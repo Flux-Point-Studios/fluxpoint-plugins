@@ -32,7 +32,9 @@ Resolve the plugin root: `${CLAUDE_PLUGIN_ROOT}`, else
    narrowed fuzzer. None of those move a hatch count, and every checker
    still exits 0. It covers Aiken, Dafny, Lean, Coq, Isabelle, TLA+ (with
    the invariants a TLC `.cfg` names) and Kani; read the `NOT COVERED`
-   lines for anything else, because that surface is the auditor's alone.
+   lines for anything else, and the `NO TAXONOMY` and `excluded by
+   declaration` lines for a tracked language whose attack classes no
+   taxonomy gates, because that surface is the auditor's alone.
    Read the rest of its output as ground already covered: a DoD line
    whose `— proof:` obligation is missing, an attack class in
    `.fluxpoint-attacks.json` with no test, and an `AXIOM AUDIT` line —

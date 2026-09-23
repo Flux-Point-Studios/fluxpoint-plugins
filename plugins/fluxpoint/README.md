@@ -297,7 +297,12 @@ proved one.
   the builder classes the off-chain TypeScript answers for. It is red for
   every class with neither a test of that name nor a waiver with a reason,
   each taxonomy gates only a repo that tracks its language, and a waiver
-  is scoped to its own taxonomy. Where a prover is
+  is scoped to its own taxonomy. A tracked language whose taxonomy is
+  missing from the manifest is named `NO TAXONOMY` with the classes the
+  template holds for it; that is a note until the manifest sets
+  `"requireAllLanguages": true`, and a `"languages"` list names the halves
+  a repo gates on purpose, printing any tracked language it leaves out as
+  excluded by declaration. Where a prover is
   not on PATH the axiom audit says NOT RUN rather than reading clean.
 - **`scripts/plutus-budget.py` gates submittability.** Correct and
   submittable are different properties and only one has a prover:

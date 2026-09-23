@@ -838,6 +838,175 @@ printf '{"version": 1, "taxonomies": [{"classes": []}]}\n' >.fluxpoint-attacks.j
 commit
 check "a taxonomy with no language at all is still red" 1 "$(rc_of --check)"
 
+# ====== 9c. a tracked language the manifest has no taxonomy for ===========
+# Every case above runs a taxonomy against the repo. This is the other
+# direction: the repo against the manifest. A repo of validators whose
+# manifest carries only the typescript half had eight eUTxO classes nobody
+# checked and a green gate that said nothing about them. A surface nobody
+# checked must never read as one that passed, so it is named every run: a
+# note by default, since reddening a repo for a manifest it has not finished
+# writing makes a gate people delete, and a failure once the manifest sets
+# requireAllLanguages. `languages` declares the halves a repo gates on
+# purpose, and a tracked language it leaves out is named as excluded.
+only_tax() {  # $1 = the template language to keep; then key=<json> pairs
+  "$FPL_PY" - "$TAX" "$@" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+doc["taxonomies"] = [t for t in doc["taxonomies"] if t["language"] == sys.argv[2]]
+for kv in sys.argv[3:]:
+    k, v = kv.split("=", 1)
+    doc[k] = json.loads(v)
+json.dump(doc, open(".fluxpoint-attacks.json", "w"), indent=2)
+PY
+}
+set_key() {  # key, <json> — into the manifest already in the repo
+  "$FPL_PY" - "$1" "$2" <<'PY'
+import json, sys
+p = ".fluxpoint-attacks.json"
+doc = json.load(open(p))
+doc[sys.argv[1]] = json.loads(sys.argv[2])
+json.dump(doc, open(p, "w"), indent=2)
+PY
+}
+# The first three ids of a language in the shipped template, then how many
+# more, which is what the note is expected to name.
+first3() { set -- $(tax_ids "$1"); printf '%s, %s, %s, +%d more' "$1" "$2" "$3" "$(($# - 3))"; }
+# Both languages tracked, every builder class specified, and the aiken half
+# missing from the manifest: the exact repo the issue describes.
+issue_state() { mkrepo; write_aiken; write_ts; write_ts_attacks; only_tax typescript "$@"; commit; }
+
+issue_state
+check "a tracked language with no taxonomy does not fail the gate" 0 "$(rc_of --check)"
+out="$(sg --check 2>&1)"
+case "$out" in *"NO TAXONOMY: this repo tracks Aiken but .fluxpoint-attacks.json declares no aiken taxonomy"*)
+  ok "  it is named NO TAXONOMY, with the language" "named" ;;
+  *) bad "  it is named NO TAXONOMY, with the language" "${out:0:70}" ;; esac
+case "$out" in *"$n_aiken known eUTxO classes are ungated"*) ok "  with how many classes it leaves ungated" "counted" ;;
+  *) bad "  with how many classes it leaves ungated" "no count" ;; esac
+case "$out" in *"($(first3 aiken))"*) ok "  and the first three of them by id" "listed" ;;
+  *) bad "  and the first three of them by id" "not listed" ;; esac
+case "$out" in *"templates/attack-taxonomy.json"*) ok "  and where to copy them from" "said" ;;
+  *) bad "  and where to copy them from" "silent" ;; esac
+case "$out" in *"attack:aiken"*) bad "  no aiken class becomes a finding" "red" ;;
+  *) ok "  no aiken class becomes a finding" "note only" ;; esac
+case "$(sg --scan)" in *"attack taxonomy aiken: NO TAXONOMY"*)
+  ok "--scan reports the missing taxonomy too" "reported" ;;
+  *) bad "--scan reports the missing taxonomy too" "silent" ;; esac
+
+issue_state 'requireAllLanguages=true'
+check "requireAllLanguages makes it a failure" 1 "$(rc_of --check)"
+case "$(sg --check 2>&1 >/dev/null)" in *"attack:aiken: NO TAXONOMY"*"$n_aiken known eUTxO classes"*)
+  ok "  the finding names the language and the cost" "named" ;;
+  *) bad "  the finding names the language and the cost" "silent" ;; esac
+issue_state 'requireAllLanguages=false'
+check "requireAllLanguages false keeps it a note" 0 "$(rc_of --check)"
+
+# The other direction: a builder the manifest carries only the aiken half for.
+mkrepo; write_ts; only_tax aiken; commit
+check "a TypeScript repo with only the aiken taxonomy stays green" 0 "$(rc_of --check)"
+out="$(sg --check 2>&1)"
+case "$out" in *"NO TAXONOMY: this repo tracks TypeScript tests but"*"declares no typescript taxonomy"*"$n_ts known off-chain builder classes are ungated ($(first3 typescript))"*)
+  ok "  but names the missing typescript taxonomy" "named" ;;
+  *) bad "  but names the missing typescript taxonomy" "${out:0:70}" ;; esac
+case "$out" in *"gates nothing here"*) ok "  beside the dormant aiken note" "said" ;;
+  *) bad "  beside the dormant aiken note" "silent" ;; esac
+set_key requireAllLanguages true
+check "  and requireAllLanguages reds it" 1 "$(rc_of --check)"
+
+# A language the repo does not carry needs no taxonomy.
+mkrepo; write_ts; write_ts_attacks; only_tax typescript 'requireAllLanguages=true'; commit
+check "a repo with no Aiken needs no aiken taxonomy, even strict" 0 "$(rc_of --check)"
+case "$(sg --check 2>&1)" in *"NO TAXONOMY"*) bad "  and says nothing about one" "noted" ;;
+  *) ok "  and says nothing about one" "silent" ;; esac
+base_state; only_tax aiken 'requireAllLanguages=true'; write_attacks
+check "a repo with no TypeScript tests needs no typescript taxonomy" 0 "$(rc_of --check)"
+case "$(sg --check 2>&1)" in *"NO TAXONOMY"*) bad "  and says nothing about one" "noted" ;;
+  *) ok "  and says nothing about one" "silent" ;; esac
+mkrepo; write_aiken; write_attacks; write_ts; write_ts_attacks
+cp "$TAX" .fluxpoint-attacks.json; set_key requireAllLanguages true; commit
+check "both halves carried and specified: green under requireAllLanguages" 0 "$(rc_of --check)"
+case "$(sg --check 2>&1)" in *"NO TAXONOMY"*) bad "  with no gap named" "noted" ;;
+  *) ok "  with no gap named" "none" ;; esac
+
+# A manifest carrying only a taxonomy this guard has not learned still owes
+# the language it has learned and the repo tracks.
+mkrepo; write_aiken
+printf '{"version": 1, "taxonomies": [{"language": "rust", "classes": [{"id": "attack_x"}]}]}\n' \
+  >.fluxpoint-attacks.json
+commit
+out="$(sg --check 2>&1)"
+case "$out" in *"NOT COVERED: taxonomy 'rust'"*"NO TAXONOMY: this repo tracks Aiken"*)
+  ok "an unlearned taxonomy alone still names the missing aiken one" "both named" ;;
+  *) bad "an unlearned taxonomy alone still names the missing aiken one" "${out:0:70}" ;; esac
+
+# `languages` says which halves this repo gates, on purpose. A tracked
+# language it leaves out is silenced, never failed, and still named.
+issue_state 'languages=["typescript"]'
+check "a language left out of 'languages' does not fail the gate" 0 "$(rc_of --check)"
+set_key requireAllLanguages true
+check "  not even under requireAllLanguages" 0 "$(rc_of --check)"
+out="$(sg --check 2>&1)"
+case "$out" in *"NO TAXONOMY"*) bad "  and raises no NO TAXONOMY line" "noted" ;;
+  *) ok "  and raises no NO TAXONOMY line" "silenced" ;; esac
+case "$out" in *"aiken excluded by declaration: this repo tracks Aiken"*"$n_aiken known eUTxO classes are not gated"*) ok "  but is named as excluded by declaration" "named" ;;
+  *) bad "  but is named as excluded by declaration" "silent" ;; esac
+check "  in exactly one line" 1 "$(printf '%s\n' "$out" | grep -c 'excluded by declaration')"
+case "$(sg --scan)" in *"attack taxonomy aiken: "*"excluded by declaration"*)
+  ok "  --scan names the exclusion too" "named" ;;
+  *) bad "  --scan names the exclusion too" "silent" ;; esac
+
+# Listing a language with no taxonomy is a contradiction: declared gated,
+# gated by nothing. It is reported, and fails under requireAllLanguages.
+issue_state 'languages=["typescript", "aiken"]'
+check "a listed language with no taxonomy stays a note by default" 0 "$(rc_of --check)"
+case "$(sg --check 2>&1)" in *"NO TAXONOMY: 'languages' lists aiken"*"declares no aiken taxonomy"*)
+  ok "  naming the contradiction" "named" ;;
+  *) bad "  naming the contradiction" "silent" ;; esac
+set_key requireAllLanguages true
+check "  and fails under requireAllLanguages" 1 "$(rc_of --check)"
+mkrepo; write_ts; write_ts_attacks; only_tax typescript 'languages=["typescript", "aiken"]' 'requireAllLanguages=true'; commit
+check "a listed language the repo does not carry fails nothing" 0 "$(rc_of --check)"
+case "$(sg --check 2>&1)" in *"'languages' lists aiken"*"no aiken taxonomy"*"nothing is ungated"*)
+  ok "  but the contradiction is still named" "named" ;;
+  *) bad "  but the contradiction is still named" "silent" ;; esac
+
+# A list never switches off a taxonomy the manifest writes out in full.
+both_state; set_key languages '["typescript"]'
+out="$(sg --check 2>&1)"
+check "a taxonomy left out of 'languages' still gates" "$n_aiken" \
+  "$(printf '%s' "$out" | grep -c 'attack:aiken:attack_')"
+case "$out" in *"the aiken taxonomy gates although 'languages' does not list aiken"*)
+  ok "  and the mismatch is named" "named" ;;
+  *) bad "  and the mismatch is named" "silent" ;; esac
+
+# Both fields are read as strictly as the rest of the manifest: a value this
+# guard cannot read is a gate that decides nothing, so it is red and named.
+bad_key() {  # label, key, <json>, text the finding must carry
+  issue_state "$2=$3"
+  check "$1 is red" 1 "$(rc_of --check)"
+  case "$(sg --check 2>&1)" in *UNREADABLE*"$4"*) ok "  and names what is wrong" "named" ;;
+    *) bad "  and names what is wrong" "silent" ;; esac
+}
+bad_key "requireAllLanguages as a string" requireAllLanguages '"yes"' "'requireAllLanguages' must be true or false"
+bad_key "requireAllLanguages as null" requireAllLanguages 'null' "'requireAllLanguages' must be true or false"
+bad_key "languages as a bare string" languages '"typescript"' "'languages' must be a non-empty list"
+bad_key "an empty languages list" languages '[]' "'languages' must be a non-empty list"
+bad_key "a non-string in languages" languages '["typescript", 1]' "'languages' must be a non-empty list"
+bad_key "a language listed twice" languages '["typescript", "typescript"]' "names 'typescript' twice"
+bad_key "an unknown language in languages" languages '["typescript", "haskell"]' "names 'haskell'"
+issue_state 'languages=["typescrpit"]'
+case "$(sg --check 2>&1)" in *UNREADABLE*"(did you mean 'typescript'?)"*)
+  ok "a misspelt language in languages is hinted" "hinted" ;;
+  *) bad "a misspelt language in languages is hinted" "no hint" ;; esac
+# The language of a taxonomy the manifest itself declares may be listed, even
+# one this guard has not learned: that taxonomy is reported NOT COVERED on
+# its own, and a forward-looking declaration is not a malformed one.
+mkrepo; write_aiken
+printf '{"version": 1, "languages": ["aiken", "rust"], "taxonomies": [{"language": "rust", "classes": [{"id": "attack_x"}]}]}\n' \
+  >.fluxpoint-attacks.json
+commit
+check "listing an unlearned language the manifest declares is not red" 0 "$(rc_of --check)"
+
 # ================= 10. --axioms: the prover's own assumption audit ========
 # The provers are not installed where this suite runs, so each toolchain is
 # a shim on PATH that prints the listing its real counterpart printed for the
