@@ -467,11 +467,23 @@ with tempfile.TemporaryDirectory() as runs:
     # import resolves from (#98), and 'latest' spans both.
     store = os.path.join(runs, "decisions.jsonl")
     ruling = dict(FROZEN, chosen="48h", rationale="the operator ruled 48h after "
-                  "the incident review, overturning the governance default")
+                  "the incident review, overturning the governance default",
+                  options=FROZEN["options"] + [
+                      {"option": "48h", "argued_by": "operator",
+                       "strongest_objection": "splits the difference without new data"}])
     with open(store, "w") as fh:
         fh.write(json.dumps({"recordId": "dec_0123456789ab", "id": "vault-window",
                              "when": "2026-08-09 12:00:00", "record": ruling}) + "\n")
     resolved_s, errs_s = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs, store)
+    # A record with every field name but the wrong types or floors is not a
+    # decision either, wherever it was stored.
+    bogus = dict(FROZEN, question=1, options=[], chosen="ghost", reversible="no")
+    with open(os.path.join(runs, "wf-bogus.json"), "w") as fh:
+        json.dump(_art("wf-bogus", "2030-01-01 00:00", {"vault-window": bogus}), fh)
+    _, errs_b = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs)
+    report("a record that is not a valid DecisionV1 does not count as one",
+           any("not a valid DecisionV1" in e for e in errs_b), (errs_b or ["none"])[0][:70])
+    os.remove(os.path.join(runs, "wf-bogus.json"))
     report("an import resolves a decision recorded with decision.py",
            not errs_s and resolved_s.get("vault-window", {}).get("runId") == "dec_0123456789ab"
            and resolved_s["vault-window"]["record"]["chosen"] == "48h",

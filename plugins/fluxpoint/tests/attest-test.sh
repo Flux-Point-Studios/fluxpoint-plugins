@@ -787,6 +787,12 @@ cp "$ROOT/r/.fluxpoint-gates.json" "$ROOT/wt/"  # a worktree session has its own
 rm -rf "$ROOT/wt/.claude" "$ROOT/wt/.fluxpoint-gates.json"
 (cd "$ROOT/wt" && env -u CLAUDE_PROJECT_DIR "$FPL_PY" "$ATTEST" --root "$ROOT/r" --run harness --nonce run-y >/dev/null 2>&1)
 check "  and --root names the project from a worktree" run-y "$(field nonce)"
+# --run is held to the hook's rule: its --tree must be the project's place,
+# never another checkout whose files would be attested to this HEAD.
+n="$(rows)"
+"$FPL_PY" "$ATTEST" --root "$ROOT/r" --tree "$ROOT/foreign" --run harness >/dev/null 2>&1; rc=$?
+check "--run refuses a --tree in another checkout" 2 "$rc"
+check "  and mints no row" "$n" "$(rows)"
 check "    running the gate in the worktree it was called from" "$WT_HEAD" "$(field treeSha)"
 stamp="$(cd "$ROOT/r" && env -u CLAUDE_PROJECT_DIR "$FPL_PY" "$ATTEST" --stamp)"
 case "$stamp" in *'"root"'*) ok "the launch stamp names the project root" "root" ;;

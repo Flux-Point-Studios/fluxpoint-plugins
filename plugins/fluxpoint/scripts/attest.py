@@ -745,6 +745,19 @@ def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
               f"{', '.join(sorted(gates)) or 'none'}) — --run takes a gate name, "
               f"never a command", file=sys.stderr)
         return 2
+    # The wrapper is held to the hook's rule: the gate runs at the project's
+    # place — its directory, or that directory's twin in a linked worktree of
+    # this repository — and so does its declared cd. A --tree elsewhere would
+    # run another checkout's files and bind the exit to this project's HEAD.
+    declared = (getattr(gates, "cds", None) or {}).get(gate, "")
+    if _place(root) and (not _is_place(tree, root, root) or (
+            declared and not _is_place(_resolve(tree, declared),
+                                       _resolve(root, declared), root))):
+        print(f"attest: --tree {tree} is not this project's directory or its twin in "
+              f"a linked worktree of this repository (or '{gate}' declares a cd outside "
+              f"it) — a run there would be attested against this project's HEAD",
+              file=sys.stderr)
+        return 2
     started = now()
     token = token or "bg_" + sha(f"{gate}|{started}|{os.getpid()}|{time.monotonic_ns()}")[:12]
     if detach:

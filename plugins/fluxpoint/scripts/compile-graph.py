@@ -352,6 +352,15 @@ def resolve_imports(ir, contracts, runs_dir, store=None):
                 f"DecisionV1 field(s) {missing} — a hand-edited artifact does "
                 f"not count as a decision")
             continue
+        # The same floors `decision.py --record` holds a ruling to: a record
+        # with every field name but `question: 1`, no options, or a chosen
+        # option nobody weighed would otherwise freeze into the next campaign.
+        bad = _sibling("decision").validate(rec, contracts.get("DecisionV1") or {})
+        if bad:
+            f.append(f"imports.{did}: the record in '{rid}' is not a valid DecisionV1 "
+                     f"({bad[0]}) — a corrupted or hand-edited record does not count "
+                     f"as a decision")
+            continue
         resolved[did] = {"record": rec, "runId": rid}
     return resolved, f
 
