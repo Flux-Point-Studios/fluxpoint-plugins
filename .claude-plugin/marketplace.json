@@ -11,7 +11,7 @@
       "name": "fluxpoint",
       "source": "./plugins/fluxpoint",
       "description": "Engineering harness with two drivers over one contract: a Stop-hook Definition-of-Done gate with per-edit verification and session bootstrap, plus a deterministic compiler that turns a declarative WORK.md graph IR into verified multi-agent campaigns — typed contracts, verification tiers, no self-certifying mutators, provenance-recorded evidence.",
-      "version": "1.42.0",
+      "version": "1.43.0",
       "category": "workflow",
       "keywords": [
         "loop",
