@@ -29,6 +29,9 @@ steps:
       - curl -fsSL https://claude.ai/install.sh | bash
       - export PATH="$$HOME/.local/bin:$$PATH"
       - claude --version
+      # Woodpecker exports SHELL=/bin/sh (dash); the suites take $SHELL as
+      # the bash that runs the hook scripts, as it is on the GitHub runner.
+      - export SHELL=/bin/bash
       - bash scripts/harness.sh --full
       # Prompt hygiene (advisory) on its own line so the trend is readable
       # in the log; only a scan that could not run (exit 2) fails it.
