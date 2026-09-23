@@ -527,8 +527,17 @@ n="$(rows)"
 rec 'node --test --test-name-pattern="slow  test" t.test.js' 0 >/dev/null
 rec "$(printf 'node --test --test-name-pattern="slow\ttest" t.test.js')" 0 >/dev/null
 check "whitespace inside quotes is not collapsed into the declared gate" "$n" "$(rows)"
-rec 'node  --test   --test-name-pattern="slow test"  t.test.js' 0 >/dev/null
-check "  while whitespace outside quotes still is" "$((n + 1))" "$(rows)"
+rec 'node --test --test-name-pattern="slow test" t.test.js' 0 >/dev/null
+check "  while the declared text itself is the gate" "$((n + 1))" "$(rows)"
+# A command with quoting or expansion is compared as written: $(...) nests
+# quotes a scanner misreads, so no whitespace in it is collapsed at all.
+"$FPL_PY" -c 'import json,sys; json.dump({"version": 1, "gates": {"harness": "scripts/harness.sh --full", "subst": "node --test --test-name-pattern=\"$(echo \"slow test\")\" t.test.js"}}, open(sys.argv[1], "w"))' \
+  "$ROOT/r/.fluxpoint-gates.json"
+rec 'node --test --test-name-pattern="$(echo "slow  test")" t.test.js' 0 >/dev/null
+rec 'node  --test --test-name-pattern="$(echo "slow test")" t.test.js' 0 >/dev/null
+check "  and nested quoting is never collapsed into the declared gate" "$((n + 1))" "$(rows)"
+rec 'node --test --test-name-pattern="$(echo "slow test")" t.test.js' 0 >/dev/null
+check "  while its exact text is the gate" "$((n + 2))" "$(rows)"
 gates
 rec "FPL_ATTEST_NONCE=run-a scripts/harness.sh --full" 0 >/dev/null
 check "  and its row names the run" run-a "$(field nonce)"
@@ -702,11 +711,19 @@ HOME="$ROOT" rec "cd '~/r/scripts' && ./harness.sh --full" 0 >/dev/null
 check "  nor a quoted ~, which bash does not expand" "$((n + 1))" "$(rows)"
 HOME="$ROOT" rec "cd ~/r/scripts && ./harness.sh --full" 0 >/dev/null
 check "  while a bare ~ is home" "$((n + 2))" "$(rows)"
+# Bash forms the matcher does not model are refused, not guessed: ~+ ($PWD),
+# a relative cd under CDPATH, and a reported directory that is gone.
+rec "cd ~+/scripts && ./harness.sh --full" 0 >/dev/null
+CDPATH="$ROOT/foreign" rec "cd scripts && ./harness.sh --full" 0 >/dev/null
+PAYLOAD_CWD="$ROOT/gone" rec "cd $ROOT/r/scripts && ./harness.sh --full" 0 >/dev/null
+check "  nor ~+, a relative cd under CDPATH, or a vanished cwd" "$((n + 2))" "$(rows)"
+CDPATH="$ROOT/foreign" rec "cd ./scripts && ./harness.sh --full" 0 >/dev/null
+check "  while ./ is immune to CDPATH, as in bash" "$((n + 3))" "$(rows)"
 # A declared cd that climbs or is absolute is resolved from the project root.
 printf '{"version":1,"gates":{"harness":"cd scripts/.. && scripts/harness.sh --full"}}' \
   >"$ROOT/r/.fluxpoint-gates.json"
 rec "cd scripts/.. && scripts/harness.sh --full" 0 >/dev/null
-check "a gate declared with cd .. is witnessed where it resolves" "$((n + 3))" "$(rows)"
+check "a gate declared with cd .. is witnessed where it resolves" "$((n + 4))" "$(rows)"
 printf '{"version":1,"gates":{"harness":"cd scripts && ./harness.sh --full"}}' \
   >"$ROOT/r/.fluxpoint-gates.json"
 out="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --last harness --nonce run-d 2>&1)"

@@ -52,6 +52,16 @@ information about whether the gate passed, so the binding between a claimed
 exit and the runtime's own holds for zeros and is silent about reds. A node
 claiming green with no row is therefore the shape worth suspecting, and
 record-run.py reports it separately for that reason.
+
+What this is not: a boundary against an agent that sets out to forge. The
+log is a file in the working tree, and an agent with a shell can append a
+row to it as easily as run a gate. The witness binds an honest execution to
+the exit the runtime reported, and makes a transcribed, stale, borrowed or
+laundered exit visible — the shapes a lazy or mistaken executor produces.
+The command matcher below is therefore strict and fails closed (a command
+it cannot place is UNATTESTED, never a pass), but it does not model every
+corner of bash. Evidence that must hold against a deliberate forger is the
+forge's own: prove:ci.
 """
 import argparse
 import datetime
@@ -104,11 +114,16 @@ FOREIGN_SPACE = re.compile(r"[^\S \t]")
 
 
 def _collapse(cmd):
-    """Runs of spaces and tabs OUTSIDE quotes become one space; quoted text
-    is kept byte for byte, as bash keeps it. Collapsing inside quotes let
-    `--test-name-pattern="slow  test"` (two spaces, a filter that matches
-    nothing) compare equal to the declared `"slow test"` and pass green."""
-    s, out, q, gap, i = str(cmd or ""), [], None, False, 0
+    """Runs of spaces and tabs become one space — but only in a command of
+    plain words, where that is exactly bash's word splitting. A command
+    carrying any quoting or expansion is kept as written (ends trimmed):
+    collapsing inside quotes let `--test-name-pattern="slow  test"` (two
+    spaces, a filter matching nothing) equal the declared `"slow test"`, and
+    `$(...)`, `${...}` and backticks nest quotes a simple scanner misreads."""
+    raw = str(cmd or "")
+    if re.search(r"[\"'`$\\]", raw):
+        return raw.strip(" \t")
+    s, out, q, gap, i = raw, [], None, False, 0
     while i < len(s):
         c = s[i]
         if q is None and c in " \t":
@@ -410,8 +425,24 @@ def cd_in_project(root, command, cwd=None, declared_cd=""):
     where the cd landed, and is judged instead.
     """
     cd = _front(command)[1]
+    raw = cd.strip()
+    bare = raw[:1] not in ("'", '"')
+    # Bash's other tilde forms (~+ is $PWD, ~- $OLDPWD, ~N the dir stack,
+    # ~user another home) are not modeled: refused rather than guessed.
+    if bare and raw.startswith("~") and not (raw == "~" or raw.startswith("~/")):
+        return False
+    # With CDPATH set, bash resolves a relative operand that does not start
+    # with `.` or `/` through it, even over ./<dir>. Not modeled: refused.
+    relative = raw and not (raw.lstrip("'\"").startswith(("/", ".", "~"))
+                            or re.match(r"^['\"]?[A-Za-z]:[\\/]", raw))
+    if relative and os.environ.get("CDPATH"):
+        return False
     expected = _resolve(root, declared_cd) if declared_cd else root
-    base = cwd if (cwd and os.path.isdir(cwd)) else root
+    # A reported directory that no longer exists is not the project root:
+    # judging it as one passed a gate run in a directory deleted since.
+    if cwd and not os.path.isdir(cwd):
+        return False
+    base = cwd or root
     if not cd:
         # No cd: bash ran in the shell's directory. It must be this
         # repository (any directory of its checkout or a linked worktree —

@@ -322,9 +322,13 @@ step; do not stop at copying files.
    handed it). A gate declared with a leading `cd <dir> &&` is matched only
    when run in that directory. A leading `cd` is witnessed only when it
    names a plain path inside this repository (its checkout or a linked
-   worktree) at the gate's declared place — not `cd "$VAR"` or
-   `cd $(...)`, which the hook cannot resolve — and a gate is one line of
-   spaces and tabs. A gate may not be
+   worktree) at the gate's declared place — not `cd "$VAR"`, `cd $(...)`,
+   `~+`, or a relative `cd` under `CDPATH`, which the hook does not model —
+   and a gate is one line of spaces and tabs. A command with quotes or
+   expansions must match the declared text exactly. The witness catches
+   transcribed, stale and borrowed exits; it is not a defence against an
+   agent that forges rows (the log is a file it can write) — a merge that
+   must hold against that rests on `prove:ci`. A gate may not be
    named `ci`: that name is the forge's. If merges
    rest on CI, add a `ci` section so `prove:ci` can cite the forge's own
    commit statuses (`attest.py --ci --pr <n>`, GitHub via `gh`; the forge
