@@ -453,6 +453,15 @@ every graph in cold-input-token equivalents: a shared prefix per call
 (priced at a tenth when warm), work tokens scaled by effort (`low` 0.5×,
 `medium` 1×, `high` 1.8×, `xhigh` 2.5×, `max` 3.5×), the whole call
 weighted by the model's price, refuters and tree sentinels included. The
+text the author writes is priced too, one token per UTF-8 byte like the
+packet: each node's prompt with its `{{A.<arg>}}` defaults and `{{item}}`
+values expanded, and a park's release instructions in its advisor call.
+A fan-out's workers read their shared prompt prefix from cache after the
+first; a different node's prompt is never discounted, because the cache
+has not seen it. `{{prev}}`, `{{decisions.*}}` and `{{seen}}` are sized
+only at run time and are named in the estimate as unpriced. So a prompt
+that grows between audit rounds moves the estimate, and the ceiling set
+from it can refuse the growth. The
 constants are stated assumptions in `compile-graph.py`, and `metrics.py`
 folds the estimate against the runtime's own `spent` per run so they get
 corrected by evidence rather than argued. `budget.maxEstimatedTokens` is
@@ -480,9 +489,11 @@ the TTL and is priced as one. Every shipped template declares `1h`.
 **An effort transition is a cold prefill.** The compiler warns on every
 consecutive pair of nodes whose `(model, effort)` differs, and on an inline
 `effort` equal to what the role or defaults already give (it changes
-nothing and reads as a decision). Where a change is justified, put it
-where the cache is cold anyway — after a park, or on the first node of a
-phase — and put same-effort work together; `graph-audit` judges whether
+nothing and reads as a decision). A park ends the relation: the call after
+a human or third-party node is priced cold whatever its key, so a change
+placed there costs nothing extra and is not reported. Where a change is
+justified, put it where the cache is cold anyway — after a park — and put
+same-effort work together; `graph-audit` judges whether
 the bump buys anything, because the compiler cannot know a task's shape.
 Whether `builder: high` is the right setting at all is a separate
 question, and it is asserted today, never measured; see DESIGN-NOTES.

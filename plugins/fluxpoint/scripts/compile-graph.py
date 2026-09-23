@@ -101,6 +101,21 @@ EFFORT_MULT = {"low": 0.5, "medium": 1.0, "high": 1.8, "xhigh": 2.5, "max": 3.5}
 # Price weight by model family, matched on a substring of the model id;
 # anything unmatched is the session's default model at weight 1.
 MODEL_MULT = (("haiku", 0.25), ("sonnet", 0.5))
+# The text a node's author writes is priced on the packet's basis: one token
+# per UTF-8 byte, deliberately conservative. The constants above never read
+# a prompt, so a graph under repair could gain kilobytes of prompt per audit
+# round while its estimate — and the ceiling set from it — stayed byte-
+# identical. Only author-controlled text is priced here; the fixed harness
+# wording each call carries is what PREFIX_TOKENS already stands for.
+PROMPT_TOKENS_PER_BYTE = 1
+# Expansions whose size is only known at run time. They are named in the
+# estimate's assumptions rather than guessed, so a reader knows which part
+# of a prompt the number cannot see.
+UNPRICED_EXPANSIONS = ("prev", "decisions", "seen")
+# Tokens whose value differs between calls of ONE node. The prompt cache is
+# prefix-keyed, so a fan-out's workers share the text before the first of
+# these and nothing after it.
+VARYING_ROOTS = {"item", "i", "seen"}
 SPEC_PREAMBLE = ("Implement and verify this locked requirement packet. Defaulted decisions are model choices, "
                  "not user authorization. Do not edit the packet, lock or proof baseline to pass a check. "
                  "If a requirement is wrong, return the counterexample for a spec revision.\n")
@@ -1314,7 +1329,8 @@ def warnings(ir, agents=None):
                 f"nodes ({hops}{more}) — each is a cold prefill even under the "
                 f"1-hour TTL, so a bump that the node's task shape does not need "
                 f"is a cost error; put same-effort work together, or move the "
-                f"change to a point that is cold anyway (after a park or a fan-out)")
+                f"change to a point that is cold anyway (after a park, where the "
+                f"estimate already prices the next call cold)")
         else:
             w.append(
                 f"{len(trans)} effort/model transition(s) between consecutive "
@@ -1399,29 +1415,99 @@ def plan_groups(ir):
     groups = []
     sentinel = ("", "low")
     if tree_guard:
-        groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True})
+        groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True,
+                       "kind": "sentinel"})
     for n in ir.get("nodes") or []:
         if is_reduce(n):
             continue
         nid = n.get("id", "?")
         if tree_guard and (prove_gate(n) or n.get("independent")):
-            groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True})
+            groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True,
+                           "kind": "sentinel"})
         if n.get("actor", "agent") != "agent":
-            groups.append({"calls": [(nid, ("", "medium"))], "park": True})
+            groups.append({"calls": [(nid, ("", "medium"))], "park": True,
+                           "kind": "advise", "node": n})
             continue
         key = node_key(n, ir)
-        fan = len(lists.get(n.get("foreach"), [None])) if n.get("foreach") else 1
+        items = lists.get(n.get("foreach"), [None]) if n.get("foreach") else [None]
+        fan = len(items)
         rounds = max(1, int((n.get("repeat") or {}).get("maxRounds", 1)))
         cnt = panel_size(n)
         per = int(n.get("expectItems", 3))
         for _ in range(rounds):
-            groups.append({"calls": [(nid, key)] * fan, "park": False})
+            groups.append({"calls": [(nid, key)] * fan, "park": False,
+                           "kind": "work", "node": n, "items": items})
             if cnt:
                 groups.append({"calls": [(nid, ("", "low"))] * (fan * per * cnt),
-                               "park": False})
+                               "park": False, "kind": "refute"})
     if tree_guard:
         groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True})
     return groups
+
+
+def _utf8(s):
+    return len(str(s).encode("utf-8"))
+
+
+def _item_value(item, tok):
+    """What {{item}} / {{item.<field>}} renders to for one list entry."""
+    if tok == "item":
+        return json.dumps(item) if not isinstance(item, str) else item
+    cur = item
+    for part in tok.split(".")[1:]:
+        cur = cur.get(part) if isinstance(cur, dict) else None
+    if cur is None:
+        return ""
+    return cur if isinstance(cur, str) else json.dumps(cur)
+
+
+def _expansion_bytes(tok, ir, item=None, index=0):
+    """Bytes one {{token}} is estimated to render to. 0 when unknowable."""
+    root = tok.split(".")[0].split("[")[0]
+    if root == "A":
+        defaults = ir.get("argDefaults") or {}
+        if "." not in tok:
+            return _utf8(json.dumps(defaults))
+        v = defaults.get(tok.split(".", 1)[1])
+        return _utf8(v) if v is not None else 0
+    if root == "campaign":
+        return _utf8(ir.get("campaign", ""))
+    if root == "item" and item is not None:
+        return _utf8(_item_value(item, tok))
+    if root == "i":
+        return len(str(index))
+    return 0
+
+
+def prompt_bytes(texts, ir, item=None, index=0):
+    """(shared, varying) UTF-8 bytes of the author text one call carries.
+
+    `shared` is everything before the first token whose value differs
+    between calls of the same node — the part a sibling's prefix cache can
+    hold. `varying` is the rest, paid in full by every call.
+    """
+    shared = varying = 0
+    split = False
+    for text in texts:
+        pos = 0
+        for m in SUBST.finditer(text):
+            lit = _utf8(text[pos:m.start()])
+            tok = m.group(1)
+            if not split and tok.split(".")[0].split("[")[0] in VARYING_ROOTS:
+                shared += lit
+                split = True
+                varying += _expansion_bytes(tok, ir, item, index)
+            elif split:
+                varying += lit + _expansion_bytes(tok, ir, item, index)
+            else:
+                shared += lit + _expansion_bytes(tok, ir, item, index)
+            pos = m.end()
+        tail = _utf8(text[pos:])
+        if split:
+            varying += tail
+        else:
+            shared += tail
+    return shared, varying
 
 
 def estimate_tokens(ir, contracts=None, specification=None):
@@ -1431,15 +1517,19 @@ def estimate_tokens(ir, contracts=None, specification=None):
     key is still in the cache: within one concurrent group always (siblings
     dispatch together), across groups only under a one-hour TTL, and never
     across a park. Everything else is a cold prefill. Work tokens scale with
-    effort and the whole call with the model's price weight. Returns the
-    total, the call and cold-prefill counts, a per-node breakdown, and the
-    assumptions it rested on, so a reader can disagree with a number rather
-    than a feeling.
+    effort and the whole call with the model's price weight. The node's own
+    prompt is priced by its bytes; its shared part is a cache read only when
+    the same node already sent it under a warm key (a fan-out's siblings, a
+    sweep's later rounds) — a warm key says nothing about a DIFFERENT node's
+    text, which the cache has never seen. Returns the total, the call and
+    cold-prefill counts, a per-node breakdown, and the assumptions it rested
+    on, so a reader can disagree with a number rather than a feeling.
     """
     budget = ir.get("budget") or {}
     ttl = budget.get("cacheTtl") or DEFAULT_CACHE_TTL
     persist = CACHE_TTLS.get(ttl, 300) >= 3600
     warm = set()
+    warm_prompts = set()   # (key, nodeId): that node's shared text is cached
     total, calls, cold = 0.0, 0, 0
     per_node = {}
     # One token per ASCII serialization byte is deliberately conservative.
@@ -1449,14 +1539,33 @@ def estimate_tokens(ir, contracts=None, specification=None):
     for g in plan_groups(ir):
         if not persist:
             warm = set()
-        for nid, (model, effort) in g["calls"]:
+            warm_prompts = set()
+        n = g.get("node") or {}
+        for ci, (nid, (model, effort)) in enumerate(g["calls"]):
             calls += 1
             key = (model, effort)
             is_warm = key in warm
             prefix = PREFIX_TOKENS * (CACHED_PREFIX_FRACTION if is_warm else 1.0)
             work = (SENTINEL_WORK_TOKENS if g.get("sentinel")
                     else WORK_TOKENS * EFFORT_MULT.get(effort, 1.0))
-            cost = (prefix + work + (0 if g.get("sentinel") else spec_input)) * _model_mult(model)
+            text = 0.0
+            if g.get("kind") in ("work", "advise"):
+                if g["kind"] == "advise":
+                    rel = n.get("release") or {}
+                    texts = [str(n.get("prompt", "")), str(rel.get("instructions", "")),
+                             str(rel.get("whyNotAgent", ""))]
+                    item = None
+                else:
+                    texts = [str(n.get("prompt", ""))]
+                    items = g.get("items") or [None]
+                    item = items[ci % len(items)]
+                shared, varying = prompt_bytes(texts, ir, item, ci)
+                seen_text = is_warm and (key, nid) in warm_prompts
+                text = (shared * (CACHED_PREFIX_FRACTION if seen_text else 1.0)
+                        + varying) * PROMPT_TOKENS_PER_BYTE
+                warm_prompts.add((key, nid))
+            cost = (prefix + work + text
+                    + (0 if g.get("sentinel") else spec_input)) * _model_mult(model)
             if not is_warm:
                 cold += 1
                 warm.add(key)
@@ -1467,11 +1576,14 @@ def estimate_tokens(ir, contracts=None, specification=None):
             rec["estimatedTokens"] += int(round(cost))
         if g["park"]:
             warm = set()
+            warm_prompts = set()
     return {
         "total": int(round(total)), "calls": calls, "cold": cold, "ttl": ttl,
         "perNode": per_node,
         "assumptions": {"prefixTokens": PREFIX_TOKENS,
                         "specificationInputTokens": spec_input,
+                        "promptTokensPerByte": PROMPT_TOKENS_PER_BYTE,
+                        "unpricedExpansions": list(UNPRICED_EXPANSIONS),
                         "cachedPrefixFraction": CACHED_PREFIX_FRACTION,
                         "workTokens": WORK_TOKENS, "effortMult": EFFORT_MULT,
                         "modelMult": dict(MODEL_MULT)},
@@ -1483,10 +1595,20 @@ def effort_transitions(ir):
 
     Each is a cold prefill for the second node, on top of whatever the TTL
     already costs. Returns [(from_id, from_key, to_id, to_key)].
+
+    A park ends the relation. estimate_tokens() prices the call after a
+    human or third-party node as a cold start whatever its key, because no
+    cache survives the hours a person takes — so a transition placed across
+    a park costs nothing extra. Reporting it anyway warned authors who
+    followed this warning's own advice, and a warning that fires on the
+    recommended placement is one people learn to skip.
     """
     out, prev = [], None
     for n in ir.get("nodes") or []:
-        if is_reduce(n) or n.get("actor", "agent") != "agent":
+        if is_reduce(n):
+            continue
+        if n.get("actor", "agent") != "agent":
+            prev = None
             continue
         key = node_key(n, ir)
         if prev is not None and key != prev[1]:

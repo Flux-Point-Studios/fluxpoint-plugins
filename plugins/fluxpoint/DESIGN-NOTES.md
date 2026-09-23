@@ -106,7 +106,8 @@ What v1.36 changed is the instrumentation, and only that:
 - the compiler prices every graph (`estimate_tokens`: prefix per call,
   warm or cold by the declared `cacheTtl` and the `(model, effort)` of the
   call before it, work scaled by `EFFORT_MULT`, the call weighted by
-  `MODEL_MULT`) and refuses a graph over `budget.maxEstimatedTokens`;
+  `MODEL_MULT`, and since v1.43 each node's own prompt text by its bytes)
+  and refuses a graph over `budget.maxEstimatedTokens`;
 - every compiled script carries `ESTIMATE` and a per-node `PROFILE`
   (effort, model, calls, estimated tokens) into its summary beside
   `spent`;

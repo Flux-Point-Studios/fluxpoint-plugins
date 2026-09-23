@@ -117,7 +117,7 @@ Copy over `WORK.md`'s Campaign section to use it.
 `maxNodes` prices the worst case: 3 modalities x (1 finder + 2 expected
 items x 3 refuters) x 6 rounds = 126. Typical runs cost far less, because
 a converging sweep never reaches its later rounds. `maxEstimatedTokens`
-prices the same worst case in tokens (~1.26M under the declared 1-hour
+prices the same worst case in tokens (~1.27M under the declared 1-hour
 prompt-cache TTL, most of it the refuters' warm reads) and is the ceiling
 the bill answers to; `cacheTtl: "1h"` is declared because every round
 blocks the parent far longer than the default five-minute cache lives.

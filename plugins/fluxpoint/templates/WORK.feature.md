@@ -148,7 +148,7 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
   design survives.
 - Budget: 20 planned agent calls, verification floor 50k tokens, and a
   cost ceiling of 300k estimated tokens over the compiler's estimate
-  (~218k under the declared 1-hour prompt-cache TTL; every effort
+  (~222k under the declared 1-hour prompt-cache TTL, prompt text included; every effort
   transition in the chain is a cold prefill the estimate charges for).
 - Halt conditions a human can name: independent harness exit != 0, a
   proof-audit verdict of WEAKENED, and a red-team verdict of BLOCK.

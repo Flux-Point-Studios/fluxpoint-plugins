@@ -147,7 +147,7 @@ Campaign section to use it.
   verdict of WEAKENED, a red-team verdict of BLOCK.
 - Budget: 16 planned agent calls covers the six nodes with headroom; no node
   carries a panel, so the verification floor is untouched. The cost
-  ceiling is 250k estimated tokens over an estimate of ~188k under the
+  ceiling is 250k estimated tokens over an estimate of ~192k under the
   declared 1-hour prompt-cache TTL.
 
 ## Decisions
