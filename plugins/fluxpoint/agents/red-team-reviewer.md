@@ -93,8 +93,12 @@ express missing verification. Include composition/skeptic artifacts and the
 final identity recheck. End with exactly `VERDICT: SHIP` or
 `VERDICT: BLOCK — <one sentence why>`.
 
-Inside a graph return the existing RedTeamV1 object: `verdict` and `findings`
-with `severity`, `finding`, `exploit_path`, `minimal_fix`. Include scope,
-coverage, composition, skeptic evidence and blockers in an additional `review`
-object. A blocked incomplete review can have `findings: []`; `verdict` still
-must be BLOCK. This preserves the contract consumed by existing halt gates.
+Inside a graph return the RedTeamV1 object: `verdict` and `findings`
+with `severity`, `finding`, `exploit_path`, `minimal_fix`, plus
+`worstSeverity` (the highest finding severity, `NONE` when there are none)
+and `worstSeverityRank` (0 NONE, 1 LOW, 2 MEDIUM, 3 HIGH, 4 CRITICAL). The
+contract binds the three together and refuses SHIP over a HIGH or CRITICAL
+finding, so a halt gate reading one field cannot be passed by the others.
+Include scope, coverage, composition, skeptic evidence and blockers in an
+additional `review` object. A blocked incomplete review can have
+`findings: []`, `worstSeverity: NONE`, rank 0; `verdict` still must be BLOCK.

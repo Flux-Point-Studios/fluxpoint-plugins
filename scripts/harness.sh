@@ -242,6 +242,8 @@ case "${1:---full}" in
         step "counterexample ledger" bash "$PLUGIN/tests/cex-test.sh" ;;
       "$PLUGIN"/scripts/blueprint-guard.py)
         step "blueprint conformance" bash "$PLUGIN/tests/blueprint-test.sh" ;;
+      "$PLUGIN"/contracts/RedTeamV1.schema.json)
+        step "red-team severity reaches the gate" "$FPL_PY" "$PLUGIN/tests/redteam-contract-test.py" ;;
       "$PLUGIN"/workflows/*.js)
         step "node --check (async wrapper): $f" check_workflow "$f"
         step "graph-audit workflow" "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py" ;;
@@ -275,6 +277,7 @@ case "${1:---full}" in
     step "compiler invariants" "$FPL_PY" "$PLUGIN/tests/compile-test.py"
     step "agentType resolution + contract" "$FPL_PY" "$PLUGIN/tests/agenttype-test.py"
     step "proof verdict reaches the record (executed)" "$FPL_PY" "$PLUGIN/tests/proof-verdict-test.py"
+    step "red-team severity reaches the gate (executed)" "$FPL_PY" "$PLUGIN/tests/redteam-contract-test.py"
     step "emission coverage" "$FPL_PY" "$PLUGIN/tests/emission-test.py"
     step "cost model: estimate, ceiling, cache TTL (executed)" "$FPL_PY" "$PLUGIN/tests/cost-test.py"
     step "codegen injection + red-team regressions" "$FPL_PY" "$PLUGIN/tests/security-test.py"

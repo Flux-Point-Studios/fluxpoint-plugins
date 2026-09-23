@@ -1,9 +1,12 @@
 {
   "$id": "RedTeamV1",
   "type": "object",
-  "required": ["verdict", "findings"],
+  "required": ["verdict", "findings", "worstSeverity", "worstSeverityRank"],
   "properties": {
-    "verdict": { "enum": ["SHIP", "BLOCK"] },
+    "verdict": {
+      "enum": ["SHIP", "BLOCK"],
+      "description": "SHIP only when coverage completed and no exploitable finding remains; missing work is BLOCK even with empty findings. The binding below refuses a SHIP over any HIGH or CRITICAL finding."
+    },
     "findings": {
       "type": "array",
       "items": {
@@ -16,6 +19,64 @@
           "minimal_fix": { "type": "string" }
         }
       }
+    },
+    "worstSeverity": {
+      "enum": ["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"],
+      "description": "The highest severity in findings, NONE when there are none. Bound to findings, so it cannot disagree with them. It exists because haltWhen compares one top-level field to a literal and cannot reach into findings[]: with verdict alone, a SHIP could sit above a CRITICAL exploit path."
+    },
+    "worstSeverityRank": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4,
+      "description": "worstSeverity as an ordinal: 0 NONE, 1 LOW, 2 MEDIUM, 3 HIGH, 4 CRITICAL. Halt on a threshold with haltWhen 'worstSeverityRank >= 3'."
     }
+  },
+  "if": { "required": ["verdict", "findings"] },
+  "then": {
+    "allOf": [
+      {
+        "if": { "required": ["worstSeverity"], "properties": { "worstSeverity": { "const": "NONE" } } },
+        "then": { "properties": { "worstSeverityRank": { "const": 0 }, "findings": { "maxItems": 0 } } }
+      },
+      {
+        "if": { "required": ["worstSeverity"], "properties": { "worstSeverity": { "const": "LOW" } } },
+        "then": { "properties": {
+          "worstSeverityRank": { "const": 1 },
+          "findings": {
+            "contains": { "required": ["severity"], "properties": { "severity": { "const": "LOW" } } },
+            "items": { "properties": { "severity": { "enum": ["LOW"] } } }
+          } } }
+      },
+      {
+        "if": { "required": ["worstSeverity"], "properties": { "worstSeverity": { "const": "MEDIUM" } } },
+        "then": { "properties": {
+          "worstSeverityRank": { "const": 2 },
+          "findings": {
+            "contains": { "required": ["severity"], "properties": { "severity": { "const": "MEDIUM" } } },
+            "items": { "properties": { "severity": { "enum": ["LOW", "MEDIUM"] } } }
+          } } }
+      },
+      {
+        "if": { "required": ["worstSeverity"], "properties": { "worstSeverity": { "const": "HIGH" } } },
+        "then": { "properties": {
+          "worstSeverityRank": { "const": 3 },
+          "findings": {
+            "contains": { "required": ["severity"], "properties": { "severity": { "const": "HIGH" } } },
+            "items": { "properties": { "severity": { "enum": ["LOW", "MEDIUM", "HIGH"] } } }
+          } } }
+      },
+      {
+        "if": { "required": ["worstSeverity"], "properties": { "worstSeverity": { "const": "CRITICAL" } } },
+        "then": { "properties": {
+          "worstSeverityRank": { "const": 4 },
+          "findings": {
+            "contains": { "required": ["severity"], "properties": { "severity": { "const": "CRITICAL" } } }
+          } } }
+      },
+      {
+        "if": { "required": ["verdict"], "properties": { "verdict": { "const": "SHIP" } } },
+        "then": { "properties": { "worstSeverityRank": { "maximum": 2 } } }
+      }
+    ]
   }
 }

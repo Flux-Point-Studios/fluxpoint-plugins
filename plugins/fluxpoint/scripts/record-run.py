@@ -29,6 +29,26 @@ DEC_HDR = "| When (UTC) | Decision | Chosen | Overturned prior | Frozen by | Rat
 # proof-audit nodes files the worst verdict, the way several harness nodes
 # file the worst exit: one WEAKENED is the campaign's answer.
 PROOF_RANK = {"NOT-APPLICABLE": 0, "SOUND": 1, "UNPROVEN": 2, "WEAKENED": 3}
+# RedTeamV1's severity ordinal. The contract binds worstSeverity to the
+# findings and refuses a SHIP over HIGH or CRITICAL; this re-derives both
+# from the findings themselves, so a validator that skipped the binding
+# cannot file a SHIP over a CRITICAL as shippable.
+SEVERITY_RANK = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+
+def red_team_incoherent(r):
+    """Why a RedTeamV1 result cannot be taken at its verdict, or None."""
+    worst = max((SEVERITY_RANK.get((f or {}).get("severity"), 0)
+                 for f in (r.get("findings") or []) if isinstance(f, dict)), default=0)
+    name = next(k for k, v in SEVERITY_RANK.items() if v == worst)
+    if r.get("verdict") == "SHIP" and worst >= SEVERITY_RANK["HIGH"]:
+        return f"SHIP over a {name} finding"
+    if ("worstSeverityRank" in r or "worstSeverity" in r) and (
+            r.get("worstSeverityRank") != worst
+            or SEVERITY_RANK.get(r.get("worstSeverity")) != worst):
+        return (f"worstSeverity {r.get('worstSeverity')}/{r.get('worstSeverityRank')} "
+                f"disagrees with its findings, whose worst is {name}")
+    return None
 
 
 def cell(s, n=160):
@@ -116,8 +136,9 @@ def derive(summary):
     map precisely so this does not have to guess from a result's shape.
 
     Returns (harness_exit, red_team_verdict, blocked, proof_verdict,
-    proof_surface) with None where the campaign genuinely produced no such
-    node. The proof verdict is the ProofV1 node's, worst of several, and
+    proof_surface, incoherent) with None where the campaign genuinely
+    produced no such node; `incoherent` lists red-team results whose verdict
+    their own findings contradict, each of which blocks like a BLOCK. The proof verdict is the ProofV1 node's, worst of several, and
     proof_surface is how many files, obligations or suites it reviewed —
     a SOUND over zero is vacuous and the row says so.
     """
@@ -125,6 +146,7 @@ def derive(summary):
     contracts = summary.get("contracts") or {}
     harness, verdict, blocked = None, None, False
     proof, proof_surface = None, None
+    incoherent = []
     for node, value in results.items():
         c = contracts.get(node)
         for r in _each(value):
@@ -136,6 +158,10 @@ def derive(summary):
                     harness = e if harness in (None, 0) else harness
             if c == "RedTeamV1" or (c is None and r.get("verdict") in ("SHIP", "BLOCK")):
                 v = r.get("verdict")
+                why = red_team_incoherent(r)
+                if why:
+                    incoherent.append(f"{node}: {why}")
+                    v = "BLOCK"
                 if v == "BLOCK":
                     verdict, blocked = "BLOCK", True
                 elif v and verdict is None:
@@ -146,7 +172,7 @@ def derive(summary):
                     proof = pv
                     sf = r.get("surface")
                     proof_surface = len(sf) if isinstance(sf, list) else 0
-    return harness, verdict, blocked, proof, proof_surface
+    return harness, verdict, blocked, proof, proof_surface, incoherent
 
 
 def main():
@@ -228,7 +254,10 @@ def main():
 
     # Derived beats declared: the flags are a fallback for a run whose
     # summary carries no such node, never an override of one that does.
-    d_harness, d_verdict, blocked, d_proof, proof_surface = derive(summary)
+    d_harness, d_verdict, blocked, d_proof, proof_surface, incoherent = derive(summary)
+    for why in incoherent:
+        print(f"record-run: red-team result refused at its verdict — {why}",
+              file=sys.stderr)
     harness = str(d_harness) if d_harness is not None else args.harness
     red_team = d_verdict if d_verdict is not None else args.red_team
     proof_audit = d_proof if d_proof is not None else args.proof_audit
@@ -455,7 +484,10 @@ def main():
 
     # 2. Evidence row, appended under whichever table header the file carries.
     claim = f"graph run: {ok} node(s) OK, {dead} dead, {findings} produced item(s)"
-    if blocked:
+    if incoherent:
+        claim += ("; red-team findings contradict its verdict (" + "; ".join(incoherent[:2])
+                  + ") — filed as BLOCK")
+    elif blocked:
         claim += "; red-team returned BLOCK — not shippable"
     if weakened:
         claim += ("; proof-audit returned WEAKENED — verification got weaker while "

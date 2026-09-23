@@ -1846,6 +1846,28 @@ def halt_parts(n):
     return field, op, lit
 
 
+def red_team_checked(n):
+    """A node whose raw RedTeamV1 result the emitted code can re-derive."""
+    return (not is_reduce(n) and n.get("contract") == "RedTeamV1"
+            and n.get("actor", "agent") == "agent"
+            and not n.get("repeat") and not panel_size(n))
+
+
+def emit_red_team_check(n, var, many=False):
+    """Halt on a red-team result its own findings contradict."""
+    nid = n["id"]
+    items = var if many else f"[{var}]"
+    return (
+        f"const incoherent_{var} = {items}.map(redTeamIncoherent).filter(Boolean)\n"
+        f"if (incoherent_{var}.length) {{\n"
+        f"  log(`HALT at {nid}: red-team result contradicts itself — ${{incoherent_{var}[0]}}`)\n"
+        f"  note({js_str(nid)}, 'HALTED', incoherent_{var}.join('; '))\n"
+        f"  RESULTS[{js_str(nid)}] = {var}\n"
+        f"  return summary('HALTED')\n"
+        f"}}"
+    )
+
+
 def emit_halt(n, var):
     field, op, lit = halt_parts(n)
     return (
@@ -2023,6 +2045,26 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  if (r.gate !== gate) return `${id}: claims gate '${r.gate}', declared '${gate}'`")
         a("  if (typeof r.exit !== 'number') return `${id}: no integer exit`")
         a("  if (!r.attestId) return `${id}: no attestId — an exit code nothing witnessed`")
+        a("  return null")
+        a("}")
+        a("")
+    if any(red_team_checked(n) for n in nodes):
+        a("// --- red-team coherence: the verdict its own findings allow ---")
+        a("// RedTeamV1 binds worstSeverity to the findings and refuses a SHIP over")
+        a("// HIGH or CRITICAL, but a runtime validator that skipped conditional")
+        a("// keywords would let exactly that through to the next node — often a")
+        a("// person about to sign. Re-derived here from the findings, in code.")
+        a("const SEVERITY_RANK = { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 }")
+        a("function redTeamIncoherent(r) {")
+        a("  if (!r || typeof r !== 'object') return null")
+        a("  const worst = (Array.isArray(r.findings) ? r.findings : [])")
+        a("    .reduce((w, f) => Math.max(w, SEVERITY_RANK[f && f.severity] || 0), 0)")
+        a("  const name = Object.keys(SEVERITY_RANK).find(k => SEVERITY_RANK[k] === worst)")
+        a("  if (r.verdict === 'SHIP' && worst >= SEVERITY_RANK.HIGH) return `SHIP over a ${name} finding`")
+        a("  // A repo-local RedTeamV1 without the ordinal is still held to the SHIP rule.")
+        a("  if (('worstSeverityRank' in r || 'worstSeverity' in r) &&")
+        a("      (r.worstSeverityRank !== worst || SEVERITY_RANK[r.worstSeverity] !== worst))")
+        a("    return `worstSeverity ${r.worstSeverity}/${r.worstSeverityRank} disagrees with its findings, whose worst is ${name}`")
         a("  return null")
         a("}")
         a("")
@@ -2704,6 +2746,8 @@ def emit_node(n, ir, specification=False):
                 a("    return summary('BUDGET-EXHAUSTED')")
                 a("  }")
         a("}")
+        if red_team_checked(n):
+            a(emit_red_team_check(n, var, many=True))
         if n.get("haltWhen"):
             # One item tripping the condition halts the campaign: a fan-out
             # gate that only fired when every branch failed would not be a gate.
@@ -2792,6 +2836,8 @@ def emit_node(n, ir, specification=False):
         a("}")
         if n.get("irreversible"):
             a("}")
+        if red_team_checked(n):
+            a(emit_red_team_check(n, raw))
         if n.get("haltWhen"):
             # Halt on the raw contract: the gate reads the node's own fields.
             a(emit_halt(n, raw))

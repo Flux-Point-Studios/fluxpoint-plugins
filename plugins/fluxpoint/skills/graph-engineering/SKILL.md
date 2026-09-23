@@ -319,6 +319,17 @@ the one that matters:
    earlier `independent` node with a `haltWhen`, because a verifier that
    runs afterwards cannot un-mint an NFT.
 
+   `haltWhen` compares one top-level field to a literal; it cannot reach
+   into an array. A contract whose deciding fact lives only inside a list
+   needs a top-level field bound to that list, or the gate reads the wrong
+   thing. `RedTeamV1` carries one: `worstSeverity` and `worstSeverityRank`
+   are bound to `findings[]` and to the verdict, and SHIP over a HIGH or
+   CRITICAL finding is refused by the contract, re-derived by the compiled
+   graph in code (a halt, before the next node), and re-derived again by
+   `record-run.py` (`BLOCKED-REDTEAM`). So `verdict == 'BLOCK'` already
+   stops every HIGH and CRITICAL; halt on `worstSeverityRank >= 2` to stop
+   on a MEDIUM as well.
+
 Two limits, stated rather than papered over. The sandbox running the
 compiled graph has no filesystem, so the ledger row is written from the run
 summary afterwards — a crash between the effect landing and the run ending
