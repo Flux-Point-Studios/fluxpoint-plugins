@@ -352,10 +352,14 @@ def resolve_imports(ir, contracts, runs_dir, store=None):
                 f"DecisionV1 field(s) {missing} — a hand-edited artifact does "
                 f"not count as a decision")
             continue
-        # The same floors `decision.py --record` holds a ruling to: a record
-        # with every field name but `question: 1`, no options, or a chosen
-        # option nobody weighed would otherwise freeze into the next campaign.
-        bad = _sibling("decision").validate(rec, contracts.get("DecisionV1") or {})
+        # The schema's floors, checked the way `decision.py --record` checks
+        # them: a record with every field name but `question: 1`, no options
+        # or string booleans would otherwise freeze into the next campaign.
+        # Not decision.py's stricter chosen-among-options rule: a graph node
+        # was only ever held to the schema, and a decision an honest run
+        # froze ("72h, matching the timelock") must stay importable.
+        bad = _sibling("decision").validate(rec, contracts.get("DecisionV1") or {},
+                                            choice_among_options=False)
         if bad:
             f.append(f"imports.{did}: the record in '{rid}' is not a valid DecisionV1 "
                      f"({bad[0]}) — a corrupted or hand-edited record does not count "

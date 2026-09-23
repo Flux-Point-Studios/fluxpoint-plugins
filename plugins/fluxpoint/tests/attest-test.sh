@@ -552,6 +552,8 @@ rec "scripts/harness.sh --full" 0 >/dev/null
 check "a gate declared with bash is not the script run bare" "$n" "$(rows)"
 rec "bash scripts/harness.sh --full" 0 >/dev/null
 check "  while run with bash it is" "$((n + 1))" "$(rows)"
+rec "bash ./scripts/harness.sh --full" 0 >/dev/null
+check "  with or without ./ after bash" "$((n + 2))" "$(rows)"
 gates
 n="$(rows)"
 # A quoted cd operand does not freeze the plain-word gate after it.

@@ -484,6 +484,16 @@ with tempfile.TemporaryDirectory() as runs:
     report("a record that is not a valid DecisionV1 does not count as one",
            any("not a valid DecisionV1" in e for e in errs_b), (errs_b or ["none"])[0][:70])
     os.remove(os.path.join(runs, "wf-bogus.json"))
+    # ...but a record a graph node froze is judged by the schema it was held
+    # to, not decision.py's stricter chosen-among-options rule.
+    worded = dict(FROZEN, chosen="72h, matching the governance timelock")
+    with open(os.path.join(runs, "wf-worded.json"), "w") as fh:
+        json.dump(_art("wf-worded", "2031-01-01 00:00", {"vault-window": worded}), fh)
+    res_w, errs_w = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs)
+    report("  while an honest run's decision worded beside its options still imports",
+           not errs_w and res_w.get("vault-window", {}).get("runId") == "wf-worded",
+           str(errs_w or res_w.get("vault-window", {}).get("runId")))
+    os.remove(os.path.join(runs, "wf-worded.json"))
     report("an import resolves a decision recorded with decision.py",
            not errs_s and resolved_s.get("vault-window", {}).get("runId") == "dec_0123456789ab"
            and resolved_s["vault-window"]["record"]["chosen"] == "48h",

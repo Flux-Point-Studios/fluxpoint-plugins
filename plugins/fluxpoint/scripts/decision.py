@@ -81,8 +81,13 @@ def load_schema(plugin_root):
         raise SystemExit(f"decision: cannot read {p}: {e}")
 
 
-def validate(rec, schema):
+def validate(rec, schema, choice_among_options=True):
     """Findings against DecisionV1. Shallow by design, floors enforced.
+
+    `choice_among_options` adds this script's own rule, stricter than the
+    schema: the chosen option is one of the options listed. --record holds
+    a ruling to it; an imported record a graph node produced was only ever
+    held to the schema, and is judged by the schema alone.
 
     release.py validates a pasted proof the same way and for the same
     reason: this is not a general JSON Schema engine, it is the specific
@@ -132,7 +137,7 @@ def validate(rec, schema):
                         f"characters — an option nobody argued against was not examined")
         chosen = rec.get("chosen")
         names = [o.get("option") for o in opts if isinstance(o, dict)]
-        if isinstance(chosen, str) and names and chosen not in names:
+        if choice_among_options and isinstance(chosen, str) and names and chosen not in names:
             f.append(f"chosen '{chosen}' is not one of the options considered "
                      f"({', '.join(str(n) for n in names)}) — a decision is a "
                      f"choice among the alternatives it weighed")

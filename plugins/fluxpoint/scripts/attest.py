@@ -211,6 +211,8 @@ def normalize(cmd):
     s = _front(cmd)[2]
     if s.startswith("./"):
         s = s[2:]
+    if s.startswith("bash ./"):  # the same file either way, under the same bash
+        s = "bash " + s[len("bash ./"):]
     return s
 
 
