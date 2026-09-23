@@ -85,14 +85,22 @@ def gates_path(root):
 # `FPL_ATTEST_NONCE=<token> <gate>`: how a graph node names the run it is
 # executing for. One assignment, at the front (after an optional `cd`), and
 # a token of plain characters, so it cannot smuggle a second command in.
-NONCE_RE = re.compile(r"FPL_ATTEST_NONCE=([A-Za-z0-9_-]{1,64})\s+(?=\S)")
+NONCE_RE = re.compile(r"FPL_ATTEST_NONCE=([A-Za-z0-9_-]{1,64})[ \t]+(?=\S)")
 # ONE leading `cd <dir> &&` (or `;`); the directory is captured for the
 # provenance of which tree the gate ran in.
 # The operand is a plain path: quoted without expansion characters, or bare
 # with no shell metacharacter at all. `cd . # && gate` runs only the cd —
 # bash reads the rest as a comment — and a looser operand matched it as the
 # gate, exit 0 and all.
-CD_RE = re.compile(r"""cd\s+('[^']*'|"[^"$`]*"|[^\s;&|<>#$`'"()\\]+)\s*(?:&&|;)\s*(?=\S)""")
+# Inside double quotes a backslash is literal before an ordinary character
+# (a Windows path) but escapes `"`, `$`, a backtick or itself; those are
+# refused, so the quote this pattern sees closing is the one bash closes.
+CD_RE = re.compile(r"""cd[ \t]+('[^']*'|"(?:[^"$`\\]|\\[^"$`\\])*"|[^\s;&|<>#$`'"()\\]+)[ \t]*(?:&&|;)[ \t]*(?=\S)""")
+# Whitespace bash does not split on (NBSP, VT, FF, \x1c-\x1f, U+2003, ...) or
+# that ends a command (a line break). str.split() splits on all of it, so
+# `FPL_ATTEST_NONCE=n1<NBSP>gate` — to bash one assignment that runs nothing
+# and exits 0 — read as the nonce and then the gate.
+FOREIGN_SPACE = re.compile(r"[^\S \t]")
 
 
 def _front(cmd):
@@ -104,7 +112,7 @@ def _front(cmd):
     then `FPL_ATTEST_NONCE=n cd backend && gate`, which used to keep its cd
     and match nothing. One nonce and one cd, never a chain of either.
     """
-    s = " ".join(str(cmd or "").split())
+    s = re.sub(r"[ \t]+", " ", str(cmd or "")).strip(" \t")
     nonce = cd = ""
     m = NONCE_RE.match(s)
     if m:
@@ -253,9 +261,10 @@ def load_gates(root):
                      f"rename this gate (e.g. 'ci-local') and cite it as "
                      f"prove:ci-local; declare the forge under a top-level 'ci' section")
             continue
-        if isinstance(cmd, str) and re.search(r"[\r\n]", cmd):
-            f.append(f"{GATES}.{name}: a gate is one command line — a line break "
-                     f"ends a command, so the hook cannot witness it; use `&&`")
+        if isinstance(cmd, str) and FOREIGN_SPACE.search(cmd):
+            f.append(f"{GATES}.{name}: a gate is one command line of spaces and tabs — "
+                     f"a line break ends a command and other whitespace is not a "
+                     f"separator to bash, so the hook cannot witness it; use `&&`")
             continue
         if not isinstance(cmd, str) or not cmd.strip():
             f.append(f"{GATES}.{name}: command must be a non-empty string")
@@ -328,7 +337,7 @@ def gate_for(gates, command):
     # A line break ends a command: `cd .\nexit 0 && gate` exits 0 before
     # the gate runs, and collapsing whitespace used to read it as one
     # `cd` and then the gate.
-    if re.search(r"[\r\n]", str(command or "")):
+    if FOREIGN_SPACE.search(str(command or "")):
         return None
     n = normalize(command)
     for name, declared in gates.items():

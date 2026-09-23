@@ -531,6 +531,15 @@ rec 'cd $(true) && scripts/harness.sh --full' 0 >/dev/null
 check "  nor is a comment, or an expansion, in the cd operand" "$n" "$(rows)"
 rec 'cd "/tmp" && scripts/harness.sh --full' 0 >/dev/null
 check "  while a quoted plain path still is" "$((n + 1))" "$(rows)"
+# Whitespace bash does not split on: to bash `FPL_ATTEST_NONCE=n<NBSP>gate`
+# is one assignment that runs nothing and exits 0.
+n="$(rows)"
+for ws in $'\xc2\xa0' $'\x0b' $'\x1f' $'\xe2\x80\x83'; do
+  rec "FPL_ATTEST_NONCE=run-a${ws}scripts/harness.sh${ws}--full" 0 >/dev/null
+done
+check "whitespace bash does not split on never reads as a gate" "$n" "$(rows)"
+rec 'cd "x\" && scripts/harness.sh --full' 0 >/dev/null
+check "  nor does a double-quoted cd whose closing quote bash escapes" "$n" "$(rows)"
 
 # ================= 11. a long gate, run in the background (#96) ==========
 # The hook cannot see a backgrounded launch finish, and one foreground call
