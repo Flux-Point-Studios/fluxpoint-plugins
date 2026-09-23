@@ -190,6 +190,27 @@ step; do not stop at copying files.
    the ratchets so their signatures are hashed. A class that genuinely
    cannot apply is waived in the committed file, where review sees it; it
    is never left unspecified.
+   Keep both taxonomies unless the repo has a reason to drop one. When the
+   repo tracks a language whose taxonomy is missing from the manifest,
+   `spec-guard.py` prints a `NO TAXONOMY` line naming the language, how
+   many classes the template holds for it and the first few ids. That line
+   is a note by default. Two optional top-level fields in
+   `.fluxpoint-attacks.json` change it:
+   ```json
+   {"version": 1, "requireAllLanguages": true, "languages": ["typescript"],
+    "taxonomies": [ … ]}
+   ```
+   `"requireAllLanguages": true` turns each `NO TAXONOMY` line into a
+   failure; set it once the manifest carries every half the repo needs.
+   `"languages"` lists the halves the repo gates on purpose. A tracked
+   language left off the list prints one `excluded by declaration` line
+   and never fails, even under `requireAllLanguages`. A language on the
+   list with no taxonomy is still reported as `NO TAXONOMY`, and a
+   taxonomy in the manifest keeps gating whether the list names it or not.
+   Both fields are validated: a `requireAllLanguages` that is not `true`
+   or `false`, a `languages` value that is not a non-empty list, or a name
+   in it that is neither a language spec-guard knows nor the language of
+   a taxonomy in the manifest makes the manifest unreadable, which is red.
    When a Definition-of-Done line rests on a proof, say which one:
    `- [x] withdraw never overdraws — proof: dafny:src/vault.dfy:Withdraw`.
    `spec-guard.py --check` refuses a checked box whose obligation does not

@@ -70,6 +70,15 @@ Three more checks ride on the same scan:
              specified and never as a failure. The known languages are
              printed beside the unknown one, and a near miss is named,
              so a transposition cannot quietly un-gate a language.
+             The other direction is checked too: a language this guard
+             knows, tracked here, with no taxonomy in the manifest is
+             named NO TAXONOMY with the classes the shipped template
+             carries for it. That is a note, because reddening a repo for
+             a manifest it has not finished writing makes a gate people
+             delete; `"requireAllLanguages": true` makes it a failure.
+             `"languages": [...]` names the halves a repo gates on
+             purpose, and a tracked language it leaves out is printed as
+             excluded by declaration instead of passed over.
 
 What a statement hash cannot see: a property proved about an unreachable
 state, a generator that cannot produce the interesting case, a test whose
@@ -662,6 +671,35 @@ DORMANT_WHY = {
     "aiken": "no Aiken file is tracked",
     "typescript": "no TypeScript test file is tracked",
 }
+# How a tracked language and its classes are named when the manifest has no
+# taxonomy for it. TypeScript is tracked by its test files, the same signal
+# its dormancy reads, so the line says tests rather than source.
+TRACKED_AS = {"aiken": "Aiken", "typescript": "TypeScript tests"}
+CLASS_KIND = {"aiken": "eUTxO", "typescript": "off-chain builder"}
+# The shipped taxonomies, beside this script in the plugin. A missing
+# taxonomy is reported with what it leaves ungated, and the template is the
+# one place that list is written down.
+TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir,
+                        "templates", "attack-taxonomy.json")
+TEMPLATE_REL = "templates/attack-taxonomy.json"
+
+
+def template_ids(lang):
+    """The class ids the shipped template carries for `lang`, or None.
+
+    None means the template could not be read. The report then says the
+    classes are ungated without counting them, which is less useful and
+    still true; a guessed count would not be.
+    """
+    try:
+        with open(TEMPLATE, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        for tax in doc["taxonomies"]:
+            if tax["language"] == lang:
+                return [c["id"] for c in tax["classes"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return None
 
 # What the off-chain side runs as a test: the conventional suffixes, plus any
 # .ts/.tsx under a test directory, which is where a repo that keeps its tests
@@ -745,7 +783,51 @@ def load_attacks(root):
         seen.add(tax["language"])
         out.append({"language": tax["language"], "classes": tax["classes"],
                     "waived": tax.get("waived", {})})
-    return {"version": doc.get("version", 1), "taxonomies": out}, None
+    # Both fields change what the gate is allowed to leave unchecked, so a
+    # value this script cannot read is a problem with a name, like every
+    # other shape error here. Treating `"yes"` as unset would drop a strict
+    # repo back to notes without a word; treating a bare string as a list
+    # would exclude whatever its letters happened to spell.
+    strict = doc.get("requireAllLanguages", False)
+    if not isinstance(strict, bool):
+        return None, f"{ATTACKS} 'requireAllLanguages' must be true or false"
+    listed = None
+    if "languages" in doc:
+        listed = doc["languages"]
+        problem = _languages_problem(listed, seen)
+        if problem:
+            return None, problem
+    return {"version": doc.get("version", 1), "taxonomies": out,
+            "languages": listed, "requireAllLanguages": strict}, None
+
+
+def _languages_problem(listed, declared):
+    """What is wrong with a `languages` list, or None.
+
+    A name must be one this guard gates, or the language of a taxonomy the
+    manifest itself declares. The second is allowed for the reason an
+    unlearned taxonomy is NOT COVERED rather than malformed: the manifest may
+    run ahead of this script. A name that is neither refers to nothing, and
+    its likely cause is a typo, which would leave the language it meant out
+    of the list and so excluded by declaration. That is the silent un-gating
+    the list exists to make visible, so the near miss is named.
+    """
+    where = f"{ATTACKS} 'languages'"
+    if (not isinstance(listed, list) or not listed
+            or not all(isinstance(x, str) and x for x in listed)):
+        return (f"{where} must be a non-empty list of language names; to gate "
+                f"nothing, remove the manifest instead")
+    seen = set()
+    for lang in listed:
+        if lang in seen:
+            return f"{where} names {lang!r} twice"
+        seen.add(lang)
+        if lang not in TAXONOMY_LANGUAGES and lang not in declared:
+            hint = _near(lang)
+            return (f"{where} names {lang!r}, which neither this guard "
+                    f"({', '.join(TAXONOMY_LANGUAGES)}) nor a taxonomy in the manifest "
+                    f"declares" + (f" (did you mean {hint!r}?)" if hint else ""))
+    return None
 
 
 def typescript_test_files(tracked):
@@ -819,14 +901,104 @@ def specified_in(root, tax, ctx):
     return typescript_specified(root, ctx["typescript"]["files"], ids)
 
 
+def _ungated(lang):
+    """(what a missing taxonomy leaves ungated, the first of them by id).
+
+    Three ids are enough to recognise the list and short enough to read in
+    one line; the rest are counted, and the template holds them all.
+    """
+    ids, kind = template_ids(lang), CLASS_KIND[lang]
+    if not ids:
+        return f"its known {kind} classes", ""
+    shown = ", ".join(ids[:3]) + (f", +{len(ids) - 3} more" if len(ids) > 3 else "")
+    return f"{len(ids)} known {kind} classes", f" ({shown})"
+
+
+def language_gaps(doc, ctx):
+    """[(language, missing, text)] for each known language the manifest leaves out.
+
+    Every other taxonomy check runs the manifest against the repo. This runs
+    the repo against the manifest, the direction that stayed silent: a repo
+    of validators whose manifest carried only the typescript half left every
+    eUTxO class ungated and read green. `missing` marks a tracked language
+    with no taxonomy, which the caller reports as NO TAXONOMY: a note, or a
+    failure under requireAllLanguages. Every other entry makes a declared
+    choice visible and never fails the gate.
+
+    "Tracked" is the dormancy `taxonomy_context` already decides, so a
+    language needs a taxonomy here exactly when its taxonomy would gate
+    something. The two directions cannot disagree about what a repo carries.
+    """
+    have = {t["language"] for t in doc["taxonomies"]}
+    listed = doc.get("languages")
+    out = []
+    for lang in TAXONOMY_LANGUAGES:
+        named = listed is None or lang in listed
+        if lang in have:
+            # The list never switches off a taxonomy the manifest writes out.
+            # Honouring it would be a second, quieter way to drop every class
+            # in a language, which is the move this check exists to expose.
+            if not named:
+                out.append((lang, False,
+                            f"the {lang} taxonomy gates although 'languages' does not "
+                            f"list {lang}; a list never switches off a taxonomy the "
+                            f"manifest carries, so add {lang} to it or remove the taxonomy"))
+            continue
+        if ctx[lang]["dormant"]:
+            # Nothing in this language is tracked, so nothing is ungated. A
+            # list naming it still contradicts the manifest, which is worth a
+            # line before the first file in that language lands.
+            if listed is not None and lang in listed:
+                out.append((lang, False,
+                            f"'languages' lists {lang} but no {lang} taxonomy is declared; "
+                            f"{DORMANT_WHY[lang]}, so nothing is ungated yet"))
+            continue
+        if not named:
+            # Excluded on purpose, and said so in one line. A choice nobody
+            # can see is indistinguishable from an accident.
+            cost, _ = _ungated(lang)
+            out.append((lang, False,
+                        f"{lang} excluded by declaration: this repo tracks {TRACKED_AS[lang]}, "
+                        f"and 'languages' names {', '.join(listed)} only, so {cost} "
+                        f"are not gated"))
+            continue
+        # Declared gated by the list and gated by nothing is the same gap as
+        # no list at all, with a contradiction on top, so it is reported the
+        # same way and says which of its two claims is false.
+        head = (f"'languages' lists {lang} and this repo tracks {TRACKED_AS[lang]}, but"
+                if listed is not None else f"this repo tracks {TRACKED_AS[lang]} but")
+        fix = (f"take {lang} out of 'languages'" if listed is not None
+               else "name the halves this repo gates on purpose in 'languages'")
+        cost, shown = _ungated(lang)
+        out.append((lang, True,
+                    f"{head} {ATTACKS} declares no {lang} taxonomy — {cost} are "
+                    f"ungated{shown}. Copy them from {TEMPLATE_REL} and waive any "
+                    f"that cannot apply, or {fix}."))
+    return out
+
+
 def attack_findings(root, now):
     doc, problem = load_attacks(root)
     if problem:
         return [("attacks", f"UNREADABLE — {problem}; every class counts as unspecified")], []
     if doc is None:
         return [], []
-    findings, notes = [], []
     ctx = taxonomy_context(root, now)
+    findings, notes = class_findings(root, doc, ctx)
+    for lang, missing, text in language_gaps(doc, ctx):
+        if not missing:
+            notes.append(f"{ATTACKS}: {text}")
+        elif doc["requireAllLanguages"]:
+            findings.append((f"attack:{lang}",
+                             f"NO TAXONOMY, and requireAllLanguages is set: {text}"))
+        else:
+            notes.append(f"NO TAXONOMY: {text}")
+    return findings, notes
+
+
+def class_findings(root, doc, ctx):
+    """(findings, notes) for every class in every taxonomy the manifest carries."""
+    findings, notes = [], []
     taxonomies = []
     for tax in doc["taxonomies"]:
         if tax["language"] in TAXONOMY_LANGUAGES:
@@ -905,6 +1077,10 @@ def print_taxonomy(root, obligations, doc, problem):
                      else "waived" if cls["id"] in tax["waived"]
                      else "UNSPECIFIED")
             print(f"  attack class {lang}:{cls['id']}: {state}")
+    # The same gaps `--check` reports, so a scan cannot list every class it
+    # was given and stay quiet about a tracked language it was given none for.
+    for lang, missing, text in language_gaps(doc, ctx):
+        print(f"  attack taxonomy {lang}: " + (f"NO TAXONOMY: {text}" if missing else text))
 
 
 # ------------------------------------------------------------------ axioms
