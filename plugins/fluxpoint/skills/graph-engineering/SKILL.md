@@ -121,7 +121,16 @@ compiler rejects, at compile time:
   `foreach`/`repeat`
 
 Those are structural. `/fluxpoint:graph-audit` judges what is left:
-scoping, tier-vs-stakes, prompt quality.
+scoping, tier-vs-stakes, prompt quality. It runs as a shipped workflow
+(`workflows/graph-audit.js`): six lens-scoped auditors, a reduce that merges
+their duplicates, and verifiers told to refute each finding, three per
+finding at HIGH and above. One auditor per round read as convergence when
+it was one reader running out of path, so SOUND now means every lens
+returned and nothing survived refutation. Rounds persist under
+`.claude/fluxpoint/audits/`, and what earlier rounds fixed or refuted is
+passed back as a settled list so a round does not relitigate it. `--quick`
+keeps the single auditor for checks between repairs; it never makes a
+graph READY.
 
 ## Work nobody on the graph can do
 

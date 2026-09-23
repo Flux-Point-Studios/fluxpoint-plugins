@@ -13,8 +13,8 @@ claude plugin validate .
 
 `--full` checks every manifest and contract, syntax-checks every script,
 validates the plugin, checks that the Claude Code and Codex manifests agree,
-compiles every campaign template and syntax-checks the generated JavaScript,
-then runs every suite under `plugins/fluxpoint/tests/` and
+compiles every campaign template and syntax-checks the generated JavaScript
+and the shipped workflow scripts, then runs every suite under `plugins/fluxpoint/tests/` and
 `plugins/substrate/tests/`. One step is advisory: `prompt-audit.py` scans
 the prompt-bearing files for patterns that degrade a frontier model and
 prints the trend without failing the run.

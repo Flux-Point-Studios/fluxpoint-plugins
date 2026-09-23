@@ -152,6 +152,32 @@ compile_templates() {
   fi
 }
 
+# A shipped workflow is hand-written, not compiled, but the runtime wraps it
+# the same way: checked under the same async wrapper, or a syntax error
+# surfaces when someone runs the command rather than here.
+check_workflow() {
+  {
+    echo 'const agent=0,parallel=0,pipeline=0,log=0,phase=0,args=0,budget=0,workflow=0;(async () => {'
+    sed 's/^export const meta/const meta/' "$1"
+    echo '})()'
+  } >/tmp/fpl-workflow.mjs
+  node --check /tmp/fpl-workflow.mjs
+}
+
+check_workflows() {
+  local f n=0
+  for f in "$PLUGIN"/workflows/*.js; do
+    [ -f "$f" ] || continue
+    n=$((n + 1))
+    check_workflow "$f" || { echo "$f does not parse under the async wrapper" >&2; return 1; }
+  done
+  # A green that checked nothing is not a green.
+  if [ "$n" -lt 1 ]; then
+    echo "expected at least 1 shipped workflow under $PLUGIN/workflows, checked $n" >&2
+    return 1
+  fi
+}
+
 # Commands and agents are run as literal instructions, so a `python3` written
 # into one is reached by no shell resolver — and `python3` is absent from a
 # standard Windows install, which made every slash command a no-op there.
@@ -216,6 +242,11 @@ case "${1:---full}" in
         step "counterexample ledger" bash "$PLUGIN/tests/cex-test.sh" ;;
       "$PLUGIN"/scripts/blueprint-guard.py)
         step "blueprint conformance" bash "$PLUGIN/tests/blueprint-test.sh" ;;
+      "$PLUGIN"/workflows/*.js)
+        step "node --check (async wrapper): $f" check_workflow "$f"
+        step "graph-audit workflow" "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py" ;;
+      "$PLUGIN"/commands/graph-audit.md)
+        step "graph-audit workflow" "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py" ;;
     esac
     ;;
   --full)
@@ -238,6 +269,9 @@ case "${1:---full}" in
     step "portable interpreter invocations" portable_invocations
     step "locked specification + executed requirements" "$FPL_PY" "$PLUGIN/scripts/specification.py" --run
     step "templates compile + emit valid JS" compile_templates
+    step "shipped workflows parse under the async wrapper" check_workflows
+    step "graph-audit workflow: lenses, reduce, refutation (executed)" \
+      "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py"
     step "compiler invariants" "$FPL_PY" "$PLUGIN/tests/compile-test.py"
     step "agentType resolution + contract" "$FPL_PY" "$PLUGIN/tests/agenttype-test.py"
     step "proof verdict reaches the record (executed)" "$FPL_PY" "$PLUGIN/tests/proof-verdict-test.py"
