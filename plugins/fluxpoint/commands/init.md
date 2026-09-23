@@ -320,7 +320,11 @@ step; do not stop at copying files.
    `attest.py --await <token>`, which attests the exit itself (from a worktree,
    `--root <this project>` keeps it in this project's log; graph nodes are
    handed it). A gate declared with a leading `cd <dir> &&` is matched only
-   when run in that directory. A gate may not be
+   when run in that directory. A leading `cd` is witnessed only when it
+   names a plain path inside this repository (its checkout or a linked
+   worktree) at the gate's declared place — not `cd "$VAR"` or
+   `cd $(...)`, which the hook cannot resolve — and a gate is one line of
+   spaces and tabs. A gate may not be
    named `ci`: that name is the forge's. If merges
    rest on CI, add a `ci` section so `prove:ci` can cite the forge's own
    commit statuses (`attest.py --ci --pr <n>`, GitHub via `gh`; the forge

@@ -168,12 +168,20 @@ check "no laundered invocation is attested" 0 "$(rows)"
 # which is the exact failure mode this file exists to prevent — and it cost
 # four real runs before anyone noticed.
 newrepo; gates
-rec "cd /repo && scripts/harness.sh --full" 0 >/dev/null
+rec "cd $ROOT/r && scripts/harness.sh --full" 0 >/dev/null
 check "cd && gate is attested" 1 "$(rows)"
-rec "cd /some/path; scripts/harness.sh --full" 0 >/dev/null
+rec "cd $ROOT/r; scripts/harness.sh --full" 0 >/dev/null
 check "cd ; gate is attested" 2 "$(rows)"
-rec "cd /repo && bash scripts/harness.sh --full" 0 >/dev/null
+rec "cd $ROOT/r && bash scripts/harness.sh --full" 0 >/dev/null
 check "cd with an interpreter prefix is attested" 3 "$(rows)"
+# ...but the cd must land in THIS project, where the gate is declared to run:
+# another checkout shares no commit with it, and a subdirectory runs the
+# gate somewhere it was not declared.
+rm -rf "$ROOT/foreign"; mkdir -p "$ROOT/foreign/scripts"; git -C "$ROOT/foreign" init -q -b main
+rec "cd $ROOT/foreign && scripts/harness.sh --full" 0 >/dev/null
+rec "cd /some/path; scripts/harness.sh --full" 0 >/dev/null
+rec "cd $ROOT/r/scripts && scripts/harness.sh --full" 0 >/dev/null
+check "a cd into another checkout, a missing or another directory is not" 3 "$(rows)"
 
 # ...but ONLY a leading cd, and only when the gate is still last. Anything that
 # can change the reported exit stays refused, cd or not.
@@ -529,7 +537,7 @@ rec "cd . # && scripts/harness.sh --full" 0 >/dev/null
 rec "FPL_ATTEST_NONCE=run-a cd . #&& scripts/harness.sh --full" 0 >/dev/null
 rec 'cd $(true) && scripts/harness.sh --full' 0 >/dev/null
 check "  nor is a comment, or an expansion, in the cd operand" "$n" "$(rows)"
-rec 'cd "/tmp" && scripts/harness.sh --full' 0 >/dev/null
+rec "cd \"$ROOT/r\" && scripts/harness.sh --full" 0 >/dev/null
 check "  while a quoted plain path still is" "$((n + 1))" "$(rows)"
 # Whitespace bash does not split on: to bash `FPL_ATTEST_NONCE=n<NBSP>gate`
 # is one assignment that runs nothing and exits 0.
@@ -670,6 +678,9 @@ rec "cd other && ./harness.sh --full" 0 >/dev/null
 check "a declared cd gate run in another directory is not attested" "$n" "$(rows)"
 rec "cd $ROOT/r/scripts && ./harness.sh --full" 0 >/dev/null
 check "  while an absolute path ending in the declared directory is" "$((n + 1))" "$(rows)"
+mkdir -p "$ROOT/foreign/scripts"
+rec "cd $ROOT/foreign/scripts && ./harness.sh --full" 0 >/dev/null
+check "  but not the same-named directory of another checkout" "$((n + 1))" "$(rows)"
 out="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --last harness --nonce run-d 2>&1)"
 case "$out" in "$(sed -n 1p "$ROOT/r/.claude/fluxpoint/attest.jsonl" | "$FPL_PY" -c 'import json,sys; print(json.load(sys.stdin)["attestId"])')"*)
   ok "--last prints the attestId a node cites, for its nonce" "${out:0:40}" ;;
@@ -687,6 +698,9 @@ git -C "$ROOT/r" -c user.email=t@t -c user.name=t commit -qm campaign
 git -C "$ROOT/r" checkout -q main
 rm -rf "$ROOT/wt"; git -C "$ROOT/r" worktree add -q --detach "$ROOT/wt" campaign
 MAIN_HEAD="$(git -C "$ROOT/r" rev-parse HEAD)"; WT_HEAD="$(git -C "$ROOT/wt" rev-parse HEAD)"
+n="$(rows)"
+rec "cd $ROOT/wt && scripts/harness.sh --full" 0 >/dev/null
+check "the hook witnesses a cd into a linked worktree of this repository" "$((n + 1))" "$(rows)"
 (cd "$ROOT/wt" && CLAUDE_PROJECT_DIR="$ROOT/r" "$FPL_PY" "$ATTEST" --run harness --nonce run-w >/dev/null 2>&1)
 check "a --run from a worktree lands in the project's log" run-w "$(field nonce)"
 check "  bound to the project's HEAD, as the hook binds it" "$MAIN_HEAD" "$(field headSha)"

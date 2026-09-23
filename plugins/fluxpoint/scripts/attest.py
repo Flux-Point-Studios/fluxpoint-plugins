@@ -323,6 +323,33 @@ class Gates(dict):
     dirs = {}
 
 
+def cd_in_project(root, command, want):
+    """Whether a command's leading `cd` lands where the gate is declared to
+    run: inside THIS repository (its checkout or a linked worktree), at the
+    project's own path plus the declared directory.
+
+    gate_for() compares text, and a suffix is not a place: `cd
+    /tmp/foreign/backend && npm test` ends like `cd backend`, ran in another
+    checkout, and would be attested against this project's HEAD. A relative
+    `cd` is resolved from the project root, where declared gates run; a
+    command with no `cd` runs where the witness already is.
+    """
+    cd = _front(command)[1]
+    if not cd:
+        return True
+    target = os.path.expanduser(cd.strip().strip("'\""))
+    if not os.path.isabs(target):
+        target = os.path.join(root, target)
+    if not os.path.isdir(target):
+        return False
+    com_t, com_r = _common_dir(target), _common_dir(root)
+    if not com_t or not com_r or not _same(com_t, com_r):
+        return False
+    at = _dir_parts(_git(target, "rev-parse", "--show-prefix") or "")
+    home = _dir_parts(_git(root, "rev-parse", "--show-prefix") or "")
+    return at == home + list(want)
+
+
 def gate_for(gates, command):
     """The declared gate this exact command is, or None.
 
@@ -495,7 +522,7 @@ def record(root, payload):
         return None, []
     command = (payload.get("tool_input") or {}).get("command")
     gate = gate_for(gates, command)
-    if not gate:
+    if not gate or not cd_in_project(root, command, gates.dirs.get(gate) or []):
         return None, []
     resp = payload.get("tool_response")
     # A backgrounded launch returns IMMEDIATELY with a success-shaped payload
