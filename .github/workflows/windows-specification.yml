@@ -1,0 +1,30 @@
+name: windows specification
+
+# The Linux gates (harness --full, executable bits) run on Woodpecker; see
+# .woodpecker.yaml. This job needs a Windows runner, which that agent is not.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-specification:
+    name: Windows specification (Python 3.9)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exercise specification and process cleanup
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python plugins/fluxpoint/tests/specification-test.py

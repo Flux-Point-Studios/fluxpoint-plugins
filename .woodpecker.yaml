@@ -1,0 +1,50 @@
+# The repo gates itself with the same contract the plugin scaffolds into
+# every other repo: scripts/harness.sh --full, exit 0 = green.
+#
+# The Windows specification job stays in .github/workflows: this agent is
+# Linux-only.
+
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+  - event: manual
+
+steps:
+  - name: harness-full
+    # Both steps carry an empty depends_on so they start together and neither
+    # can mask the other's verdict, as the separate GitHub jobs did.
+    depends_on: []
+    image: nikolaik/python-nodejs:python3.11-nodejs22
+    commands:
+      # jq: the hook scripts prefer it over their python fallback, and the
+      # GitHub runner this replaces carried it.
+      - apt-get update -qq && apt-get install -yqq --no-install-recommends jq > /dev/null
+      # The clone step and this one run as different users; without this, git
+      # refuses the checkout as dubiously owned.
+      - git config --global --add safe.directory '*'
+      # The official installer, not npm: the npm global install skips the
+      # optional dependency carrying the native binary. `$$` escapes
+      # Woodpecker's own variable substitution.
+      - curl -fsSL https://claude.ai/install.sh | bash
+      - export PATH="$$HOME/.local/bin:$$PATH"
+      - claude --version
+      - bash scripts/harness.sh --full
+      # Prompt hygiene (advisory) on its own line so the trend is readable
+      # in the log; only a scan that could not run (exit 2) fails it.
+      - python3 plugins/fluxpoint/scripts/prompt-audit.py
+
+  - name: executable-bits
+    depends_on: []
+    image: nikolaik/python-nodejs:python3.11-nodejs22
+    commands:
+      - git config --global --add safe.directory '*'
+      # bash, for the process substitution; the step shell is dash.
+      - |
+        bash -c '
+          missing=0
+          while IFS= read -r f; do
+            if [ ! -x "$$f" ]; then echo "not executable: $$f"; missing=1; fi
+          done < <(git ls-files "*.sh")
+          exit $$missing
+        '
