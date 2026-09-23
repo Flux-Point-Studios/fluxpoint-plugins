@@ -17,6 +17,8 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { TextDecoder } from "node:util";
+import { parseJsonNoDuplicateKeys, parseTimestamp } from "./lifecycle.mjs";
 
 const DEFAULT_EXCLUDE_DIRS = ["node_modules", ".git", "dist", "build", "out", "coverage", "__pycache__"];
 const WALK_MAX_DEPTH = 6;
@@ -26,6 +28,8 @@ const JS_RESOLVE_SUFFIXES = ["", ".js", ".mjs", ".cjs", ".ts", "/index.js", "/in
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 const STRING_CAP = 2000; // one manifest string is one line/cell; long is fine, unbounded is not
 const LIST_CAP = 50; // printed problem/alarm/note lines before "N more suppressed"
+const MAX_DELIVERABLE_LEDGER_BYTES = 1024 * 1024;
+const MAX_DELIVERABLE_ENTRIES = 5000;
 
 // control chars (C0 + DEL) and the Unicode line/paragraph separators, so a
 // manifest string can never break out of its line into forged output
@@ -39,6 +43,48 @@ function clean(value, max = STRING_CAP) {
 function capList(list, max = LIST_CAP) {
   if (list.length <= max) return list;
   return [...list.slice(0, max), `…and ${list.length - max} more suppressed`];
+}
+
+function readBoundedUtf8File(file, label, maxBytes) {
+  const lexical = fs.lstatSync(file);
+  if (!lexical.isFile() || lexical.isSymbolicLink()) throw new Error(`${label} is not a regular file`);
+  if (lexical.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
+  const handle = fs.openSync(file, flags);
+  try {
+    const before = fs.fstatSync(handle);
+    if (
+      !before.isFile() || before.dev !== lexical.dev || before.ino !== lexical.ino
+      || before.size !== lexical.size
+    ) {
+      throw new Error(`${label} changed while it was being opened`);
+    }
+    const chunks = [];
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1));
+    let total = 0;
+    while (total <= maxBytes) {
+      const count = fs.readSync(handle, buffer, 0, Math.min(buffer.length, maxBytes + 1 - total), null);
+      if (count === 0) break;
+      total += count;
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
+    }
+    const after = fs.fstatSync(handle);
+    const lexicalAfter = fs.lstatSync(file);
+    if (total > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+    if (
+      total !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs
+      || lexicalAfter.isSymbolicLink() || lexicalAfter.dev !== before.dev || lexicalAfter.ino !== before.ino
+    ) {
+      throw new Error(`${label} changed while it was being read`);
+    }
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total));
+    } catch {
+      throw new Error(`${label} is not valid UTF-8`);
+    }
+  } finally {
+    fs.closeSync(handle);
+  }
 }
 
 function resolveRoot(argv) {
@@ -160,6 +206,18 @@ function loadManifests(root, excludeDirs, problems) {
 // saying why, and sentAt keeps meaning exactly one thing: an email left.
 const CLOSE_REASONS = ["superseded", "withdrawn", "answered-elsewhere"];
 
+function parseCalendarDay(value) {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12) return null;
+  if (day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate()) return null;
+  return match[0];
+}
+
 function fmtAge(ms) {
   const h = Math.round(ms / 3600000);
   if (h < 1) return "under an hour";
@@ -175,40 +233,112 @@ function deliverableAlarms(root, excludeDirs, problems) {
     if (!fs.existsSync(df)) continue;
     let parsed;
     try {
-      parsed = JSON.parse(fs.readFileSync(df, "utf8"));
+      const label = `${entry.name}/deliverables.json`;
+      parsed = parseJsonNoDuplicateKeys(
+        readBoundedUtf8File(df, label, MAX_DELIVERABLE_LEDGER_BYTES),
+        label
+      );
     } catch (e) {
       problems.push(`unreadable ledger: ${clean(entry.name)}/deliverables.json (${clean(e.message)})`);
       continue;
     }
-    const list = parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.deliverables)
-      ? parsed.deliverables : null;
-    if (!list) {
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Array.isArray(parsed.deliverables)) {
       problems.push(`invalid ledger: ${clean(entry.name)}/deliverables.json needs a "deliverables" array`);
       continue;
     }
-    for (const d of list) {
+    if (parsed.deliverables.length > MAX_DELIVERABLE_ENTRIES) {
+      problems.push(
+        `invalid ledger: ${clean(entry.name)}/deliverables.json exceeds ${MAX_DELIVERABLE_ENTRIES} entries`
+      );
+      continue;
+    }
+    // Per-entry validity. A single malformed or duplicate id reports its own
+    // entry and nothing more — indexing the whole ledger through one throw would
+    // drop every OTHER obligation in the repo, and a register that goes quiet on
+    // one typo is the exact failure the closedReason vocabulary exists to end.
+    const indexed = new Map();
+    for (const item of parsed.deliverables) {
+      if (!item || typeof item !== "object" || Array.isArray(item) || typeof item.id !== "string" || !item.id.trim()) {
+        problems.push(`invalid deliverable in ${clean(entry.name)}: each deliverable needs a non-empty string "id"`);
+        continue;
+      }
+      if (indexed.has(item.id)) {
+        problems.push(`invalid ledger: ${clean(entry.name)}/deliverables.json repeats deliverable id ${clean(item.id)}`);
+        continue;
+      }
+      indexed.set(item.id, item);
+    }
+    for (const d of indexed.values()) {
       if (!d || typeof d !== "object" || !isStr(d.id)) {
         problems.push(`invalid deliverable in ${clean(entry.name)}: each needs a string "id"`);
         continue;
       }
-      const sent = isStr(d.sentAt) && d.sentAt.trim();
-      const closed = isStr(d.closedAt) && d.closedAt.trim();
-      if (sent && closed) {
-        problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: has both "sentAt" and "closedAt" — a send and a non-send closure cannot both be true`);
+      const built = parseTimestamp(d.builtAt);
+      if (built == null) {
+        problems.push(`invalid deliverable ${clean(d.id)} in ${clean(entry.name)}: "builtAt" must be an ISO-8601 instant`);
+        continue;
       }
-      if (sent) continue; // sent — the obligation is closed
-      if (closed) {
+      const rawSent = isStr(d.sentAt) ? d.sentAt.trim() : "";
+      const rawSentOn = isStr(d.sentOn) ? d.sentOn.trim() : "";
+      const rawClosed = isStr(d.closedAt) ? d.closedAt.trim() : "";
+      const rawClosedOn = isStr(d.closedOn) ? d.closedOn.trim() : "";
+      const sentAt = rawSent ? parseTimestamp(rawSent) : null;
+      const sentOn = rawSentOn ? parseCalendarDay(rawSentOn) : null;
+      const closedAt = rawClosed ? parseTimestamp(rawClosed) : null;
+      const closedOn = rawClosedOn ? parseCalendarDay(rawClosedOn) : null;
+      const now = Date.now();
+      const today = new Date(now).toISOString().slice(0, 10);
+      const builtDay = d.builtAt.trim().slice(0, 10);
+      const sentChronology = sentAt != null && sentAt >= built && sentAt <= now;
+      const sentDayChronology = sentOn != null && sentOn >= builtDay && sentOn <= today;
+      const closedChronology = closedAt != null && closedAt >= built && closedAt <= now;
+      const closedDayChronology = closedOn != null && closedOn >= builtDay && closedOn <= today;
+      if (rawSent && sentAt == null) {
+        problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: "sentAt" must be an ISO-8601 instant`);
+      }
+      if (rawSentOn && sentOn == null) {
+        problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: "sentOn" must be an ISO-8601 calendar date`);
+      }
+      if (rawClosed && closedAt == null) {
+        problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: "closedAt" must be an ISO-8601 instant`);
+      }
+      if (rawClosedOn && closedOn == null) {
+        problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: "closedOn" must be an ISO-8601 calendar date`);
+      }
+      if ((sentAt != null && !sentChronology) || (closedAt != null && !closedChronology)) {
+        problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: ending must be on or after builtAt and not in the future`);
+      }
+      if ((sentOn != null && !sentDayChronology) || (closedOn != null && !closedDayChronology)) {
+        problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: ending day must be on or after builtAt and not in the future`);
+      }
+      const duplicateSendPrecision = Boolean(rawSent && rawSentOn);
+      const duplicateClosePrecision = Boolean(rawClosed && rawClosedOn);
+      if (duplicateSendPrecision) {
+        problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: has both "sentAt" and "sentOn" — choose the precision the evidence supports`);
+      }
+      if (duplicateClosePrecision) {
+        problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: has both "closedAt" and "closedOn" — choose the precision the evidence supports`);
+      }
+      const rawSend = rawSent || rawSentOn;
+      const rawClose = rawClosed || rawClosedOn;
+      if (rawSend && rawClose) {
+        const sendField = rawSent ? "sentAt" : "sentOn";
+        const closeField = rawClosed ? "closedAt" : "closedOn";
+        problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: has both "${sendField}" and "${closeField}" — a send and a non-send closure cannot both be true`);
+      }
+      const ambiguousEnding = duplicateSendPrecision || duplicateClosePrecision || Boolean(rawSend && rawClose);
+      if (!ambiguousEnding && (sentChronology || sentDayChronology)) continue;
+      if (closedAt != null || closedOn != null) {
         const reason = isStr(d.closedReason) ? d.closedReason.trim() : "";
         const because = isStr(d.closedBecause) ? d.closedBecause.trim() : "";
+        const closedField = closedAt != null ? "closedAt" : "closedOn";
         // A half-written closure keeps alarming: going quiet on a typo is the
         // failure this field exists to end.
-        if (CLOSE_REASONS.includes(reason) && because) continue;
-        problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: "closedAt" needs a "closedReason" of ${CLOSE_REASONS.join("/")} and a "closedBecause" saying why`);
-      }
-      const built = isStr(d.builtAt) ? Date.parse(d.builtAt) : NaN;
-      if (Number.isNaN(built)) {
-        problems.push(`invalid deliverable ${clean(d.id)} in ${clean(entry.name)}: "builtAt" must be a parseable date`);
-        continue;
+        if (!CLOSE_REASONS.includes(reason) || !because) {
+          problems.push(`deliverable ${clean(d.id)} in ${clean(entry.name)}: "${closedField}" needs a "closedReason" of ${CLOSE_REASONS.join("/")} and a "closedBecause" saying why`);
+        } else if (!ambiguousEnding && (closedChronology || closedDayChronology)) {
+          continue;
+        }
       }
       // One-line alarms are injected session context — cap every field hard.
       const who = isStr(d.recipient) && d.recipient.trim() ? clean(d.recipient, 80) : "unnamed recipient";
