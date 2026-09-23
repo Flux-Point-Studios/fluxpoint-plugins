@@ -259,7 +259,22 @@ def plan(args):
         findings = cg.validate(v_ir, contracts, cg.load_gates(args.root), agents, packet)
         if packet_problem:
             findings = [packet_problem] + findings
-        est = cg.estimate_tokens(v_ir, contracts, packet)
+        # Priced per case, with the case's own launch args: a case's payload
+        # reaches every {{A.x}} it fills, and pricing the graph's defaults
+        # once for every case let a large payload read as nothing — past
+        # the plan's total and past maxEstimatedTokens alike.
+        by_case = {}
+        for c in cases:
+            c_ir = dict(v_ir)
+            c_ir["argDefaults"] = {**(v_ir.get("argDefaults") or {}), **(c.get("args") or {}),
+                                   "case": c["id"]}
+            by_case[c["id"]] = cg.estimate_tokens(c_ir, contracts, packet)["total"]
+        worst = max(by_case, key=lambda k: by_case[k])
+        cap = (v_ir.get("budget") or {}).get("maxEstimatedTokens")
+        if isinstance(cap, int) and not isinstance(cap, bool) and by_case[worst] > cap:
+            findings = findings + [
+                f"case '{worst}' is estimated at ~{by_case[worst]:,} tokens with its launch "
+                f"args, over budget.maxEstimatedTokens {cap:,}"]
         unmodified = all(
             ((ir.get("roles") or {}).get(r) or {}).get(f) == (None if v == "default" else v)
             for r, f, v in combo)
@@ -269,13 +284,15 @@ def plan(args):
                                      + "\n```", text, count=1))
         variants[vid] = {"settings": [{"role": r, "field": f, "value": v} for r, f, v in combo],
                          "graph": os.path.relpath(path, args.root).replace(os.sep, "/"),
-                         "estimatedTokens": est["total"], "findings": findings,
-                         "unmodified": unmodified}
+                         "estimatedTokens": int(round(sum(by_case.values()) / len(by_case))),
+                         "estimatedTokensByCase": by_case,
+                         "findings": findings, "unmodified": unmodified}
     per_variant = len(cases) * args.reps
     doc = {"version": 1, "name": name, "graph": args.plan, "reps": args.reps,
            "cases": cases, "train_ids": train, "test_ids": test, "variants": variants,
            "runsPlanned": per_variant * len(variants),
-           "estimatedTokens": sum(v["estimatedTokens"] for v in variants.values()) * per_variant}
+           "estimatedTokens": sum(sum(v["estimatedTokensByCase"].values())
+                                  for v in variants.values()) * args.reps}
     with open(os.path.join(out_dir, "plan.json"), "w", encoding="utf-8", newline="\n") as fh:
         json.dump(doc, fh, indent=2)
 
@@ -284,7 +301,7 @@ def plan(args):
           f"= {doc['runsPlanned']} run(s), ~{doc['estimatedTokens']:,} estimated tokens")
     for vid, v in sorted(variants.items()):
         bad = f"  IR REJECTED: {v['findings'][0]}" if v["findings"] else ""
-        print(f"  {vid:<40} ~{v['estimatedTokens']:,} per run  {v['graph']}{bad}")
+        print(f"  {vid:<40} ~{v['estimatedTokens']:,} per run on average  {v['graph']}{bad}")
     print(f"  split: {len(train)} train case(s), {len(test)} test case(s) — the test "
           f"split is scored, never read")
     if n_test:
@@ -381,10 +398,21 @@ def score(args):
         return 2
     with open(p, encoding="utf-8") as fh:
         doc = json.load(fh)
-    runs, dupes = one_per_sample(load_runs(args.root, name))
-    unknown = sorted({r["case"] for r in runs} - {c["id"] for c in doc["cases"]})
+    # Only the planned samples count: a run of a known variant and case at
+    # a repetition the plan never drew (rep 99, -1, "x") would move a pass
+    # rate and narrow its interval past the sample size the plan printed.
+    planned_reps = {str(k) for k in range(int(doc.get("reps") or 1))}
+    case_ids = {c["id"] for c in doc["cases"]}
+    loaded, unplanned = [], []
+    for r in load_runs(args.root, name):
+        ok = (r["variant"] in doc["variants"] and r["case"] in case_ids
+              and not isinstance(r["rep"], bool) and str(r["rep"]) in planned_reps)
+        (loaded if ok else unplanned).append(r)
+    runs, dupes = one_per_sample(loaded)
+    unknown = sorted({r["case"] for r in unplanned} - case_ids)
     report = {"name": name, "variants": {}, "unknownCases": unknown,
-              "duplicates": [d["runId"] for d in dupes]}
+              "duplicates": [d["runId"] for d in dupes],
+              "unplanned": [r["runId"] for r in unplanned]}
     for vid in sorted(doc["variants"]):
         mine = [r for r in runs if r["variant"] == vid]
         report["variants"][vid] = {
@@ -417,6 +445,9 @@ def score(args):
         print(f"  {len(dupes)} duplicate run(s) of an already-recorded sample ignored — the "
               f"first recorded run of each (variant, case, rep) is the sample: "
               f"{', '.join(d['runId'] for d in dupes[:3])}")
+    if unplanned:
+        print(f"  {len(unplanned)} run(s) outside the plan's (variant, case, rep) samples "
+              f"ignored: {', '.join(r['runId'] for r in unplanned[:3])}")
     if unknown:
         print(f"  {len(unknown)} run(s) name a case the plan does not have: "
               f"{', '.join(unknown[:3])} — launch with the plan's case ids")

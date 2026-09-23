@@ -237,7 +237,8 @@ def load_gates(root):
         f.append(f"{GATES}: 'gates' must be a non-empty object of name -> command"
                  f" (or empty beside a top-level 'ci' section)")
         return {}, f
-    out = {}
+    out = Gates()
+    out.dirs = {}
     for name, cmd in gates.items():
         if not IDENT.match(str(name)):
             f.append(f"{GATES}: gate name '{name}' must be lowercase kebab-case")
@@ -252,6 +253,7 @@ def load_gates(root):
             f.append(f"{GATES}.{name}: command must be a non-empty string")
             continue
         out[name] = normalize(cmd)
+        out.dirs[name] = _dir_parts(_front(cmd)[1])
     return ({} if f else out), f
 
 
@@ -292,12 +294,39 @@ def declared_command(root, gate):
         return (json.load(fh).get("gates") or {}).get(gate)
 
 
+def _dir_parts(d):
+    """A `cd` target as path components, quotes and `.` dropped."""
+    d = str(d or "").strip().strip("'\"").replace("\\", "/")
+    return [x for x in d.split("/") if x not in ("", ".")]
+
+
+class Gates(dict):
+    """{name: normalized command}, with each gate's declared leading `cd`
+    directory (as components) in `.dirs`."""
+    dirs = {}
+
+
 def gate_for(gates, command):
-    """The declared gate this exact command is, or None."""
+    """The declared gate this exact command is, or None.
+
+    normalize() drops one leading `cd`, so `cd /abs/project && gate` still
+    matches. But a gate whose DECLARATION starts with `cd backend &&` is
+    identified by that directory too: `cd frontend && npm test` normalizes
+    to the same `npm test`, runs against another component of the same
+    commit, and must not be attested as the backend's gate. The invoked
+    directory has to end with the declared one (`backend`, `./backend`,
+    `/abs/checkout/backend` and a worktree's `wt/backend` all do).
+    """
     n = normalize(command)
     for name, declared in gates.items():
-        if declared == n:
-            return name
+        if declared != n:
+            continue
+        want = (getattr(gates, "dirs", None) or {}).get(name) or []
+        if want:
+            got = _dir_parts(_front(command)[1])
+            if len(got) < len(want) or got[len(got) - len(want):] != want:
+                continue
+        return name
     return None
 
 
@@ -956,7 +985,9 @@ def verify_claims(root, summary):
     reported — this speaks only about commands the repo itself declared.
     """
     gates, findings = load_gates(root)
-    if findings or not gates:
+    # A CI-only manifest ({"gates": {}, "ci": ...}) still has a witness to
+    # hold prove:ci citations to; returning early filed them unchecked.
+    if findings or (not gates and not load_ci(root)):
         return [], findings
     rows = read(root)
     results = (summary or {}).get("results") or {}

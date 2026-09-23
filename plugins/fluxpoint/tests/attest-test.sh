@@ -646,6 +646,12 @@ check "  and so does one after it" run-e "$(field nonce)"
 n="$(rows)"
 rec "FPL_ATTEST_NONCE=run-f cd scripts && FPL_ATTEST_NONCE=run-g ./harness.sh --full" 0 >/dev/null
 check "  but never two nonces" "$n" "$(rows)"
+# A gate declared with its own `cd` is identified by that directory too: the
+# same command run in another component of the same commit is not it.
+rec "cd other && ./harness.sh --full" 0 >/dev/null
+check "a declared cd gate run in another directory is not attested" "$n" "$(rows)"
+rec "cd $ROOT/r/scripts && ./harness.sh --full" 0 >/dev/null
+check "  while an absolute path ending in the declared directory is" "$((n + 1))" "$(rows)"
 out="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --last harness --nonce run-d 2>&1)"
 case "$out" in "$(sed -n 1p "$ROOT/r/.claude/fluxpoint/attest.jsonl" | "$FPL_PY" -c 'import json,sys; print(json.load(sys.stdin)["attestId"])')"*)
   ok "--last prints the attestId a node cites, for its nonce" "${out:0:40}" ;;
@@ -729,6 +735,11 @@ chmod +x "$ROOT/bin2/gh"
 printf '{"version":1,"gates":{},"ci":{"forge":"github"}}' >"$ROOT/r/.fluxpoint-gates.json"
 "$FPL_PY" "$ATTEST" --root "$ROOT/r" --list >/dev/null 2>&1; rc=$?
 check "a manifest whose only witness is the forge is accepted" 0 "$rc"
+# ...and its prove:ci citations are still checked: a fabricated one is not
+# filed clean for want of a local gate.
+out="$(ATT=att_fabricated02 cici att_fabricated02 abc1234 wf-cionly)"
+case "$out" in *TAMPERED-EXECUTION*) ok "  and a prove:ci citation under it is still checked" "caught" ;;
+  *) bad "  and a prove:ci citation under it is still checked" "${out:0:90}" ;; esac
 PATH="$ROOT/bin2:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
 check "a failing check past the first page is a red ci row" 1 "$rc"
 n="$(rows)"

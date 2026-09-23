@@ -136,6 +136,17 @@ with tempfile.TemporaryDirectory() as root:
            f"{hi['passes']}/{so['passes']} of {nt}")
     report("  one run per planned sample: a retry of a recorded sample is ignored",
            rep_["duplicates"] == ["wf_retry"], str(rep_.get("duplicates")))
+    # A run at a repetition the plan never drew is not a sample.
+    extra = json.load(open(os.path.join(runs, "wf_s2.json")))
+    extra.update(runId="wf_rep99")
+    extra["summary"]["inputs"] = {"goal": "g", "case": first, "rep": 99}
+    json.dump(extra, open(os.path.join(runs, "wf_rep99.json"), "w"))
+    rep99 = json.loads(cli(root, "--score", "effort1", "--json").stdout)
+    report("  and a run at an unplanned repetition is not counted",
+           rep99["unplanned"] == ["wf_rep99"]
+           and rep99["variants"]["builder-medium.builder-claude-sonnet-5"]["test"] == so,
+           str(rep99.get("unplanned")))
+    os.remove(os.path.join(runs, "wf_rep99.json"))
     report("  never counting another sweep's runs",
            rep_["variants"]["builder-high.builder-default"]["train"]["runs"]
            == 2 * len(plan["train_ids"]), "isolated")
@@ -240,6 +251,26 @@ with tempfile.TemporaryDirectory() as root:
     report("a variant the compiler would refuse for want of a packet is refused here",
            r.returncode == 1 and "spec required before implementation" in r.stdout,
            (r.stdout + r.stderr).strip()[-70:])
+
+with tempfile.TemporaryDirectory() as root:
+    # A case's launch args fill {{A.goal}}; a big payload is priced, per case,
+    # and can put a variant over its ceiling.
+    capped = json.loads(json.dumps(IR))
+    capped["budget"]["maxEstimatedTokens"] = 150000
+    with open(os.path.join(root, "WORK.md"), "w") as fh:
+        fh.write("```json graph-ir\n" + json.dumps(capped) + "\n```\n")
+    big = [dict(c) for c in CASES]
+    big[3] = dict(big[3], args={"goal": "g" * 120000})
+    with open(os.path.join(root, "cases.json"), "w") as fh:
+        json.dump(big, fh)
+    r = cli(root, "--plan", "WORK.md", "--name", "big", "--vary", "builder.effort=medium,high",
+            "--cases", "cases.json", "--reps", "1")
+    bplan = json.load(open(os.path.join(root, ".claude", "fluxpoint", "sweeps", "big", "plan.json")))
+    by = bplan["variants"]["builder-high"]["estimatedTokensByCase"]
+    report("a sweep prices each case with its own launch args",
+           by["c3"] - by["c0"] >= 119000, f"c3 {by['c3']:,} vs c0 {by['c0']:,}")
+    report("  and a case that puts a variant over its ceiling is refused",
+           r.returncode == 1 and "case 'c3'" in r.stdout, (r.stdout + r.stderr).strip()[-70:])
 
 report("resolution math: ~1/sqrt(n) for a pass rate",
        abs(sw.half_width(100) - 0.098) < 0.001 and sw.runs_for(0.2) == 93,
