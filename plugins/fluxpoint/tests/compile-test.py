@@ -957,6 +957,9 @@ def tree_own_writes_and_launch_case():
     # tracked settings file or project agent edited mid-run is a mutation.
     settings = run([["abc123", ""], ["abc123", " M .claude/settings.json"]], base)
     agent_def = run([["abc123", ""], ["abc123", " M .claude/agents/red-team-reviewer.md"]], base)
+    # git quotes a path with a tab and, under core.quotePath=false, leaves an
+    # astral character raw: decoding it must not throw out of the guard.
+    astral = run([["abc123", ""], ["abc123", '?? "x\\t\U0001F600.txt"']], base)
     plugin_dirs = run([["abc123", ""], ["abc123", "?? .claude/fluxpoint/\n"
                                                    " M .claude/workflows/g.js\n"
                                                    "?? .claude/worktrees/"]], base)
@@ -980,6 +983,8 @@ def tree_own_writes_and_launch_case():
          outcome(agent_def) == "TREE-MOVED", agent_def),
         ("  but the plugin's own .claude/ directories do not",
          outcome(plugin_dirs) in ("COMPLETE", "INCOMPLETE"), plugin_dirs),
+        ("a quoted path with an astral character is read, not thrown on",
+         outcome(astral) == "TREE-MOVED" and "err" not in astral, astral),
         ("nor are .claude/ state and the compiled graph file",
          outcome(own) in ("COMPLETE", "INCOMPLETE"), own),
         ("real code dirt beside them still halts the run",
@@ -1211,6 +1216,9 @@ def prove_ci_and_launch_case():
         ("the prove node is told to bind its gate run to this run's nonce",
          "FPL_ATTEST_NONCE=${LAUNCH.nonce}" in js and "provePreamble(\"ci\") +" in js
          and "--match-head-commit" in js, "preamble"),
+        ("  and to name the stamped project root to attest.py",
+         "const ROOT_ARG = " in js and "attest.py --ci${ROOT_ARG}" in js
+         and "--last ${gate}${ROOT_ARG}" in js, "root"),
         ("a ci citation that names no commit is UNPROVEN in the run",
          "gate === 'ci' && !r.sha" in js, "checked"),
     ]:

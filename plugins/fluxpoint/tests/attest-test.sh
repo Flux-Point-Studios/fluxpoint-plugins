@@ -511,6 +511,9 @@ stamp="$("$FPL_PY" "$ATTEST" --stamp)"
 newrepo; gates
 rec "FPL_ATTEST_NONCE=run-a scripts/harness.sh --full" 0 >/dev/null
 check "a nonce-prefixed gate run is still the declared gate" harness "$(field gate)"
+n="$(rows)"
+rec "$(printf 'cd .\nexit 0 && scripts/harness.sh --full')" 0 >/dev/null
+check "a line break before the gate is not the gate (exit 0 before it runs)" "$n" "$(rows)"
 check "  and its row names the run" run-a "$(field nonce)"
 ATT="$(field attestId)"
 out="$(runbound "{'launch': {'since': '2000-01-01T00:00:00Z', 'nonce': 'run-b'}}" wf-n1)"
@@ -669,13 +672,32 @@ git -C "$ROOT/r" -c user.email=t@t -c user.name=t commit -qm campaign
 git -C "$ROOT/r" checkout -q main
 rm -rf "$ROOT/wt"; git -C "$ROOT/r" worktree add -q --detach "$ROOT/wt" campaign
 MAIN_HEAD="$(git -C "$ROOT/r" rev-parse HEAD)"; WT_HEAD="$(git -C "$ROOT/wt" rev-parse HEAD)"
-(cd "$ROOT/wt" && env -u CLAUDE_PROJECT_DIR "$FPL_PY" "$ATTEST" --run harness --nonce run-w >/dev/null 2>&1)
+(cd "$ROOT/wt" && CLAUDE_PROJECT_DIR="$ROOT/r" "$FPL_PY" "$ATTEST" --run harness --nonce run-w >/dev/null 2>&1)
 check "a --run from a worktree lands in the project's log" run-w "$(field nonce)"
 check "  bound to the project's HEAD, as the hook binds it" "$MAIN_HEAD" "$(field headSha)"
 check "  with the tree it ran on beside it" "$WT_HEAD" "$(field treeSha)"
 [ ! -e "$ROOT/wt/.claude/fluxpoint/attest.jsonl" ] && ok "  and nothing in the worktree's own" "clean" \
   || bad "  and nothing in the worktree's own" "a stray log"
+# Without CLAUDE_PROJECT_DIR (Codex) a worktree may be the session's own
+# project, so nothing is guessed from git: the log stays where it was run,
+# and the node is handed the project explicitly instead (--root, stamped).
+cp "$ROOT/r/.fluxpoint-gates.json" "$ROOT/wt/"  # a worktree session has its own (committed) manifest
+(cd "$ROOT/wt" && env -u CLAUDE_PROJECT_DIR "$FPL_PY" "$ATTEST" --run harness --nonce run-x >/dev/null 2>&1)
+[ -f "$ROOT/wt/.claude/fluxpoint/attest.jsonl" ] && grep -q run-x "$ROOT/wt/.claude/fluxpoint/attest.jsonl" \
+  && ok "  with no project variable, a worktree session keeps its own log" "its own" \
+  || bad "  with no project variable, a worktree session keeps its own log" "moved"
+rm -rf "$ROOT/wt/.claude" "$ROOT/wt/.fluxpoint-gates.json"
+(cd "$ROOT/wt" && env -u CLAUDE_PROJECT_DIR "$FPL_PY" "$ATTEST" --root "$ROOT/r" --run harness --nonce run-y >/dev/null 2>&1)
+check "  and --root names the project from a worktree" run-y "$(field nonce)"
+check "    running the gate in the worktree it was called from" "$WT_HEAD" "$(field treeSha)"
+stamp="$(cd "$ROOT/r" && env -u CLAUDE_PROJECT_DIR "$FPL_PY" "$ATTEST" --stamp)"
+case "$stamp" in *'"root"'*) ok "the launch stamp names the project root" "root" ;;
+  *) bad "the launch stamp names the project root" "$stamp" ;; esac
 git -C "$ROOT/r" worktree remove --force "$ROOT/wt" >/dev/null 2>&1
+# From a subdirectory of the project the declared command still runs at the
+# project root: `scripts/harness.sh` from scripts/ used to run there.
+(cd "$ROOT/r/scripts" && CLAUDE_PROJECT_DIR="$ROOT/r" "$FPL_PY" "$ATTEST" --run harness >/dev/null 2>&1); rc=$?
+check "--run from a project subdirectory runs the gate at the root" 0 "$rc"
 # A relative --root with --detach: the child starts in that directory and
 # used to resolve the root a second time, finding no manifest.
 tok="$(cd "$ROOT" && "$FPL_PY" "$ATTEST" --root r --run harness --detach 2>&1 | sed -n 's/.* as \(bg_[0-9a-f]*\).*/\1/p' | head -1)"

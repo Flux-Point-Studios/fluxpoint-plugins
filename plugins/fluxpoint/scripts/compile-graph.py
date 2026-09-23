@@ -1868,7 +1868,7 @@ def effort_transitions(ir):
     for g in plan_groups(ir):
         track = g["track"]
         keys = warm.setdefault(track, set())
-        if g.get("kind") == "work":
+        if g.get("kind") == "work" and g["calls"]:  # an empty foreach spawns nothing
             nid = g["node"].get("id", "?")
             key = g["calls"][0][1]
             p = prev.get(track)
@@ -2292,12 +2292,15 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  throw new Error('this graph has prove: nodes but no launch stamp {since, nonce} was passed "
           "— launch it with /fluxpoint:graph-run, which stamps args._launch with attest.py --stamp')")
         a("const LAUNCH = A._launch")
+        a("// The project the stamp was minted in: a node that steps into a worktree")
+        a("// names it, so the wrapper attests into the log record-run.py reads.")
+        a("const ROOT_ARG = typeof LAUNCH.root === 'string' && LAUNCH.root ? ' --root ' + JSON.stringify(LAUNCH.root) : ''")
         a("// Injected ahead of each prove: node's prompt. The nonce is what makes")
         a("// the witness's row this run's; a gate run without it is cited as STALE.")
         a("function provePreamble(gate) {")
         a("  return gate === 'ci'")
-        a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run the fluxpoint plugin's scripts/py.sh attest.py --ci --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
-        a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate} --nonce ${LAUNCH.nonce} in the background and collect it with attest.py --await. Return gate '${gate}', the exit, and the attestId the witness recorded (scripts/py.sh attest.py --last ${gate} --nonce ${LAUNCH.nonce} prints it).\\n\\n`")
+        a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run the fluxpoint plugin's scripts/py.sh attest.py --ci${ROOT_ARG} --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
+        a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} in the background and collect it with attest.py --await${ROOT_ARG} <token>. Return gate '${gate}', the exit, and the attestId the witness recorded (scripts/py.sh attest.py --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`")
         a("}")
         a("function citation(id, gate, r) {")
         a("  if (!r || typeof r !== 'object') return `${id}: no result to prove`")
@@ -2682,8 +2685,9 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  const esc = { n: 10, t: 9, r: 13, a: 7, b: 8, f: 12, v: 11, '\"': 34, '\\\\': 92 }")
         a("  let out = ''")
         a("  for (let i = 0; i < s.length; i++) {")
-        a("    const c = s[i]")
-        a("    if (c !== '\\\\' || i + 1 >= s.length) { out += encodeURIComponent(c); continue }")
+        a("    // Whole code points: a lone surrogate half makes encodeURIComponent throw.")
+        a("    const c = String.fromCodePoint(s.codePointAt(i))")
+        a("    if (c !== '\\\\' || i + 1 >= s.length) { try { out += encodeURIComponent(c) } catch (e) { return p } i += c.length - 1; continue }")
         a("    const oct = /^[0-7]{3}/.exec(s.slice(i + 1, i + 4))")
         a("    const byte = oct ? parseInt(oct[0], 8) : (esc[s[i + 1]] !== undefined ? esc[s[i + 1]] : s.charCodeAt(i + 1))")
         a("    out += '%' + (byte < 16 ? '0' : '') + byte.toString(16)")

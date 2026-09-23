@@ -86,6 +86,13 @@ fan = {"version": 1, "campaign": "c", "budget": {"maxNodes": 50}, "treeGuard": F
 r = est(fan)
 report("a fan-out's siblings share one cold prefill", r["cold"] == 1 and r["calls"] == 3,
        f"cold {r['cold']} of {r['calls']}")
+empty_fan = copy.deepcopy(fan)
+empty_fan["lists"]["la"] = []
+try:
+    ok_empty = cg.effort_transitions(empty_fan) == [] and est(empty_fan)["calls"] == 0
+except Exception as e:  # noqa: BLE001
+    ok_empty = False
+report("an empty foreach list prices and walks without a crash", ok_empty, "no calls")
 
 # A park is cold whatever the TTL: nothing survives the hours a person takes.
 parked = chain("medium", "medium", "medium", ttl="1h")

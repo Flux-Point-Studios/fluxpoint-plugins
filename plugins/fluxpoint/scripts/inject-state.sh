@@ -265,7 +265,9 @@ if rows:
             _spec.loader.exec_module(_dec)
             _root = os.path.dirname(os.path.abspath(sys.argv[1]))
             kept = {did for did in cut if _dec.find(_root, did)}
-        except Exception:  # noqa: BLE001 - a pointer is a courtesy, never a failure
+        except (Exception, SystemExit):  # noqa: BLE001 - a pointer is a courtesy:
+            # decision.py exits on a malformed store line, and that must not
+            # take the whole WORK.md block with it.
             kept = set()
     for did in cut:
         if did in kept:

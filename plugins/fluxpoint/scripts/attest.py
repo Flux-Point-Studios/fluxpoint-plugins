@@ -317,6 +317,11 @@ def gate_for(gates, command):
     directory has to end with the declared one (`backend`, `./backend`,
     `/abs/checkout/backend` and a worktree's `wt/backend` all do).
     """
+    # A line break ends a command: `cd .\nexit 0 && gate` exits 0 before
+    # the gate runs, and collapsing whitespace used to read it as one
+    # `cd` and then the gate.
+    if re.search(r"[\r\n]", str(command or "")):
+        return None
     n = normalize(command)
     for name, declared in gates.items():
         if declared != n:
@@ -376,40 +381,62 @@ def _tree_sha(root, payload, command):
 
 
 def project_root(start="."):
-    """Where the manifest and the attest log live, seen from `start`.
+    """Where the manifest and the attest log live when no --root is given.
 
-    A gate run from a linked worktree (git worktree add) belongs to the
-    project it was checked out from: the hook attests into the project's log
-    (it cds to CLAUDE_PROJECT_DIR), and so must the wrapper, or record-run
-    looks in the project's log for a row written into the worktree's and
-    files an honest node as TAMPERED-EXECUTION.
+    CLAUDE_PROJECT_DIR when it holds a manifest: the PostToolUse hook cds
+    there, so a gate run from a linked worktree of the campaign branch is
+    attested into the project's log by the wrapper as it is by the hook.
+    Otherwise the starting directory, as before: git cannot tell a session
+    that works IN a worktree (Codex sets no project variable) from a graph
+    node that stepped into one, so it is not asked to. A node is handed the
+    root explicitly instead (`--root`, from the launch stamp).
     """
     env = os.environ.get("CLAUDE_PROJECT_DIR")
     if env and os.path.exists(gates_path(env)):
         return env
+    return start
+
+
+def _git(d, *a):
     try:
         import subprocess
-
-        def git(*a):
-            r = subprocess.run(["git", "-C", start] + list(a),
-                               capture_output=True, text=True, timeout=10)
-            return r.stdout.strip() if r.returncode == 0 else None
-        top = git("rev-parse", "--show-toplevel")
-        common = git("rev-parse", "--path-format=absolute", "--git-common-dir") \
-            or git("rev-parse", "--git-common-dir")
-        prefix = git("rev-parse", "--show-prefix") or ""
+        r = subprocess.run(["git", "-C", d] + list(a), capture_output=True, text=True,
+                           timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else None
     except (OSError, ValueError):
-        return start
-    if not top or not common:
-        return start
-    common = os.path.abspath(os.path.join(start, common))
-    if os.path.basename(common) != ".git":
-        return start
-    main = os.path.dirname(common)
-    if os.path.normcase(os.path.realpath(main)) == os.path.normcase(os.path.realpath(top)):
-        return start
-    cand = os.path.join(main, prefix)
-    return cand if os.path.exists(gates_path(cand)) else start
+        return None
+
+
+def _common_dir(d):
+    """The repository's shared .git directory, absolute."""
+    got = _git(d, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if got:
+        return got
+    got = _git(d, "rev-parse", "--git-common-dir")  # git < 2.31: relative to d
+    return os.path.join(d, got) if got else None
+
+
+def _same(a, b):
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def tree_for(root, start="."):
+    """Where a gate runs: the project's place in the checkout `start` is in.
+
+    From the project's own checkout — its root or any subdirectory — that
+    is the project root: a declared command runs where the manifest says,
+    never in whatever subdirectory an agent's shell last cd'd into (a
+    `pytest` there runs a subset and would be attested as the gate). From a
+    linked worktree of the same repository it is the same place inside that
+    worktree, which is the tree under test. Anywhere else, the root.
+    """
+    top_r, top_s = _git(root, "rev-parse", "--show-toplevel"), _git(start, "rev-parse", "--show-toplevel")
+    if not top_r or not top_s or _same(top_r, top_s):
+        return root
+    com_r, com_s = _common_dir(root), _common_dir(start)
+    if not com_r or not com_s or not _same(com_r, com_s):
+        return root
+    return os.path.join(top_s, _git(root, "rev-parse", "--show-prefix") or "")
 
 
 def now():
@@ -424,7 +451,10 @@ def stamp():
     other's executions. Minted here so its format is the rows' own.
     """
     import secrets
-    return {"since": now(), "nonce": secrets.token_hex(8)}
+    # The project root rides along, so a node that steps into a worktree
+    # can name the log it attests into (`--root`) whatever the runtime.
+    return {"since": now(), "nonce": secrets.token_hex(8),
+            "root": os.path.abspath(project_root("."))}
 
 
 def append_row(root, row):
@@ -1048,11 +1078,11 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=None,
-                    help="the project (manifest and log); default: the project the "
-                         "current directory belongs to, a linked worktree's included")
+                    help="the project (manifest and log); default: CLAUDE_PROJECT_DIR "
+                         "when it holds a manifest, else the current directory")
     ap.add_argument("--tree", default=None,
-                    help="with --run: the tree to run the gate in (default: the "
-                         "current directory when --root is not given, else --root)")
+                    help="with --run: the tree to run the gate in (default: the project "
+                         "root, or its place in the linked worktree the caller is in)")
     ap.add_argument("--detach", action="store_true",
                     help="with --run: start the gate as its own background process")
     ap.add_argument("--token", help=argparse.SUPPRESS)
@@ -1077,10 +1107,8 @@ def main():
     g.add_argument("--last", metavar="GATE",
                    help="print the newest attested row of GATE (with --nonce: of this run)")
     a = ap.parse_args()
-    tree = a.tree
     if a.root is None:
         a.root = project_root(".")
-        tree = tree or "."
 
     if a.nonce and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", a.nonce):
         print("attest: --nonce must be 1-64 letters, digits, '-' or '_'", file=sys.stderr)
@@ -1089,6 +1117,7 @@ def main():
         print(json.dumps(stamp()))
         return 0
     if a.run:
+        tree = a.tree or (None if a.token else tree_for(a.root, "."))
         return run_gate(a.root, a.run, a.detach, a.token, a.nonce, tree)
     if a.last:
         mine = [r for r in read(a.root) if r.get("gate") == a.last

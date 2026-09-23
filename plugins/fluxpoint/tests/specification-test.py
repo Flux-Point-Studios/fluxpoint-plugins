@@ -436,11 +436,20 @@ time.sleep(float(sys.argv[1]))
         r = self.run_cli('--run', '--if-present')
         self.assertNotIn('legacy', r.stdout)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)  # declared, never locked
-        self.assertEqual(self.run_cli('--lock').returncode, 0)
+        self.assertEqual(self.run_cli('--lock', '--graph', 'WORK.md').returncode, 0)
         self.assertTrue((self.root / 'specs' / 'rollout-lock.json').exists())
+        self.assertEqual(self.run_cli('--run', '--if-present').returncode, 0)
         sys.path.insert(0, str(PLUGIN / 'scripts'))
         import specification
         self.assertTrue(specification.locked(self.root))
+
+    def test_bare_lock_keeps_the_default_packet(self):
+        # A flow that just wrote .fluxpoint-spec.json locks that file, even
+        # where WORK.md names another packet for the runner.
+        (self.root / 'WORK.md').write_text('SPEC: specs/a.json\n', encoding='utf-8')
+        r = self.run_cli('--lock')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.root / '.fluxpoint-spec-lock.json').exists())
 
     def test_spec_and_graph_spellings_of_one_packet_agree(self):
         self.lock()

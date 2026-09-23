@@ -417,8 +417,13 @@ back it, since CI on any older green commit would pass. Pin the merge after
 the gate to the same commit with `gh pr merge --match-head-commit <sha>`.
 Each row names its witness — `hook`, `wrapper` or `forge`. A gate run from
 a linked worktree of the campaign branch is attested into the project's log
-and bound to the project's HEAD, whichever witness saw it; the tree it ran
-on is recorded beside it as `treeSha`. `attest.py --last <gate> --nonce
+and bound to the project's HEAD, whichever witness saw it: the launch stamp
+carries the project `root` and the prove preamble passes it as `--root`
+(under Claude Code, `CLAUDE_PROJECT_DIR` names it too). The gate runs at
+the project's place in the checkout the caller is in, never in a
+subdirectory its shell last entered, and the tree it ran on is recorded
+beside it as `treeSha`. A gate declared as `cd <dir> && ...` matches only a
+run in that directory. `attest.py --last <gate> --nonce
 <nonce>` prints the attestId a node cites. A manifest the witness refuses
 (a gate named `ci`, an unknown forge) fails every `prove:` node at compile
 time, and a run under one is filed `INCOMPLETE`.

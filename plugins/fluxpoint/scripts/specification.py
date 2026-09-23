@@ -429,11 +429,13 @@ def main():
     root = Path(args.root).resolve()
     try:
         spec = args.spec
-        if not spec and not args.graph:
-            # Without --spec or --graph the state file's own header names the
-            # packet: the scaffolded harness runs `--run --if-present`, and a
+        if not spec and not args.graph and args.run:
+            # Without --spec or --graph the runner reads the state file's own
+            # header: the scaffolded harness runs `--run --if-present`, and a
             # WORK.md declaring SPEC: specs/x.json was reported as "a legacy
-            # loop without a spec" and checked nothing.
+            # loop without a spec" and checked nothing. --lock and --check
+            # keep the default packet: a flow that just wrote
+            # .fluxpoint-spec.json locks that file, not another one.
             for cand in ('WORK.md', 'LOOP.md'):
                 if (root / cand).is_file():
                     spec = graph_headers(root / cand).get('SPEC')

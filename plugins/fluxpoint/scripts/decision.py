@@ -190,9 +190,9 @@ def derive_id(root, question):
     if not base[0].isalpha():
         base = "d-" + base
     base = base[:55].rstrip("-")
-    for r in read_store(os.path.join(root, STORE)):
-        if (r.get("id") == base and isinstance(r.get("record"), dict)
-                and r["record"].get("question") != question):
+    # Both places --show and imports read: the store and recorded runs.
+    for _, _, rec in find(root, base):
+        if rec.get("question") != question:
             return f"{base}-{tag}"
     return base
 

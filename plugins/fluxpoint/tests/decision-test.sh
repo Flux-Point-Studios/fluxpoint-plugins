@@ -308,6 +308,25 @@ case "$ctx" in *"decision.py --show legacy-window"*)
   bad "a cut row with no kept record gets no --show pointer" "pointer" ;;
   *"legacy-window's whole record is not kept"*) ok "a cut row with no kept record gets no --show pointer" "says so" ;;
   *) bad "a cut row with no kept record gets no --show pointer" "${ctx:0:80}" ;; esac
+# A malformed line in the store must not take the WORK.md block with it.
+mkdir -p "$R/.claude/fluxpoint"; printf '{"id": "x"\n' >>"$R/.claude/fluxpoint/decisions.jsonl"
+ctx="$(printf '{"session_id":"s4","cwd":"%s"}' "$R" | bash "$INJECT" 2>/dev/null)"
+case "$ctx" in *"## Decisions"*"legacy-window"*) ok "a malformed store line leaves SessionStart's summary whole" "whole" ;;
+  *) bad "a malformed store line leaves SessionStart's summary whole" "${ctx:0:80}" ;; esac
+
+# A derived id is checked against recorded runs too: --show reads both.
+mkrepo
+mkdir -p "$R/.claude/fluxpoint/runs"
+printf '%s' "$GOOD" | "$FPL_PY" -c '
+import json, sys
+rec = json.load(sys.stdin); rec["question"] = "how should the vault unlock window be bounded for testnet only?"
+json.dump({"runId": "wf_q", "when": "2026-09-01 10:00",
+           "summary": {"decisions": {"how-should-the-vault-unlock-window-be-bo": rec}}},
+          open(sys.argv[1], "w"))' "$R/.claude/fluxpoint/runs/wf_q.json"
+printf '%s' "$GOOD" | dec --record >/dev/null 2>&1
+id="$("$FPL_PY" -c 'import json,sys; print([json.loads(l)["id"] for l in open(sys.argv[1])][-1])' "$R/.claude/fluxpoint/decisions.jsonl")"
+case "$id" in how-should-the-vault-unlock-window-be-bo-*) ok "a derived id a recorded run already uses for another question is hashed" "$id" ;;
+  *) bad "a derived id a recorded run already uses for another question is hashed" "$id" ;; esac
 
 mkrepo
 printf '# nothing here\n' >"$R/BARE.md"

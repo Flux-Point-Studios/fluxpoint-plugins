@@ -60,7 +60,9 @@ Workflow tool requires.
    ```
    bash "$ROOT/scripts/py.sh" attest.py --stamp
    ```
-   into `args._launch` (`{"since": ..., "nonce": ...}`). `record-run.py`
+   into `args._launch` (`{"since": ..., "nonce": ..., "root": ...}`; `root` is
+   the project, which the prove preamble passes to `attest.py` as `--root`
+   so a node working in a worktree attests into this project's log). `record-run.py`
    files a citation of any row minted before `since`, or by a run with a
    different nonce, as STALE, so neither an earlier run's execution nor an
    overlapping run's on the same commit can stand in for this one. The
