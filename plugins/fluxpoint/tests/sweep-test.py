@@ -86,6 +86,8 @@ with tempfile.TemporaryDirectory() as root:
     report("the plan says what it can resolve before anything is spent",
            f"resolution: a pass rate over {2 * len(plan['test_ids'])} test run(s)" in r.stdout
            and "20-point difference" in r.stdout, "stated")
+    report("  and that reps are counted from 0, as --score counts them",
+           "for k in 0..1 (0-based" in r.stdout, "stated")
     bad = cli(root, "--plan", "WORK.md", "--name", "x", "--vary", "reviewer.effort=low,high")
     report("varying a role the graph does not declare is refused",
            bad.returncode == 2 and "no role 'reviewer'" in bad.stderr, bad.stderr.strip()[-50:])
@@ -206,6 +208,12 @@ with tempfile.TemporaryDirectory() as root:
               "--cases", "slashy.json")
     report("a case id that is a path is refused at --plan",
            bad.returncode == 2 and "path separators" in bad.stderr, bad.stderr.strip()[-50:])
+    with open(os.path.join(root, "listargs.json"), "w") as fh:
+        json.dump([{"id": "l0", "args": ["goal", "x"]}, {"id": "l1"}], fh)
+    bad = cli(root, "--plan", "WORK.md", "--name", "x", "--vary", "builder.effort=low,high",
+              "--cases", "listargs.json")
+    report("a case whose args are not an object is refused, not a traceback",
+           bad.returncode == 2 and "args must be an object" in bad.stderr, bad.stderr.strip()[-50:])
     bad = cli(root, "--plan", "WORK.md", "--name", "x", "--vary", "builder.effort=low,high")
     report("a plan that holds out no test case is refused, not planned",
            bad.returncode == 2 and "no test case" in bad.stderr, bad.stderr.strip()[-60:])

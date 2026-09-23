@@ -2294,7 +2294,9 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("const LAUNCH = A._launch")
         a("// The project the stamp was minted in: a node that steps into a worktree")
         a("// names it, so the wrapper attests into the log record-run.py reads.")
-        a("const ROOT_ARG = typeof LAUNCH.root === 'string' && LAUNCH.root ? ' --root ' + JSON.stringify(LAUNCH.root) : ''")
+        # Single-quoted for bash: inside double quotes a `$` or a backtick in
+        # the path would still expand, and run.
+        a("const ROOT_ARG = typeof LAUNCH.root === 'string' && LAUNCH.root ? \" --root '\" + LAUNCH.root.replace(/'/g, \"'\\\\''\") + \"'\" : ''")
         a("// Injected ahead of each prove: node's prompt. The nonce is what makes")
         a("// the witness's row this run's; a gate run without it is cited as STALE.")
         a("function provePreamble(gate) {")

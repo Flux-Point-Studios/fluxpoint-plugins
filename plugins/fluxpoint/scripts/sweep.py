@@ -230,6 +230,8 @@ def plan(args):
                 isinstance(c, dict) and isinstance(c.get("id"), str) and c["id"] for c in cases)
                 or len({c["id"] for c in cases}) != len(cases)):
             raise ValueError("--cases must be a JSON list of objects with distinct string ids")
+        if any(not isinstance(c.get("args", {}), dict) for c in cases):
+            raise ValueError("--cases: a case's args must be an object of launch args")
         bad = [c["id"] for c in cases if not CASE_ID.match(c["id"])]
         if bad:
             raise ValueError(f"--cases: id {bad[0]!r} must be letters, digits, '.', '_' or '-' "
@@ -313,7 +315,8 @@ def plan(args):
         print(f"  to see a {d * 100:.0f}-point difference (95%, power 0.8): ~{runs_for(d)} "
               f"test run(s) per variant")
     print("  launch each run with /fluxpoint:graph-run on the variant's graph file, with "
-          "args {...case.args, \"case\": <id>, \"rep\": <k>}, and record it as usual")
+          f"args {{...case.args, \"case\": <id>, \"rep\": <k>}} for k in 0..{args.reps - 1} "
+          f"(0-based: --score counts only those), and record it as usual")
     return 1 if any(v["findings"] for v in variants.values()) else 0
 
 

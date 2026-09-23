@@ -88,7 +88,11 @@ def gates_path(root):
 NONCE_RE = re.compile(r"FPL_ATTEST_NONCE=([A-Za-z0-9_-]{1,64})\s+(?=\S)")
 # ONE leading `cd <dir> &&` (or `;`); the directory is captured for the
 # provenance of which tree the gate ran in.
-CD_RE = re.compile(r"cd\s+([^;&|<>]+?)\s*(?:&&|;)\s*(?=\S)")
+# The operand is a plain path: quoted without expansion characters, or bare
+# with no shell metacharacter at all. `cd . # && gate` runs only the cd —
+# bash reads the rest as a comment — and a looser operand matched it as the
+# gate, exit 0 and all.
+CD_RE = re.compile(r"""cd\s+('[^']*'|"[^"$`]*"|[^\s;&|<>#$`'"()\\]+)\s*(?:&&|;)\s*(?=\S)""")
 
 
 def _front(cmd):
@@ -248,6 +252,10 @@ def load_gates(root):
                      f"statuses (prove:ci, attest.py --ci) since fluxpoint 1.43 — "
                      f"rename this gate (e.g. 'ci-local') and cite it as "
                      f"prove:ci-local; declare the forge under a top-level 'ci' section")
+            continue
+        if isinstance(cmd, str) and re.search(r"[\r\n]", cmd):
+            f.append(f"{GATES}.{name}: a gate is one command line — a line break "
+                     f"ends a command, so the hook cannot witness it; use `&&`")
             continue
         if not isinstance(cmd, str) or not cmd.strip():
             f.append(f"{GATES}.{name}: command must be a non-empty string")
@@ -443,7 +451,7 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def stamp():
+def stamp(root=None):
     """A launch stamp for args._launch: when the run starts, and its nonce.
 
     `since` bounds what a citation may be older than; the nonce names the
@@ -454,7 +462,7 @@ def stamp():
     # The project root rides along, so a node that steps into a worktree
     # can name the log it attests into (`--root`) whatever the runtime.
     return {"since": now(), "nonce": secrets.token_hex(8),
-            "root": os.path.abspath(project_root("."))}
+            "root": os.path.abspath(root or project_root("."))}
 
 
 def append_row(root, row):
@@ -1114,7 +1122,7 @@ def main():
         print("attest: --nonce must be 1-64 letters, digits, '-' or '_'", file=sys.stderr)
         return 2
     if a.stamp:
-        print(json.dumps(stamp()))
+        print(json.dumps(stamp(a.root)))
         return 0
     if a.run:
         tree = a.tree or (None if a.token else tree_for(a.root, "."))

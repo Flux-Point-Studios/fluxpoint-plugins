@@ -511,9 +511,6 @@ stamp="$("$FPL_PY" "$ATTEST" --stamp)"
 newrepo; gates
 rec "FPL_ATTEST_NONCE=run-a scripts/harness.sh --full" 0 >/dev/null
 check "a nonce-prefixed gate run is still the declared gate" harness "$(field gate)"
-n="$(rows)"
-rec "$(printf 'cd .\nexit 0 && scripts/harness.sh --full')" 0 >/dev/null
-check "a line break before the gate is not the gate (exit 0 before it runs)" "$n" "$(rows)"
 check "  and its row names the run" run-a "$(field nonce)"
 ATT="$(field attestId)"
 out="$(runbound "{'launch': {'since': '2000-01-01T00:00:00Z', 'nonce': 'run-b'}}" wf-n1)"
@@ -525,6 +522,15 @@ case "$out" in *"[ATTESTED]"*) ok "  and this run's own is ATTESTED" "attested" 
   *) bad "  and this run's own is ATTESTED" "${out:0:70}" ;; esac
 rec "FPL_ATTEST_NONCE=x; rm -rf / scripts/harness.sh --full" 0 >/dev/null
 check "a nonce cannot carry a second command in" run-a "$(field nonce)"
+n="$(rows)"
+rec "$(printf 'cd .\nexit 0 && scripts/harness.sh --full')" 0 >/dev/null
+check "a line break before the gate is not the gate (exit 0 before it runs)" "$n" "$(rows)"
+rec "cd . # && scripts/harness.sh --full" 0 >/dev/null
+rec "FPL_ATTEST_NONCE=run-a cd . #&& scripts/harness.sh --full" 0 >/dev/null
+rec 'cd $(true) && scripts/harness.sh --full' 0 >/dev/null
+check "  nor is a comment, or an expansion, in the cd operand" "$n" "$(rows)"
+rec 'cd "/tmp" && scripts/harness.sh --full' 0 >/dev/null
+check "  while a quoted plain path still is" "$((n + 1))" "$(rows)"
 
 # ================= 11. a long gate, run in the background (#96) ==========
 # The hook cannot see a backgrounded launch finish, and one foreground call
@@ -693,6 +699,14 @@ check "    running the gate in the worktree it was called from" "$WT_HEAD" "$(fi
 stamp="$(cd "$ROOT/r" && env -u CLAUDE_PROJECT_DIR "$FPL_PY" "$ATTEST" --stamp)"
 case "$stamp" in *'"root"'*) ok "the launch stamp names the project root" "root" ;;
   *) bad "the launch stamp names the project root" "$stamp" ;; esac
+stamp="$(cd / && env -u CLAUDE_PROJECT_DIR "$FPL_PY" "$ATTEST" --stamp --root "$ROOT/r")"
+case "$stamp" in *"\"root\": \"$ROOT/r\""*) ok "  and --root names it from anywhere" "root" ;;
+  *) bad "  and --root names it from anywhere" "$stamp" ;; esac
+printf '{"version":1,"gates":{"unit":"cd .\\npytest -q"}}' >"$ROOT/r/.fluxpoint-gates.json"
+out="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --list 2>&1)"; rc=$?
+case "$rc:$out" in 1:*"one command line"*) ok "a declared gate with a line break is a manifest finding" "refused" ;;
+  *) bad "a declared gate with a line break is a manifest finding" "$rc ${out:0:60}" ;; esac
+gates
 git -C "$ROOT/r" worktree remove --force "$ROOT/wt" >/dev/null 2>&1
 # From a subdirectory of the project the declared command still runs at the
 # project root: `scripts/harness.sh` from scripts/ used to run there.

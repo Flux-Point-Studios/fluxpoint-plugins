@@ -1125,6 +1125,23 @@ def contracts_header_case():
 contracts_header_case()
 
 
+def root_arg_literal(js):
+    """The emitted ROOT_ARG, fed a hostile root, reaches bash as that root."""
+    import subprocess
+    import tempfile
+    line = next((x for x in js.splitlines() if x.startswith("const ROOT_ARG = ")), "")
+    if not line:
+        return False
+    hostile = "/srv/build$dir/pr'oj`touch pwned`"
+    with tempfile.TemporaryDirectory() as d:
+        probe = ("const LAUNCH = {root: " + json.dumps(hostile) + "};\n" + line +
+                 "\nprocess.stdout.write(ROOT_ARG)\n")
+        arg = subprocess.run(["node", "-e", probe], capture_output=True, text=True).stdout
+        out = subprocess.run(["bash", "-c", "set -- " + arg + "; printf '%s|%s' \"$1\" \"$2\""],
+                             capture_output=True, text=True, cwd=d).stdout
+        return out == "--root|" + hostile and not os.path.exists(os.path.join(d, "pwned"))
+
+
 def prove_ci_and_launch_case():
     """CI's statuses guard an irreversible node; citations carry the launch.
 
@@ -1219,6 +1236,8 @@ def prove_ci_and_launch_case():
         ("  and to name the stamped project root to attest.py",
          "const ROOT_ARG = " in js and "attest.py --ci${ROOT_ARG}" in js
          and "--last ${gate}${ROOT_ARG}" in js, "root"),
+        ("  single-quoted, so no path can expand or run in the shell",
+         root_arg_literal(js), "literal"),
         ("a ci citation that names no commit is UNPROVEN in the run",
          "gate === 'ci' && !r.sha" in js, "checked"),
     ]:
