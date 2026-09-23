@@ -670,8 +670,12 @@ def record(root, payload):
     log = f"{out.get('stdout') or ''}\n---\n{out.get('stderr') or ''}"
     session = str(payload.get("session_id") or "")
     row = {
+        # The raw command and its nonce are part of the identity: two
+        # executions that normalize alike in one second (a nonce-prefixed
+        # run and a plain one) are two rows, never one id cited for either.
         "attestId": "att_" + sha(f"{when}|{norm}|{code}|{session}"
-                                 f"|{payload.get('tool_use_id') or ''}")[:12],
+                                 f"|{payload.get('tool_use_id') or ''}"
+                                 f"|{nonce_of(command)}|{command}")[:12],
         "gate": gate,
         "command": norm,
         "commandSha": sha(norm),
