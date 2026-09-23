@@ -679,8 +679,10 @@ for name, ok in [
     ("the worktree preamble asserts the base, with the sha supplied",
      "basePreamble() +" in tree_js and "merge-base --is-ancestor" in tree_js
      and "${BASE.sha}" in tree_js),
+    # It may READ one — the tree guard compares a launch reading when
+    # there is one (#94) — but never refuses to start without it.
     ("a graph with no isolated nodes demands no base",
-     "A._base" not in plain_js),
+     "no base was passed" not in plain_js),
     # #21: the sentinel brackets the campaign and guards every verdict-minting
     # node; drift halts rather than advancing.
     ("sentinel at start, before the verdict node, and at end",
@@ -870,6 +872,99 @@ def tree_sentinel_executed_case():
 
 
 tree_sentinel_executed_case()
+
+
+def tree_own_writes_and_launch_case():
+    """The guard ignores the plugin's own writes and re-reads at launch (#94).
+
+    The Stop hook appends an Evidence row to the state file whenever the
+    orchestrator ends a turn, which a live graph's sentinel read as an
+    undeclared mutation: TREE-MOVED, and every verdict discarded. And the
+    sentinel is a memoized agent() call, so a resume replayed its first
+    reading instead of taking one — the launcher's own fresh reading in
+    args._base is what a resume is now held to.
+    """
+    global passed, failed
+    import subprocess
+    import tempfile
+
+    ir = copy.deepcopy(BASE)
+    add_verified_mutator(ir)
+    js = cg.emit(ir, CONTRACTS, graph_file="GRAPH.rollout.md")
+
+    plain_js = cg.emit(copy.deepcopy(BASE), CONTRACTS)
+
+    def run(readings, base, js=js):
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "o.json")
+            w = os.path.join(d, "w.mjs")
+            with open(w, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join([
+                    "import {writeFileSync} from 'node:fs';",
+                    "const PROMPTS=[], LOGS=[]; let checks=0;",
+                    f"const READINGS={json.dumps(readings)};",
+                    "const agent=async(p,o)=>{PROMPTS.push(String(p));",
+                    "  if(String(o.label||'').includes('tree-check')) {",
+                    "    const r = READINGS[Math.min(checks, READINGS.length - 1)]; checks++;",
+                    "    return {head: r[0], porcelain: r[1]} }",
+                    "  if(String(o.label||'').includes('refute'))",
+                    "    return {refuted:false, reason:'no'};",
+                    "  if(String(o.label||'').includes('gate'))",
+                    "    return {exit:0, command:'scripts/harness.sh --full', tail:''};",
+                    "  if(String(o.label||'').includes('build'))",
+                    "    return {summary:'done', plan:'p', files:[], risks:[]};",
+                    "  return {findings:[]}};",
+                    "const parallel=async(t)=>Promise.all(t.map(f=>f()));",
+                    "const pipeline=async()=>[],phase=()=>{};",
+                    "const log=(m)=>LOGS.push(String(m));",
+                    f"const args={json.dumps({'_base': base} if base else {})};",
+                    "const budget={total:null,spent:()=>0,remaining:()=>1e9};",
+                    "const workflow=0;",
+                    "(async () => {",
+                    js.replace("export const meta", "const meta"),
+                    "})().then(r=>writeFileSync(" + json.dumps(out)
+                    + ",JSON.stringify({r, LOGS, gateRan: PROMPTS.some(p=>p.includes('re-run the harness'))})))",
+                    ".catch(e=>writeFileSync(" + json.dumps(out)
+                    + ",JSON.stringify({err:String(e&&e.message||e)})))",
+                ]))
+            subprocess.run(["node", w], capture_output=True, timeout=90)
+            return json.load(open(out)) if os.path.exists(out) else {"err": "no output"}
+
+    base = {"sha": "abc123", "branch": "main", "porcelain": ""}
+    hook_row = run([["abc123", ""], ["abc123", " M WORK.md"]], base)
+    own = run([["abc123", ""], ["abc123", "?? .claude/\n M GRAPH.rollout.md"]], base)
+    code = run([["abc123", ""], ["abc123", " M WORK.md\n M src/app.py"]], base)
+    moved_head = run([["abc123", ""]], {"sha": "fff999", "branch": "main", "porcelain": ""})
+    moved_dirt = run([["abc123", ""]], {"sha": "abc123", "porcelain": " M src/app.py"})
+    resumed_dirty_state = run([["abc123", ""]], {"sha": "abc123", "porcelain": " M WORK.md"})
+    no_launch = run([["abc123", ""]], None, js=plain_js)
+
+    def outcome(x):
+        return (x.get("r") or {}).get("outcome")
+
+    for name, ok, got in [
+        ("the Stop hook's Evidence row is not TREE-MOVED",
+         outcome(hook_row) in ("COMPLETE", "INCOMPLETE"), hook_row),
+        ("nor are .claude/ state and the compiled graph file",
+         outcome(own) in ("COMPLETE", "INCOMPLETE"), own),
+        ("real code dirt beside them still halts the run",
+         outcome(code) == "TREE-MOVED", code),
+        ("a launch on a different HEAD than the run's first reading halts",
+         outcome(moved_head) == "TREE-MOVED" and moved_head.get("gateRan") is False, moved_head),
+        ("  and so does launch-time code dirt the first reading lacked",
+         outcome(moved_dirt) == "TREE-MOVED", moved_dirt),
+        ("  but a launch whose only difference is the state file proceeds",
+         outcome(resumed_dirty_state) in ("COMPLETE", "INCOMPLETE"), resumed_dirty_state),
+        ("with no launch reading the run proceeds and says what it cannot check",
+         outcome(no_launch) in ("COMPLETE", "INCOMPLETE")
+         and any("no launch reading" in m for m in no_launch.get("LOGS", [])), no_launch),
+    ]:
+        detail = "yes" if ok else f"got {str(got)[:160]}"
+        print(f"{'PASS' if ok else 'FAIL'}  tree-own-writes: {name:<52} -> {detail[:120]}")
+        passed, failed = (passed + ok, failed + (not ok))
+
+
+tree_own_writes_and_launch_case()
 
 
 def contracts_header_case():

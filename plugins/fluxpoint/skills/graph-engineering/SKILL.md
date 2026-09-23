@@ -251,7 +251,16 @@ campaign a wrong answer rather than an error:
   campaign end. Mutators run in worktrees and measurers in snapshots, so
   the shared tree must be IDENTICAL at every checkpoint: any drift halts
   the campaign as `TREE-MOVED` with the dirt named, instead of advancing
-  verdicts about a tree that is gone. The record rides out in the summary
+  verdicts about a tree that is gone. The plugin's own writes are left out
+  of the comparison: the state file (`WORK.md`, `LOOP.md`, the graph file
+  itself), where the Stop hook appends its Evidence row whenever the
+  orchestrator ends a turn, and everything under `.claude/`. The sentinel
+  is an `agent()` call, so a resume replays its first reading rather than
+  taking one; the launcher's fresh reading in `args._base` (HEAD and
+  porcelain, taken at every launch by `/fluxpoint:graph-run`) is compared
+  against it, and a resume on a tree that moved since the run it replays
+  halts `TREE-MOVED` at launch instead of handing back cached verdicts about
+  the old tree. The record rides out in the summary
   as `tree`. `treeGuard: false` in the IR turns it off, on the record.
 
 **Prove the harness in a worktree before you trust a `mutates` node.** Green

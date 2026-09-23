@@ -335,6 +335,33 @@ for skip in README.md .claude/settings.json docs/notes.md; do
   fi
 done
 
+# --- 5a. only paths inside the project arm the gate (#94) ---
+# An orchestrator writes scratch scripts outside the repository all the
+# time; arming on them made the gate write an Evidence row into the tree a
+# live graph was guarding.
+newrepo 1
+mkdir -p "$ROOT/scratch"
+printf 'print(1)\n' >"$ROOT/scratch/patch.py"
+post_input "$ROOT/scratch/patch.py" | eval "$(hook_cmd PostToolUse)" >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && [ ! -f .claude/fluxpoint/s.dirty ]; then
+  ok "verify-changed: a write outside the project does not arm" "no run, no marker"
+else
+  bad "verify-changed: a write outside the project does not arm" "rc=$rc"
+fi
+post_input "../scratch/patch.py" | eval "$(hook_cmd PostToolUse)" >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && [ ! -f .claude/fluxpoint/s.dirty ]; then
+  ok "verify-changed: nor does a relative path that escapes it" "no run, no marker"
+else
+  bad "verify-changed: nor does a relative path that escapes it" "rc=$rc"
+fi
+newrepo 0
+printf 'y = 2\n' >>src/app.py
+post_input "$ROOT/r/src/app.py" | eval "$(hook_cmd PostToolUse)" >/dev/null 2>&1
+[ -f .claude/fluxpoint/s.dirty ] && ok "verify-changed: an absolute path inside still arms" "marker written" \
+  || bad "verify-changed: an absolute path inside still arms" "no marker"
+
 # --- 6. no harness in the repo: mark dirty, stay silent, never fail the edit ---
 newrepo none
 printf 'y = 2\n' >>src/app.py

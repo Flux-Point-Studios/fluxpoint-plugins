@@ -1858,7 +1858,7 @@ def emit_halt_any(n, var):
     )
 
 
-def emit(ir, contracts, imports_resolved=None, specification=None):
+def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=None):
     nodes = ir["nodes"]
     lists = ir.get("lists") or {}
     nodes_by_id = {x.get("id"): x for x in nodes}
@@ -2325,7 +2325,25 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
         a("// must be IDENTICAL at every checkpoint — any drift is an undeclared")
         a("// mutation, and the campaign halts on it rather than advancing.")
         a("// treeGuard: false in the IR turns this off, on the record.")
-        a("const TREE = { baseline: null, checks: [] }")
+        a("//")
+        a("// The plugin's own writes are not the campaign's and are left out of")
+        a("// the comparison: the Stop hook appends its Evidence row to the state")
+        a("// file whenever the orchestrator ends a turn, and state, attestations,")
+        a("// recompiled scripts and run records all live under .claude/. Counted,")
+        a("// one turn end during a live run discarded every verdict it had minted.")
+        state_files = ["WORK.md", "LOOP.md"]
+        if graph_file and graph_file not in state_files:
+            state_files.append(graph_file)
+        a("const TREE_IGNORE = " + json.dumps({"files": state_files, "prefixes": [".claude/"]}))
+        a("function treeIgnored(line) {")
+        a("  const rest = line.replace(/^\\S{1,2}\\s+/, '')")
+        a("  const paths = rest.split(' -> ').map(p => p.trim().replace(/^\"(.*)\"$/, '$1'))")
+        a("  return paths.every(p => TREE_IGNORE.files.includes(p) ||")
+        a("    TREE_IGNORE.prefixes.some(x => p === x.replace(/\\/$/, '') || p.startsWith(x)))")
+        a("}")
+        a("const treeNorm = s => String(s || '').split('\\n').map(x => x.trim()).filter(Boolean)")
+        a("  .filter(x => !treeIgnored(x)).sort().join('\\n')")
+        a("const TREE = { baseline: null, launch: null, checks: [] }")
         a("async function treeCheck(point, phase) {")
         a("  // agent(), not spawn(): a guard rail must not spend the node budget")
         a("  // and must still run after the ceiling is reached.")
@@ -2340,8 +2358,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
         a("    INCOMPLETE = true")
         a("    return true")
         a("  }")
-        a("  const norm = s => String(s || '').split('\\n').map(x => x.trim()).filter(Boolean).sort().join('\\n')")
-        a("  const rec = { point, head: String(r.head || '').trim(), porcelain: norm(r.porcelain) }")
+        a("  const rec = { point, head: String(r.head || '').trim(), porcelain: treeNorm(r.porcelain) }")
         a("  TREE.checks.push(rec)")
         a("  if (!TREE.baseline) { TREE.baseline = rec; return true }")
         a("  if (rec.head === TREE.baseline.head && rec.porcelain === TREE.baseline.porcelain) return true")
@@ -2354,6 +2371,26 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
     last_phase = nodes[-1].get("phase", "Run") if nodes else "Run"
     if tree_guard:
         a(f"await treeCheck('campaign-start', {js_str(first_phase)})")
+        a("// The sentinel above is an agent() call, so a resume replays its FIRST")
+        a("// reading instead of taking one. The launcher's reading (args._base,")
+        a("// taken fresh at every launch) is compared against it here: a resume on")
+        a("// a tree that moved since the run it replays would otherwise hand back")
+        a("// cached verdicts about a tree that no longer exists.")
+        a("if (A._base && A._base.sha) {")
+        a("  TREE.launch = { head: String(A._base.sha).trim(),")
+        a("    porcelain: typeof A._base.porcelain === 'string' ? treeNorm(A._base.porcelain) : null }")
+        a("  const b = TREE.baseline")
+        a("  if (b && (TREE.launch.head !== b.head ||")
+        a("      (TREE.launch.porcelain !== null && TREE.launch.porcelain !== b.porcelain))) {")
+        a("    note('tree-check', 'TREE-MOVED', `launch: HEAD ${b.head} -> ${TREE.launch.head}` +")
+        a("      (TREE.launch.porcelain !== null && TREE.launch.porcelain !== b.porcelain")
+        a("        ? `; dirt: ${TREE.launch.porcelain || '(none)'} vs ${b.porcelain || '(none)'}` : ''))")
+        a("    log(`TREE-MOVED at launch: this launch's tree is not the one the run's first reading described — a resume would replay verdicts about a tree that no longer exists. Launch fresh (no resumeFromRunId), or restore the tree the run started on.`)")
+        a("    return summary('TREE-MOVED')")
+        a("  }")
+        a("} else {")
+        a("  log('tree guard: no launch reading in args._base — a resume cannot tell whether the tree moved since the run it replays; /fluxpoint:graph-run passes one')")
+        a("}")
         a("")
     for n in nodes:
         if tree_guard and (prove_gate(n) or n.get("independent")):
@@ -3032,7 +3069,10 @@ def main():
               f"contracts: {contracts_desc}; {packet_note}")
         return 0
 
-    js = emit(ir, contracts, resolved, specification)
+    graph_rel = os.path.relpath(os.path.abspath(args.graph),
+                                os.path.abspath(args.gates_root)).replace(os.sep, "/")
+    js = emit(ir, contracts, resolved, specification,
+              graph_file=None if graph_rel.startswith("../") else graph_rel)
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         with open(args.out, "w", encoding="utf-8", newline="\n") as fh:

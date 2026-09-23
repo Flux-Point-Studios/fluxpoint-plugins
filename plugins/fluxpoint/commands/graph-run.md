@@ -39,12 +39,17 @@ Workflow tool requires.
    The output is generated code. Never hand-edit it; edit the IR and
    recompile, or the spec and the executor start lying to each other.
 4. Load whatever state the graph refuses to start without.
-   If any node declares `isolation` — or `mutates: true`, which implies a
-   worktree — record the campaign base; the compiled graph refuses to
-   start without it:
+   Record the launch reading, fresh at every launch including a resume:
    ```
-   args._base = {"sha": "$(git rev-parse HEAD)", "branch": "$(git branch --show-current)"}
+   args._base = {"sha": "$(git rev-parse HEAD)", "branch": "$(git branch --show-current)",
+                 "porcelain": "$(git status --porcelain)"}
    ```
+   A graph with any `isolation` node — or `mutates: true`, which implies a
+   worktree — refuses to start without it. Every graph that guards its tree
+   (the default) compares it against the run's first sentinel reading: the
+   sentinel is a cached `agent()` call on resume, so this reading is the
+   only one that sees the tree the resumed run is really on. Never reuse an
+   earlier launch's `_base`.
    Isolated nodes are handed this base in their prompts and told to assert
    it before trusting the tree they were given: a worktree's base is the
    runtime's choice, and it has been observed cut from the default branch
@@ -117,8 +122,11 @@ Workflow tool requires.
 7. Partial failure is a targeted repair, not a restart: fix the one red
    node (its IR prompt, its contract, or the code it touched), recompile,
    stop the run if still live, then re-invoke with
-   `{scriptPath, resumeFromRunId}` — passing `_ledger` again, freshly
-   loaded. The unchanged prefix returns from cache; only the repaired
+   `{scriptPath, resumeFromRunId}` — passing `_ledger` and `_base` again,
+   both freshly loaded. A repair that changed code the campaign's verdicts
+   judged moves the tree, and the resume halts `TREE-MOVED` at launch: the
+   cached verdicts describe the old tree, so launch fresh instead. Edits to
+   the graph file, `WORK.md` and `.claude/` do not count. The unchanged prefix returns from cache; only the repaired
    node onward re-runs, and any irreversible node among them replays
    from the ledger rather than firing twice. Restarting a mostly-green
    graph from zero is a finding.
