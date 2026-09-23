@@ -633,5 +633,130 @@ printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"},"ci":{"forg
 "$FPL_PY" "$ATTEST" --root "$ROOT/r" --list >/dev/null 2>&1; rc=$?
 check "an unsupported forge is a manifest finding" 1 "$rc"
 
+# ================= 13. review findings on the witnesses ====================
+# The instructed form for a declared gate that itself starts with `cd`:
+# the nonce goes in front of the whole declared command, or after its cd.
+newrepo
+printf '{"version":1,"gates":{"harness":"cd scripts && ./harness.sh --full"}}' \
+  >"$ROOT/r/.fluxpoint-gates.json"
+rec "FPL_ATTEST_NONCE=run-d cd scripts && ./harness.sh --full" 0 >/dev/null
+check "a nonce in front of a gate's own leading cd still matches" run-d "$(field nonce)"
+rec "cd scripts && FPL_ATTEST_NONCE=run-e ./harness.sh --full" 0 >/dev/null
+check "  and so does one after it" run-e "$(field nonce)"
+n="$(rows)"
+rec "FPL_ATTEST_NONCE=run-f cd scripts && FPL_ATTEST_NONCE=run-g ./harness.sh --full" 0 >/dev/null
+check "  but never two nonces" "$n" "$(rows)"
+out="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --last harness --nonce run-d 2>&1)"
+case "$out" in "$(sed -n 1p "$ROOT/r/.claude/fluxpoint/attest.jsonl" | "$FPL_PY" -c 'import json,sys; print(json.load(sys.stdin)["attestId"])')"*)
+  ok "--last prints the attestId a node cites, for its nonce" "${out:0:40}" ;;
+  *) bad "--last prints the attestId a node cites, for its nonce" "${out:0:60}" ;; esac
+"$FPL_PY" "$ATTEST" --root "$ROOT/r" --last harness --nonce nobody >/dev/null 2>&1; rc=$?
+check "  and exits 1 when this run attested nothing" 1 "$rc"
+
+# A gate run through the wrapper from a linked worktree of the campaign
+# branch attests into the PROJECT's log, bound to the project's HEAD as the
+# hook would be, with the tree it actually ran on recorded beside it.
+newrepo; gates
+git -C "$ROOT/r" checkout -qb campaign
+echo change >"$ROOT/r/f.txt"; git -C "$ROOT/r" add f.txt
+git -C "$ROOT/r" -c user.email=t@t -c user.name=t commit -qm campaign
+git -C "$ROOT/r" checkout -q main
+rm -rf "$ROOT/wt"; git -C "$ROOT/r" worktree add -q --detach "$ROOT/wt" campaign
+MAIN_HEAD="$(git -C "$ROOT/r" rev-parse HEAD)"; WT_HEAD="$(git -C "$ROOT/wt" rev-parse HEAD)"
+(cd "$ROOT/wt" && env -u CLAUDE_PROJECT_DIR "$FPL_PY" "$ATTEST" --run harness --nonce run-w >/dev/null 2>&1)
+check "a --run from a worktree lands in the project's log" run-w "$(field nonce)"
+check "  bound to the project's HEAD, as the hook binds it" "$MAIN_HEAD" "$(field headSha)"
+check "  with the tree it ran on beside it" "$WT_HEAD" "$(field treeSha)"
+[ ! -e "$ROOT/wt/.claude/fluxpoint/attest.jsonl" ] && ok "  and nothing in the worktree's own" "clean" \
+  || bad "  and nothing in the worktree's own" "a stray log"
+git -C "$ROOT/r" worktree remove --force "$ROOT/wt" >/dev/null 2>&1
+# A relative --root with --detach: the child starts in that directory and
+# used to resolve the root a second time, finding no manifest.
+tok="$(cd "$ROOT" && "$FPL_PY" "$ATTEST" --root r --run harness --detach 2>&1 | sed -n 's/.* as \(bg_[0-9a-f]*\).*/\1/p' | head -1)"
+(cd "$ROOT" && "$FPL_PY" "$ATTEST" --root r --await "$tok" --timeout 30 >/dev/null 2>&1); rc=$?
+check "--detach with a relative --root still runs the gate" 0 "$rc"
+# The bash the gate runs under is the one py.sh names, not whichever
+# "bash" the OS resolves first (System32's is WSL's on Windows).
+printf '#!/usr/bin/env bash\ntouch "%s/used-fpl-bash"\nexec bash "$@"\n' "$ROOT" >"$ROOT/bin-bash"
+chmod +x "$ROOT/bin-bash"; rm -f "$ROOT/used-fpl-bash"
+FPL_BASH="$ROOT/bin-bash" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --run harness >/dev/null 2>&1
+[ -f "$ROOT/used-fpl-bash" ] && ok "--run starts the gate with FPL_BASH" "used" \
+  || bad "--run starts the gate with FPL_BASH" "not used"
+# A runner that writes DONE between --await's read and its liveness probe
+# finished; it did not die.
+out="$("$FPL_PY" - "$ATTEST" "$ROOT/r" <<'PYEOF' 2>&1
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("attest", sys.argv[1])
+at = importlib.util.module_from_spec(spec); spec.loader.exec_module(at)
+root = sys.argv[2]
+at._bg_write(root, {"token": "bg_race0000000", "gate": "harness", "status": "RUNNING",
+                    "pid": 999999, "started": at.now()})
+def finish(pid, started=""):
+    at._bg_write(root, {"token": "bg_race0000000", "gate": "harness", "status": "DONE",
+                        "exit": 0, "attestId": "att_race", "started": started})
+    return False
+at._alive = finish
+print("rc", at.await_gate(root, "bg_race0000000", 5))
+PYEOF
+)"
+case "$out" in *"att_race"*"rc 0"*) ok "--await re-reads before calling a runner gone" "done" ;;
+  *) bad "--await re-reads before calling a runner gone" "${out:0:70}" ;; esac
+
+# The forge pages its listings (30 by default). A failing check on page two
+# of a matrix CI used to be invisible, and the commit attested green.
+newrepo
+mkdir -p "$ROOT/bin2"
+cat >"$ROOT/bin2/gh" <<'SH'
+#!/usr/bin/env bash
+page="$(printf '%s' "$*" | sed -n 's/.*[?&]page=\([0-9]*\).*/\1/p')"; page="${page:-1}"
+per="$(printf '%s' "$*" | sed -n 's/.*per_page=\([0-9]*\).*/\1/p')"; per="${per:-30}"
+[ -n "${FAKE_IGNORE_PAGING:-}" ] && { page=1; per=30; }
+case "$*" in
+  *"/status"*) printf '{"total_count":0,"statuses":[]}' ;;
+  *"/check-runs"*)
+    start=$(( (page - 1) * per )); end=$(( start + per )); [ "$end" -gt 35 ] && end=35
+    printf '{"total_count":35,"check_runs":['
+    sep=''
+    for i in $(seq "$start" $(( end - 1 ))); do
+      c=success; [ "$i" -eq 32 ] && c=failure
+      printf '%s{"name":"matrix (%d)","status":"completed","conclusion":"%s"}' "$sep" "$i" "$c"; sep=','
+    done
+    printf ']}' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$ROOT/bin2/gh"
+printf '{"version":1,"gates":{},"ci":{"forge":"github"}}' >"$ROOT/r/.fluxpoint-gates.json"
+"$FPL_PY" "$ATTEST" --root "$ROOT/r" --list >/dev/null 2>&1; rc=$?
+check "a manifest whose only witness is the forge is accepted" 0 "$rc"
+PATH="$ROOT/bin2:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+check "a failing check past the first page is a red ci row" 1 "$rc"
+n="$(rows)"
+FAKE_IGNORE_PAGING=1 PATH="$ROOT/bin2:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+check "  and a listing shorter than its own total is no verdict" 3 "$rc"
+check "  and mints no row" "$n" "$(rows)"
+
+# A manifest the witness refuses mints nothing, so no citation in a run that
+# declared prove: nodes can be checked — that run is not clean.
+newrepo
+printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full","ci":"make ci"}}' \
+  >"$ROOT/r/.fluxpoint-gates.json"
+out="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --list 2>&1)"
+case "$out" in *"rename this gate"*) ok "a gate named ci is told how to migrate" "rename" ;;
+  *) bad "a gate named ci is told how to migrate" "${out:0:70}" ;; esac
+out="$(ATT=att_fabricated01 runbound "{}" wf-m1)"
+case "$out" in *"| INCOMPLETE |"*) ok "  and a prove: run under a refused manifest is INCOMPLETE" "INCOMPLETE" ;;
+  *) bad "  and a prove: run under a refused manifest is INCOMPLETE" "${out:0:90}" ;; esac
+
+# STALE beside a claimed green with no row: both are said.
+newrepo; gates
+rec "scripts/harness.sh --full" 0 >/dev/null
+ATT="$(field attestId)"
+out="$(runbound "{'launch': {'since': '2999-01-01T00:00:00Z'}, 'results': {'gate': {'gate': 'harness', 'exit': 0, 'attestId': 'ATT'}, 'gate2': {'gate': 'harness', 'exit': 0}}, 'contracts': {'gate': 'ExecutionV1', 'gate2': 'ExecutionV1'}, 'prove': {'gate': 'harness', 'gate2': 'harness'}}" wf-s1)"
+case "$out" in *"claim exit 0 with no row"*) ok "a STALE citation no longer hides a claimed green with no row" "said" ;;
+  *) bad "a STALE citation no longer hides a claimed green with no row" "${out:0:90}" ;; esac
+case "$out" in *"STALE — "*"UNATTESTED — "*) ok "  and the Evidence claim names both" "both" ;;
+  *) bad "  and the Evidence claim names both" "${out:0:90}" ;; esac
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

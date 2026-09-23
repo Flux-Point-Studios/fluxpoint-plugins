@@ -11,6 +11,7 @@ instrumentation a later effort sweep needs — executed against the compiler,
 the emitted script, and metrics.py.
 """
 import copy
+import shutil
 import importlib.util
 import json
 import os
@@ -99,6 +100,17 @@ r = est(parked)
 report("a park resets the warm prefix under 1h",
        r["cold"] == 2 and est(chain("medium", "medium", "medium", ttl="1h"))["cold"] == 1,
        f"cold {r['cold']} with a park, 1 without")
+# Only what waits on the park waits for the release. A node that hangs off
+# the node BEFORE the park spawns in the same run, right after the advisor:
+# its medium prefix is still warm, and pricing it cold was the review's
+# finding against #92.
+beside = copy.deepcopy(parked)
+beside["nodes"][2]["after"] = "n0"
+report("  but a node that does not wait on the park keeps the run's warm prefix",
+       est(beside)["cold"] == 1, f"cold {est(beside)['cold']}")
+report("  and held_by names only the parks a node waits on",
+       cg.held_by(parked)["n2"] == frozenset({"n1"})
+       and cg.held_by(beside)["n2"] == frozenset(), "after-chain")
 
 # ==================== refuters, sentinels and models are priced ==========
 plain = {"version": 1, "campaign": "c", "budget": {"maxNodes": 50}, "treeGuard": False,
@@ -217,6 +229,63 @@ d_post = est(fan_post)["total"] - est(fan)["total"]
 report("a fan-out's shared prompt prefix is paid once, then read from cache",
        d_pre == 1000 + 2 * 100, f"+{d_pre}")
 report("  and text after the item token is paid by every worker", d_post == 3000, f"+{d_post}")
+# Warm prompt text is priced at a tenth, so a call's cost is fractional; the
+# headline must still be the sum of the per-node profile beside it.
+odd = copy.deepcopy(fan)
+odd["nodes"][0]["prompt"] = "y" * 1003 + "do {{item.key}}"
+odd["nodes"].append({"id": "g", "foreach": "la", "prompt": "z" * 7 + "{{item.key}}",
+                     "contract": "DesignV1", "after": "f"})
+e_odd = est(odd)
+report("the estimate is the sum of its per-node profile",
+       e_odd["total"] == sum(r["estimatedTokens"] for r in e_odd["perNode"].values()),
+       f"{e_odd['total']} vs {sum(r['estimatedTokens'] for r in e_odd['perNode'].values())}")
+# The estimator prices {{item}} as the script renders it, and a bare
+# {{item}} over objects is rendered as JSON — it used to reach the worker as
+# "[object Object]", no item data at all, while being priced as the object.
+objs = {"version": 1, "campaign": "c", "budget": {"maxNodes": 50}, "treeGuard": False,
+        "argDefaults": {"cfg": "x"},
+        "lists": {"la": [{"key": "a", "arr": [1, 2], "o": {"k": "é"}, "n": 3, "b": True}]},
+        "nodes": [{"id": "f", "foreach": "la", "contract": "DesignV1",
+                   "prompt": "<{{item}}|{{item.arr}}|{{item.o}}|{{item.n}}|{{item.b}}"
+                             "|{{item.missing}}|{{A.cfg}}>"}]}
+item0 = objs["lists"]["la"][0]
+expect = ("<" + json.dumps(item0, ensure_ascii=False, separators=(",", ":")) + "|[1,2]|"
+          + '{"k":"é"}|3|true|undefined|x>')
+shared, varying = cg.prompt_bytes([objs["nodes"][0]["prompt"]], objs, item0, 0)
+report("an item token is priced as the bytes the script renders",
+       shared + varying == len(expect.encode("utf-8")),
+       f"{shared + varying} vs {len(expect.encode('utf-8'))}")
+js_objs = cg.emit(objs, CONTRACTS, {})
+report("  and the script renders item and A tokens through tokenText",
+       "${tokenText(item)}" in js_objs and "${tokenText(A.cfg)}" in js_objs
+       and "function tokenText(v)" in js_objs, "bound")
+if shutil.which("node"):
+    fn = next(l for l in js_objs.splitlines() if l.startswith("function tokenText(v)"))
+    probe = (fn + "\nconst item = " + json.dumps(item0) + ", A = {cfg: 'x'};\n"
+             "process.stdout.write(" + cg.js_template(objs["nodes"][0]["prompt"]) + ")\n")
+    r = subprocess.run(["node", "-e", probe], capture_output=True, text=True, encoding="utf-8")
+    report("  and node renders exactly what was priced", r.stdout == expect,
+           r.stdout[:60] or r.stderr[:60])
+# What the estimate cannot size, it names — with the nodes that use it.
+blind = single("do {{A.goal}} with {{A.cfg}}", requiredArgs=["goal"], argDefaults={"cfg": "c"})
+blind["nodes"].append({"id": "g", "prompt": "then {{prev}}", "contract": "DesignV1",
+                       "after": "f"})
+report("a launch arg with no default and a run-time {{prev}} are named as unpriced",
+       dict(cg.unpriced_expansions(blind)) == {"{{A.goal}} (launch arg)": ["f"],
+                                               "{{prev}}": ["g"]},
+       str(cg.unpriced_expansions(blind)))
+report("  and the compiled header names them",
+       "// unpriced: {{A.goal}} (launch arg) in f; {{prev}} in g" in cg.emit(blind, CONTRACTS, {}),
+       "header")
+with tempfile.TemporaryDirectory() as d:
+    work = os.path.join(d, "WORK.md")
+    with open(work, "w", encoding="utf-8") as fh:
+        fh.write("# w\n\n```json graph-ir\n" + json.dumps(blind) + "\n```\n")
+    r = subprocess.run([sys.executable, os.path.join(PLUGIN, "scripts", "compile-graph.py"),
+                        work, "--check", "--gates-root", d], capture_output=True, text=True)
+    report("  and so does --check",
+           "unpriced: {{A.goal}} (launch arg) in f; {{prev}} in g" in r.stdout,
+           r.stdout.strip()[-80:] or r.stderr.strip()[-80:])
 two = chain("medium", "medium", ttl="1h")
 two["nodes"][1]["prompt"] += " " + "z" * 2000
 d_two = est(two)["total"] - est(chain("medium", "medium", ttl="1h"))["total"]
@@ -246,6 +315,12 @@ w = cg.warnings(chain("medium", "high", "medium", ttl="1h"))
 report("consecutive effort changes are warned about",
        any("transition" in x and "'n0'(medium) -> 'n1'(high)" in x for x in w),
        next((x[:60] for x in w if "transition" in x), "SILENT"))
+# Under 1h the change back to medium reads the prefix n0 warmed: the
+# estimator charges it warm, so the warning must not call it cold.
+report("  but a return to a key the run already warmed is not",
+       cg.effort_transitions(chain("medium", "high", "medium", ttl="1h"))
+       == [("n0", ("", "medium"), "n1", ("", "high"))],
+       str(cg.effort_transitions(chain("medium", "high", "medium", ttl="1h"))))
 w = cg.warnings(chain("medium", "high"))
 report("under the default TTL the warning says hops are cold anyway",
        any("transition" in x and "5-minute" in x for x in w), "cold anyway")
@@ -266,6 +341,12 @@ report("a transition across a park is not reported (priced cold already)",
 thirdp = copy.deepcopy(across)
 thirdp["nodes"][1]["actor"] = "third-party"
 report("  nor across a third-party park", not cg.effort_transitions(thirdp), "silent")
+beside_t = copy.deepcopy(across)
+beside_t["nodes"][2]["after"] = "n0"
+report("  but a node that does not wait on the park is judged against the node before it",
+       [(a, b) for a, _, b, _ in cg.effort_transitions(beside_t)] == [("n0", "n2")]
+       and any("transition" in x for x in cg.warnings(beside_t)),
+       str(cg.effort_transitions(beside_t)))
 report("  while the same change with no park between is still warned",
        any("transition" in x for x in cg.warnings(chain("medium", "medium", "high", ttl="1h"))),
        "warned")

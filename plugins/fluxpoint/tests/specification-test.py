@@ -423,6 +423,54 @@ time.sleep(float(sys.argv[1]))
                                env=dict(os.environ, PYTHONIOENCODING='utf-8', FPL_MEMORY_INDEX='0'))
             self.assertEqual(r.returncode, want, r.stderr)
 
+    def test_runner_honors_the_state_file_spec_header(self):
+        # The scaffolded harness runs `--run --if-present` with no --graph;
+        # a WORK.md naming its own packet was reported as a legacy loop with
+        # no spec, and nothing it required was checked.
+        (self.root / '.fluxpoint-spec.json').unlink()
+        doc = packet()
+        (self.root / 'specs').mkdir()
+        (self.root / 'specs' / 'rollout.json').write_text(json.dumps(doc), encoding='utf-8')
+        (self.root / 'WORK.md').write_text('STATUS: READY\nSPEC: specs/rollout.json\n',
+                                           encoding='utf-8')
+        r = self.run_cli('--run', '--if-present')
+        self.assertNotIn('legacy', r.stdout)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)  # declared, never locked
+        self.assertEqual(self.run_cli('--lock').returncode, 0)
+        self.assertTrue((self.root / 'specs' / 'rollout-lock.json').exists())
+        sys.path.insert(0, str(PLUGIN / 'scripts'))
+        import specification
+        self.assertTrue(specification.locked(self.root))
+
+    def test_spec_and_graph_spellings_of_one_packet_agree(self):
+        self.lock()
+        self.rollout()
+        r = self.run_cli('--check', '--graph', 'GRAPH.rollout.md',
+                         '--spec', './.fluxpoint-spec.rollout.json')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_sibling_campaign_files_its_row_into_work_md(self):
+        # --graph names the packet the run is held to; --evidence the file
+        # whose tables take the row. A GRAPH.<name>.md with a packet of its
+        # own had no way to reach WORK.md's Evidence table.
+        self.lock()
+        self.rollout()
+        (self.root / 'WORK.md').write_text(
+            'STATUS: READY\nSPEC: .fluxpoint-spec.json\n\n## Evidence\n\n'
+            '| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n',
+            encoding='utf-8')
+        identity = json.loads((self.root / '.fluxpoint-spec.rollout-lock.json').read_text())
+        (self.root / 'result.json').write_text(json.dumps(
+            {'outcome': 'COMPLETE', 'campaign': 'c', 'specification': identity,
+             'specificationPath': '.fluxpoint-spec.rollout.json'}))
+        r = subprocess.run([sys.executable, str(PLUGIN / 'scripts/record-run.py'),
+                            '--run-id', 'sibling', '--graph', 'GRAPH.rollout.md',
+                            '--evidence', 'WORK.md', '--result', 'result.json'],
+                           cwd=self.root, capture_output=True, encoding='utf-8',
+                           env=dict(os.environ, PYTHONIOENCODING='utf-8', FPL_MEMORY_INDEX='0'))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('| sibling |', (self.root / 'WORK.md').read_text(encoding='utf-8'))
+
     def test_spec_header_spellings_of_one_packet_agree(self):
         self.lock()
         self.rollout()
@@ -575,7 +623,9 @@ const agent = async (prompt) => {prompts.push(prompt); return {exit: 0, branch: 
         cases += [('SPEC: .fluxpoint-spec.json \t\n', 1),
                   ('SPEC:\t.fluxpoint-spec.json\r\n', 1),
                   ('SPEC:\n.fluxpoint-spec.json\n', 0),
-                  ('SPEC: xfluxpoint-specxjson\n', 0)]
+                  # A header naming no JSON packet is an error in both, never
+                  # a legacy loop: the runner now reads WORK.md's SPEC:.
+                  ('SPEC: xfluxpoint-specxjson\n', 1)]
         for marker, expected in cases:
             with self.subTest(marker=marker):
                 (self.root / 'WORK.md').write_bytes(marker.encode('utf-8'))

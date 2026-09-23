@@ -173,6 +173,30 @@ def keep(root, did, rec, graph):
     return line
 
 
+def derive_id(root, question):
+    """An id for a record recorded without --id.
+
+    Kebab-case from the question's first 40 characters, starting with a
+    letter ('d-' in front of a leading digit), or a hash of the question
+    when it has no ASCII letters at all. Once ids became the key --show and
+    imports look a record up by, two different questions sharing a 40-char
+    prefix read as one decision's two versions — so a derived id that the
+    store already holds for another question gets the question's hash.
+    """
+    base = re.sub(r"[^a-z0-9]+", "-", question[:40].lower()).strip("-")
+    tag = hashlib.sha256(question.encode("utf-8")).hexdigest()[:8]
+    if not base:
+        return "d-" + tag
+    if not base[0].isalpha():
+        base = "d-" + base
+    base = base[:55].rstrip("-")
+    for r in read_store(os.path.join(root, STORE)):
+        if (r.get("id") == base and isinstance(r.get("record"), dict)
+                and r["record"].get("question") != question):
+            return f"{base}-{tag}"
+    return base
+
+
 def order_key(when):
     """A timestamp from either source as 'YYYY-MM-DD HH:MM:SS'.
 
@@ -194,6 +218,12 @@ def run_decision(artifact, did):
     node contracted to DecisionV1 whose id is the decision id.
     """
     summary = artifact.get("summary") or {}
+    # A decision this run IMPORTED rides in its decisions map as provenance
+    # (record-run.py's decision_rows skips it for the same reason). Read as
+    # a fresh ruling it was dated by this run and could hide a newer one
+    # recorded while the run was parked.
+    if did in (summary.get("decisionsImported") or {}):
+        return None
     rec = (summary.get("decisions") or {}).get(did)
     if isinstance(rec, dict):
         return rec
@@ -334,12 +364,13 @@ def main():
         return 1
 
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
-    did = a.id or re.sub(r"[^a-z0-9]+", "-",
-                         str(rec.get("question", ""))[:40].lower()).strip("-")
+    did = a.id or derive_id(a.root, str(rec.get("question", "")))
     if not DID.match(did):
-        print(f"decision: id '{did}' must be lowercase kebab-case, at most 64 "
-              f"characters — it is how --show and a later campaign's imports "
-              f"find this record", file=sys.stderr)
+        why = ("it is empty" if not did else "it must start with a letter"
+               if not did[0].isalpha() else "it must be lowercase letters, digits and "
+               "hyphens, at most 64 characters")
+        print(f"decision: --id '{did}' is not usable: {why} — the id is how --show "
+              f"and a later campaign's imports find this record", file=sys.stderr)
         return 1
     # The record is kept before the row is written, so a missing table, a
     # full disk at the splice, or a crash in between still leaves the whole

@@ -18,9 +18,12 @@ compiler, `record-run.py --graph` and `specification.py --graph <file>` all
 read the header, so two campaigns on one branch keep separate packets
 instead of overwriting one. A path outside the repository, a non-JSON path,
 or two different `SPEC:` lines in one file is an error. The scaffolded
-harness still runs the default packet; wire any other packet's `--run`
-into the harness explicitly. Lines inside fenced blocks never count as
-headers.
+harness runs the packet `WORK.md` (else `LOOP.md`) declares, the default
+one when it declares none; wire a sibling campaign's packet `--run` into
+the harness explicitly. `spec-guard.py` treats a campaign as locked when
+the lock of any packet `WORK.md`, `LOOP.md` or a `GRAPH.*.md` declares
+exists, so no locked packet leaves the Decisions-row waiver open. Lines
+inside fenced blocks never count as headers.
 
 A graph file may also declare `CONTRACTS: <dir>`, a repository-local
 directory of `*.schema.json` contracts. The compiler overlays it on the

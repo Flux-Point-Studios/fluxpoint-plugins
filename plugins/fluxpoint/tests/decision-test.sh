@@ -252,6 +252,63 @@ case "$out" in *"wf_dec"*"three days widens"*)
   ok "--show finds a decision a graph run filed" "run artifact" ;;
   *) bad "--show finds a decision a graph run filed" "${out:0:60}" ;; esac
 
+# An honoring run carries the decision it IMPORTED in its decisions map as
+# provenance. Read as a fresh ruling, it was dated by that run and hid a
+# newer operator ruling recorded while the run was parked.
+printf '%s' "$GOOD" | "$FPL_PY" -c '
+import json, sys
+rec = json.load(sys.stdin); rec["chosen"] = "72h-imported-copy"
+json.dump({"runId": "wf_hon", "when": "2030-01-01 10:00", "recordedAt": "2030-01-01 10:00:00",
+           "summary": {"decisions": {"vault-window": rec},
+                       "decisionsImported": {"vault-window": "dec_old"}}}, open(sys.argv[1], "w"))' \
+  "$R/.claude/fluxpoint/runs/wf_hon.json"
+out="$(dec --show vault-window 2>&1)"
+case "$out" in *"72h-imported-copy"*|*"wf_hon"*)
+  bad "an imported copy is provenance, not a newer version" "${out:0:60}" ;;
+  *) ok "an imported copy is provenance, not a newer version" "skipped" ;; esac
+
+# An id derived from the question must be one --show can look up, and two
+# questions must never share one.
+mkrepo
+printf '%s' "$GOOD" | "$FPL_PY" -c 'import json,sys; d=json.load(sys.stdin); d["question"]="2FA: TOTP or WebAuthn for operator logins?"; print(json.dumps(d))' \
+  | dec --record >/dev/null 2>&1
+check "a question starting with a digit still records" 0 "$?"
+dec --show d-2fa-totp-or-webauthn-for-operator-login >/dev/null 2>&1
+check "  under an id --show finds" 0 "$?"
+printf '%s' "$GOOD" | "$FPL_PY" -c 'import json,sys; d=json.load(sys.stdin); d["question"]="保险库的解锁窗口应该设置为多长时间才合适？"; print(json.dumps(d))' \
+  | dec --record >/dev/null 2>&1
+check "a question with no ASCII letters still records" 0 "$?"
+for q in "Should we use Postgres or SQLite for the session store?" \
+         "Should we use Postgres or SQLite for the analytics warehouse?"; do
+  printf '%s' "$GOOD" | Q="$q" "$FPL_PY" -c 'import json,os,sys; d=json.load(sys.stdin); d["question"]=os.environ["Q"]; print(json.dumps(d))' \
+    | dec --record >/dev/null 2>&1
+done
+ids="$("$FPL_PY" -c 'import json,sys; print(" ".join(sorted({json.loads(l)["id"] for l in open(sys.argv[1]) if "Postgres" in l})))' "$R/.claude/fluxpoint/decisions.jsonl")"
+case "$ids" in *" "*) ok "two questions sharing a 40-char prefix keep two ids" "$ids" ;;
+  *) bad "two questions sharing a 40-char prefix keep two ids" "$ids" ;; esac
+printf '%s' "$GOOD" | dec --record --id 9lives >/dev/null 2>"$ROOT/err"
+case "$(cat "$ROOT/err")" in *"start with a letter"*) ok "a bad --id says what is wrong with it" "said" ;;
+  *) bad "a bad --id says what is wrong with it" "$(head -c 80 "$ROOT/err")" ;; esac
+
+# A cut row whose record this clone never kept (it predates 1.43, or was
+# recorded in another clone) gets no pointer that answers "no record".
+mkrepo
+"$FPL_PY" - "$R/WORK.md" <<'PYEOF'
+import sys
+p = sys.argv[1]
+t = open(p, encoding="utf-8").read()
+row = "| 2026-01-01 00:00 | legacy-window | 24h | no | none | " + "x" * 80 + "… |\n"
+d = t.index("## Decisions")
+sep = t.index("|\n|", d)
+i = t.index("\n", sep + 2) + 1
+open(p, "w", encoding="utf-8").write(t[:i] + row + t[i:])
+PYEOF
+ctx="$(printf '{"session_id":"s3","cwd":"%s"}' "$R" | bash "$INJECT" 2>/dev/null)"
+case "$ctx" in *"decision.py --show legacy-window"*)
+  bad "a cut row with no kept record gets no --show pointer" "pointer" ;;
+  *"legacy-window's whole record is not kept"*) ok "a cut row with no kept record gets no --show pointer" "says so" ;;
+  *) bad "a cut row with no kept record gets no --show pointer" "${ctx:0:80}" ;; esac
+
 mkrepo
 printf '# nothing here\n' >"$R/BARE.md"
 printf '%s' "$GOOD" | dec --record --id vault-window --graph BARE.md >/dev/null 2>&1

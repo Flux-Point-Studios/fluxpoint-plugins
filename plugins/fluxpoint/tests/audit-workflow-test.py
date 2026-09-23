@@ -219,6 +219,36 @@ report("counts split by severity",
        and bs.get("MEDIUM") == {"distinct": 1, "confirmed": 0, "refuted": 1, "unverified": 0}
        and c.get("verifiers") == 4, f"{bs.get('HIGH')} {bs.get('MEDIUM')} verifiers={c.get('verifiers')}")
 
+# ================ an over-merge cannot drop a finding (review of #97)
+# The reduce folds a CRITICAL and a different HIGH into one cluster. The
+# refuters used to see only the lead's failure path, refute it, and the
+# round came back SOUND with the HIGH nowhere in the result.
+SKIPPED = "release gate passes on a skipped CI job"
+RESPOND_OVER = r"""(p, o) => {
+  const l = String(o.label || '');
+  if (l === 'lens:merge-deploy') return {findings: [F('CRITICAL', '%s')]};
+  if (l === 'lens:verdicts') return {findings: [F('HIGH', '%s'), F('MEDIUM', 'verdict schema drops a field')]};
+  if (l.startsWith('lens:')) return {findings: []};
+  if (l === 'reduce') return {clusters: [{members: reduceItems(p).map(f => f.id), settled: ''}]};
+  if (l.startsWith('refute:')) return p.includes('a concrete failure path for: %s')
+    ? {refuted: false, reason: 'the skipped job really passes the gate'}
+    : {refuted: true, reason: 'stale refs are refreshed first'};
+  return null;
+}""" % (STALE, SKIPPED, SKIPPED)
+res = run(BASE, RESPOND_OVER)
+r = res.get("r") or {}
+c = r.get("counts") or {}
+report("the refuters see every merged member's failure path",
+       any("a concrete failure path for: " + SKIPPED in x["prompt"] for x in labels(res, "refute:")),
+       "carried" if labels(res, "refute:") else "no refuters")
+report("  so an over-merged distinct finding is not refuted on its lead alone",
+       r.get("verdict") == "REWIRE" and c.get("confirmed", 0) >= 1, f"{r.get('verdict')} {c.get('confirmed')}")
+merged = [m["title"] for d in (r.get("confirmed") or []) for m in d.get("merged", [])]
+report("  and the absorbed member is named in the result", SKIPPED in merged, str(merged)[:80])
+report("two findings from one lens never share a cluster",
+       c.get("distinct") == 2 and any("one lens" in l for l in res["logs"]),
+       f"distinct {c.get('distinct')}")
+
 # ======================= one of three is not a majority; all refuted = SOUND
 RESPOND_ONE = r"""(p, o) => {
   const l = String(o.label || '');

@@ -211,6 +211,16 @@ substrate_tests() {
 case "${1:---full}" in
   --changed)
     f="${2:?usage: harness.sh --changed <file>}"
+    # The per-edit hook passes the tool's file_path, which is absolute; every
+    # pattern below is relative to the repository root, so an absolute path
+    # matched none of them and the scoped checks never ran from the hook.
+    case "$f" in
+      /* | [A-Za-z]:[\\/]*)
+        rel="$("$FPL_PY" -c 'import os, sys
+p = os.path.relpath(os.path.abspath(sys.argv[1]), os.getcwd())
+print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
+        case "$rel" in "" | ../* | ..) : ;; *) f="$rel" ;; esac ;;
+    esac
     case "$f" in
       *.json) step "json: $f" check_json "$f" ;;
       *.sh)   step "bash -n: $f" check_sh "$f" ;;
@@ -247,6 +257,7 @@ case "${1:---full}" in
       "$PLUGIN"/workflows/*.js)
         step "node --check (async wrapper): $f" check_workflow "$f"
         step "graph-audit workflow" "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py" ;;
+      # Reached only by hand: the per-edit hook skips *.md edits.
       "$PLUGIN"/commands/graph-audit.md)
         step "graph-audit workflow" "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py" ;;
     esac

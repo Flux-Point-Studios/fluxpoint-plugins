@@ -194,9 +194,9 @@ if [ -n "$state" ]; then
   # Done but not with what was proven or what is blocking.
   echo "- ${state} (sections that matter, newest evidence first):"
   "$FPL_PY" - "$state" "$here" <<'PY'
-import re, sys
+import os, re, sys
 
-text = open(sys.argv[1], errors="replace").read()
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 lines = text.splitlines()
 out, elided = [], []
 BUDGET = 90  # lines emitted, not lines scanned
@@ -252,9 +252,28 @@ if rows:
         cells = [c.strip() for c in r.strip().strip("|").split("|")]
         if "\u2026" in r and len(cells) > 1 and re.match(r"^[a-z][a-z0-9-]*$", cells[1]):
             cut.append(cells[1])
+    # Only where the record is actually kept: the store is local to the
+    # clone that recorded it, and a row older than 1.43 has none. A pointer
+    # that answers "no record" teaches a fresh context to stop following it.
+    kept = None
+    if cut:
+        try:
+            import importlib.util
+            _spec = importlib.util.spec_from_file_location(
+                "_fpl_decision", os.path.join(sys.argv[2], "decision.py"))
+            _dec = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_dec)
+            _root = os.path.dirname(os.path.abspath(sys.argv[1]))
+            kept = {did for did in cut if _dec.find(_root, did)}
+        except Exception:  # noqa: BLE001 - a pointer is a courtesy, never a failure
+            kept = set()
     for did in cut:
-        out.append(f"  (cut: the whole record, options, objections and evidence: "
-                   f"bash \"{sys.argv[2]}/py.sh\" decision.py --show {did})")
+        if did in kept:
+            out.append(f"  (cut: the whole record, options, objections and evidence: "
+                       f"bash \"{sys.argv[2]}/py.sh\" decision.py --show {did})")
+        else:
+            out.append(f"  (cut: {did}'s whole record is not kept in this clone — the "
+                       f"row predates 1.43 or was recorded elsewhere; read WORK.md)")
     if len(rows) > 3:
         elided.append(f"{len(rows) - 3} older Decisions row(s)")
 

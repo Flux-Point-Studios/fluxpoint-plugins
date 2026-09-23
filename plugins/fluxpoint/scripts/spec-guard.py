@@ -822,8 +822,18 @@ def _languages_problem(listed, declared):
         if lang in seen:
             return f"{where} names {lang!r} twice"
         seen.add(lang)
-        if lang not in TAXONOMY_LANGUAGES and lang not in declared:
-            hint = _near(lang)
+        if lang in TAXONOMY_LANGUAGES:
+            continue
+        hint = _near(lang)
+        # A near miss of a known language is a typo even when a taxonomy in
+        # the manifest carries the same spelling: the likeliest typo is the
+        # one copied from the manifest's own taxonomy ("Aiken"), and letting
+        # it through left the language it meant excluded by declaration.
+        if hint and hint not in listed:
+            return (f"{where} names {lang!r}, which is not a language this guard "
+                    f"gates (did you mean {hint!r}?) — as written, {hint} is left out "
+                    f"of the list and so excluded by declaration")
+        if lang not in declared:
             return (f"{where} names {lang!r}, which neither this guard "
                     f"({', '.join(TAXONOMY_LANGUAGES)}) nor a taxonomy in the manifest "
                     f"declares" + (f" (did you mean {hint!r}?)" if hint else ""))
@@ -939,7 +949,14 @@ def language_gaps(doc, ctx):
             # Honouring it would be a second, quieter way to drop every class
             # in a language, which is the move this check exists to expose.
             if not named:
+                # A dormant taxonomy gates nothing yet; saying it "gates"
+                # right under the line that says it gates nothing told the
+                # reader to fix a manifest that was doing no harm.
                 out.append((lang, False,
+                            f"the {lang} taxonomy is not listed in 'languages'; it gates "
+                            f"nothing yet ({DORMANT_WHY[lang]}) and will gate once one is, "
+                            f"since a list never switches off a taxonomy the manifest "
+                            f"carries" if ctx[lang]["dormant"] else
                             f"the {lang} taxonomy gates although 'languages' does not "
                             f"list {lang}; a list never switches off a taxonomy the "
                             f"manifest carries, so add {lang} to it or remove the taxonomy"))
@@ -1277,6 +1294,20 @@ def axiom_findings(root, base, now):
 
 # ------------------------------------------------------------------ check
 
+def _spec_locked(root):
+    """Whether the campaign is locked, at whatever packet path it declares.
+
+    Only the default lock used to count, so a packet named by a SPEC: header
+    (and locked beside itself) left the Decisions-row waiver open.
+    """
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "specification.py")
+    spec = importlib.util.spec_from_file_location("_fpl_specification", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.locked(root)
+
+
 def check(root, axioms_only=False):
     """Return (findings, notes). A finding is an unjustified weakening."""
     base = load_baseline(root)
@@ -1297,7 +1328,7 @@ def check(root, axioms_only=False):
     else:
         # Legacy waivers must be decision rows. A locked campaign changes its
         # reviewed packet and baseline instead of exempting obligations in prose.
-        justified = "" if os.path.exists(os.path.join(root, ".fluxpoint-spec-lock.json")) else "\n".join(
+        justified = "" if _spec_locked(root) else "\n".join(
             line for line in work_text(root).splitlines()
             if re.match(r"^\|\s*\d{4}-\d{2}-\d{2}\b", line) and line.count("|") >= 7)
         # A file rename moves every obligation in it. That is not a weakening,

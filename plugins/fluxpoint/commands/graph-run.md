@@ -65,7 +65,8 @@ Workflow tool requires.
    different nonce, as STALE, so neither an earlier run's execution nor an
    overlapping run's on the same commit can stand in for this one. The
    compiled graph tells each `prove:` node to run its gate as
-   `FPL_ATTEST_NONCE=<nonce> <declared command>`; a gate that outlives one
+   `FPL_ATTEST_NONCE=<nonce> <declared command>` (and cite what
+   `attest.py --last <gate> --nonce <nonce>` prints); a gate that outlives one
    tool call runs as `attest.py --run <gate> --nonce <nonce>` in the
    background and is collected with `attest.py --await <token>`; a
    `prove:ci` node runs `attest.py --ci --pr <n> --wait --nonce <nonce>`
@@ -134,8 +135,12 @@ Workflow tool requires.
    something you remember to write:
    ```
    echo '<the workflow return value as JSON>' | bash "$ROOT/scripts/py.sh" record-run.py \
-     --run-id <runId> --graph <graph> [--harness <exit>] [--red-team SHIP|BLOCK]
+     --run-id <runId> --graph <graph> [--evidence WORK.md] [--harness <exit>] [--red-team SHIP|BLOCK]
    ```
+   `--graph` is the file the run was compiled from (its `SPEC:` is the
+   packet the run is checked against); `--evidence` is the file whose
+   Evidence and Decisions tables receive the rows, `--graph` by default. A
+   campaign in `GRAPH.<name>.md` with a packet of its own passes both.
    That also appends any irreversible effect to the ledger, so the next
    run replays it instead of repeating it. Before diagnosing an empty or
    surprising result, read the run's `journal.jsonl` — it records what
@@ -147,7 +152,9 @@ Workflow tool requires.
    both freshly loaded. A repair that changed code the campaign's verdicts
    judged moves the tree, and the resume halts `TREE-MOVED` at launch: the
    cached verdicts describe the old tree, so launch fresh instead. Edits to
-   the graph file, `WORK.md` and `.claude/` do not count. The unchanged prefix returns from cache; only the repaired
+   the graph file, `WORK.md` and the plugin's own `.claude/fluxpoint/`,
+   `.claude/workflows/` and `.claude/worktrees/` do not count; an edit to
+   tracked config such as `.claude/settings.json` does. The unchanged prefix returns from cache; only the repaired
    node onward re-runs, and any irreversible node among them replays
    from the ledger rather than firing twice. Restarting a mostly-green
    graph from zero is a finding.

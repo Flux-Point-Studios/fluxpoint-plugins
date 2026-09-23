@@ -145,8 +145,10 @@ Evidence table both modes append to.
   weighted by model — and `budget.maxEstimatedTokens` is the ceiling on
   that estimate. The constants are stated assumptions in one place;
   `metrics.py` holds them to the runtime's own `spent`. Effort
-  transitions between consecutive nodes are warned about as the cold
-  prefills they are.
+  transitions between consecutive nodes into a key the run has not warmed
+  are warned about as the cold prefills they are, and every expansion the
+  estimate cannot size (`{{prev}}`, a launch arg with no default) is named
+  as unpriced.
 - Ending a discovery sweep on its round ceiling is logged
   `discovery INCOMPLETE, not exhausted` — stopping early and finishing are
   different claims.

@@ -37,7 +37,8 @@ headline. When every variant's test interval overlaps every other's, the
 curve is flat at this sample size, which is itself the finding the issue
 names: the work is not bound by thinking compute, and the cheapest setting
 holds within noise. --hillclimb DIR writes the same runs in the layout the
-claude-api hillclimb flow reads (results.jsonl per variant, _state.json
+claude-api hillclimb flow reads (baseline/ and v<N>/ dirs, results.jsonl per
+variant, traces for the train split only, _state.json
 with the split), so a tuner can pick up where the sweep stops.
 
 A run is matched to its case through `inputs.case`, which the compiled
@@ -74,9 +75,18 @@ def slug(s):
     return re.sub(r"[^a-z0-9.-]+", "-", str(s).lower()).strip("-.") or "x"
 
 
+def name_slug(s):
+    """A sweep name as TAG reads it back: no '.', which slug() keeps for
+    values. A dotted name used to plan fine and then match no run at all."""
+    return re.sub(r"[^a-z0-9-]+", "-", str(s).lower()).strip("-") or "x"
+
+
+CASE_ID = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$")
+
+
 def parse_vary(specs, roles, nodes=()):
     """[(role, field, [values])] from `role.field=a,b` specs."""
-    out = []
+    out, seen = [], set()
     for spec_ in specs:
         m = re.fullmatch(r"([a-z][a-z0-9-]*)\.(effort|model)=(.+)", spec_.strip())
         if not m:
@@ -87,6 +97,14 @@ def parse_vary(specs, roles, nodes=()):
                              f"(roles: {', '.join(sorted(roles)) or 'none'})")
         if not all(values) or len(set(values)) != len(values):
             raise ValueError(f"--vary {spec_!r}: values must be distinct and non-empty")
+        if (role, field) in seen:
+            raise ValueError(f"--vary {spec_!r}: {role}.{field} is already varied — naming it "
+                             f"twice makes variants that are one campaign under two labels")
+        seen.add((role, field))
+        slugs = [slug(v) for v in values]
+        if len(set(slugs)) != len(slugs):
+            raise ValueError(f"--vary {spec_!r}: values that differ only in case or "
+                             f"punctuation name one variant — one would overwrite the other")
         # A knob that does not reach the calls it names makes every variant
         # the same campaign under a different label, and the sweep measures
         # noise. So a role nothing uses, or a setting a node overrides
@@ -111,16 +129,35 @@ def split(cases, name, test_fraction):
 
     Never by score: a split chosen by how cases did is a tuner reading the
     number it will be graded on.
+
+    The fraction is honored over the whole set, not rounded per group: a
+    per-group round held out one case of every pair (50% asked as 10%), and
+    a group of one never held out anything, so twelve cases under twelve
+    tags split into no test set at all. Groups of one are pooled into one
+    stratum, and every stratum keeps at least one case in train.
     """
     groups = {}
     for c in cases:
         groups.setdefault((c.get("tags") or ["untagged"])[0], []).append(c["id"])
+    strata = [(tag, ids) for tag, ids in sorted(groups.items()) if len(ids) >= 2]
+    pooled = [i for _, ids in sorted(groups.items()) if len(ids) == 1 for i in ids]
+    if pooled:
+        strata.append(("~singletons", pooled))
+    n = len(cases)
+    k_total = min(max(int(round(n * test_fraction)), 1), n - 1) if n >= 2 else 0
+    caps = [max(0, len(ids) - 1) for _, ids in strata]
+    exact = [len(ids) * k_total / n for _, ids in strata] if n else []
+    quota = [min(int(math.floor(e)), c) for e, c in zip(exact, caps)]
+    order = sorted(range(len(strata)), key=lambda i: (-(exact[i] - math.floor(exact[i])), strata[i][0]))
+    left = k_total - sum(quota)
+    while left > 0 and any(quota[i] < caps[i] for i in order):
+        for i in order:
+            if left and quota[i] < caps[i]:
+                quota[i] += 1
+                left -= 1
     train, test = [], []
-    for _, ids in sorted(groups.items()):
+    for (_, ids), k in zip(strata, quota):
         ids = sorted(ids, key=lambda i: hashlib.sha256(f"{name}|{i}".encode()).hexdigest())
-        k = int(round(len(ids) * test_fraction))
-        if len(ids) >= 2:
-            k = min(max(k, 1), len(ids) - 1)
         test += ids[:k]
         train += ids[k:]
     return sorted(train), sorted(test)
@@ -167,16 +204,24 @@ def plan(args):
                                             header.get("CONTRACTS"), None, args.root)
     except (cg.GraphError, ValueError) as e:
         raise ValueError(f"{args.plan}: {e}")
-    packet = None
-    if header.get("SPEC") or spec_mod.required(args.root):
+    # The packet exactly as compile-graph.py loads it — on the same condition
+    # and with its path — so a variant the compiler refuses (over the cost
+    # ceiling once the packet is priced, or mutating with no packet at all)
+    # is refused here too, before anyone pays for its runs.
+    packet, packet_problem = None, None
+    spec_path = header.get("SPEC")
+    if spec_path or spec_mod.required(args.root) or any(
+            n.get("mutates") or n.get("irreversible") for n in ir.get("nodes") or []):
         try:
-            pk, identity = spec_mod.load(args.root, spec=header.get("SPEC"))
-            packet = {"packet": pk, "identity": identity}
+            packet_file, _ = spec_mod.packet_paths(args.root, spec_path)
+            pk, identity = spec_mod.load(args.root, spec=spec_path)
+            packet = {"packet": pk, "identity": identity,
+                      "path": os.path.relpath(packet_file, args.root).replace(os.sep, "/")}
         except (OSError, ValueError, TypeError) as e:
-            print(f"sweep: the source graph needs a locked packet and it does not load ({e}); "
-                  f"estimates below leave the packet out", file=sys.stderr)
+            packet_problem = f"spec required before implementation: {e}"
+    agents = cg.load_agents(args.root)
     vary = parse_vary(args.vary, ir.get("roles") or {}, ir.get("nodes") or [])
-    name = slug(args.name)
+    name = name_slug(args.name)
     cases = [{"id": "default", "args": {}}]
     if args.cases:
         with open(args.cases, encoding="utf-8") as fh:
@@ -185,7 +230,16 @@ def plan(args):
                 isinstance(c, dict) and isinstance(c.get("id"), str) and c["id"] for c in cases)
                 or len({c["id"] for c in cases}) != len(cases)):
             raise ValueError("--cases must be a JSON list of objects with distinct string ids")
+        bad = [c["id"] for c in cases if not CASE_ID.match(c["id"])]
+        if bad:
+            raise ValueError(f"--cases: id {bad[0]!r} must be letters, digits, '.', '_' or '-' "
+                             f"(it names trace files, so no path separators)")
     train, test = split(cases, name, args.test_fraction)
+    if not test:
+        raise ValueError(
+            f"the split holds out no test case ({len(cases)} case(s)) — with nothing held out "
+            f"no variant can be compared to another, whatever the rep count. Give --cases "
+            f"with at least two cases")
     out_dir = os.path.join(args.root, SWEEPS, name)
     os.makedirs(out_dir, exist_ok=True)
     variants = {}
@@ -198,17 +252,25 @@ def plan(args):
             else:
                 body[field] = value
         vid = ".".join(f"{slug(r)}-{slug(v)}" for r, _, v in combo)
+        if vid in variants:
+            raise ValueError(f"two variants are both named {vid} — one would overwrite the other")
         v_ir["campaign"] = f"{ir['campaign']} [sweep {name}/{vid}]"
         v_ir["name"] = f"{ir.get('name') or 'graph-campaign'}--{name}--{vid}"[:120]
-        findings = cg.validate(v_ir, contracts, cg.load_gates(args.root))
+        findings = cg.validate(v_ir, contracts, cg.load_gates(args.root), agents, packet)
+        if packet_problem:
+            findings = [packet_problem] + findings
         est = cg.estimate_tokens(v_ir, contracts, packet)
+        unmodified = all(
+            ((ir.get("roles") or {}).get(r) or {}).get(f) == (None if v == "default" else v)
+            for r, f, v in combo)
         path = os.path.join(out_dir, f"{vid}.md")
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(cg.IR_FENCE.sub(lambda _: "```json graph-ir\n" + json.dumps(v_ir, indent=2)
                                      + "\n```", text, count=1))
         variants[vid] = {"settings": [{"role": r, "field": f, "value": v} for r, f, v in combo],
                          "graph": os.path.relpath(path, args.root).replace(os.sep, "/"),
-                         "estimatedTokens": est["total"], "findings": findings}
+                         "estimatedTokens": est["total"], "findings": findings,
+                         "unmodified": unmodified}
     per_variant = len(cases) * args.reps
     doc = {"version": 1, "name": name, "graph": args.plan, "reps": args.reps,
            "cases": cases, "train_ids": train, "test_ids": test, "variants": variants,
@@ -312,7 +374,7 @@ def summarize(rows):
 
 
 def score(args):
-    name = slug(args.score)
+    name = name_slug(args.score)
     p = os.path.join(args.root, SWEEPS, name, "plan.json")
     if not os.path.exists(p):
         print(f"sweep: no plan at {p} — run --plan first", file=sys.stderr)
@@ -338,10 +400,11 @@ def score(args):
                    key=lambda v: tested[v]["meanSpent"], default=None)
     report["flat"] = flat
     report["cheapest"] = cheapest
-    if args.hillclimb:
-        export(args.hillclimb, doc, runs)
+    # The report first: an export that fails must not take the score with it.
     if args.json:
-        print(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2), flush=True)
+        if args.hillclimb:
+            export(args.hillclimb, doc, runs)
         return 0
     print(f"sweep {name}: {len(runs)} recorded run(s) of {doc['runsPlanned']} planned")
     for vid, v in report["variants"].items():
@@ -361,18 +424,38 @@ def score(args):
         print("  not enough test runs to compare variants yet")
     elif flat:
         print(f"  FLAT: every variant's test interval overlaps every other's — at this "
-              f"sample size no setting beats another, and the cheapest ({cheapest}) holds "
-              f"quality within noise")
+              f"sample size no setting beats another, "
+              + (f"and the cheapest ({cheapest}) holds quality within noise" if cheapest
+                 else "and no run recorded its spend, so no cheapest setting can be named"))
     else:
         print("  the test intervals separate: at least one setting differs beyond noise")
+    if args.hillclimb:
+        sys.stdout.flush()
+        export(args.hillclimb, doc, runs)
     return 0
+
+
+def variant_dirs(doc):
+    """{vid: dir} in the hillclimb layout's names: `baseline` and `v<N>`.
+
+    Its report builder reads only directories named exactly that and
+    ignores the rest, so a directory per variant id was an export nothing
+    could read. The baseline is the variant that leaves the source graph's
+    settings as they are, else the first planned.
+    """
+    vids = list(doc["variants"])
+    base = next((v for v in vids if doc["variants"][v].get("unmodified")), vids[0] if vids else None)
+    order = [base] + [v for v in vids if v != base] if base else []
+    return {v: ("baseline" if i == 0 else f"v{i}") for i, v in enumerate(order)}
 
 
 def export(out, doc, runs):
     """The sweep's runs in the claude-api hillclimb layout, one dir per variant."""
     os.makedirs(out, exist_ok=True)
+    dirs = variant_dirs(doc)
     with open(os.path.join(out, "_state.json"), "w", encoding="utf-8", newline="\n") as fh:
         json.dump({"reps": doc["reps"], "train_ids": doc["train_ids"], "test_ids": doc["test_ids"],
+                   "variants": {d: vid for vid, d in dirs.items()},
                    "goal": {"target": "pass", "direction": "higher", "hold": ["spent_tokens"]},
                    "metrics": [{"id": "pass", "kind": "binary", "label": "Campaign passed"},
                                {"id": "harnessGreen", "kind": "binary"},
@@ -380,13 +463,16 @@ def export(out, doc, runs):
                    "perf_fields": [{"id": "spent_tokens", "label": "Output tokens spent",
                                     "unit": "tok"}]}, fh, indent=2)
     cases = {c["id"]: c for c in doc["cases"]}
-    for vid in doc["variants"]:
-        vdir = os.path.join(out, vid)
+    train = set(doc["train_ids"])
+    for vid, dname in dirs.items():
+        vdir = os.path.join(out, dname)
         os.makedirs(os.path.join(vdir, "traces"), exist_ok=True)
+        settings = ", ".join(f"{s['role']}.{s['field']}={s['value']}"
+                             for s in doc["variants"][vid]["settings"])
         with open(os.path.join(vdir, "summary.json"), "w", encoding="utf-8", newline="\n") as fh:
-            json.dump({"description": ", ".join(
-                f"{s['role']}.{s['field']}={s['value']}" for s in doc["variants"][vid]["settings"]),
-                "target": "code"}, fh)
+            json.dump({"description": f"{vid}: {settings}", "target": "code"}, fh)
+        with open(os.path.join(vdir, "change.md"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(f"{vid}: {settings}\n")
         with open(os.path.join(vdir, "results.jsonl"), "w", encoding="utf-8", newline="\n") as fh:
             for r in (r for r in runs if r["variant"] == vid):
                 case = cases.get(r["case"], {})
@@ -396,6 +482,10 @@ def export(out, doc, runs):
                     "tags": case.get("tags") or [], "grade": r["grade"], "model": "mixed",
                     "spent_tokens": r["spent"], "meta": {"runId": r["runId"]},
                     "usage": {"output_tokens": r["spent"] or 0}}) + "\n")
+                # The test split is scored, never read: a tuner handed its
+                # transcripts would be grading itself on what it studied.
+                if r["case"] not in train:
+                    continue
                 trace = [{"role": "user", "content": json.dumps(case.get("args") or {})},
                          {"role": "assistant", "content": json.dumps(
                              {k: r["summary"].get(k) for k in
@@ -424,8 +514,9 @@ def main():
         if a.plan:
             if not a.name:
                 ap.error("--plan needs --name")
-            if a.reps < 1 or not 0 <= a.test_fraction < 1:
-                ap.error("--reps must be >= 1 and --test-fraction in [0, 1)")
+            if a.reps < 1 or not 0 < a.test_fraction < 1:
+                ap.error("--reps must be >= 1 and --test-fraction in (0, 1): a sweep "
+                         "with no held-out cases cannot compare its variants")
             return plan(a)
         return score(a)
     except (OSError, ValueError) as e:

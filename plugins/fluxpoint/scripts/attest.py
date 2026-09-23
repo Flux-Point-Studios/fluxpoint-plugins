@@ -86,16 +86,38 @@ def gates_path(root):
 # executing for. One assignment, at the front (after an optional `cd`), and
 # a token of plain characters, so it cannot smuggle a second command in.
 NONCE_RE = re.compile(r"FPL_ATTEST_NONCE=([A-Za-z0-9_-]{1,64})\s+(?=\S)")
+# ONE leading `cd <dir> &&` (or `;`); the directory is captured for the
+# provenance of which tree the gate ran in.
+CD_RE = re.compile(r"cd\s+([^;&|<>]+?)\s*(?:&&|;)\s*(?=\S)")
+
+
+def _front(cmd):
+    """(nonce, cd_dir, rest) of a command line's permitted prefix.
+
+    The nonce may sit before or after the one leading `cd`: the compiled
+    preamble tells a node to prefix the declared command, and a declared
+    command may itself start with `cd backend &&` — the instructed form is
+    then `FPL_ATTEST_NONCE=n cd backend && gate`, which used to keep its cd
+    and match nothing. One nonce and one cd, never a chain of either.
+    """
+    s = " ".join(str(cmd or "").split())
+    nonce = cd = ""
+    m = NONCE_RE.match(s)
+    if m:
+        nonce, s = m.group(1), s[m.end():]
+    m = CD_RE.match(s)
+    if m:
+        cd, s = m.group(1), s[m.end():]
+    if not nonce:
+        m = NONCE_RE.match(s)
+        if m:
+            nonce, s = m.group(1), s[m.end():]
+    return nonce, cd, s
 
 
 def nonce_of(cmd):
     """The run nonce a command line carries, or ''."""
-    s = " ".join(str(cmd or "").split())
-    m = re.match(r"cd\s+(?:[^;&|<>]+?)\s*(?:&&|;)\s*(?=\S)", s)
-    if m:
-        s = s[m.end():]
-    m = NONCE_RE.match(s)
-    return m.group(1) if m else ""
+    return _front(cmd)[0]
 
 
 def normalize(cmd):
@@ -120,20 +142,14 @@ def normalize(cmd):
     they simply do not match, and an unmatched command is attested as nothing
     at all.
     """
-    s = " ".join(str(cmd or "").split())
     # ONE prefix, never a chain: the match is non-greedy and applied once, so
     # `cd a && cd b && gate` still fails to match — the remainder is not the
     # declared command. An explicit multi-cd check would be dead weight AND
     # wrong, refusing a gate that legitimately starts with `cd` itself.
-    m = re.match(r"cd\s+(?:[^;&|<>]+?)\s*(?:&&|;)\s*(?=\S)", s)
-    if m:
-        s = s[m.end():]
     # The run's nonce rides in as an environment assignment, which changes
     # nothing about the exit the shell reports. It is read by nonce_of(),
     # never matched as part of the gate.
-    m = NONCE_RE.match(s)
-    if m:
-        s = s[m.end():]
+    s = _front(cmd)[2]
     for prefix in ("bash ", "sh ", "zsh "):
         if s.startswith(prefix):
             s = s[len(prefix):].lstrip()
@@ -215,8 +231,11 @@ def load_gates(root):
         f.append(f"{GATES}: version must be 1")
     f += _ci_problems(doc)
     gates = doc.get("gates")
-    if not isinstance(gates, dict) or not gates:
-        f.append(f"{GATES}: 'gates' must be a non-empty object of name -> command")
+    # A manifest whose only witness is the forge is a natural shape: an empty
+    # `gates` beside a `ci` section declares exactly that.
+    if not isinstance(gates, dict) or (not gates and not isinstance(doc.get("ci"), dict)):
+        f.append(f"{GATES}: 'gates' must be a non-empty object of name -> command"
+                 f" (or empty beside a top-level 'ci' section)")
         return {}, f
     out = {}
     for name, cmd in gates.items():
@@ -225,7 +244,9 @@ def load_gates(root):
             continue
         if name == "ci":
             f.append(f"{GATES}: gate name 'ci' is reserved for the forge's commit "
-                     f"statuses — declare them under a top-level 'ci' section")
+                     f"statuses (prove:ci, attest.py --ci) since fluxpoint 1.43 — "
+                     f"rename this gate (e.g. 'ci-local') and cite it as "
+                     f"prove:ci-local; declare the forge under a top-level 'ci' section")
             continue
         if not isinstance(cmd, str) or not cmd.strip():
             f.append(f"{GATES}.{name}: command must be a non-empty string")
@@ -315,6 +336,53 @@ def head_sha(root):
         return ""
 
 
+def _tree_sha(root, payload, command):
+    """HEAD of the tree a hook-witnessed gate ran in: the session's cwd, then
+    the command's one leading `cd`. Provenance only — headSha, the project's
+    HEAD, is what a citation is bound to, for every witness alike."""
+    cd = _front(command)[1].strip().strip("'\"")
+    base = str(payload.get("cwd") or root)
+    tree = os.path.join(base, os.path.expanduser(cd)) if cd else base
+    return head_sha(tree) if os.path.isdir(tree) else ""
+
+
+def project_root(start="."):
+    """Where the manifest and the attest log live, seen from `start`.
+
+    A gate run from a linked worktree (git worktree add) belongs to the
+    project it was checked out from: the hook attests into the project's log
+    (it cds to CLAUDE_PROJECT_DIR), and so must the wrapper, or record-run
+    looks in the project's log for a row written into the worktree's and
+    files an honest node as TAMPERED-EXECUTION.
+    """
+    env = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env and os.path.exists(gates_path(env)):
+        return env
+    try:
+        import subprocess
+
+        def git(*a):
+            r = subprocess.run(["git", "-C", start] + list(a),
+                               capture_output=True, text=True, timeout=10)
+            return r.stdout.strip() if r.returncode == 0 else None
+        top = git("rev-parse", "--show-toplevel")
+        common = git("rev-parse", "--path-format=absolute", "--git-common-dir") \
+            or git("rev-parse", "--git-common-dir")
+        prefix = git("rev-parse", "--show-prefix") or ""
+    except (OSError, ValueError):
+        return start
+    if not top or not common:
+        return start
+    common = os.path.abspath(os.path.join(start, common))
+    if os.path.basename(common) != ".git":
+        return start
+    main = os.path.dirname(common)
+    if os.path.normcase(os.path.realpath(main)) == os.path.normcase(os.path.realpath(top)):
+        return start
+    cand = os.path.join(main, prefix)
+    return cand if os.path.exists(gates_path(cand)) else start
+
+
 def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -387,6 +455,7 @@ def record(root, payload):
         "exit": code,
         "logSha256": sha(log),
         "headSha": head_sha(root),
+        "treeSha": _tree_sha(root, payload, command),
         "when": when,
         "sessionId": session,
         # Subagent Bash calls fire this hook too, and a gate run inside a
@@ -421,7 +490,7 @@ def _bg_write(root, rec):
     os.replace(tmp, os.path.join(d, f"{rec['token']}.json"))
 
 
-def run_gate(root, gate, detach=False, token=None, nonce=""):
+def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
     """Run a declared gate and attest its exit. Returns the gate's exit code.
 
     The command is the manifest's, resolved from the gate NAME, so nothing
@@ -433,7 +502,12 @@ def run_gate(root, gate, detach=False, token=None, nonce=""):
     own; under Claude Code, `run_in_background` on a plain --run does the
     same. Either way the token is printed first, and --await is how the
     verdict is collected.
+
+    `root` is where the manifest and the log live; `tree` is where the gate
+    runs (root when not given) — a worktree of the campaign branch, say.
     """
+    root = os.path.abspath(root)
+    tree = os.path.abspath(tree or root)
     gates, findings = load_gates(root)
     for f in findings:
         print(f"attest: {f}", file=sys.stderr)
@@ -453,23 +527,45 @@ def run_gate(root, gate, detach=False, token=None, nonce=""):
         # when it starts, and never after this line could overwrite a DONE.
         _bg_write(root, {"token": token, "gate": gate, "status": "RUNNING",
                          "pid": None, "started": started})
+        # Absolute paths: the child starts in `tree`, and a relative root
+        # resolved a second time from there named a directory that does not
+        # exist — the child exited on a missing manifest, silently.
         subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__), "--root", root, "--run", gate,
-             "--token", token] + (["--nonce", nonce] if nonce else []),
-            cwd=root, stdin=subprocess.DEVNULL,
+            [sys.executable, os.path.abspath(__file__), "--root", root, "--tree", tree,
+             "--run", gate, "--token", token] + (["--nonce", nonce] if nonce else []),
+            cwd=tree, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=(os.name != "nt"))
         print(f"attest: started {gate} as {token} — collect it with "
               f"attest.py --await {token}", flush=True)
         return 0
-    return _execute(root, gate, started, token, nonce)
+    return _execute(root, gate, started, token, nonce, tree)
 
 
-def _execute(root, gate, started, token, nonce=""):
+def _bash():
+    """The bash to run a gate with, as an absolute path where one is known.
+
+    On Windows a bare "bash" is resolved by CreateProcess, which searches
+    System32 before PATH: on a machine with WSL that is WSL's bash.exe, a
+    different toolchain from the Git Bash the hooks and the Bash tool use.
+    py.sh exports the bash it runs under as FPL_BASH.
+    """
+    import shutil
+    for cand in (os.environ.get("FPL_BASH"), os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")):
+        if cand and os.path.isfile(cand):
+            return cand
+    return shutil.which("bash") or "bash"
+
+
+def _execute(root, gate, started, token, nonce="", tree=None):
     import subprocess
+    tree = tree or root
     raw = declared_command(root, gate)
     norm = normalize(raw)
+    # The project's HEAD, as the hook records it: one notion of the judged
+    # commit for every witness. Where the gate actually ran is treeSha.
     head = head_sha(root)
+    tree_head = head_sha(tree)
     log = os.path.join(_bg_dir(root), f"{token}.log")
     _bg_write(root, {"token": token, "gate": gate, "status": "RUNNING",
                      "pid": os.getpid(), "started": started, "headSha": head,
@@ -477,14 +573,14 @@ def _execute(root, gate, started, token, nonce=""):
     print(f"attest: running {gate} as {token} — collect it with "
           f"attest.py --await {token}", flush=True)
     with open(log, "wb") as out:
-        code = subprocess.call(["bash", "-c", raw], cwd=root, stdin=subprocess.DEVNULL,
+        code = subprocess.call([_bash(), "-c", raw], cwd=tree, stdin=subprocess.DEVNULL,
                                stdout=out, stderr=subprocess.STDOUT)
     with open(log, "rb") as fh:
         text = fh.read().decode("utf-8", "replace")
     row = {
         "attestId": "att_" + sha(f"{started}|{norm}|{code}|{token}")[:12],
         "gate": gate, "command": norm, "commandSha": sha(norm), "exit": code,
-        "logSha256": sha(f"{text}\n---\n"), "headSha": head,
+        "logSha256": sha(f"{text}\n---\n"), "headSha": head, "treeSha": tree_head,
         "started": started, "when": now(), "sessionId": "", "agent": "",
         "witness": "wrapper", "token": token, "nonce": nonce,
     }
@@ -508,7 +604,7 @@ def _alive(pid, started=""):
     if not isinstance(pid, int) or pid <= 0:
         return False
     if os.name == "nt":
-        return True  # no cheap probe; the timeout bounds the wait instead
+        return _alive_nt(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -516,6 +612,27 @@ def _alive(pid, started=""):
     except PermissionError:
         return True
     return True
+
+
+def _alive_nt(pid):
+    """Windows: is the process still running? OpenProcess, then its exit
+    code (STILL_ACTIVE while it runs). Answering True for every pid left a
+    crashed runner RUNNING forever and --await answering 3 to every call."""
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return k.GetLastError() == 5  # access denied: it exists
+        try:
+            code = ctypes.c_ulong()
+            if not k.GetExitCodeProcess(h, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            k.CloseHandle(h)
+    except Exception:  # noqa: BLE001 - no probe: the timeout bounds the wait
+        return True
 
 
 def await_gate(root, ref, timeout):
@@ -547,6 +664,12 @@ def await_gate(root, ref, timeout):
             print(f"attest: {rec['gate']} exit {rec['exit']} -> {rec['attestId']}")
             return 0
         if not _alive(rec.get("pid"), rec.get("started")):
+            # The runner writes DONE and exits: between the read above and
+            # the probe it may have done both.
+            again = _bg_read(root, rec["token"]) or rec
+            if again.get("status") == "DONE":
+                print(f"attest: {again['gate']} exit {again['exit']} -> {again['attestId']}")
+                return 0
             print(f"attest: the runner for {rec['token']} ({rec.get('gate')}) is gone "
                   f"and left no verdict — nothing was attested; run the gate again",
                   file=sys.stderr)
@@ -567,6 +690,30 @@ def _gh_json(path):
     return json.loads(r.stdout or "{}")
 
 
+def _gh_all(path, key, pages=50):
+    """Every item of a paginated GitHub listing, or an error.
+
+    The API answers 30 items a page by default. A matrix CI with more check
+    runs than that had its failing job on page two read as absent, and every
+    reported context passing — a red commit attested green. So the listing
+    is walked to its end and held to the total the API itself reports.
+    """
+    items, total = [], None
+    for page in range(1, pages + 1):
+        sep = "&" if "?" in path else "?"
+        got = _gh_json(f"{path}{sep}per_page=100&page={page}")
+        batch = got.get(key) or []
+        if total is None and isinstance(got.get("total_count"), int):
+            total = got["total_count"]
+        items.extend(batch)
+        if len(batch) < 100 or (total is not None and len(items) >= total):
+            break
+    if total is not None and len(items) < total:
+        raise RuntimeError(f"{path} listed {len(items)} of {total} {key} — "
+                           f"a partial listing is no verdict")
+    return items
+
+
 def forge_contexts(sha_):
     """{context: 'success'|'failure'|'pending'} for a commit, from GitHub.
 
@@ -580,13 +727,11 @@ def forge_contexts(sha_):
     def put(name, state):
         if name not in out or rank[state] > rank[out[name]]:
             out[name] = state
-    status = _gh_json(f"repos/{{owner}}/{{repo}}/commits/{sha_}/status")
-    for st in status.get("statuses") or []:
+    for st in _gh_all(f"repos/{{owner}}/{{repo}}/commits/{sha_}/status", "statuses"):
         s_ = st.get("state")
         put(str(st.get("context")), "success" if s_ == "success"
             else "pending" if s_ == "pending" else "failure")
-    runs = _gh_json(f"repos/{{owner}}/{{repo}}/commits/{sha_}/check-runs")
-    for cr in runs.get("check_runs") or []:
+    for cr in _gh_all(f"repos/{{owner}}/{{repo}}/commits/{sha_}/check-runs", "check_runs"):
         if cr.get("status") != "completed":
             put(str(cr.get("name")), "pending")
         elif cr.get("conclusion") in ("success", "neutral", "skipped"):
@@ -871,7 +1016,12 @@ def verify_claims(root, summary):
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--root", default=".")
+    ap.add_argument("--root", default=None,
+                    help="the project (manifest and log); default: the project the "
+                         "current directory belongs to, a linked worktree's included")
+    ap.add_argument("--tree", default=None,
+                    help="with --run: the tree to run the gate in (default: the "
+                         "current directory when --root is not given, else --root)")
     ap.add_argument("--detach", action="store_true",
                     help="with --run: start the gate as its own background process")
     ap.add_argument("--token", help=argparse.SUPPRESS)
@@ -893,7 +1043,13 @@ def main():
     g.add_argument("--ci", action="store_true")
     g.add_argument("--stamp", action="store_true",
                    help="print a launch stamp for args._launch")
+    g.add_argument("--last", metavar="GATE",
+                   help="print the newest attested row of GATE (with --nonce: of this run)")
     a = ap.parse_args()
+    tree = a.tree
+    if a.root is None:
+        a.root = project_root(".")
+        tree = tree or "."
 
     if a.nonce and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", a.nonce):
         print("attest: --nonce must be 1-64 letters, digits, '-' or '_'", file=sys.stderr)
@@ -902,7 +1058,20 @@ def main():
         print(json.dumps(stamp()))
         return 0
     if a.run:
-        return run_gate(a.root, a.run, a.detach, a.token, a.nonce)
+        return run_gate(a.root, a.run, a.detach, a.token, a.nonce, tree)
+    if a.last:
+        mine = [r for r in read(a.root) if r.get("gate") == a.last
+                and (not a.nonce or r.get("nonce") == a.nonce)]
+        if not mine:
+            print(f"attest: no attested run of '{a.last}'"
+                  + (f" for nonce {a.nonce}" if a.nonce else "")
+                  + " — a failed gate is not attested by the hook; run it again, or "
+                    "through attest.py --run", file=sys.stderr)
+            return 1
+        r = mine[-1]
+        print(f"{r['attestId']} gate {r['gate']} exit {r['exit']} when {r.get('when')} "
+              f"witness {r.get('witness') or 'hook'} nonce {r.get('nonce') or '-'}")
+        return 0
     if a.await_:
         return await_gate(a.root, a.await_, a.timeout)
     if a.ci:
@@ -921,7 +1090,8 @@ def main():
         print(f"attest: {len(gates)} declared gate(s), {len(rows)} attested execution(s)")
         for name, cmd in sorted(gates.items()):
             mine = [r for r in rows if r.get("gate") == name]
-            last = f"last {mine[-1]['when']} exit {mine[-1]['exit']}" if mine else "never run"
+            last = (f"last {mine[-1]['when']} exit {mine[-1]['exit']} -> "
+                    f"{mine[-1].get('attestId')}") if mine else "never run"
             print(f"  {name:<16} {cmd}")
             print(f"  {'':<16} {len(mine)} run(s), {last}")
         ci = load_ci(a.root)

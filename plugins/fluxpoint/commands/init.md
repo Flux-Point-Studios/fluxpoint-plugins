@@ -317,7 +317,9 @@ step; do not stop at copying files.
    than being credited to the gate. Commit the manifest; it is part of the
    trust base. A gate that outlives one tool call (600 s) runs through
    `attest.py --run <gate>` in the background and is collected with
-   `attest.py --await <token>`, which attests the exit itself. If merges
+   `attest.py --await <token>`, which attests the exit itself (run from a
+   worktree, it still attests into this project's log). A gate may not be
+   named `ci`: that name is the forge's. If merges
    rest on CI, add a `ci` section so `prove:ci` can cite the forge's own
    commit statuses (`attest.py --ci --pr <n>`, GitHub via `gh`; the forge
    names the commit):

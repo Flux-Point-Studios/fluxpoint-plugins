@@ -177,7 +177,9 @@ changed() {
 full() {
   if need_gate specification.py .fluxpoint-spec.json .fluxpoint-spec-lock.json; then
     "$FPL_PY" "$FPL_GATE" --run --if-present
-  elif [ -f WORK.md ] && grep -Eq $'^SPEC:[ \t]*[.]fluxpoint-spec[.]json[ \t]*\r?$' WORK.md; then
+  elif [ -f WORK.md ] && grep -Eq $'^SPEC:[ \t]*[^ \t\r]' WORK.md; then
+    # Any packet WORK.md names, as specification.py reads it: the runner
+    # checks the declared packet, so its absence cannot pass for "no spec".
     echo "harness: specification.py is required by WORK.md but is unavailable" >&2
     return 1
   fi

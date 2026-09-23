@@ -132,13 +132,17 @@ v1.43 settles the evaluation question and builds everything around the
 sweep except the spend. `scripts/sweep.py --plan` writes one graph file per
 setting under test (the role changed, nothing else; a role no node uses,
 or one a node overrides inline, is refused, because a knob that does not
-reach its calls sweeps noise), prices each, and draws a train/test split of
-the cases at random, stratified by tag, never by score. `--score` grades
+reach its calls sweeps noise), prices and validates each against the same
+packet the compiler would load, and draws a train/test split of the cases at
+random, stratified by tag, never by score, with the test fraction honored
+over the whole set; a plan that holds out nothing is refused, since no rep
+count can then compare two variants. `--score` grades
 recorded runs per variant — a pass is COMPLETE with no red harness, no
 BLOCK and no WEAKENED — with Wilson intervals on the test split as the
 headline, calls the curve flat when every interval overlaps, and
 `--hillclimb DIR` exports the runs in the layout the claude-api hillclimb
-flow reads. Each compiled summary now carries its launch `inputs`, so a
+flow reads (`baseline/` for the unmodified setting, `v<N>/` for the rest,
+transcripts for the train split only). Each compiled summary now carries its launch `inputs`, so a
 run is matched to its case.
 
 The arithmetic that settles whether the harness can serve as the

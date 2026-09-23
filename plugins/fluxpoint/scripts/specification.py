@@ -269,6 +269,35 @@ def packet_paths(root, spec=None):
     return root / rel, root / rel.with_name(rel.name[:-len('.json')] + '-lock.json')
 
 
+def declared_packets(root):
+    """Every packet the root's state and graph files declare, plus the default.
+
+    WORK.md, LOOP.md and GRAPH.*.md are where a campaign names its packet;
+    a lock beside any of them makes the campaign a locked one.
+    """
+    root = Path(root)
+    specs = [None]
+    for f in [root / 'WORK.md', root / 'LOOP.md'] + sorted(root.glob('GRAPH.*.md')):
+        try:
+            s = graph_headers(f).get('SPEC')
+        except (OSError, ValueError):
+            continue
+        if s and s not in specs:
+            specs.append(s)
+    return specs
+
+
+def locked(root):
+    """True when any declared packet has its lock."""
+    for s in declared_packets(root):
+        try:
+            if packet_paths(root, s)[1].exists():
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def required(root):
     root = Path(root)
     work = root / 'WORK.md'
@@ -400,9 +429,19 @@ def main():
     root = Path(args.root).resolve()
     try:
         spec = args.spec
+        if not spec and not args.graph:
+            # Without --spec or --graph the state file's own header names the
+            # packet: the scaffolded harness runs `--run --if-present`, and a
+            # WORK.md declaring SPEC: specs/x.json was reported as "a legacy
+            # loop without a spec" and checked nothing.
+            for cand in ('WORK.md', 'LOOP.md'):
+                if (root / cand).is_file():
+                    spec = graph_headers(root / cand).get('SPEC')
+                    if spec:
+                        break
         if args.graph:
             declared = graph_headers(root / args.graph).get('SPEC')
-            if spec and declared and spec != declared:
+            if spec and declared and canonical(spec) != canonical(declared):
                 raise ValueError(f'--spec {spec} contradicts {args.graph}, which declares SPEC: {declared}')
             spec = spec or declared
         if args.if_present and not args.run:

@@ -942,9 +942,44 @@ def tree_own_writes_and_launch_case():
     def outcome(x):
         return (x.get("r") or {}).get("outcome")
 
+    # A project below a monorepo's top level: porcelain names paths from the
+    # repository root, so the ignore list carries the project's prefix. And
+    # git octal-escapes a non-ASCII graph name, which must still match.
+    mono_js = cg.emit(ir, CONTRACTS, graph_file="GRAPH-\u00e9.md",
+                      project_prefix="services/api/")
+    mono_hook = run([["abc123", ""], ["abc123", " M services/api/WORK.md\n"
+                                                 "?? services/api/.claude/"]], base, js=mono_js)
+    mono_launch = run([["abc123", " M services/api/WORK.md"]], base, js=mono_js)
+    mono_quoted = run([["abc123", ' M "services/api/GRAPH-\\303\\251.md"']], base, js=mono_js)
+    mono_code = run([["abc123", ""], ["abc123", " M services/api/src/app.py"]], base, js=mono_js)
+    mono_other = run([["abc123", ""], ["abc123", " M WORK.md"]], base, js=mono_js)
+    # Only the plugin's own directories under .claude/ are its writes: a
+    # tracked settings file or project agent edited mid-run is a mutation.
+    settings = run([["abc123", ""], ["abc123", " M .claude/settings.json"]], base)
+    agent_def = run([["abc123", ""], ["abc123", " M .claude/agents/red-team-reviewer.md"]], base)
+    plugin_dirs = run([["abc123", ""], ["abc123", "?? .claude/fluxpoint/\n"
+                                                   " M .claude/workflows/g.js\n"
+                                                   "?? .claude/worktrees/"]], base)
+
     for name, ok, got in [
         ("the Stop hook's Evidence row is not TREE-MOVED",
          outcome(hook_row) in ("COMPLETE", "INCOMPLETE"), hook_row),
+        ("  nor in a project below a monorepo's top level",
+         outcome(mono_hook) in ("COMPLETE", "INCOMPLETE"), mono_hook),
+        ("  whose launch-time STATUS edit does not halt a fresh launch",
+         outcome(mono_launch) in ("COMPLETE", "INCOMPLETE"), mono_launch),
+        ("  nor does a graph file git prints octal-escaped",
+         outcome(mono_quoted) in ("COMPLETE", "INCOMPLETE"), mono_quoted),
+        ("  while its code dirt still halts",
+         outcome(mono_code) == "TREE-MOVED", mono_code),
+        ("  and so does a WORK.md that is not the project's",
+         outcome(mono_other) == "TREE-MOVED", mono_other),
+        ("a tracked .claude/settings.json edited mid-run halts",
+         outcome(settings) == "TREE-MOVED", settings),
+        ("  and so does a project agent definition",
+         outcome(agent_def) == "TREE-MOVED", agent_def),
+        ("  but the plugin's own .claude/ directories do not",
+         outcome(plugin_dirs) in ("COMPLETE", "INCOMPLETE"), plugin_dirs),
         ("nor are .claude/ state and the compiled graph file",
          outcome(own) in ("COMPLETE", "INCOMPLETE"), own),
         ("real code dirt beside them still halts the run",
@@ -965,6 +1000,65 @@ def tree_own_writes_and_launch_case():
 
 
 tree_own_writes_and_launch_case()
+
+
+def tree_prefix_from_main_case():
+    """main() derives the project prefix from git, not from the caller."""
+    global passed, failed
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "mono")
+        proj = os.path.join(repo, "services", "api")
+        os.makedirs(proj)
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        work = os.path.join(proj, "WORK.md")
+        with open(work, "w", encoding="utf-8") as fh:
+            fh.write("# w\n\n```json graph-ir\n" + json.dumps(BASE) + "\n```\n")
+        out = os.path.join(d, "g.js")
+        r = subprocess.run([sys.executable, os.path.join(PLUGIN, "scripts", "compile-graph.py"),
+                            work, "--gates-root", proj, "-o", out],
+                           capture_output=True, text=True)
+        js = open(out, encoding="utf-8").read() if os.path.exists(out) else ""
+        line = next((x for x in js.splitlines() if x.startswith("const TREE_IGNORE")), "")
+        ignore = json.loads(line.split("=", 1)[1]) if line else {}
+        outside = cg.git_prefix(d)
+    for name, ok, got in [
+        ("the compiled ignore list carries the project's prefix",
+         "services/api/WORK.md" in ignore.get("files", [])
+         and "services/api/.claude/fluxpoint/" in ignore.get("prefixes", []),
+         line or r.stderr),
+        ("  and a directory outside any repository has none",
+         outside == "", outside),
+    ]:
+        detail = "yes" if ok else f"got {str(got)[:160]}"
+        print(f"{'PASS' if ok else 'FAIL'}  tree-prefix: {name:<55} -> {detail[:120]}")
+        passed, failed = (passed + ok, failed + (not ok))
+
+
+tree_prefix_from_main_case()
+
+
+def duplicate_contract_id_case():
+    """Two files claiming one $id: which binds must not depend on the loader."""
+    global passed, failed
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        for fn, req in (("A-old.schema.json", ["txHash"]), ("SigV1.schema.json", ["txHash", "signer"])):
+            with open(os.path.join(d, fn), "w", encoding="utf-8") as fh:
+                json.dump({"$id": "SigV1", "type": "object", "required": req}, fh)
+        try:
+            cg.load_contracts(d)
+            got = "loaded"
+        except cg.GraphError as e:
+            got = str(e)
+    ok = "both declare $id SigV1" in got
+    print(f"{'PASS' if ok else 'FAIL'}  contracts: two files claiming one $id are refused      -> {got[:100]}")
+    passed, failed = (passed + ok, failed + (not ok))
+
+
+duplicate_contract_id_case()
 
 
 def contracts_header_case():
@@ -1053,6 +1147,14 @@ def prove_ci_and_launch_case():
             json.dump({"version": 1, "gates": {"harness": "scripts/harness.sh"},
                        "ci": {"forge": "github", "contexts": ["harness"]}}, fh)
         loaded = cg.load_gates(d)
+        # The witness's own rules, at compile time: a manifest attest.py
+        # refuses mints no rows, so a prove: node over it cannot be proved.
+        with open(os.path.join(d, ".fluxpoint-gates.json"), "w") as fh:
+            json.dump({"version": 1, "gates": {"harness": "scripts/harness.sh", "ci": "make ci"}}, fh)
+        refused = cg.validate(ir, CONTRACTS, gates=cg.load_gates(d))
+        with open(os.path.join(d, ".fluxpoint-gates.json"), "w") as fh:
+            json.dump({"version": 1, "gates": {}, "ci": {"forge": "github"}}, fh)
+        ci_only = cg.load_gates(d)
     js = cg.emit(ir, CONTRACTS, {})
 
     def run(args):
@@ -1093,6 +1195,10 @@ def prove_ci_and_launch_case():
          any("prove:ci" in f and "'ci' section" in f for f in without), without),
         ("load_gates lists ci beside the declared gates",
          loaded == {"harness", "ci"}, loaded),
+        ("a manifest the witness refuses fails a prove: node at compile time",
+         any("which the witness refuses" in f for f in refused), refused),
+        ("  while a CI-only manifest is a manifest",
+         ci_only == {"ci"} and not ci_only.findings, (ci_only, ci_only.findings)),
         ("a prove: graph refuses to start without a launch stamp",
          "launch stamp" in str(unstamped.get("err")), unstamped),
         ("  and carries the stamp into the summary it is recorded from",

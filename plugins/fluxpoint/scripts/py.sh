@@ -37,6 +37,17 @@ if [ -z "${FPL_PY:-}" ]; then
   fi
 fi
 export PYTHONIOENCODING=utf-8
+# The bash this runs under, for a script that has to start one (attest.py
+# --run). On Windows a bare "bash" resolves through System32 first, which is
+# WSL's where it is installed, not the Git Bash every hook runs in.
+if [ -z "${FPL_BASH:-}" ] && [ -n "${BASH:-}" ]; then
+  if command -v cygpath >/dev/null 2>&1; then
+    FPL_BASH="$(cygpath -w "$BASH" 2>/dev/null || printf '%s' "$BASH")"
+  else
+    FPL_BASH="$BASH"
+  fi
+  export FPL_BASH
+fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 target="$here/$1"

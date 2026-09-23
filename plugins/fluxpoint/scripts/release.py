@@ -82,13 +82,21 @@ def load_contract(plugin_root, name, root=".", graph=None):
             local = specification.graph_headers(os.path.join(root, graph)).get("CONTRACTS")
             if local:
                 d = os.path.join(root, str(specification.in_repo(local, "CONTRACTS:")))
+                found = []
                 for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
                     if not fn.endswith(".schema.json"):
                         continue
                     with open(os.path.join(d, fn), encoding="utf-8") as fh:
                         schema = json.load(fh)
                     if schema.get("$id", fn.split(".")[0]) == name:
-                        return schema
+                        found.append((fn, schema))
+                # The compiler refuses a directory where two files claim one
+                # $id; so does the release, or each could bind a different one.
+                if len(found) > 1:
+                    raise ValueError(f"{', '.join(f for f, _ in found)} all declare $id "
+                                     f"{name} — one contract name, one file")
+                if found:
+                    return found[0][1]
         except (OSError, ValueError) as e:
             raise SystemExit(f"release: {graph}: {e}")
     p = os.path.join(plugin_root, "contracts", f"{name}.schema.json")

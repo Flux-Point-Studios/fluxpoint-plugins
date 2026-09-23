@@ -147,12 +147,60 @@ with tempfile.TemporaryDirectory() as root:
     hc = os.path.join(root, "hc")
     cli(root, "--score", "effort1", "--hillclimb", hc)
     state = json.load(open(os.path.join(hc, "_state.json")))
-    rows = open(os.path.join(hc, "builder-high.builder-default", "results.jsonl")).read().splitlines()
+    # The hillclimb report builder reads only `baseline` and `v<N>` dirs; the
+    # baseline is the variant that leaves the source's settings as they are.
+    report("--hillclimb names variant dirs the way the hillclimb flow reads them",
+           sorted(x for x in os.listdir(hc) if x != "_state.json") == ["baseline", "v1", "v2", "v3"]
+           and state["variants"]["baseline"] == "builder-high.builder-default",
+           str(sorted(os.listdir(hc))))
+    rows = open(os.path.join(hc, "baseline", "results.jsonl")).read().splitlines()
     report("--hillclimb writes the split and one row per (case, rep)",
            state["test_ids"] == plan["test_ids"] and len(rows) == 20
            and json.loads(rows[0])["grade"]["pass"] == 1, f"{len(rows)} rows")
-    report("  with a trace per row for the tuner to read",
-           len(os.listdir(os.path.join(hc, "builder-high.builder-default", "traces"))) == 20, "traces")
+    traces = os.listdir(os.path.join(hc, "baseline", "traces"))
+    report("  with a trace per TRAIN row only: the test split is scored, never read",
+           len(traces) == 2 * len(plan["train_ids"])
+           and not any(t.split("_rep")[0] in plan["test_ids"] for t in traces), f"{len(traces)} traces")
+    report("  and each dir says which variant it is",
+           open(os.path.join(hc, "v1", "change.md")).read().split(":")[0] in plan["variants"], "named")
+    # No spend recorded: FLAT must not name "the cheapest (None)".
+    for fn in os.listdir(runs):
+        art = json.load(open(os.path.join(runs, fn)))
+        art["summary"]["spent"] = None
+        json.dump(art, open(os.path.join(runs, fn), "w"))
+    out = cli(root, "--score", "effort1").stdout
+    report("a flat sweep with no recorded spend names no cheapest setting",
+           "(None)" not in out and "no run recorded its spend" in out, out.strip()[-70:])
+
+    # A dotted sweep name used to plan fine and then match no run at all.
+    r = cli(root, "--plan", "WORK.md", "--name", "effort-v1.5", "--vary", "builder.effort=medium,high",
+            "--cases", "cases.json", "--reps", "1")
+    dotted = json.load(open(os.path.join(root, ".claude", "fluxpoint", "sweeps", "effort-v1-5",
+                                         "plan.json")))
+    vfile = open(os.path.join(root, dotted["variants"]["builder-high"]["graph"])).read()
+    report("a dotted --name is tagged in a form --score reads back",
+           sw.TAG.search(json.loads(vfile.split("```json graph-ir\n", 1)[1].split("\n```", 1)[0])
+                         ["campaign"]) is not None, dotted["name"])
+    bad = cli(root, "--plan", "WORK.md", "--name", "x", "--vary", "builder.effort=low,high",
+              "--vary", "builder.effort=low,high")
+    report("the same role.field varied twice is refused",
+           bad.returncode == 2 and "already varied" in bad.stderr, bad.stderr.strip()[-50:])
+    bad = cli(root, "--plan", "WORK.md", "--name", "x", "--vary",
+              "builder.model=Claude-Opus-5,claude-opus-5")
+    report("values that name one variant are refused",
+           bad.returncode == 2 and "overwrite" in bad.stderr, bad.stderr.strip()[-50:])
+    with open(os.path.join(root, "slashy.json"), "w") as fh:
+        json.dump([{"id": "auth/login-0"}, {"id": "auth/login-1"}], fh)
+    bad = cli(root, "--plan", "WORK.md", "--name", "x", "--vary", "builder.effort=low,high",
+              "--cases", "slashy.json")
+    report("a case id that is a path is refused at --plan",
+           bad.returncode == 2 and "path separators" in bad.stderr, bad.stderr.strip()[-50:])
+    bad = cli(root, "--plan", "WORK.md", "--name", "x", "--vary", "builder.effort=low,high")
+    report("a plan that holds out no test case is refused, not planned",
+           bad.returncode == 2 and "no test case" in bad.stderr, bad.stderr.strip()[-60:])
+    bad = cli(root, "--plan", "WORK.md", "--name", "x", "--vary", "builder.effort=low,high",
+              "--cases", "cases.json", "--test-fraction", "0")
+    report("  and so is --test-fraction 0", bad.returncode == 2, bad.stderr.strip()[-50:])
 
 with tempfile.TemporaryDirectory() as root:
     os.makedirs(os.path.join(root, ".local-contracts"))
@@ -162,9 +210,36 @@ with tempfile.TemporaryDirectory() as root:
     local["nodes"][1]["contract"] = "PlanV1"
     with open(os.path.join(root, "WORK.md"), "w") as fh:
         fh.write("CONTRACTS: .local-contracts\n\n```json graph-ir\n" + json.dumps(local) + "\n```\n")
-    r = cli(root, "--plan", "WORK.md", "--name", "local", "--vary", "builder.effort=medium,high")
+    with open(os.path.join(root, "cases.json"), "w") as fh:
+        json.dump(CASES, fh)
+    r = cli(root, "--plan", "WORK.md", "--name", "local", "--vary", "builder.effort=medium,high",
+            "--cases", "cases.json")
     report("a graph's CONTRACTS: overlay is honored while planning",
            r.returncode == 0 and "IR REJECTED" not in r.stdout, (r.stdout + r.stderr).strip()[-70:])
+
+# The fraction is honored over the whole set: singleton tags pool into one
+# stratum instead of all training, and pairs are not each split in half.
+uniq = [{"id": f"u{i}", "tags": [f"t{i}"]} for i in range(12)]
+pairs = [{"id": f"p{i}", "tags": [f"g{i // 2}"]} for i in range(12)]
+report("twelve cases under twelve tags still hold out a test set",
+       len(sw.split(uniq, "x", 0.3)[1]) == 4, str(sw.split(uniq, "x", 0.3)[1]))
+report("  and 10% of twelve paired cases is one, not six",
+       len(sw.split(pairs, "x", 0.1)[1]) == 1, str(sw.split(pairs, "x", 0.1)[1]))
+
+with tempfile.TemporaryDirectory() as root:
+    # A mutating graph with no packet: compile refuses every variant, so the
+    # plan must say so rather than price runs nobody can launch.
+    mut = json.loads(json.dumps(IR))
+    mut["nodes"][1]["mutates"] = True
+    with open(os.path.join(root, "WORK.md"), "w") as fh:
+        fh.write("```json graph-ir\n" + json.dumps(mut) + "\n```\n")
+    with open(os.path.join(root, "cases.json"), "w") as fh:
+        json.dump(CASES, fh)
+    r = cli(root, "--plan", "WORK.md", "--name", "mut", "--vary", "builder.effort=medium,high",
+            "--cases", "cases.json")
+    report("a variant the compiler would refuse for want of a packet is refused here",
+           r.returncode == 1 and "spec required before implementation" in r.stdout,
+           (r.stdout + r.stderr).strip()[-70:])
 
 report("resolution math: ~1/sqrt(n) for a pass rate",
        abs(sw.half_width(100) - 0.098) < 0.001 and sw.runs_for(0.2) == 93,

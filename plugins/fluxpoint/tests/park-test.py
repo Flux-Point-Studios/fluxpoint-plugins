@@ -422,6 +422,16 @@ with tempfile.TemporaryDirectory() as runs:
     report("latest is the newest run carrying the decision",
            not errs and resolved.get("vault-window", {}).get("runId") == "wf-new",
            str(resolved.get("vault-window", {}).get("runId")))
+    # A run that honored an IMPORTED decision carries it as provenance; it
+    # is not a newer ruling, however late the run was recorded.
+    hon = _art("wf-hon", "2026-08-09 09:00", {"vault-window": FROZEN})
+    hon["summary"]["decisionsImported"] = {"vault-window": "wf-old"}
+    put("wf-hon", hon)
+    resolved, errs = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs)
+    report("  and a run's imported copy is not a newer ruling",
+           not errs and resolved.get("vault-window", {}).get("runId") == "wf-new",
+           str(resolved.get("vault-window", {}).get("runId")))
+    os.remove(os.path.join(runs, "wf-hon.json"))
 
     imp_js = cg.emit(copy.deepcopy(IMP), CONTRACTS, resolved)
     report("the resolved record is embedded, not couriered",
@@ -532,10 +542,11 @@ SUB["nodes"][1]["release"]["instructions"] = "check out {{A.branch}}, then merge
 emitted = cg.emit(SUB, CONTRACTS)
 
 report("a parked prompt interpolates its args",
-       "${A.branch}" in emitted and "{{A.branch}}" not in emitted,
+       "${tokenText(A.branch)}" in emitted and "{{A.branch}}" not in emitted,
        "interpolated" if "{{A.branch}}" not in emitted else "left literal")
 report("and so do its release instructions",
-       emitted.count("${A.base}") >= 2, f"{emitted.count('${A.base}')} site(s)")
+       emitted.count("${tokenText(A.base)}") >= 2,
+       f"{emitted.count('${tokenText(A.base)}')} site(s)")
 
 # The emitted script must still parse: js_template escapes backticks and ${,
 # and a release string is operator prose that can contain either.

@@ -220,7 +220,13 @@ function refutePrompt(d, lens) {
       `Failure path: ${d.failurePath}`,
       `Evidence cited: ${d.evidence}`,
       `Proposed rewire: ${d.rewire}`,
-      d.variants.length ? `Other lenses worded it as:\n${d.variants.map(v => `- ${v}`).join('\n')}` : '',
+      d.merged.length
+        ? `The reduce merged ${d.merged.length + 1} findings into this one. Treat each as its own claim: set ` +
+          `refuted to true only if you refute EVERY failure path below as well as the one above; if any one ` +
+          `stands, refuted is false and reason names which.\n` +
+          d.merged.map(m => `- ${m.severity} from ${m.lens}: ${m.title}\n  Failure path: ${m.failurePath}\n` +
+            `  Evidence cited: ${m.evidence}`).join('\n')
+        : '',
       d.settled
         ? `It restates the settled item "${d.settled}". Refute it unless it carries new measured evidence that was not available when that item was settled.`
         : '',
@@ -243,12 +249,15 @@ const bySeverity = (a, b) => RANK[a.severity] - RANK[b.severity]
 // returned: ids it invented are ignored, ids it repeated keep their first
 // cluster, ids it left out become clusters of one, and each of those repairs
 // is logged. Severity is the highest any member claimed, taken here in code
-// so the reduce cannot soften it.
+// so the reduce cannot soften it. An over-merge cannot drop a finding either:
+// two findings from ONE lens never share a cluster (one auditor does not
+// report the same failure twice), every member's failure path reaches the
+// refuters, and a cluster is refuted only when all of them are.
 function buildDistinct(raw, reduced) {
   const byId = new Map(raw.map(f => [f.id, f]))
   const owner = new Set()
   const groups = []
-  let invented = 0, repeated = 0, unknownSettled = 0
+  let invented = 0, repeated = 0, unknownSettled = 0, sameLens = 0
   for (const c of (reduced && Array.isArray(reduced.clusters)) ? reduced.clusters : []) {
     const members = []
     for (const id of Array.isArray(c.members) ? c.members : []) {
@@ -261,12 +270,23 @@ function buildDistinct(raw, reduced) {
     const claimed = typeof c.settled === 'string' ? c.settled.trim() : ''
     const settled = settledTitle(claimed)
     if (claimed && !settled) unknownSettled++
-    groups.push({ members, settled })
+    // Split a cluster holding two findings from one lens, each into the
+    // first part that has none from its lens yet.
+    const parts = []
+    for (const id of members) {
+      const lens = byId.get(id).lens
+      let part = parts.find(pt => !pt.some(x => byId.get(x).lens === lens))
+      if (!part) { part = []; parts.push(part) }
+      part.push(id)
+    }
+    if (parts.length > 1) sameLens++
+    for (const pt of parts) groups.push({ members: pt, settled })
   }
   const orphans = raw.filter(f => !owner.has(f.id))
   if (reduced) {
     if (invented) log(`reduce: ignored ${invented} id(s) that no lens produced`)
     if (repeated) log(`reduce: ${repeated} id(s) placed in two clusters; each kept its first`)
+    if (sameLens) log(`reduce: split ${sameLens} cluster(s) that merged two findings from one lens; one auditor does not report the same failure twice`)
     if (unknownSettled) log(`reduce: ${unknownSettled} settled match(es) named a title not on the settled list; treated as unmatched`)
     if (orphans.length) log(`reduce: left ${orphans.length} finding(s) unclustered; each is verified on its own`)
   }
@@ -285,6 +305,9 @@ function buildDistinct(raw, reduced) {
       rewire: lead.rewire,
       sources: unique(ms.map(m => m.lens)),
       variants: unique(ms.filter(m => m !== lead).map(m => m.title)).filter(t => t !== lead.title),
+      merged: ms.filter(m => m !== lead).map(m => ({
+        lens: m.lens, severity: m.severity, title: m.title, failurePath: m.failurePath, evidence: m.evidence,
+      })),
       members: g.members,
       settled: g.settled || exact,
     }
@@ -322,6 +345,7 @@ function publicFinding(d) {
   return {
     id: d.id, severity: d.severity, title: d.title, failurePath: d.failurePath,
     rewire: d.rewire, evidence: d.evidence, sources: d.sources, settled: d.settled,
+    merged: d.merged.map(m => ({ lens: m.lens, severity: m.severity, title: m.title, failurePath: m.failurePath })),
     votes: d.votes,
   }
 }
@@ -382,7 +406,9 @@ function summarize(raw, judged, dead, verifiers, deadVerifiers) {
     counts,
     confirmed: confirmed.map(publicFinding),
     unverified: unverified.map(publicFinding),
-    refuted: refuted.map(d => d.title),
+    // Every member's title: each was a claim the refuters were told to
+    // refute on its own, so each is settled — and none goes unrecorded.
+    refuted: unique(refuted.flatMap(d => [d.title, ...d.variants])),
     settledMatched: settledMatched.map(d => ({ id: d.id, title: d.title, settled: d.settled, status: d.status })),
     verdict,
     why: why.length ? why.join('; ') : (MODE === 'single'

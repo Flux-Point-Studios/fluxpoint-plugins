@@ -409,12 +409,19 @@ runner mints the row itself when the command ends, including a red exit
 the hook never sees. CI's own statuses on a commit are `prove:ci`: a
 top-level `ci` section in the manifest names the forge and the contexts
 that decide, `attest.py --ci --pr <n> [--wait]` (or `--ref <branch>`) has
-the forge name the commit and mints a row from its statuses, and pending
-or unreported contexts mint nothing. A `prove:ci` claim returns that `sha`
+the forge name the commit and mints a row from its statuses (every page of
+them, held to the total the forge reports), and pending, unreported or
+partially listed contexts mint nothing. A `prove:ci` claim returns that `sha`
 and must match the row; a row for a sha the node chose (`--sha`) cannot
 back it, since CI on any older green commit would pass. Pin the merge after
 the gate to the same commit with `gh pr merge --match-head-commit <sha>`.
-Each row names its witness — `hook`, `wrapper` or `forge`.
+Each row names its witness — `hook`, `wrapper` or `forge`. A gate run from
+a linked worktree of the campaign branch is attested into the project's log
+and bound to the project's HEAD, whichever witness saw it; the tree it ran
+on is recorded beside it as `treeSha`. `attest.py --last <gate> --nonce
+<nonce>` prints the attestId a node cites. A manifest the witness refuses
+(a gate named `ci`, an unknown forge) fails every `prove:` node at compile
+time, and a run under one is filed `INCOMPLETE`.
 
 Nodes that merely happen to match a declared gate stay observed rather than
 enforced. Opting in is what earns the stricter reading, and a check that
@@ -513,11 +520,14 @@ every graph in cold-input-token equivalents: a shared prefix per call
 weighted by the model's price, refuters and tree sentinels included. The
 text the author writes is priced too, one token per UTF-8 byte like the
 packet: each node's prompt with its `{{A.<arg>}}` defaults and `{{item}}`
-values expanded, and a park's release instructions in its advisor call.
+values expanded as the script renders them (text as itself, a list or an
+object as JSON), and a park's release instructions in its advisor call.
 A fan-out's workers read their shared prompt prefix from cache after the
 first; a different node's prompt is never discounted, because the cache
-has not seen it. `{{prev}}`, `{{decisions.*}}` and `{{seen}}` are sized
-only at run time and are named in the estimate as unpriced. So a prompt
+has not seen it. `{{prev}}`, `{{decisions.*}}`, `{{seen}}` and a launch
+argument with no `argDefault` are sized only at run time; `--check` and
+the compiled header name each one and the nodes that use it as
+`unpriced`, so the number never reads as complete when it is not. So a prompt
 that grows between audit rounds moves the estimate, and the ceiling set
 from it can refuse the growth. The
 constants are stated assumptions in `compile-graph.py`, and `metrics.py`
@@ -541,17 +551,24 @@ siblings that dispatch together are, and every sequential hop is a cold
 prefill. The runtime sets the TTL per session, never per call, so the
 declaration is a requirement on the session that runs the graph —
 `/fluxpoint:graph-run` names it in preflight — and the compiled script
-logs it at launch. A resume past a parked node is a cold start whatever
-the TTL and is priced as one. Every shipped template declares `1h`.
+logs it at launch. A node that waits on a park (through `after` or a
+reduce's `from`) runs after the release, in a later run: a cold start
+whatever the TTL, and priced as one. A node that does not wait on it runs
+on in the same run and keeps what that run warmed. Every shipped template
+declares `1h`.
 
 **An effort transition is a cold prefill.** The compiler warns on every
-consecutive pair of nodes whose `(model, effort)` differs, and on an inline
+consecutive pair of nodes whose `(model, effort)` changes to a key the run
+has not warmed yet — the hops the estimate charges cold — and on an inline
 `effort` equal to what the role or defaults already give (it changes
-nothing and reads as a decision). A park ends the relation: the call after
-a human or third-party node is priced cold whatever its key, so a change
-placed there costs nothing extra and is not reported. Where a change is
-justified, put it where the cache is cold anyway — after a park — and put
-same-effort work together; `graph-audit` judges whether
+nothing and reads as a decision). A return to a key an earlier call
+already warmed is a cache read and is not reported. A park ends the
+relation for what waits on it: the first call after the release is priced
+cold whatever its key, so a change placed there costs nothing extra and is
+not reported; a node that does not wait on the park still runs right after
+the one before it and is judged against it. Where a change is justified,
+put it where the cache is cold anyway — on a node that waits on a park —
+and put same-effort work together; `graph-audit` judges whether
 the bump buys anything, because the compiler cannot know a task's shape.
 Whether `builder: high` is the right setting at all is a separate
 question, and it is asserted today, never measured; see DESIGN-NOTES.

@@ -213,6 +213,14 @@ check "a weakening a Decisions row names is allowed" 0 "$(rc_of --check)"
 case "$(sg --check)" in *"a Decisions row names it"*) ok "and the justification is echoed" "echoed" ;;
   *) bad "and the justification is echoed" "silent" ;; esac
 
+# A campaign locked at a packet path of its own (a SPEC: header) is as
+# locked as one at the default path: no prose row may waive a weakening.
+# Only the default lock used to count.
+sed -i '1a SPEC: specs/rollout.json' WORK.md
+mkdir -p specs && printf '{}\n' >specs/rollout-lock.json
+check "a campaign locked at its SPEC: path takes no Decisions-row waiver" 1 "$(rc_of --check)"
+rm -rf specs; sed -i '/^SPEC: specs\/rollout.json$/d' WORK.md
+
 # A Decisions row about something else must not launder it.
 sed -i 's/dafny:src\/vault.dfy:Withdraw/some other unrelated decision/' WORK.md
 check "an unrelated Decisions row does not launder it" 1 "$(rc_of --check)"
@@ -1006,6 +1014,28 @@ printf '{"version": 1, "languages": ["aiken", "rust"], "taxonomies": [{"language
   >.fluxpoint-attacks.json
 commit
 check "listing an unlearned language the manifest declares is not red" 0 "$(rc_of --check)"
+# ...but a near miss of a known language is a typo even when a taxonomy in
+# the manifest carries that spelling: the likeliest typo is copied from the
+# manifest's own taxonomy, and it left the real language excluded, green.
+issue_state 'requireAllLanguages=true'
+"$FPL_PY" - <<'PY'
+import json
+p = ".fluxpoint-attacks.json"
+doc = json.load(open(p))
+doc["taxonomies"].append({"language": "Aiken", "classes": [{"id": "attack_x"}]})
+doc["languages"] = ["Aiken", "typescript"]
+json.dump(doc, open(p, "w"), indent=2)
+PY
+git add -A; git -c user.email=t@t -c user.name=t commit -qm near
+check "a near-miss language copied from a taxonomy is red" 1 "$(rc_of --check)"
+case "$(sg --check 2>&1)" in *"did you mean 'aiken'?"*) ok "  and names the language it meant" "hinted" ;;
+  *) bad "  and names the language it meant" "no hint" ;; esac
+# A dormant taxonomy left off the list gates nothing; it is not told it gates.
+mkrepo; write_ts; write_ts_attacks; cp "$TAX" .fluxpoint-attacks.json; set_key languages '["typescript"]'; commit
+out="$(sg --check 2>&1)"
+case "$out" in *"aiken taxonomy gates although"*) bad "a dormant taxonomy off the list is not said to gate" "contradiction" ;;
+  *"aiken taxonomy is not listed in 'languages'; it gates nothing yet"*) ok "a dormant taxonomy off the list is not said to gate" "consistent" ;;
+  *) bad "a dormant taxonomy off the list is not said to gate" "${out:0:80}" ;; esac
 
 # ================= 10. --axioms: the prover's own assumption audit ========
 # The provers are not installed where this suite runs, so each toolchain is
