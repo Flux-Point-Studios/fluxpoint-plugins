@@ -183,6 +183,83 @@ case "$out" in *"nothing was written down"*)
   bad "armed, declared silence clears it too" "still blocked" ;;
   *) ok "armed, declared silence clears it too" "allowed" ;; esac
 
+# ================= 5. the whole record survives, not one row (#98) =========
+# The row is an index: cells are cut to fit a table. The validated record —
+# the question, every option with its objection, the evidence — used to be
+# written nowhere, so the conditions that mattered were the part a fresh
+# context could not recover.
+LONG='{
+  "question": "should same-block claims wait for the risk-bucket campaign?",
+  "options": [
+    {"option": "options 1 and 3 together, started only after the risk-bucket campaign is fully done",
+     "argued_by": "operator",
+     "strongest_objection": "delays the distribution partner by a full campaign"},
+    {"option": "option 1 alone", "argued_by": "model",
+     "strongest_objection": "makes the same block likely but cannot guarantee it"}
+  ],
+  "chosen": "options 1 and 3 together, started only after the risk-bucket campaign is fully done",
+  "rationale": "The operator chose it, citing the distribution partner'"'"'s wish for same-block payout: option 1 alone makes the same block likely but cannot guarantee it, and running both before the risk-bucket campaign lands would double the migration window the auditors signed off on.",
+  "overturned_prior": true,
+  "frozen_by": "none",
+  "reversible": true,
+  "evidence": ["operator, verbatim: start only after the risk-bucket campaign is fully done"]
+}'
+mkrepo
+printf '%s' "$LONG" | dec --record --id same-block-claims >/dev/null 2>&1
+check "a long decision is recorded" 0 "$?"
+grep -q '| same-block-claims |' "$R/WORK.md" \
+  && ok "the row carries the id whole, so it can be looked up" "indexed" \
+  || bad "the row carries the id whole, so it can be looked up" "$(grep '^| 20' "$R/WORK.md" | head -1)"
+[ -f "$R/.claude/fluxpoint/decisions.jsonl" ] \
+  && ok "the full record is kept beside the row" "decisions.jsonl" \
+  || bad "the full record is kept beside the row" "missing"
+out="$(dec --show same-block-claims 2>&1)"
+case "$out" in *"started only after the risk-bucket campaign is fully done"*"delays the distribution partner"*"operator, verbatim"*)
+  ok "--show returns the chosen option, objections and evidence" "whole" ;;
+  *) bad "--show returns the chosen option, objections and evidence" "${out:0:60}" ;; esac
+case "$out" in *"auditors signed off on."*)
+  ok "  and the rationale the row cut" "whole" ;;
+  *) bad "  and the rationale the row cut" "${out:0:60}" ;; esac
+js="$(dec --show same-block-claims --json 2>/dev/null)"
+"$FPL_PY" -c 'import json,sys; r=json.loads(sys.argv[1]); sys.exit(0 if len(r["options"])==2 and r["overturned_prior"] is True else 1)' "$js" \
+  && ok "--show --json is the validated DecisionV1" "json" \
+  || bad "--show --json is the validated DecisionV1" "${js:0:60}"
+ctx="$(printf '{"session_id":"s2","cwd":"%s"}' "$R" | bash "$INJECT" 2>/dev/null)"
+case "$ctx" in *"decision.py --show same-block-claims"*)
+  ok "SessionStart points a cut row at its full record" "pointer" ;;
+  *) bad "SessionStart points a cut row at its full record" "no pointer" ;; esac
+
+printf '%s' "$GOOD" | dec --record --id same-block-claims >/dev/null 2>&1
+out="$(dec --show same-block-claims 2>&1)"
+case "$out" in *"1 earlier version"*"chosen: 72h"*)
+  ok "a re-decision shows the newest and counts the earlier" "newest" ;;
+  *) bad "a re-decision shows the newest and counts the earlier" "${out:0:60}" ;; esac
+dec --show nobody-decided-this >/dev/null 2>&1
+check "--show on an id nobody recorded is an error" 1 "$?"
+printf '%s' "$GOOD" | dec --record --id 'Vault Window!' >/dev/null 2>&1
+check "an --id that cannot be looked up is refused" 1 "$?"
+
+# A graph campaign's decisions live in its run artifact; --show finds them.
+mkdir -p "$R/.claude/fluxpoint/runs"
+printf '%s' "$GOOD" | "$FPL_PY" -c '
+import json, sys
+rec = json.load(sys.stdin)
+json.dump({"runId": "wf_dec", "when": "2026-09-01 10:00",
+           "summary": {"decisions": {"vault-window": rec}}}, open(sys.argv[1], "w"))' \
+  "$R/.claude/fluxpoint/runs/wf_dec.json"
+out="$(dec --show vault-window 2>&1)"
+case "$out" in *"wf_dec"*"three days widens"*)
+  ok "--show finds a decision a graph run filed" "run artifact" ;;
+  *) bad "--show finds a decision a graph run filed" "${out:0:60}" ;; esac
+
+mkrepo
+printf '# nothing here\n' >"$R/BARE.md"
+printf '%s' "$GOOD" | dec --record --id vault-window --graph BARE.md >/dev/null 2>&1
+check "no table: still reported" 3 "$?"
+grep -q '"vault-window"' "$R/.claude/fluxpoint/decisions.jsonl" 2>/dev/null \
+  && ok "  but the record itself is not lost" "kept" \
+  || bad "  but the record itself is not lost" "dropped"
+
 cd /; rm -rf "$ROOT"
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -10,7 +10,8 @@ the schema was written against — "a decision that overturned the prior is
 the one a fresh context re-decides the other way" — stayed wide open for
 loop work, which is most work.
 
-  decision.py --record [--graph WORK.md] < decision.json
+  decision.py --record [--graph WORK.md] [--id <kebab-id>] < decision.json
+  decision.py --show <id> [--json]
   decision.py --none "<why nothing was decided>" --session <id>
 
 `--record` validates against the shipped `contracts/DecisionV1.schema.json`
@@ -33,11 +34,22 @@ the optional distill check is armed (`FPL_DISTILL=1`), which is deliberately
 off by default: a gate that starts by blocking stops gets switched off
 before it has established what normal looks like.
 
-This script executes nothing and decides nothing. It validates, and it
-writes one row.
+The row is an index, not the record. Its cells are cut to fit a table —
+60 characters of the choice, 160 of the rationale — and the question, every
+option with its objection, and the evidence do not fit at all. So the whole
+validated record is appended to `.claude/fluxpoint/decisions.jsonl` before
+the row is written, the row carries the id whole, and `--show <id>` prints
+the record back: the newest one for that id, from this store or from a
+recorded graph run, with a count of earlier versions. The compiler's
+`imports` resolve from the same store, so an operator ruling recorded here
+can bind a later campaign's prompt like a decision a graph node made.
+
+This script executes nothing and decides nothing. It validates, keeps the
+record, and writes one row.
 """
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -46,6 +58,12 @@ import tempfile
 
 DEC_HDR = "| When (UTC) | Decision | Chosen | Overturned prior | Frozen by | Rationale |"
 SCHEMA = "DecisionV1.schema.json"
+STORE = os.path.join(".claude", "fluxpoint", "decisions.jsonl")
+RUNS = os.path.join(".claude", "fluxpoint", "runs")
+# An id is a lookup key, and the compiler's {{decisions.<id>}} and imports
+# only accept kebab-case, so a row whose id cannot be looked up is refused
+# rather than written.
+DID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
 def cell(s, n=160):
@@ -121,6 +139,102 @@ def validate(rec, schema):
     return f
 
 
+def read_store(path):
+    """Every stored record, oldest first. A malformed line is a hard error.
+
+    The ledger's discipline, for the ledger's reason: skipping a line that
+    does not parse would silently lose a decision, and this file exists so
+    that none is lost.
+    """
+    if not os.path.exists(path):
+        return []
+    out = []
+    with open(path, encoding="utf-8") as fh:
+        for i, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                raise SystemExit(f"decision: {path}:{i} is not valid JSON: {e}")
+    return out
+
+
+def keep(root, did, rec, graph):
+    """Append the whole record to the store; returns the stored line."""
+    when = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    body = json.dumps(rec, sort_keys=True)
+    line = {"recordId": "dec_" + hashlib.sha256(f"{did}|{when}|{body}".encode()).hexdigest()[:12],
+            "id": did, "when": when, "source": "decision.py", "graph": graph, "record": rec}
+    p = os.path.join(root, STORE)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(line) + "\n")
+    return line
+
+
+def run_decision(artifact, did):
+    """The DecisionV1 a recorded graph run filed under `did`, or None.
+
+    record-run.py's filing order: the campaign's own decisions map, then a
+    node contracted to DecisionV1 whose id is the decision id.
+    """
+    summary = artifact.get("summary") or {}
+    rec = (summary.get("decisions") or {}).get(did)
+    if isinstance(rec, dict):
+        return rec
+    rec = (summary.get("results") or {}).get(did)
+    if (summary.get("contracts") or {}).get(did) == "DecisionV1" and isinstance(rec, dict):
+        return rec
+    return None
+
+
+def find(root, did):
+    """[(when, source, record)] for one decision id, oldest first.
+
+    Both places a decision is kept: this store (operator rulings, loop
+    work) and recorded graph runs (a node that decided).
+    """
+    # Ordered by time, then by position: two rulings in one second are
+    # still told apart by which was appended last.
+    hits = [(str(r.get("when") or ""), (1, i), str(r.get("recordId") or "store"), r.get("record"))
+            for i, r in enumerate(read_store(os.path.join(root, STORE)))
+            if r.get("id") == did and isinstance(r.get("record"), dict)]
+    runs = os.path.join(root, RUNS)
+    for fn in sorted(os.listdir(runs)) if os.path.isdir(runs) else []:
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(runs, fn), encoding="utf-8") as fh:
+                art = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        rec = run_decision(art, did) if isinstance(art, dict) else None
+        if rec is not None:
+            hits.append((str(art.get("when") or ""), (0, 0), fn[:-len(".json")], rec))
+    return [(w, src, rec) for w, _, src, rec in sorted(hits, key=lambda h: (h[0], h[1], h[2]))]
+
+
+def render(did, when, source, rec, earlier):
+    """A stored DecisionV1, whole, as text a reader can act on."""
+    yes = lambda b: "yes" if b else "no"  # noqa: E731
+    lines = [f"decision {did} — {when or 'undated'}, from {source}"
+             + (f" [{earlier} earlier version(s): --json shows only this one]" if earlier else ""),
+             f"question: {rec.get('question')}", "options:"]
+    for o in rec.get("options") or []:
+        if not isinstance(o, dict):
+            continue
+        mark = "  [CHOSEN]" if o.get("option") == rec.get("chosen") else ""
+        lines.append(f"  - {o.get('option')} (argued by {o.get('argued_by')}){mark}")
+        lines.append(f"      strongest objection: {o.get('strongest_objection')}")
+    lines += [f"chosen: {rec.get('chosen')}", f"rationale: {rec.get('rationale')}",
+              f"overturned prior: {yes(rec.get('overturned_prior'))} · frozen by: "
+              f"{rec.get('frozen_by') or 'none'} · reversible: {yes(rec.get('reversible'))}",
+              "evidence:"]
+    lines += [f"  - {e}" for e in rec.get("evidence") or []] or ["  (none)"]
+    return "\n".join(lines)
+
+
 def splice(path, row):
     if not os.path.exists(path):
         return "no-file"
@@ -155,10 +269,23 @@ def main():
     ap.add_argument("--id", default="", help="short kebab-case id for the row")
     ap.add_argument("--result", help="decision JSON file (default stdin)")
     ap.add_argument("--session", default="nosession")
+    ap.add_argument("--json", action="store_true", help="with --show: the record as JSON")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--record", action="store_true")
+    g.add_argument("--show", metavar="ID")
     g.add_argument("--none", metavar="REASON")
     a = ap.parse_args()
+
+    if a.show:
+        hits = find(a.root, a.show)
+        if not hits:
+            print(f"decision: no record of '{a.show}' in {STORE} or any recorded run",
+                  file=sys.stderr)
+            return 1
+        when, source, rec = hits[-1]
+        print(json.dumps(rec, indent=2) if a.json
+              else render(a.show, when, source, rec, len(hits) - 1))
+        return 0
 
     if a.none:
         if len(a.none.strip()) < 20:
@@ -194,7 +321,16 @@ def main():
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
     did = a.id or re.sub(r"[^a-z0-9]+", "-",
                          str(rec.get("question", ""))[:40].lower()).strip("-")
-    row = (f"| {ts} | {cell(did, 40)} | {cell(rec.get('chosen'), 60)} "
+    if not DID.match(did):
+        print(f"decision: id '{did}' must be lowercase kebab-case, at most 64 "
+              f"characters — it is how --show and a later campaign's imports "
+              f"find this record", file=sys.stderr)
+        return 1
+    # The record is kept before the row is written, so a missing table, a
+    # full disk at the splice, or a crash in between still leaves the whole
+    # decision on disk; the row only indexes it.
+    kept = keep(a.root, did, rec, a.graph)
+    row = (f"| {ts} | {did} | {cell(rec.get('chosen'), 60)} "
            f"| {'YES' if rec.get('overturned_prior') else 'no'} "
            f"| {cell(rec.get('frozen_by') or 'none', 40)} "
            f"| {cell(rec.get('rationale'))} |")
@@ -204,6 +340,8 @@ def main():
     if status == "written":
         print(f"decision: recorded '{did}' in {a.graph}")
         print(row)
+        print(f"decision: the whole record is {kept['recordId']} in {STORE} — "
+              f"decision.py --show {did}")
         if rec.get("overturned_prior"):
             print("decision: this one overturned the prior — it is exactly the "
                   "kind a fresh context re-decides the other way, which is why "
@@ -215,7 +353,9 @@ def main():
                       f"choice outlives this run"),
         "no-separator": f"{graph} has a Decisions header with no separator row",
     }
-    print(f"decision: {msgs.get(status, status)}; nothing written", file=sys.stderr)
+    print(f"decision: {msgs.get(status, status)}; no row written — the whole "
+          f"record is kept as {kept['recordId']} (decision.py --show {did})",
+          file=sys.stderr)
     return 3
 
 

@@ -27,7 +27,9 @@ does.
   - Loop: `lib.sh`, `inject-state.sh`, `verify-changed.sh`, `dod-gate.sh`,
     `precompact.sh`, `prompt-recall.sh`, `evidence.py` (the gate authors
     its own Evidence row; this writes it and executes nothing),
-    `decision.py` (Decisions rows with the `DecisionV1` floors enforced),
+    `decision.py` (whole `DecisionV1` records kept in
+    `.claude/fluxpoint/decisions.jsonl`, indexed by a Decisions row, read
+    back with `--show`, floors enforced),
     `py.sh` (interpreter resolution and UTF-8 stdio).
   - Gates and ratchets: `exec-attest.sh` with `attest.py` (hook-minted exit
     codes for declared gates), `secret-guard.py` (credential gate),

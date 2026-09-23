@@ -78,10 +78,11 @@ Workflow tool requires.
    failure — clear it with `/fluxpoint:release <node>`, never by inventing
    a release.
    If the IR has an `imports` block, there is nothing for you to load: the
-   compiler resolves each frozen decision from `.claude/fluxpoint/runs`
-   at compile time — `'latest'` is the newest recorded run carrying that
-   decision id, otherwise the named runId — and embeds the record and its
-   source runId in the generated script. No hand-assembled `args._decisions`
+   compiler resolves each frozen decision from `.claude/fluxpoint/runs` and
+   from the records `decision.py` keeps in `.claude/fluxpoint/decisions.jsonl`
+   at compile time — `'latest'` is the newest of either carrying that
+   decision id, otherwise the named runId or `dec_` recordId — and embeds
+   the record and its source in the generated script. No hand-assembled `args._decisions`
    map exists to get wrong, and a missing or malformed record fails step 2's
    `--check` rather than the launch. If it does fail there, the campaign
    that makes the decision has to run first; never hand-write or edit a run

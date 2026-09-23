@@ -193,7 +193,7 @@ if [ -n "$state" ]; then
   # it: a fresh context was re-oriented with the goal and the Definition of
   # Done but not with what was proven or what is blocking.
   echo "- ${state} (sections that matter, newest evidence first):"
-  "$FPL_PY" - "$state" <<'PY'
+  "$FPL_PY" - "$state" "$here" <<'PY'
 import re, sys
 
 text = open(sys.argv[1], errors="replace").read()
@@ -245,6 +245,16 @@ if rows:
     out.append("")
     out.append(f"## Decisions — newest {min(3, len(rows))} of {len(rows)}")
     out += [r.rstrip() for r in rows[:3]]
+    # A row is an index cut to fit a table; the condition that mattered is
+    # often the part past the cut. Point a cut row at its whole record.
+    cut = []
+    for r in rows[:3]:
+        cells = [c.strip() for c in r.strip().strip("|").split("|")]
+        if "\u2026" in r and len(cells) > 1 and re.match(r"^[a-z][a-z0-9-]*$", cells[1]):
+            cut.append(cells[1])
+    for did in cut:
+        out.append(f"  (cut: the whole record, options, objections and evidence: "
+                   f"bash \"{sys.argv[2]}/py.sh\" decision.py --show {did})")
     if len(rows) > 3:
         elided.append(f"{len(rows) - 3} older Decisions row(s)")
 

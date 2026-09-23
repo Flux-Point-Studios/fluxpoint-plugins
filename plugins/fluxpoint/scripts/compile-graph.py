@@ -219,8 +219,8 @@ def _decision_in(artifact, did):
     return None
 
 
-def resolve_imports(ir, contracts, runs_dir):
-    """Resolve the IR's imports from recorded runs, at compile time.
+def resolve_imports(ir, contracts, runs_dir, store=None):
+    """Resolve the IR's imports from recorded runs and the decision store.
 
     Returns ({decisionId: {"record": ..., "runId": ...}}, findings).
 
@@ -234,6 +234,11 @@ def resolve_imports(ir, contracts, runs_dir):
 
     A malformed run artifact is a hard finding, never skipped: what
     'latest' names must not depend on which artifacts happened to parse.
+
+    `store` is decision.py's `decisions.jsonl`. Operator rulings are made in
+    chat, not by a graph node, so they never reach a run artifact; without
+    the store they could not bind a later campaign at all. 'latest' spans
+    both sources, and a store record is addressed by its recordId.
     """
     imports = ir.get("imports") or {}
     if not imports:
@@ -262,21 +267,47 @@ def resolve_imports(ir, contracts, runs_dir):
                 f.append(f"imports: {p} is not a run artifact (not an object)")
                 continue
             arts.append((str(art.get("when") or ""), fn[: -len(".json")], art))
+    kept = []  # (when, recordId, decisionId, record)
+    if store and os.path.exists(store):
+        with open(store, encoding="utf-8") as fh:
+            for i, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError as e:
+                    f.append(f"imports: {store}:{i} is not valid JSON ({e}) — a "
+                             f"malformed decision record cannot be skipped")
+                    continue
+                if isinstance(r, dict) and isinstance(r.get("record"), dict):
+                    kept.append((str(r.get("when") or ""), str(r.get("recordId") or ""),
+                                 r.get("id"), r["record"], i))
     for did in sorted(imports):
         ref = imports[did]
         if ref == "latest":
+            # (when, order, source, record): ties in time go to the store
+            # record appended last, then to the run id, never to chance.
             hits = []
             for when, rid, art in arts:
                 rec = _decision_in(art, did)
                 if rec is not None:
-                    hits.append((when, rid, rec))
+                    hits.append((when, (0, 0), rid, rec))
+            hits += [(when, (1, i), rid, rec) for when, rid, kid, rec, i in kept if kid == did]
             if not hits:
                 f.append(
                     f"imports.{did}: no recorded run in {runs_dir} carries this "
-                    f"decision — the campaign that decides it has to run first; "
-                    f"never hand-write a run artifact to get past this")
+                    f"decision, and decision.py has recorded none — the campaign "
+                    f"or the ruling that decides it has to come first; never "
+                    f"hand-write a run artifact to get past this")
                 continue
-            _, rid, rec = max(hits, key=lambda h: (h[0], h[1]))
+            _, _, rid, rec = max(hits, key=lambda h: (h[0], h[1], h[2]))
+        elif str(ref).startswith("dec_"):
+            hit = next(((rid, rec) for _, rid, kid, rec, _ in kept
+                        if rid == ref and kid == did), None)
+            if hit is None:
+                f.append(f"imports.{did}: record '{ref}' not found in {store or 'the decision store'}")
+                continue
+            rid, rec = hit
         else:
             art = next((a for _, rid, a in arts if rid == ref), None)
             if art is None:
@@ -3050,6 +3081,8 @@ def main():
     ap.add_argument("--contracts", help="contracts directory")
     ap.add_argument("--runs-dir", default=RUNS_DIR,
                     help="recorded-runs directory imports resolve against")
+    ap.add_argument("--decisions", default=os.path.join(".claude", "fluxpoint", "decisions.jsonl"),
+                    help="decision.py's store, which imports also resolve against")
     ap.add_argument("--gates-root", default=".",
                     help=f"directory holding {GATES}, which prove: tiers resolve against")
     args = ap.parse_args()
@@ -3110,7 +3143,7 @@ def main():
 
     # Resolved for --check too: a missing decision should fail preflight,
     # not the emission the preflight was supposed to clear.
-    resolved, rfindings = resolve_imports(ir, contracts, args.runs_dir)
+    resolved, rfindings = resolve_imports(ir, contracts, args.runs_dir, args.decisions)
     if rfindings:
         print("graph-compile: imports unresolved\n", file=sys.stderr)
         for f in rfindings:

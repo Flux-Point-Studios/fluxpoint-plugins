@@ -452,6 +452,27 @@ with tempfile.TemporaryDirectory() as runs:
            (errs4 or ["none"])[0][:60])
     os.remove(os.path.join(runs, "wf-cut.json"))
 
+    # Operator rulings are recorded with decision.py, never by a graph node,
+    # so they never reach a run artifact. The store is the other source an
+    # import resolves from (#98), and 'latest' spans both.
+    store = os.path.join(runs, "decisions.jsonl")
+    ruling = dict(FROZEN, chosen="48h", rationale="the operator ruled 48h after "
+                  "the incident review, overturning the governance default")
+    with open(store, "w") as fh:
+        fh.write(json.dumps({"recordId": "dec_0123456789ab", "id": "vault-window",
+                             "when": "2026-08-09 12:00:00", "record": ruling}) + "\n")
+    resolved_s, errs_s = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs, store)
+    report("an import resolves a decision recorded with decision.py",
+           not errs_s and resolved_s.get("vault-window", {}).get("runId") == "dec_0123456789ab"
+           and resolved_s["vault-window"]["record"]["chosen"] == "48h",
+           str(resolved_s.get("vault-window", {}).get("runId")))
+    pinned_s = copy.deepcopy(IMP)
+    pinned_s["imports"] = {"vault-window": "wf-new"}
+    resolved_p, _ = cg.resolve_imports(pinned_s, CONTRACTS, runs, store)
+    report("  and a pinned runId still names the run",
+           resolved_p.get("vault-window", {}).get("runId") == "wf-new", "pinned")
+    os.remove(store)
+
     with open(os.path.join(runs, "wf-bad.json"), "w") as fh:
         fh.write("{not json")
     _, errs5 = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs)

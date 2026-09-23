@@ -83,7 +83,7 @@ def decision_rows(summary, ts):
     out = []
     for did, r in rows:
         out.append(
-            f"| {ts} | {cell(did, 40)} | {cell(r.get('chosen'), 60)} "
+            f"| {ts} | {cell(did, 80)} | {cell(r.get('chosen'), 60)} "
             f"| {'YES' if r.get('overturned_prior') else 'no'} "
             f"| {cell(r.get('frozen_by') or 'none', 40)} "
             f"| {cell(r.get('rationale'))} |"
