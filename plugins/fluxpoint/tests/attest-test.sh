@@ -554,6 +554,16 @@ rec "bash scripts/harness.sh --full" 0 >/dev/null
 check "  while run with bash it is" "$((n + 1))" "$(rows)"
 rec "bash ./scripts/harness.sh --full" 0 >/dev/null
 check "  with or without ./ after bash" "$((n + 2))" "$(rows)"
+# `bash <script>` stands for a bare declared script only when the script IS
+# a bash script: a /bin/sh one can give another verdict under bash.
+printf '#!/bin/sh\nexit 0\n' >"$ROOT/r/scripts/posix.sh"; chmod +x "$ROOT/r/scripts/posix.sh"
+printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full","posix":"scripts/posix.sh"}}' \
+  >"$ROOT/r/.fluxpoint-gates.json"
+rec "bash scripts/posix.sh" 0 >/dev/null
+check "bash on a /bin/sh script is not its bare declared gate" "$((n + 2))" "$(rows)"
+rec "bash scripts/harness.sh --full" 0 >/dev/null
+check "  while bash on a bash script is" "$((n + 3))" "$(rows)"
+gates
 gates
 n="$(rows)"
 # A quoted cd operand does not freeze the plain-word gate after it.

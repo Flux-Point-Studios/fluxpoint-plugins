@@ -475,7 +475,23 @@ def cd_in_project(root, command, cwd=None, declared_cd=""):
     return False
 
 
-def gate_for(gates, command):
+BASH_SHEBANG = re.compile(r"^#![ \t]*\S*/(?:env[ \t]+(?:-\S+[ \t]+)*)?bash(?:[ \t]|$)")
+
+
+def _bash_script(root, cd, script):
+    """Whether `script` (a declared gate's first word) is demonstrably a bash
+    script: its shebang names bash. Running a /bin/sh script under bash is
+    another interpreter, which can give another verdict."""
+    base = _resolve(root, cd) if cd else root
+    try:
+        with open(os.path.join(base, script), "rb") as fh:
+            first = fh.readline(200).decode("utf-8", "replace")
+    except OSError:
+        return False
+    return bool(BASH_SHEBANG.match(first))
+
+
+def gate_for(gates, command, root=None):
     """The declared gate this exact command is, or None.
 
     normalize() drops one leading `cd`, so `cd /abs/project && gate` still
@@ -493,14 +509,18 @@ def gate_for(gates, command):
         return None
     n = normalize(command)
     # `bash scripts/x.sh` is the declared `scripts/x.sh` run another way —
-    # but only in that direction. A gate DECLARED with `bash ` needs bash
+    # when the script is a bash script (its shebang names bash; `root`
+    # locates it), and only in that direction. A gate DECLARED with `bash ` needs bash
     # (its shebang may say /bin/sh, dash here, where `[[` is "not found" and
     # the script can exit 0), so running the script bare is not that gate;
     # nor is `sh scripts/x.sh` any gate but one declared exactly so.
     alt = _unbash(n)
     for name, declared in gates.items():
         if declared != n and (alt is None or declared != alt
-                              or declared.startswith(("bash ", "sh ", "zsh "))):
+                              or declared.startswith(("bash ", "sh ", "zsh "))
+                              or root is None
+                              or not _bash_script(root, (getattr(gates, "cds", None) or {})
+                                                  .get(name, ""), declared.split(" ", 1)[0])):
             continue
         want = (getattr(gates, "dirs", None) or {}).get(name) or []
         if want:
@@ -653,7 +673,7 @@ def record(root, payload):
     if tool and tool != "Bash":
         return None, []
     command = (payload.get("tool_input") or {}).get("command")
-    gate = gate_for(gates, command)
+    gate = gate_for(gates, command, root)
     if not gate or not cd_in_project(root, command, payload.get("cwd"),
                                      (getattr(gates, "cds", None) or {}).get(gate, "")):
         return None, []
@@ -1239,7 +1259,7 @@ def verify_claims(root, summary):
                 continue
             if "exit" not in r or "command" not in r:
                 continue
-            gate = gate_for(gates, r.get("command"))
+            gate = gate_for(gates, r.get("command"), root)
             if not gate:
                 continue
             claimed = r.get("exit")

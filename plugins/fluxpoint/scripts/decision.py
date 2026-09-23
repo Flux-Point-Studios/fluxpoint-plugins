@@ -117,6 +117,9 @@ def validate(rec, schema, choice_among_options=True):
         if isinstance(val, list) and len(val) < spec.get("minItems", 0):
             f.append(f"{key} needs at least {spec['minItems']} entries — "
                      f"{spec.get('description', '')}".rstrip(" —"))
+        if (isinstance(val, list) and (spec.get("items") or {}).get("type") == "string"
+                and not all(isinstance(x, str) for x in val)):
+            f.append(f"every entry of {key} must be a string")
 
     opts = rec.get("options")
     if isinstance(opts, list):
@@ -131,6 +134,9 @@ def validate(rec, schema, choice_among_options=True):
                     f.append(f"options[{i}] missing '{key}'")
             for key, spec in oprops.items():
                 v = o.get(key)
+                if key in o and spec.get("type") == "string" and not isinstance(v, str):
+                    f.append(f"options[{i}].{key} must be a string")
+                    continue
                 if isinstance(v, str) and len(v.strip()) < spec.get("minLength", 0):
                     f.append(
                         f"options[{i}].{key} is shorter than {spec['minLength']} "

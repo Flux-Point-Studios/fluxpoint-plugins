@@ -478,6 +478,15 @@ with tempfile.TemporaryDirectory() as runs:
     # A record with every field name but the wrong types or floors is not a
     # decision either, wherever it was stored.
     bogus = dict(FROZEN, question=1, options=[], chosen="ghost", reversible="no")
+    nested = dict(FROZEN, evidence=[1, 2], options=[
+        {"option": "24h", "argued_by": 7, "strongest_objection": 12345678901234567890},
+        FROZEN["options"][1]])
+    with open(os.path.join(runs, "wf-nested.json"), "w") as fh:
+        json.dump(_art("wf-nested", "2030-06-01 00:00", {"vault-window": nested}), fh)
+    _, errs_n = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs)
+    report("a record with numeric option fields or evidence is not a valid DecisionV1",
+           any("not a valid DecisionV1" in e for e in errs_n), (errs_n or ["none"])[0][:70])
+    os.remove(os.path.join(runs, "wf-nested.json"))
     with open(os.path.join(runs, "wf-bogus.json"), "w") as fh:
         json.dump(_art("wf-bogus", "2030-01-01 00:00", {"vault-window": bogus}), fh)
     _, errs_b = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs)
