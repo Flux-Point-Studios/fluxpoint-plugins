@@ -56,18 +56,25 @@ Workflow tool requires.
    rather than the campaign's, where a file an earlier node committed is
    simply absent and nothing inside says so.
    If any node declares `verify: prove:<gate>`, stamp the launch; the
-   compiled graph refuses to start without it, and `record-run.py` files a
-   citation of any row minted before it as STALE:
+   compiled graph refuses to start without it:
    ```
-   args._launch = {"since": "$(date -u +%FT%TZ)"}
+   bash "$ROOT/scripts/py.sh" attest.py --stamp
    ```
-   On a resume pass the stamp of the run being resumed (its recorded
-   artifact carries it as `summary.launch`), never a fresh one: the
-   replayed nodes' citations were minted after the original launch. A
-   `prove:` node whose gate outlives one tool call runs it with
-   `attest.py --run <gate>` in the background and collects it with
-   `attest.py --await <token>`; a `prove:ci` node runs
-   `attest.py --ci --sha <tip> --wait` and cites the row it prints.
+   into `args._launch` (`{"since": ..., "nonce": ...}`). `record-run.py`
+   files a citation of any row minted before `since`, or by a run with a
+   different nonce, as STALE, so neither an earlier run's execution nor an
+   overlapping run's on the same commit can stand in for this one. The
+   compiled graph tells each `prove:` node to run its gate as
+   `FPL_ATTEST_NONCE=<nonce> <declared command>`; a gate that outlives one
+   tool call runs as `attest.py --run <gate> --nonce <nonce>` in the
+   background and is collected with `attest.py --await <token>`; a
+   `prove:ci` node runs `attest.py --ci --pr <n> --wait --nonce <nonce>`
+   (or `--ref <branch>`) so the forge, not the node, names the commit, and
+   returns that `sha`, which whatever merges after the gate pins with
+   `gh pr merge --match-head-commit <sha>`. On a resume pass the stamp of
+   the run being resumed (its recorded artifact carries it as
+   `summary.launch`), never a fresh one: the replayed nodes' citations
+   carry the original nonce.
    If any node has `actor: human` or `actor: third-party`:
    ```
    bash "$ROOT/scripts/py.sh" release.py --load --campaign "<the IR's campaign line>"

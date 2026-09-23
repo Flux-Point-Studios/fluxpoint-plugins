@@ -216,13 +216,13 @@ def main():
     try:
         # The graph file's SPEC: header names the packet this campaign is
         # held to; a repository can carry one per campaign.
-        spec_path = _spec.graph_headers(args.graph).get("SPEC")
+        spec_path = _spec.canonical(_spec.graph_headers(args.graph).get("SPEC"))
     except (OSError, ValueError) as e:
         print(f"record-run: {args.graph}: {e}", file=sys.stderr)
         return 1
     if "specification" in summary or spec_path or _spec.required(args.root):
         try:
-            ran = summary.get("specificationPath")
+            ran = _spec.canonical(summary.get("specificationPath"))
             if ran and spec_path and ran != spec_path:
                 raise ValueError(f"the run was compiled against {ran}, but {args.graph} "
                                  f"declares SPEC: {spec_path}")
@@ -426,6 +426,11 @@ def main():
             {
                 "runId": args.run_id,
                 "when": ts,
+                # To the second: `when` keeps the Evidence row's minute for
+                # every reader that parses it, and this is what orders a run
+                # against a decision recorded in the same minute.
+                "recordedAt": datetime.datetime.now(datetime.timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M:%S"),
                 "executor": args.executor,
                 "outcome": outcome,
                 "nodesOk": ok,

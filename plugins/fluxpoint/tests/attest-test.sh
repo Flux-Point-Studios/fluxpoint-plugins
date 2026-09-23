@@ -501,6 +501,28 @@ case "$out" in *"[ATTESTED]"*"[STALE]"*"already backs"*)
   ok "one execution cannot verify two nodes" "second is stale" ;;
   *) bad "one execution cannot verify two nodes" "${out:0:90}" ;; esac
 
+# Two runs overlapping on one commit and one gate: a row the OTHER run
+# minted after this run's launch passes every check above. The run nonce
+# names whose execution a row is.
+stamp="$("$FPL_PY" "$ATTEST" --stamp)"
+"$FPL_PY" -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d["since"].endswith("Z") and len(d["nonce"]) == 16 else 1)' "$stamp" \
+  && ok "--stamp mints a launch stamp {since, nonce}" "$stamp" \
+  || bad "--stamp mints a launch stamp {since, nonce}" "$stamp"
+newrepo; gates
+rec "FPL_ATTEST_NONCE=run-a scripts/harness.sh --full" 0 >/dev/null
+check "a nonce-prefixed gate run is still the declared gate" harness "$(field gate)"
+check "  and its row names the run" run-a "$(field nonce)"
+ATT="$(field attestId)"
+out="$(runbound "{'launch': {'since': '2000-01-01T00:00:00Z', 'nonce': 'run-b'}}" wf-n1)"
+case "$out" in *"[STALE]"*"another run minted"*)
+  ok "an overlapping run's execution is STALE here" "stale" ;;
+  *) bad "an overlapping run's execution is STALE here" "${out:0:70}" ;; esac
+out="$(runbound "{'launch': {'since': '2000-01-01T00:00:00Z', 'nonce': 'run-a'}}" wf-n2)"
+case "$out" in *"[ATTESTED]"*) ok "  and this run's own is ATTESTED" "attested" ;;
+  *) bad "  and this run's own is ATTESTED" "${out:0:70}" ;; esac
+rec "FPL_ATTEST_NONCE=x; rm -rf / scripts/harness.sh --full" 0 >/dev/null
+check "a nonce cannot carry a second command in" run-a "$(field nonce)"
+
 # ================= 11. a long gate, run in the background (#96) ==========
 # The hook cannot see a backgrounded launch finish, and one foreground call
 # is capped at 600 s. attest.py --run executes the DECLARED command itself
@@ -509,13 +531,14 @@ case "$out" in *"[ATTESTED]"*"[STALE]"*"already backs"*)
 newrepo
 printf '#!/usr/bin/env bash\nsleep 1\nexit "${GATE_EXIT:-0}"\n' >scripts/harness.sh
 gates
-tok="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --run harness --detach 2>&1 | sed -n 's/.* as \(bg_[0-9a-f]*\).*/\1/p' | head -1)"
+tok="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --run harness --detach --nonce run-c 2>&1 | sed -n 's/.* as \(bg_[0-9a-f]*\).*/\1/p' | head -1)"
 [ -n "$tok" ] && ok "--run starts a declared gate and names its token" "$tok" \
   || bad "--run starts a declared gate and names its token" "no token"
 out="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --await "$tok" --timeout 30 2>&1)"; rc=$?
 check "--await returns once the gate has finished" 0 "$rc"
 check "  and the row is the gate's, witnessed by the runner" wrapper "$(field witness)"
 check "  with the gate's own exit" 0 "$(field exit)"
+check "  and the run nonce it was started with" run-c "$(field nonce)"
 [ -n "$(field started)" ] && ok "  and the moment it started" "$(field started)" \
   || bad "  and the moment it started" "missing"
 BGATT="$(field attestId)"
@@ -554,6 +577,7 @@ case "$*" in
   *"/status"*) printf '{"state":"%s","statuses":[{"context":"harness","state":"%s"}]}' \
                  "${FAKE_CI:-success}" "${FAKE_CI:-success}" ;;
   *"/check-runs"*) printf '{"total_count":1,"check_runs":[{"name":"lint","status":"completed","conclusion":"success"}]}' ;;
+  *"/pulls/"*) printf '{"head":{"sha":"%s"}}' "${FAKE_HEAD:-abc1234def5678}" ;;
   *) exit 1 ;;
 esac
 SH
@@ -565,13 +589,34 @@ check "--ci over green statuses exits 0" 0 "$rc"
 check "  and mints a ci row" ci "$(field gate)"
 check "  witnessed by the forge" forge "$(field witness)"
 check "  for the sha it was asked about" abc1234 "$(field headSha)"
+SHAATT="$(field attestId)"
+cici() { # $1 = attestId, $2 = claimed sha ('' for none), $3 = run id
+  ATT="$1" bound "{'results': {'merge-gate': {'gate': 'ci', 'exit': 0, 'attestId': 'ATT'$( [ -n "$2" ] && printf ", 'sha': '%s'" "$2")}}, 'contracts': {'merge-gate': 'ExecutionV1'}, 'prove': {'merge-gate': 'ci'}}" \
+    | "$FPL_PY" "$RECORD" --run-id "$3" --graph WORK.md --root "$ROOT/r" \
+      --state-dir "$ROOT/r/.claude/fluxpoint/runs" 2>&1
+}
+# A sha the node chose could be CI's verdict on any older green commit.
+out="$(cici "$SHAATT" abc1234 wf-ci0)"
+case "$out" in *"[STALE]"*"the node named itself"*)
+  ok "a forge row for a sha the node chose cannot back prove:ci" "stale" ;;
+  *) bad "a forge row for a sha the node chose cannot back prove:ci" "${out:0:70}" ;; esac
+PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --pr 7 >/dev/null 2>&1; rc=$?
+check "--ci --pr asks the forge for the pull request's head" 0 "$rc"
+check "  and records which pull request named it" pr:7 "$(field target)"
+check "  and the commit the forge named" abc1234def5678 "$(field headSha)"
 CIATT="$(field attestId)"
-out="$(ATT="$CIATT" bound "{'results': {'merge-gate': {'gate': 'ci', 'exit': 0, 'attestId': 'ATT'}}, 'contracts': {'merge-gate': 'ExecutionV1'}, 'prove': {'merge-gate': 'ci'}, 'tree': {'baseline': {'head': '$(git -C "$ROOT/r" rev-parse HEAD)'}}}" \
-  | "$FPL_PY" "$RECORD" --run-id wf-ci1 --graph WORK.md --root "$ROOT/r" \
-    --state-dir "$ROOT/r/.claude/fluxpoint/runs" 2>&1)"
+out="$(cici "$CIATT" abc1234def5678 wf-ci1)"
 case "$out" in *"[ATTESTED]"*"| COMPLETE |"*)
   ok "a prove:ci node citing the forge row is ATTESTED" "attested" ;;
   *) bad "a prove:ci node citing the forge row is ATTESTED" "${out:0:70}" ;; esac
+out="$(cici "$CIATT" "" wf-ci2)"
+case "$out" in *"[STALE]"*"does not name the commit"*)
+  ok "  but only when the claim names the commit, so the merge can pin it" "stale" ;;
+  *) bad "  but only when the claim names the commit, so the merge can pin it" "${out:0:70}" ;; esac
+out="$(cici "$CIATT" 0000000aaaa wf-ci3)"
+case "$out" in *TAMPERED-EXECUTION*)
+  ok "  and a claimed commit the forge did not judge is TAMPERED" "caught" ;;
+  *) bad "  and a claimed commit the forge did not judge is TAMPERED" "${out:0:70}" ;; esac
 FAKE_CI=failure PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
 check "a failing context is a red ci row" 1 "$rc"
 check "  recorded, not smoothed" 1 "$(field exit)"

@@ -1080,8 +1080,12 @@ def prove_ci_and_launch_case():
             return json.load(open(out)) if os.path.exists(out) else {"err": "no output"}
 
     stamped = run({"confirm": "merge", "_ledger": {},
-                   "_launch": {"since": "2026-09-23T00:00:00Z"}})
+                   "_launch": {"since": "2026-09-23T00:00:00Z", "nonce": "a1b2c3"}})
     unstamped = run({"confirm": "merge", "_ledger": {}})
+    no_nonce = run({"confirm": "merge", "_ledger": {},
+                    "_launch": {"since": "2026-09-23T00:00:00Z"}})
+    bad_nonce = run({"confirm": "merge", "_ledger": {},
+                     "_launch": {"since": "2026-09-23T00:00:00Z", "nonce": "x; rm -rf ."}})
     for name, ok, got in [
         ("prove:ci resolves when the manifest declares a ci section",
          not with_ci, with_ci),
@@ -1094,6 +1098,15 @@ def prove_ci_and_launch_case():
         ("  and carries the stamp into the summary it is recorded from",
          ((stamped.get("r") or {}).get("launch") or {}).get("since") == "2026-09-23T00:00:00Z",
          stamped),
+        ("a stamp without a run nonce is refused (overlapping runs, #91 review)",
+         "launch stamp" in str(no_nonce.get("err")), no_nonce),
+        ("  and so is a nonce that is not a plain token",
+         "launch stamp" in str(bad_nonce.get("err")), bad_nonce),
+        ("the prove node is told to bind its gate run to this run's nonce",
+         "FPL_ATTEST_NONCE=${LAUNCH.nonce}" in js and "provePreamble(\"ci\") +" in js
+         and "--match-head-commit" in js, "preamble"),
+        ("a ci citation that names no commit is UNPROVEN in the run",
+         "gate === 'ci' && !r.sha" in js, "checked"),
     ]:
         detail = "yes" if ok else f"got {str(got)[:150]}"
         print(f"{'PASS' if ok else 'FAIL'}  prove-ci: {name:<58} -> {detail[:120]}")

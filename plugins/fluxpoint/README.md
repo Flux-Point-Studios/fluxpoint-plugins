@@ -111,7 +111,7 @@ Evidence table both modes append to.
   older than the run's launch stamp, from another commit, or already
   backing another node is `STALE`. A gate too long for one tool call runs
   through `attest.py --run`/`--await`, and `prove:ci` cites CI's own
-  commit statuses.
+  commit statuses on the commit the forge names for a pull request.
 - The DoD gate arms on two independent signals — the PostToolUse marker
   and dirtiness re-derived from `git` — because the marker cannot see
   source written through the Bash tool. Dirtiness is measured against the

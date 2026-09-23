@@ -18,7 +18,9 @@ agent never touches the number.
   attest.py --verify          cross-check a run summary on stdin against the log
   attest.py --run GATE        run a declared gate and attest its exit itself
   attest.py --await TOKEN     wait, in bounded slices, for a --run to finish
-  attest.py --ci --sha SHA    attest the forge's own commit statuses for SHA
+  attest.py --ci --pr N       attest the forge's own commit statuses on PR N's head
+                              (or --ref BRANCH; --sha names a commit the caller chose)
+  attest.py --stamp           a launch stamp ({since, nonce}) for args._launch
 
 Three witnesses mint rows, and each row names its own: `hook` (the Bash
 PostToolUse payload), `wrapper` (--run, which executes the command the
@@ -80,6 +82,22 @@ def gates_path(root):
     return os.path.join(root, GATES)
 
 
+# `FPL_ATTEST_NONCE=<token> <gate>`: how a graph node names the run it is
+# executing for. One assignment, at the front (after an optional `cd`), and
+# a token of plain characters, so it cannot smuggle a second command in.
+NONCE_RE = re.compile(r"FPL_ATTEST_NONCE=([A-Za-z0-9_-]{1,64})\s+(?=\S)")
+
+
+def nonce_of(cmd):
+    """The run nonce a command line carries, or ''."""
+    s = " ".join(str(cmd or "").split())
+    m = re.match(r"cd\s+(?:[^;&|<>]+?)\s*(?:&&|;)\s*(?=\S)", s)
+    if m:
+        s = s[m.end():]
+    m = NONCE_RE.match(s)
+    return m.group(1) if m else ""
+
+
 def normalize(cmd):
     """Canonical form of a command line, for comparison against a manifest.
 
@@ -108,6 +126,12 @@ def normalize(cmd):
     # declared command. An explicit multi-cd check would be dead weight AND
     # wrong, refusing a gate that legitimately starts with `cd` itself.
     m = re.match(r"cd\s+(?:[^;&|<>]+?)\s*(?:&&|;)\s*(?=\S)", s)
+    if m:
+        s = s[m.end():]
+    # The run's nonce rides in as an environment assignment, which changes
+    # nothing about the exit the shell reports. It is read by nonce_of(),
+    # never matched as part of the gate.
+    m = NONCE_RE.match(s)
     if m:
         s = s[m.end():]
     for prefix in ("bash ", "sh ", "zsh "):
@@ -295,6 +319,17 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def stamp():
+    """A launch stamp for args._launch: when the run starts, and its nonce.
+
+    `since` bounds what a citation may be older than; the nonce names the
+    run, so two runs overlapping on one commit and one gate cannot cite each
+    other's executions. Minted here so its format is the rows' own.
+    """
+    import secrets
+    return {"since": now(), "nonce": secrets.token_hex(8)}
+
+
 def append_row(root, row):
     p = path_for(root)
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -358,6 +393,7 @@ def record(root, payload):
         # graph node is exactly the execution record/run needs to bind.
         "agent": str(payload.get("agent_type") or payload.get("agent_id") or ""),
         "witness": "hook",
+        "nonce": nonce_of(command),
     }
     append_row(root, row)
     return row, []
@@ -385,7 +421,7 @@ def _bg_write(root, rec):
     os.replace(tmp, os.path.join(d, f"{rec['token']}.json"))
 
 
-def run_gate(root, gate, detach=False, token=None):
+def run_gate(root, gate, detach=False, token=None, nonce=""):
     """Run a declared gate and attest its exit. Returns the gate's exit code.
 
     The command is the manifest's, resolved from the gate NAME, so nothing
@@ -419,16 +455,17 @@ def run_gate(root, gate, detach=False, token=None):
                          "pid": None, "started": started})
         subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), "--root", root, "--run", gate,
-             "--token", token], cwd=root, stdin=subprocess.DEVNULL,
+             "--token", token] + (["--nonce", nonce] if nonce else []),
+            cwd=root, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=(os.name != "nt"))
         print(f"attest: started {gate} as {token} — collect it with "
               f"attest.py --await {token}", flush=True)
         return 0
-    return _execute(root, gate, started, token)
+    return _execute(root, gate, started, token, nonce)
 
 
-def _execute(root, gate, started, token):
+def _execute(root, gate, started, token, nonce=""):
     import subprocess
     raw = declared_command(root, gate)
     norm = normalize(raw)
@@ -449,7 +486,7 @@ def _execute(root, gate, started, token):
         "gate": gate, "command": norm, "commandSha": sha(norm), "exit": code,
         "logSha256": sha(f"{text}\n---\n"), "headSha": head,
         "started": started, "when": now(), "sessionId": "", "agent": "",
-        "witness": "wrapper", "token": token,
+        "witness": "wrapper", "token": token, "nonce": nonce,
     }
     append_row(root, row)
     _bg_write(root, {"token": token, "gate": gate, "status": "DONE", "exit": code,
@@ -572,8 +609,27 @@ def ci_verdict(contexts, required):
     return 0
 
 
-def attest_ci(root, sha_, wait=False, timeout=AWAIT_DEFAULT):
-    """Mint a `forge` row for a commit's CI verdict. 0/1 minted, 3 undecided."""
+def resolve_target(pr=None, ref=None):
+    """(sha, target) the forge names for a pull request or a branch.
+
+    The forge chooses the commit, not the caller: a row minted for a sha the
+    node picked could be CI's verdict on any older green commit, cited over
+    a merge of something else.
+    """
+    if pr is not None:
+        head = (_gh_json(f"repos/{{owner}}/{{repo}}/pulls/{int(pr)}").get("head") or {})
+        return str(head.get("sha") or ""), f"pr:{int(pr)}"
+    got = _gh_json(f"repos/{{owner}}/{{repo}}/commits/{ref}")
+    return str(got.get("sha") or ""), f"ref:{ref}"
+
+
+def attest_ci(root, sha_, wait=False, timeout=AWAIT_DEFAULT, pr=None, ref=None, nonce=""):
+    """Mint a `forge` row for a commit's CI verdict. 0/1 minted, 3 undecided.
+
+    With `pr` or `ref` the forge resolves the commit and the row records
+    which; a bare `sha` is the caller's choice, and a prove:ci citation
+    refuses such a row.
+    """
     gates, findings = load_gates(root)
     for f in findings:
         print(f"attest: {f}", file=sys.stderr)
@@ -584,8 +640,19 @@ def attest_ci(root, sha_, wait=False, timeout=AWAIT_DEFAULT):
         print(f"attest: {GATES} declares no 'ci' section — nothing says which "
               f"forge or which contexts decide a merge", file=sys.stderr)
         return 2
+    target = None
+    if pr is not None or ref:
+        if ref and not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", ref):
+            print("attest: --ref must be a branch or tag name", file=sys.stderr)
+            return 2
+        try:
+            sha_, target = resolve_target(pr, ref)
+        except (OSError, RuntimeError, ValueError) as e:
+            print(f"attest: could not resolve {'PR ' + str(pr) if pr is not None else ref} "
+                  f"on the forge: {e} — nothing attested", file=sys.stderr)
+            return 3
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha_ or ""):
-        print("attest: --sha must be a commit sha", file=sys.stderr)
+        print("attest: name the commit with --pr, --ref or --sha", file=sys.stderr)
         return 2
     required = ci.get("contexts")
     deadline = time.monotonic() + max(0, timeout)
@@ -615,6 +682,7 @@ def attest_ci(root, sha_, wait=False, timeout=AWAIT_DEFAULT):
         "gate": "ci", "command": f"ci:{sha_}", "commandSha": sha(f"ci:{sha_}"),
         "exit": code, "logSha256": sha(canon), "headSha": sha_, "when": when,
         "sessionId": "", "agent": "", "witness": "forge", "contexts": contexts,
+        "target": target, "nonce": nonce,
     }
     append_row(root, row)
     print(f"attest: ci on {sha_} exit {code} -> {row['attestId']}")
@@ -690,6 +758,32 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None):
                 "detail": (f"cites {cited}, minted {minted or 'at an unknown time'}, "
                            f"before this run launched ({since}) — an execution from "
                            f"another run, not this node's")}
+    nonce = launch.get("nonce") if isinstance(launch, dict) else None
+    if nonce and row.get("nonce") != nonce:
+        return {**base, "status": "STALE",
+                "detail": (f"cites {cited}, which "
+                           + (f"another run minted (nonce {row['nonce']})" if row.get("nonce")
+                              else "carries no run nonce")
+                           + f" — this run's is {nonce}; a gate run for this node passes "
+                           f"FPL_ATTEST_NONCE (or --nonce) so its row names the run")}
+    if row.get("witness") == "forge":
+        # CI's verdict is about the commit the forge named, and the claim must
+        # say which commit that is, so the merge it guards can be pinned to it
+        # (`gh pr merge --match-head-commit`). A sha the node chose could be
+        # any older green commit.
+        if not row.get("target"):
+            return {**base, "status": "STALE",
+                    "detail": (f"cites {cited}, CI on {str(row.get('headSha'))[:12]}, a commit "
+                               f"the node named itself — mint it with --pr or --ref so the "
+                               f"forge names the tip")}
+        if not r.get("sha"):
+            return {**base, "status": "STALE",
+                    "detail": (f"cites {cited} but does not name the commit it judged (sha) — "
+                               f"the merge cannot be pinned to CI's verdict")}
+        if not _same_commit(r["sha"], row.get("headSha")):
+            return {**base, "status": "MISMATCH",
+                    "detail": (f"claims CI on {str(r['sha'])[:12]} citing {cited}, which the "
+                               f"forge recorded for {str(row.get('headSha'))[:12]}")}
     if (head and row.get("witness") != "forge" and row.get("headSha")
             and not _same_commit(row["headSha"], head)):
         return {**base, "status": "STALE",
@@ -786,6 +880,10 @@ def main():
     ap.add_argument("--sha", help="with --ci: the commit whose statuses decide")
     ap.add_argument("--wait", action="store_true",
                     help="with --ci: poll until every context has a verdict")
+    ap.add_argument("--pr", type=int, help="with --ci: the pull request whose head the forge names")
+    ap.add_argument("--ref", help="with --ci: the branch or tag whose tip the forge names")
+    ap.add_argument("--nonce", default="",
+                    help="with --run or --ci: the run nonce from args._launch")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--record", action="store_true")
     g.add_argument("--list", action="store_true")
@@ -793,14 +891,22 @@ def main():
     g.add_argument("--run", metavar="GATE")
     g.add_argument("--await", dest="await_", metavar="TOKEN")
     g.add_argument("--ci", action="store_true")
+    g.add_argument("--stamp", action="store_true",
+                   help="print a launch stamp for args._launch")
     a = ap.parse_args()
 
+    if a.nonce and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", a.nonce):
+        print("attest: --nonce must be 1-64 letters, digits, '-' or '_'", file=sys.stderr)
+        return 2
+    if a.stamp:
+        print(json.dumps(stamp()))
+        return 0
     if a.run:
-        return run_gate(a.root, a.run, a.detach, a.token)
+        return run_gate(a.root, a.run, a.detach, a.token, a.nonce)
     if a.await_:
         return await_gate(a.root, a.await_, a.timeout)
     if a.ci:
-        return attest_ci(a.root, a.sha, a.wait, a.timeout)
+        return attest_ci(a.root, a.sha, a.wait, a.timeout, a.pr, a.ref, a.nonce)
 
     if a.list:
         gates, findings = load_gates(a.root)

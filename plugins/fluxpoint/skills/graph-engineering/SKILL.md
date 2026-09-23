@@ -391,13 +391,15 @@ declared verification did not run, which is not the same accusation.
 
 A citation is also bound to the run that cites it. The compiled graph
 refuses to start without the launch stamp `/fluxpoint:graph-run` passes in
-`args._launch`, and carries it into the summary; a cited row minted before
-the stamp, on a different commit than the one the tree guard read, or
-already backing another node is `STALE`, which files the run `INCOMPLETE`.
-Without that, any earlier row of the same gate and exit — another
-campaign's, weeks old — passed as this node's execution. A resume reuses the
-stamp of the run it resumes, since its replayed citations predate its own
-launch.
+`args._launch` (`attest.py --stamp`: a `since` and a run nonce), tells each
+`prove:` node to run its gate as `FPL_ATTEST_NONCE=<nonce> <command>`, and
+carries the stamp into the summary. A cited row minted before `since`, by a
+run with another nonce, on a different commit than the one the tree guard
+read, or already backing another node is `STALE`, which files the run
+`INCOMPLETE`. Without that, any earlier row of the same gate and exit —
+another campaign's, weeks old, or an overlapping run's on the same commit —
+passed as this node's execution. A resume reuses the stamp of the run it
+resumes, since its replayed citations carry the original nonce.
 
 Two witnesses cover what one tool call cannot. A gate longer than the
 600-second cap runs through `attest.py --run <gate>` (the manifest's
@@ -406,9 +408,13 @@ command, resolved from the gate name) started in the background, and
 runner mints the row itself when the command ends, including a red exit
 the hook never sees. CI's own statuses on a commit are `prove:ci`: a
 top-level `ci` section in the manifest names the forge and the contexts
-that decide, `attest.py --ci --sha <sha> [--wait]` mints a row from the
-forge's answer, and pending or unreported contexts mint nothing. Each row
-names its witness — `hook`, `wrapper` or `forge`.
+that decide, `attest.py --ci --pr <n> [--wait]` (or `--ref <branch>`) has
+the forge name the commit and mints a row from its statuses, and pending
+or unreported contexts mint nothing. A `prove:ci` claim returns that `sha`
+and must match the row; a row for a sha the node chose (`--sha`) cannot
+back it, since CI on any older green commit would pass. Pin the merge after
+the gate to the same commit with `gh pr merge --match-head-commit <sha>`.
+Each row names its witness — `hook`, `wrapper` or `forge`.
 
 Nodes that merely happen to match a declared gate stay observed rather than
 enforced. Opting in is what earns the stricter reading, and a check that

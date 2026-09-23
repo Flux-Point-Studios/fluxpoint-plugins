@@ -173,6 +173,20 @@ def keep(root, did, rec, graph):
     return line
 
 
+def order_key(when):
+    """A timestamp from either source as 'YYYY-MM-DD HH:MM:SS'.
+
+    Stored records carry seconds; run artifacts carry `recordedAt` with
+    seconds and, before 1.43, only a minute-precision `when`. Compared as
+    raw text, 'HH:MM:SS' sorts after 'HH:MM' whatever the order the two
+    happened in, so both are brought to one shape first. A minute-only
+    artifact is read as the start of its minute: which one came first in
+    that minute was never recorded.
+    """
+    s = str(when or "").replace("T", " ").rstrip("Z").strip()
+    return s + ":00" if len(s) == 16 else s
+
+
 def run_decision(artifact, did):
     """The DecisionV1 a recorded graph run filed under `did`, or None.
 
@@ -197,7 +211,7 @@ def find(root, did):
     """
     # Ordered by time, then by position: two rulings in one second are
     # still told apart by which was appended last.
-    hits = [(str(r.get("when") or ""), (1, i), str(r.get("recordId") or "store"), r.get("record"))
+    hits = [(order_key(r.get("when")), (1, i), str(r.get("recordId") or "store"), r.get("record"))
             for i, r in enumerate(read_store(os.path.join(root, STORE)))
             if r.get("id") == did and isinstance(r.get("record"), dict)]
     runs = os.path.join(root, RUNS)
@@ -211,7 +225,8 @@ def find(root, did):
             continue
         rec = run_decision(art, did) if isinstance(art, dict) else None
         if rec is not None:
-            hits.append((str(art.get("when") or ""), (0, 0), fn[:-len(".json")], rec))
+            hits.append((order_key(art.get("recordedAt") or art.get("when")), (0, 0),
+                         fn[:-len(".json")], rec))
     return [(w, src, rec) for w, _, src, rec in sorted(hits, key=lambda h: (h[0], h[1], h[2]))]
 
 

@@ -28,7 +28,8 @@ split gives, and how many runs a chosen difference would need, before a
 token is spent.
 
 --score reads `.claude/fluxpoint/runs/*.json`, keeps the runs of this
-sweep, and grades each: a pass is outcome COMPLETE with no red harness,
+sweep — the first recorded run of each (variant, case, rep), since a retry
+of a recorded sample is not a second observation — and grades each: a pass is outcome COMPLETE with no red harness,
 no red-team BLOCK and no WEAKENED proof audit. It reports each variant's
 pass rate with its Wilson interval, output tokens spent per run and per
 pass, on the train and test splits separately — the test split is the
@@ -153,11 +154,27 @@ def plan(args):
     cg = compiler()
     with open(args.plan, encoding="utf-8") as fh:
         text = fh.read()
+    sys.path.insert(0, HERE)
+    import specification as spec_mod
     try:
         ir = cg.extract_ir(text)
-    except cg.GraphError as e:
+        # The variants keep the source's headers, so they compile against
+        # its CONTRACTS: overlay and its SPEC: packet; the plan validates
+        # and prices them against the same, or it reports defects the
+        # compiled graphs would not have and prices calls they do not make.
+        header = spec_mod.headers(text)
+        contracts, _ = cg.resolve_contracts(os.path.join(os.path.dirname(HERE), "contracts"),
+                                            header.get("CONTRACTS"), None, args.root)
+    except (cg.GraphError, ValueError) as e:
         raise ValueError(f"{args.plan}: {e}")
-    contracts = cg.load_contracts(os.path.join(os.path.dirname(HERE), "contracts"))
+    packet = None
+    if header.get("SPEC") or spec_mod.required(args.root):
+        try:
+            pk, identity = spec_mod.load(args.root, spec=header.get("SPEC"))
+            packet = {"packet": pk, "identity": identity}
+        except (OSError, ValueError, TypeError) as e:
+            print(f"sweep: the source graph needs a locked packet and it does not load ({e}); "
+                  f"estimates below leave the packet out", file=sys.stderr)
     vary = parse_vary(args.vary, ir.get("roles") or {}, ir.get("nodes") or [])
     name = slug(args.name)
     cases = [{"id": "default", "args": {}}]
@@ -184,7 +201,7 @@ def plan(args):
         v_ir["campaign"] = f"{ir['campaign']} [sweep {name}/{vid}]"
         v_ir["name"] = f"{ir.get('name') or 'graph-campaign'}--{name}--{vid}"[:120]
         findings = cg.validate(v_ir, contracts, cg.load_gates(args.root))
-        est = cg.estimate_tokens(v_ir, contracts)
+        est = cg.estimate_tokens(v_ir, contracts, packet)
         path = os.path.join(out_dir, f"{vid}.md")
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(cg.IR_FENCE.sub(lambda _: "```json graph-ir\n" + json.dumps(v_ir, indent=2)
@@ -221,6 +238,12 @@ def plan(args):
     return 1 if any(v["findings"] for v in variants.values()) else 0
 
 
+def order_key(when):
+    """decision.py's timestamp normalization: 'YYYY-MM-DD HH:MM:SS'."""
+    s = str(when or "").replace("T", " ").rstrip("Z").strip()
+    return s + ":00" if len(s) == 16 else s
+
+
 def grade(art):
     """{pass, harnessGreen, shipped} for one recorded run."""
     harness = str(art.get("harnessExit"))
@@ -253,8 +276,28 @@ def load_runs(root, name):
                     "rep": inputs.get("rep", 0), "grade": grade(art),
                     "spent": s.get("spent") if isinstance(s.get("spent"), (int, float)) else None,
                     "estimate": (s.get("estimate") or {}).get("total"),
+                    "order": (order_key(art.get("recordedAt") or art.get("when")),
+                              art.get("runId") or fn[:-5]),
                     "summary": s})
     return out
+
+
+def one_per_sample(runs):
+    """(kept, duplicates): exactly one run per (variant, case, rep).
+
+    Two artifacts for one planned sample are one observation recorded twice,
+    and counting both narrows every interval the sweep reports. The FIRST
+    one recorded is the sample: keeping the newest would let a retry that
+    replaced a failure count as the observation, which is retry-until-pass.
+    """
+    kept, dupes = {}, []
+    for r in sorted(runs, key=lambda r: r["order"]):
+        k = (r["variant"], r["case"], str(r["rep"]))
+        if k in kept:
+            dupes.append(r)
+        else:
+            kept[k] = r
+    return list(kept.values()), dupes
 
 
 def summarize(rows):
@@ -276,9 +319,10 @@ def score(args):
         return 2
     with open(p, encoding="utf-8") as fh:
         doc = json.load(fh)
-    runs = load_runs(args.root, name)
+    runs, dupes = one_per_sample(load_runs(args.root, name))
     unknown = sorted({r["case"] for r in runs} - {c["id"] for c in doc["cases"]})
-    report = {"name": name, "variants": {}, "unknownCases": unknown}
+    report = {"name": name, "variants": {}, "unknownCases": unknown,
+              "duplicates": [d["runId"] for d in dupes]}
     for vid in sorted(doc["variants"]):
         mine = [r for r in runs if r["variant"] == vid]
         report["variants"][vid] = {
@@ -306,6 +350,10 @@ def score(args):
                           else f"{s['passes']}/{s['runs']} [{s['ci95'][0]:.2f}-{s['ci95'][1]:.2f}]")
         cost = f"{t['meanSpent']:,.0f}" if t["meanSpent"] is not None else "n/a"
         print(f"  {vid:<40} test {rate(t):<22} train {rate(tr):<22} spent/run {cost}")
+    if dupes:
+        print(f"  {len(dupes)} duplicate run(s) of an already-recorded sample ignored — the "
+              f"first recorded run of each (variant, case, rep) is the sample: "
+              f"{', '.join(d['runId'] for d in dupes[:3])}")
     if unknown:
         print(f"  {len(unknown)} run(s) name a case the plan does not have: "
               f"{', '.join(unknown[:3])} — launch with the plan's case ids")

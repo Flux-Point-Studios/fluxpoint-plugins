@@ -119,6 +119,13 @@ with tempfile.TemporaryDirectory() as root:
             rec(f"wf_h{n}", "builder-high.builder-default", case, rep, True, 90000)
             rec(f"wf_s{n}", "builder-medium.builder-claude-sonnet-5", case, rep, rep == 0, 30000)
     rec("wf_other", "builder-high.builder-default", "c1", 0, False, 1, other="another-sweep")
+    # A retry recorded for a sample that already has a run: the first
+    # recorded is the observation, never the retry that replaced it.
+    first = plan["test_ids"][0]
+    art = json.load(open(os.path.join(runs, "wf_s1.json")))
+    art.update(runId="wf_retry", recordedAt="2999-01-01 00:00:00", outcome="COMPLETE", harnessExit="0")
+    art["summary"]["inputs"] = {"goal": "g", "case": first, "rep": 1}
+    json.dump(art, open(os.path.join(runs, "wf_retry.json"), "w"))
     r = cli(root, "--score", "effort1", "--json")
     rep_ = json.loads(r.stdout)
     hi = rep_["variants"]["builder-high.builder-default"]["test"]
@@ -127,6 +134,8 @@ with tempfile.TemporaryDirectory() as root:
     report("--score grades the test split per variant, from recorded runs",
            hi["runs"] == nt and hi["passes"] == nt and so["passes"] == nt // 2,
            f"{hi['passes']}/{so['passes']} of {nt}")
+    report("  one run per planned sample: a retry of a recorded sample is ignored",
+           rep_["duplicates"] == ["wf_retry"], str(rep_.get("duplicates")))
     report("  never counting another sweep's runs",
            rep_["variants"]["builder-high.builder-default"]["train"]["runs"]
            == 2 * len(plan["train_ids"]), "isolated")
@@ -144,6 +153,18 @@ with tempfile.TemporaryDirectory() as root:
            and json.loads(rows[0])["grade"]["pass"] == 1, f"{len(rows)} rows")
     report("  with a trace per row for the tuner to read",
            len(os.listdir(os.path.join(hc, "builder-high.builder-default", "traces"))) == 20, "traces")
+
+with tempfile.TemporaryDirectory() as root:
+    os.makedirs(os.path.join(root, ".local-contracts"))
+    with open(os.path.join(root, ".local-contracts", "PlanV1.schema.json"), "w") as fh:
+        json.dump({"$id": "PlanV1", "type": "object", "properties": {"steps": {"type": "array"}}}, fh)
+    local = json.loads(json.dumps(IR))
+    local["nodes"][1]["contract"] = "PlanV1"
+    with open(os.path.join(root, "WORK.md"), "w") as fh:
+        fh.write("CONTRACTS: .local-contracts\n\n```json graph-ir\n" + json.dumps(local) + "\n```\n")
+    r = cli(root, "--plan", "WORK.md", "--name", "local", "--vary", "builder.effort=medium,high")
+    report("a graph's CONTRACTS: overlay is honored while planning",
+           r.returncode == 0 and "IR REJECTED" not in r.stdout, (r.stdout + r.stderr).strip()[-70:])
 
 report("resolution math: ~1/sqrt(n) for a pass rate",
        abs(sw.half_width(100) - 0.098) < 0.001 and sw.runs_for(0.2) == 93,

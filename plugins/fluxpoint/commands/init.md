@@ -319,7 +319,8 @@ step; do not stop at copying files.
    `attest.py --run <gate>` in the background and is collected with
    `attest.py --await <token>`, which attests the exit itself. If merges
    rest on CI, add a `ci` section so `prove:ci` can cite the forge's own
-   commit statuses (`attest.py --ci --sha <sha>`, GitHub via `gh`):
+   commit statuses (`attest.py --ci --pr <n>`, GitHub via `gh`; the forge
+   names the commit):
    ```json
    {"version": 1, "gates": {"harness": "scripts/harness.sh --full"},
     "ci": {"forge": "github", "contexts": ["harness"]}}

@@ -219,6 +219,18 @@ def _decision_in(artifact, did):
     return None
 
 
+def _order_key(when):
+    """decision.py's order_key: both sources as 'YYYY-MM-DD HH:MM:SS'.
+
+    A run artifact carries `recordedAt` to the second (a minute-only `when`
+    before 1.43) and a stored decision carries seconds; compared as raw
+    text, the longer string won every same-minute tie whatever happened
+    first, and 'latest' froze the older choice.
+    """
+    s = str(when or "").replace("T", " ").rstrip("Z").strip()
+    return s + ":00" if len(s) == 16 else s
+
+
 def resolve_imports(ir, contracts, runs_dir, store=None):
     """Resolve the IR's imports from recorded runs and the decision store.
 
@@ -266,7 +278,8 @@ def resolve_imports(ir, contracts, runs_dir, store=None):
             if not isinstance(art, dict):
                 f.append(f"imports: {p} is not a run artifact (not an object)")
                 continue
-            arts.append((str(art.get("when") or ""), fn[: -len(".json")], art))
+            arts.append((_order_key(art.get("recordedAt") or art.get("when")),
+                         fn[: -len(".json")], art))
     kept = []  # (when, recordId, decisionId, record)
     if store and os.path.exists(store):
         with open(store, encoding="utf-8") as fh:
@@ -280,7 +293,7 @@ def resolve_imports(ir, contracts, runs_dir, store=None):
                              f"malformed decision record cannot be skipped")
                     continue
                 if isinstance(r, dict) and isinstance(r.get("record"), dict):
-                    kept.append((str(r.get("when") or ""), str(r.get("recordId") or ""),
+                    kept.append((_order_key(r.get("when")), str(r.get("recordId") or ""),
                                  r.get("id"), r["record"], i))
     for did in sorted(imports):
         ref = imports[did]
@@ -2064,18 +2077,27 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("const PROVE = " + json.dumps(
             {n["id"]: prove_gate(n) for n in prove_nodes}, sort_keys=True))
         a("// The launch stamp is what binds a citation to THIS run: record-run.py")
-        a("// refuses a cited row minted before it, so a node cannot pass by")
-        a("// citing an earlier run's execution of the same gate. It rides out in")
-        a("// the summary; a resume reuses the stamp of the run it resumes.")
-        a("if (!A._launch || !A._launch.since)")
-        a("  throw new Error('this graph has prove: nodes but no launch stamp was passed "
-          "— launch it with /fluxpoint:graph-run, which stamps args._launch')")
+        a("// refuses a cited row minted before `since`, or by a run with another")
+        a("// nonce, so a node cannot pass by citing an execution it did not cause —")
+        a("// an earlier run's, or an overlapping one's on the same commit. It rides")
+        a("// out in the summary; a resume reuses the stamp of the run it resumes.")
+        a("if (!A._launch || !A._launch.since || !/^[A-Za-z0-9_-]{1,64}$/.test(String(A._launch.nonce || '')))")
+        a("  throw new Error('this graph has prove: nodes but no launch stamp {since, nonce} was passed "
+          "— launch it with /fluxpoint:graph-run, which stamps args._launch with attest.py --stamp')")
         a("const LAUNCH = A._launch")
+        a("// Injected ahead of each prove: node's prompt. The nonce is what makes")
+        a("// the witness's row this run's; a gate run without it is cited as STALE.")
+        a("function provePreamble(gate) {")
+        a("  return gate === 'ci'")
+        a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run the fluxpoint plugin's scripts/py.sh attest.py --ci --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
+        a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate} --nonce ${LAUNCH.nonce} in the background and collect it with attest.py --await. Return gate '${gate}', the exit, and the attestId the witness recorded (attest.py --list shows the newest).\\n\\n`")
+        a("}")
         a("function citation(id, gate, r) {")
         a("  if (!r || typeof r !== 'object') return `${id}: no result to prove`")
         a("  if (r.gate !== gate) return `${id}: claims gate '${r.gate}', declared '${gate}'`")
         a("  if (typeof r.exit !== 'number') return `${id}: no integer exit`")
         a("  if (!r.attestId) return `${id}: no attestId — an exit code nothing witnessed`")
+        a("  if (gate === 'ci' && !r.sha) return `${id}: CI verdict names no commit — the merge cannot be pinned to it`")
         a("  return null")
         a("}")
         a("")
@@ -2661,6 +2683,8 @@ def emit_node(n, ir, specification=False):
         pre = "measurePreamble() + "
     elif n.get("isolation") in (True, "worktree") or n.get("mutates"):
         pre = "basePreamble() + "
+    if prove_gate(n):
+        pre += f"provePreamble({js_str(prove_gate(n))}) + "
     if specification:
         pre += "specificationPreamble() + "
     prompt = (pre + js_template(n["prompt"], mapping)) if not is_reduce(n) else None

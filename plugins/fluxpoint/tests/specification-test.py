@@ -423,6 +423,23 @@ time.sleep(float(sys.argv[1]))
                                env=dict(os.environ, PYTHONIOENCODING='utf-8', FPL_MEMORY_INDEX='0'))
             self.assertEqual(r.returncode, want, r.stderr)
 
+    def test_spec_header_spellings_of_one_packet_agree(self):
+        self.lock()
+        self.rollout()
+        text = (self.root / 'GRAPH.rollout.md').read_text(encoding='utf-8')
+        (self.root / 'GRAPH.rollout.md').write_text(
+            text.replace('SPEC: .fluxpoint-spec.rollout.json', 'SPEC: ./.fluxpoint-spec.rollout.json'),
+            encoding='utf-8')
+        identity = json.loads((self.root / '.fluxpoint-spec.rollout-lock.json').read_text())
+        (self.root / 'result.json').write_text(json.dumps(
+            {'outcome': 'COMPLETE', 'campaign': 'c', 'specification': identity,
+             'specificationPath': '.fluxpoint-spec.rollout.json'}))
+        r = subprocess.run([sys.executable, str(PLUGIN / 'scripts/record-run.py'),
+                            '--run-id', 'dot-slash', '--graph', 'GRAPH.rollout.md', '--result', 'result.json'],
+                           cwd=self.root, capture_output=True, encoding='utf-8',
+                           env=dict(os.environ, PYTHONIOENCODING='utf-8', FPL_MEMORY_INDEX='0'))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_spec_refusal_still_records_the_irreversible_effect(self):
         self.lock()
         summary = {'outcome': 'COMPLETE', 'campaign': 'c', 'specification': {'sha256': 'stale'},

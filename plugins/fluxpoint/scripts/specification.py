@@ -240,6 +240,18 @@ def in_repo(rel, what):
     return p
 
 
+def canonical(spec):
+    """A SPEC: path as one spelling: repo-relative, '/'-separated, no './'.
+
+    `SPEC: ./specs/rollout.json` and `SPEC: specs/rollout.json` name one
+    packet; comparing their text would refuse a run recorded against the
+    packet it was compiled with.
+    """
+    if spec is None:
+        return None
+    return '/'.join(in_repo(spec, 'SPEC:').parts)
+
+
 def packet_paths(root, spec=None):
     """(packet, lock) for a packet path; the default pair when spec is None.
 
@@ -249,9 +261,9 @@ def packet_paths(root, spec=None):
     `.fluxpoint-spec.rollout.json` into `.fluxpoint-spec.rollout-lock.json`.
     """
     root = Path(root)
-    if spec is None or spec == SPEC:
+    if spec is None or canonical(spec) == SPEC:
         return root / SPEC, root / LOCK
-    rel = in_repo(spec, 'SPEC:')
+    rel = Path(canonical(spec))
     if rel.suffix != '.json':
         raise ValueError(f'SPEC: {spec!r} must name a .json packet')
     return root / rel, root / rel.with_name(rel.name[:-len('.json')] + '-lock.json')

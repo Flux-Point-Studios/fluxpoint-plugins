@@ -466,6 +466,22 @@ with tempfile.TemporaryDirectory() as runs:
            not errs_s and resolved_s.get("vault-window", {}).get("runId") == "dec_0123456789ab"
            and resolved_s["vault-window"]["record"]["chosen"] == "48h",
            str(resolved_s.get("vault-window", {}).get("runId")))
+    # Same minute, run recorded after the ruling: the run is the latest.
+    # Compared as text, 'HH:MM:SS' outranked 'HH:MM' whatever came first.
+    put("wf-late", dict(_art("wf-late", "2026-08-09 12:00", {"vault-window": NEWER}),
+                        recordedAt="2026-08-09 12:00:45"))
+    resolved_t, _ = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs, store)
+    report("latest orders a run and a ruling from the same minute by the second",
+           resolved_t.get("vault-window", {}).get("runId") == "wf-late",
+           str(resolved_t.get("vault-window", {}).get("runId")))
+    spec_d = importlib.util.spec_from_file_location(
+        "decision", os.path.join(PLUGIN, "scripts", "decision.py"))
+    dmod = importlib.util.module_from_spec(spec_d)
+    spec_d.loader.exec_module(dmod)
+    report("  and decision.py orders the two the same way",
+           dmod.order_key("2026-08-09 12:00") < dmod.order_key("2026-08-09 12:00:30")
+           < dmod.order_key("2026-08-09T12:00:45Z"), "normalized")
+    os.remove(os.path.join(runs, "wf-late.json"))
     pinned_s = copy.deepcopy(IMP)
     pinned_s["imports"] = {"vault-window": "wf-new"}
     resolved_p, _ = cg.resolve_imports(pinned_s, CONTRACTS, runs, store)
