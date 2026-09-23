@@ -150,8 +150,13 @@ _evil = "`);await import('node:fs').then(m=>m.writeFileSync('__CANARY__','x'));(
 with tempfile.TemporaryDirectory() as _runs:
     _rec = {
         "question": "a question long enough to satisfy the schema floor?",
+        # A valid DecisionV1 (two options, the floors met) carrying the
+        # payload in every free-text field: imports validate the record, so
+        # the hostile one must still be a decision to reach emission.
         "options": [{"option": _evil, "argued_by": _evil,
-                     "strongest_objection": "an objection with real length"}],
+                     "strongest_objection": "an objection with real length"},
+                    {"option": "${process.exit(2)}", "argued_by": _evil,
+                     "strongest_objection": "a second objection with real length"}],
         "chosen": _evil,
         "rationale": "a rationale long enough that a lazy output cannot "
                      "satisfy it, carrying the payload elsewhere",
