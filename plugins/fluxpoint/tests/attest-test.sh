@@ -539,6 +539,15 @@ check "  and nested quoting is never collapsed into the declared gate" "$((n + 1
 rec 'node --test --test-name-pattern="$(echo "slow test")" t.test.js' 0 >/dev/null
 check "  while its exact text is the gate" "$((n + 2))" "$(rows)"
 gates
+n="$(rows)"
+# `sh` runs a bash script under whatever sh is, a different command; only a
+# `bash ` prefix is the declared gate run another way.
+rec "sh scripts/harness.sh --full" 0 >/dev/null
+check "an sh prefix is not the declared gate" "$n" "$(rows)"
+# A quoted cd operand does not freeze the plain-word gate after it.
+rec "cd \"$ROOT/r\" &&  scripts/harness.sh   --full" 0 >/dev/null
+check "  while a quoted cd before a spaced-out gate still is" "$((n + 1))" "$(rows)"
+gates
 rec "FPL_ATTEST_NONCE=run-a scripts/harness.sh --full" 0 >/dev/null
 check "  and its row names the run" run-a "$(field nonce)"
 ATT="$(field attestId)"
@@ -719,11 +728,26 @@ PAYLOAD_CWD="$ROOT/gone" rec "cd $ROOT/r/scripts && ./harness.sh --full" 0 >/dev
 check "  nor ~+, a relative cd under CDPATH, or a vanished cwd" "$((n + 2))" "$(rows)"
 CDPATH="$ROOT/foreign" rec "cd ./scripts && ./harness.sh --full" 0 >/dev/null
 check "  while ./ is immune to CDPATH, as in bash" "$((n + 3))" "$(rows)"
+# A gate with no cd runs in the shell's directory, which must be the
+# project's: from a subdirectory `pytest -q` collects only that subtree.
+printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"}}' >"$ROOT/r/.fluxpoint-gates.json"
+PAYLOAD_CWD="$ROOT/r/scripts" rec "scripts/harness.sh --full" 0 >/dev/null
+check "a bare gate run from a project subdirectory is not the gate" "$((n + 3))" "$(rows)"
+PAYLOAD_CWD="$ROOT/r" rec "scripts/harness.sh --full" 0 >/dev/null
+check "  while from the project directory it is" "$((n + 4))" "$(rows)"
+# A declared cd outside the repository is no place of this project's: its
+# runs share no commit with the HEAD a row would bind them to.
+printf '{"version":1,"gates":{"outside":"cd %s/foreign/scripts && ./harness.sh --full"}}' "$ROOT" \
+  >"$ROOT/r/.fluxpoint-gates.json"
+rec "cd $ROOT/foreign/scripts && ./harness.sh --full" 0 >/dev/null
+check "a gate declared in another checkout is never attested to this one" "$((n + 4))" "$(rows)"
+printf '{"version":1,"gates":{"harness":"cd scripts && ./harness.sh --full"}}' \
+  >"$ROOT/r/.fluxpoint-gates.json"
 # A declared cd that climbs or is absolute is resolved from the project root.
 printf '{"version":1,"gates":{"harness":"cd scripts/.. && scripts/harness.sh --full"}}' \
   >"$ROOT/r/.fluxpoint-gates.json"
 rec "cd scripts/.. && scripts/harness.sh --full" 0 >/dev/null
-check "a gate declared with cd .. is witnessed where it resolves" "$((n + 4))" "$(rows)"
+check "a gate declared with cd .. is witnessed where it resolves" "$((n + 5))" "$(rows)"
 printf '{"version":1,"gates":{"harness":"cd scripts && ./harness.sh --full"}}' \
   >"$ROOT/r/.fluxpoint-gates.json"
 out="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --last harness --nonce run-d 2>&1)"

@@ -323,7 +323,9 @@ step; do not stop at copying files.
    when run in that directory. A leading `cd` is witnessed only when it
    names a plain path inside this repository (its checkout or a linked
    worktree) at the gate's declared place — not `cd "$VAR"`, `cd $(...)`,
-   `~+`, or a relative `cd` under `CDPATH`, which the hook does not model —
+   a `~` form other than `~` and `~/...`, or a relative `cd` under
+   `CDPATH`, which the hook does not model; a gate with no `cd` runs at the
+   project root, not a subdirectory, and only a `bash ` prefix is dropped —
    and a gate is one line of spaces and tabs. A command with quotes or
    expansions must match the declared text exactly. The witness catches
    transcribed, stale and borrowed exits; it is not a defence against an

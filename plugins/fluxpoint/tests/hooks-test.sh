@@ -181,9 +181,19 @@ if [ -f "$ws/repo/.claude/fluxpoint/attest.jsonl" ]; then
 else
   bad "exec-attest: attests in a repo BELOW a non-git project dir" "no log — resolved the workspace root"
 fi
-# ...and from a SUBDIRECTORY of that repo, since a gate is often run from one.
+# ...and from a session whose shell sits in a SUBDIRECTORY of that repo: the
+# hook still finds the repo. The gate itself must run at the project root
+# (a bare gate from the subdirectory would run only that subtree), so the
+# command cds there, as an agent in a subdirectory does.
 rm -rf "$ws/repo/.claude"; mkdir -p "$ws/repo/sub"
 ( cd "$ws/repo/sub" && ws_input "$ws/repo/sub" "scripts/harness.sh --full" 0 \
+  | CLAUDE_PROJECT_DIR="$ws" eval "$(hook_cmd PostToolUse 1)" >/dev/null 2>&1 )
+if [ -f "$ws/repo/.claude/fluxpoint/attest.jsonl" ]; then
+  bad "exec-attest: a bare gate from a subdirectory is not the project's gate" "recorded"
+else
+  ok "exec-attest: a bare gate from a subdirectory is not the project's gate" "not recorded"
+fi
+( cd "$ws/repo/sub" && ws_input "$ws/repo/sub" "cd $ws/repo && scripts/harness.sh --full" 0 \
   | CLAUDE_PROJECT_DIR="$ws" eval "$(hook_cmd PostToolUse 1)" >/dev/null 2>&1 )
 if [ -f "$ws/repo/.claude/fluxpoint/attest.jsonl" ]; then
   ok "exec-attest: attests from a subdirectory of the repo" "recorded"

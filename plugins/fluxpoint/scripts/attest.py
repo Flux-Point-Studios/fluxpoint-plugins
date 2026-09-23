@@ -154,7 +154,10 @@ def _front(cmd):
     then `FPL_ATTEST_NONCE=n cd backend && gate`, which used to keep its cd
     and match nothing. One nonce and one cd, never a chain of either.
     """
-    s = _collapse(cmd)
+    # The prefix patterns take any run of spaces and tabs between their own
+    # tokens; only the gate that follows is collapsed, so a quoted cd
+    # operand does not keep the rest of the line from its plain-word form.
+    s = str(cmd or "").strip(" \t")
     nonce = cd = ""
     m = NONCE_RE.match(s)
     if m:
@@ -166,7 +169,7 @@ def _front(cmd):
         m = NONCE_RE.match(s)
         if m:
             nonce, s = m.group(1), s[m.end():]
-    return nonce, cd, s
+    return nonce, cd, _collapse(s)
 
 
 def nonce_of(cmd):
@@ -177,7 +180,8 @@ def nonce_of(cmd):
 def normalize(cmd):
     """Canonical form of a command line, for comparison against a manifest.
 
-    Whitespace is collapsed and a leading interpreter or `./` is dropped, so
+    Whitespace between plain words is collapsed and a leading `bash ` or `./`
+    is dropped, so
     `bash scripts/harness.sh  --full` and `./scripts/harness.sh --full` are
     the same declared gate.
 
@@ -204,10 +208,12 @@ def normalize(cmd):
     # nothing about the exit the shell reports. It is read by nonce_of(),
     # never matched as part of the gate.
     s = _front(cmd)[2]
-    for prefix in ("bash ", "sh ", "zsh "):
-        if s.startswith(prefix):
-            s = s[len(prefix):].lstrip()
-            break
+    # Only `bash `: `sh scripts/check.sh` runs a bash script under whatever
+    # sh is (dash on Debian), where `[[` is "not found" and the script can
+    # exit 0 — a different command that passed as the gate. A gate declared
+    # with `sh ` or `zsh ` still matches itself exactly.
+    if s.startswith("bash "):
+        s = s[len("bash "):].lstrip()
     if s.startswith("./"):
         s = s[2:]
     return s
@@ -398,14 +404,15 @@ def _place(d):
             _dir_parts(_git(d, "rev-parse", "--show-prefix") or ""))
 
 
-def _is_place(target, expected):
-    """`target` is the declared directory, or its twin in a linked worktree."""
-    if not os.path.isdir(target):
+def _is_place(target, expected, root):
+    """`target` is the declared directory, or its twin in a linked worktree —
+    and both are in the project's own repository. An exact path match used
+    to pass before the repository was checked, so a gate declared as `cd
+    /tmp/foreign/backend && ...` was attested against this project's HEAD."""
+    pt, pe, pr = _place(target), _place(expected), _place(root)
+    if not (pt and pe and pr) or pt[0] != pr[0] or pe[0] != pr[0]:
         return False
-    if os.path.isdir(expected) and _same(target, expected):
-        return True
-    pt, pe = _place(target), _place(expected)
-    return bool(pt and pe and pt == pe)
+    return _same(target, expected) or pt == pe
 
 
 def cd_in_project(root, command, cwd=None, declared_cd=""):
@@ -417,7 +424,8 @@ def cd_in_project(root, command, cwd=None, declared_cd=""):
     must be the same directory, or its twin in a linked worktree of this
     repository: `cd /tmp/foreign/backend`, and a relative `cd backend` from
     another checkout, are not the project's gate, whatever HEAD the project
-    is at. A gate with no `cd` must at least run inside this repository.
+    is at. A gate with no `cd` runs in the shell's directory, which must be
+    the project's.
 
     A runtime may report the shell's directory after the command rather
     than before it. For a plain relative `cd` (no `..`) whose pre-command
@@ -444,20 +452,20 @@ def cd_in_project(root, command, cwd=None, declared_cd=""):
         return False
     base = cwd or root
     if not cd:
-        # No cd: bash ran in the shell's directory. It must be this
-        # repository (any directory of its checkout or a linked worktree —
-        # a gate is often run from a subdirectory); another checkout shares
-        # no commit with the project.
-        pb, pr = _place(base), _place(root)
-        return bool(pb and pr and pb[0] == pr[0])
+        # No cd: bash ran in the shell's directory, which must be the
+        # project's own (or its twin in a linked worktree). `pytest -q` from
+        # a subdirectory collects only that subtree, and another checkout
+        # shares no commit with the project; --run's tree_for() holds the
+        # wrapper to the same place.
+        return _is_place(base, root, root)
     pre = _resolve(base, cd)
-    if _is_place(pre, expected):
+    if _is_place(pre, expected, root):
         return True
     parts = _dir_parts(cd)
     tail = _dir_parts(os.path.realpath(base).replace(os.sep, "/"))
     if (not os.path.isabs(_resolve("", cd)) and ".." not in parts and parts
             and not os.path.exists(pre) and tail[len(tail) - len(parts):] == parts):
-        return _is_place(base, expected)
+        return _is_place(base, expected, root)
     return False
 
 
