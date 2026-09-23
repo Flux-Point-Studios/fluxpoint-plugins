@@ -315,7 +315,17 @@ step; do not stop at copying files.
    with a pipe, a redirect, or a trailing `|| true` reports a different exit
    and is deliberately not attested, so it shows up as UNATTESTED rather
    than being credited to the gate. Commit the manifest; it is part of the
-   trust base.
+   trust base. A gate that outlives one tool call (600 s) runs through
+   `attest.py --run <gate>` in the background and is collected with
+   `attest.py --await <token>`, which attests the exit itself. If merges
+   rest on CI, add a `ci` section so `prove:ci` can cite the forge's own
+   commit statuses (`attest.py --ci --sha <sha>`, GitHub via `gh`):
+   ```json
+   {"version": 1, "gates": {"harness": "scripts/harness.sh --full"},
+    "ci": {"forge": "github", "contexts": ["harness"]}}
+   ```
+   Without `contexts`, every context the forge reports must pass and at
+   least one must exist.
 11. Fill in the Merge policy block, asking the user once: may green + SHIP
    PRs merge autonomously in this repo, and does merging trigger a deploy?
    If auto-merge is on, verify `gh` is authenticated and record the

@@ -378,6 +378,27 @@ report clean when its own verification says its exit codes are not what
 happened. A `prove:` node citing nothing is `INCOMPLETE` instead: the
 declared verification did not run, which is not the same accusation.
 
+A citation is also bound to the run that cites it. The compiled graph
+refuses to start without the launch stamp `/fluxpoint:graph-run` passes in
+`args._launch`, and carries it into the summary; a cited row minted before
+the stamp, on a different commit than the one the tree guard read, or
+already backing another node is `STALE`, which files the run `INCOMPLETE`.
+Without that, any earlier row of the same gate and exit — another
+campaign's, weeks old — passed as this node's execution. A resume reuses the
+stamp of the run it resumes, since its replayed citations predate its own
+launch.
+
+Two witnesses cover what one tool call cannot. A gate longer than the
+600-second cap runs through `attest.py --run <gate>` (the manifest's
+command, resolved from the gate name) started in the background, and
+`attest.py --await <token>` collects it in bounded foreground slices; the
+runner mints the row itself when the command ends, including a red exit
+the hook never sees. CI's own statuses on a commit are `prove:ci`: a
+top-level `ci` section in the manifest names the forge and the contexts
+that decide, `attest.py --ci --sha <sha> [--wait]` mints a row from the
+forge's answer, and pending or unreported contexts mint nothing. Each row
+names its witness — `hook`, `wrapper` or `forge`.
+
 Nodes that merely happen to match a declared gate stay observed rather than
 enforced. Opting in is what earns the stricter reading, and a check that
 starts by failing runs is a check people switch off.
@@ -386,7 +407,9 @@ And where a repo declares gates, an `irreversible` node's mandatory earlier
 guard **must** use `prove:`. The ordering invariant — gate before effect —
 was always sound in structure and hollow in fidelity while the guard typed
 its own exit code. An effect nobody can undo may not rest on a number the
-node that ran it wrote by hand.
+node that ran it wrote by hand. `prove:ci` and a `--run`/`--await` gate
+qualify, so a merge guarded by CI's statuses or a long suite no longer has
+to park on a person for want of a gate that fits one call.
 
 ## Canonical shapes
 

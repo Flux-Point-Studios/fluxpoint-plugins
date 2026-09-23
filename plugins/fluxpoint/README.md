@@ -104,7 +104,11 @@ Evidence table both modes append to.
   hook. `verify: "prove:<gate>"` makes a node cite the attestation its run
   produced — a citation that does not exist or disagrees files the run
   `TAMPERED-EXECUTION`, and citing nothing files it `INCOMPLETE` rather
-  than accusing an executor that never touched the Bash tool.
+  than accusing an executor that never touched the Bash tool. A citation
+  older than the run's launch stamp, from another commit, or already
+  backing another node is `STALE`. A gate too long for one tool call runs
+  through `attest.py --run`/`--await`, and `prove:ci` cites CI's own
+  commit statuses.
 - The DoD gate arms on two independent signals — the PostToolUse marker
   and dirtiness re-derived from `git` — because the marker cannot see
   source written through the Bash tool. Dirtiness is measured against the

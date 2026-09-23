@@ -55,6 +55,19 @@ Workflow tool requires.
    runtime's choice, and it has been observed cut from the default branch
    rather than the campaign's, where a file an earlier node committed is
    simply absent and nothing inside says so.
+   If any node declares `verify: prove:<gate>`, stamp the launch; the
+   compiled graph refuses to start without it, and `record-run.py` files a
+   citation of any row minted before it as STALE:
+   ```
+   args._launch = {"since": "$(date -u +%FT%TZ)"}
+   ```
+   On a resume pass the stamp of the run being resumed (its recorded
+   artifact carries it as `summary.launch`), never a fresh one: the
+   replayed nodes' citations were minted after the original launch. A
+   `prove:` node whose gate outlives one tool call runs it with
+   `attest.py --run <gate>` in the background and collects it with
+   `attest.py --await <token>`; a `prove:ci` node runs
+   `attest.py --ci --sha <tip> --wait` and cites the row it prints.
    If any node has `actor: human` or `actor: third-party`:
    ```
    bash "$ROOT/scripts/py.sh" release.py --load --campaign "<the IR's campaign line>"

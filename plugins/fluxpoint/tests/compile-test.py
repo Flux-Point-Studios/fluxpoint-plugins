@@ -1026,5 +1026,82 @@ def contracts_header_case():
 contracts_header_case()
 
 
+def prove_ci_and_launch_case():
+    """CI's statuses guard an irreversible node; citations carry the launch.
+
+    The two strongest attestations a merge has — CI's own commit statuses
+    and a gate longer than one tool call — could not guard an irreversible
+    node, so the terminal merge had to be parked on a person (#96). And a
+    cited attestation was never bound to the run that cited it (#91).
+    """
+    global passed, failed
+    import subprocess
+    import tempfile
+
+    ir = {"version": 1, "campaign": "ship it", "treeGuard": False,
+          "budget": {"maxNodes": 6}, "requiredArgs": ["confirm"],
+          "nodes": [{"id": "push", "prompt": "push the tip", "contract": "HarnessCheckV1"},
+                    {"id": "ci-gate", "prompt": "cite CI's verdict on the tip",
+                     "contract": "ExecutionV1", "verify": "prove:ci",
+                     "independent": True, "verifies": "push", "haltWhen": "exit != 0"},
+                    {"id": "merge", "prompt": "merge the tip",
+                     "contract": "HarnessCheckV1", "irreversible": True}]}
+    with_ci = cg.validate(ir, CONTRACTS, gates={"harness", "ci"})
+    without = cg.validate(ir, CONTRACTS, gates={"harness"})
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, ".fluxpoint-gates.json"), "w") as fh:
+            json.dump({"version": 1, "gates": {"harness": "scripts/harness.sh"},
+                       "ci": {"forge": "github", "contexts": ["harness"]}}, fh)
+        loaded = cg.load_gates(d)
+    js = cg.emit(ir, CONTRACTS, {})
+
+    def run(args):
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "o.json")
+            w = os.path.join(d, "w.mjs")
+            with open(w, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join([
+                    "import {writeFileSync} from 'node:fs';",
+                    "const agent=async(p,o)=>{",
+                    "  if(String(o.label||'').includes('ci-gate')) return {gate:'ci', exit:0, attestId:'att_x'};",
+                    "  return {exit:0, command:'git', tail:''}};",
+                    "const parallel=async(t)=>Promise.all(t.map(f=>f()));",
+                    "const pipeline=async()=>[],log=()=>{},phase=()=>{};",
+                    f"const args={json.dumps(args)};",
+                    "const budget={total:null,spent:()=>0,remaining:()=>1e9};",
+                    "const workflow=0;",
+                    "(async () => {",
+                    js.replace("export const meta", "const meta"),
+                    "})().then(r=>writeFileSync(" + json.dumps(out) + ",JSON.stringify({r})))",
+                    ".catch(e=>writeFileSync(" + json.dumps(out)
+                    + ",JSON.stringify({err:String(e&&e.message||e)})))",
+                ]))
+            subprocess.run(["node", w], capture_output=True, timeout=90)
+            return json.load(open(out)) if os.path.exists(out) else {"err": "no output"}
+
+    stamped = run({"confirm": "merge", "_ledger": {},
+                   "_launch": {"since": "2026-09-23T00:00:00Z"}})
+    unstamped = run({"confirm": "merge", "_ledger": {}})
+    for name, ok, got in [
+        ("prove:ci resolves when the manifest declares a ci section",
+         not with_ci, with_ci),
+        ("prove:ci without a ci section is rejected, and says what to add",
+         any("prove:ci" in f and "'ci' section" in f for f in without), without),
+        ("load_gates lists ci beside the declared gates",
+         loaded == {"harness", "ci"}, loaded),
+        ("a prove: graph refuses to start without a launch stamp",
+         "launch stamp" in str(unstamped.get("err")), unstamped),
+        ("  and carries the stamp into the summary it is recorded from",
+         ((stamped.get("r") or {}).get("launch") or {}).get("since") == "2026-09-23T00:00:00Z",
+         stamped),
+    ]:
+        detail = "yes" if ok else f"got {str(got)[:150]}"
+        print(f"{'PASS' if ok else 'FAIL'}  prove-ci: {name:<58} -> {detail[:120]}")
+        passed, failed = (passed + ok, failed + (not ok))
+
+
+prove_ci_and_launch_case()
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

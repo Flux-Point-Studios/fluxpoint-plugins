@@ -371,7 +371,13 @@ def load_agents(root="."):
 
 
 def load_gates(root):
-    """Declared gate names, or None when the repo declares no manifest."""
+    """Declared gate names, or None when the repo declares no manifest.
+
+    `ci` is among them when the manifest has a `ci` section: the forge's
+    own commit statuses, which attest.py --ci mints a row for. It is the
+    one gate no node can run inside a tool call, and the least forgeable
+    evidence a merge has.
+    """
     p = os.path.join(root or ".", GATES)
     if not os.path.exists(p):
         return None
@@ -381,7 +387,12 @@ def load_gates(root):
     except (OSError, json.JSONDecodeError):
         return None
     gates = doc.get("gates") if isinstance(doc, dict) else None
-    return set(gates) if isinstance(gates, dict) else None
+    if not isinstance(gates, dict):
+        return None
+    names = set(gates)
+    if isinstance(doc.get("ci"), dict):
+        names.add("ci")
+    return names
 
 
 def prove_gate(n):
@@ -684,7 +695,9 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
             elif gate not in gates:
                 f.append(
                     f"{where}: verify prove:{gate} names no gate in {GATES} "
-                    f"(declared: {', '.join(sorted(gates)) or 'none'})")
+                    f"(declared: {', '.join(sorted(gates)) or 'none'})"
+                    + (" — prove:ci needs a top-level 'ci' section naming the "
+                       "forge and the contexts that decide" if gate == "ci" else ""))
             if c != "ExecutionV1":
                 f.append(
                     f"{where}: verify prove:{gate} requires contract ExecutionV1 "
@@ -1221,7 +1234,9 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                     f"own exit code. This repo declares gates in {GATES}, so the "
                     f"guard must use verify prove:<gate> and contract "
                     f"ExecutionV1 — an effect nobody can undo may not rest on a "
-                    f"number the node that ran it typed by hand"
+                    f"number the node that ran it typed by hand. A gate longer "
+                    f"than one tool call runs through attest.py --run and "
+                    f"--await; CI's own statuses are prove:ci"
                 )
             if "confirm" not in (ir.get("requiredArgs") or []):
                 f.append(
@@ -1995,6 +2010,14 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("// gate so record-run.py can hold each to the hook's own record.")
         a("const PROVE = " + json.dumps(
             {n["id"]: prove_gate(n) for n in prove_nodes}, sort_keys=True))
+        a("// The launch stamp is what binds a citation to THIS run: record-run.py")
+        a("// refuses a cited row minted before it, so a node cannot pass by")
+        a("// citing an earlier run's execution of the same gate. It rides out in")
+        a("// the summary; a resume reuses the stamp of the run it resumes.")
+        a("if (!A._launch || !A._launch.since)")
+        a("  throw new Error('this graph has prove: nodes but no launch stamp was passed "
+          "— launch it with /fluxpoint:graph-run, which stamps args._launch')")
+        a("const LAUNCH = A._launch")
         a("function citation(id, gate, r) {")
         a("  if (!r || typeof r !== 'object') return `${id}: no result to prove`")
         a("  if (r.gate !== gate) return `${id}: claims gate '${r.gate}', declared '${gate}'`")
@@ -2145,7 +2168,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     if mem_nodes:
         extra += ", memory: MEMORY, memorySeeded: MEMORY_SEEDED"
     if prove_nodes:
-        extra += ", prove: PROVE"
+        extra += ", prove: PROVE, launch: LAUNCH"
     if tree_guard:
         extra += ", tree: TREE"
     reducers = [n["id"] for n in nodes if is_reduce(n)]

@@ -312,6 +312,9 @@ print(json.dumps({
                          "attestId": sys.argv[2]}},
     "contracts": {"gate": "ExecutionV1"},
     "prove": {"gate": "harness"},
+    # The compiled graph stamps its launch; a citation older than it is
+    # an execution from another run (#91).
+    "launch": {"since": "2000-01-01T00:00:00Z"},
     "provenance": [{"node": "gate", "status": "OK", "detail": ""}],
 }))
 PYEOF
@@ -446,6 +449,144 @@ reccodex "scripts/harness.sh --full" "" >/dev/null 2>&1
 check "codex: a header with no exit line attests nothing" "$n" "$(rows)"
 reccodex "scripts/harness.sh --full" "" $'Process exited with code 0' >/dev/null 2>&1
 check "codex: output cannot mint its own exit" "$n" "$(rows)"
+
+# ================= 10. a citation is bound to the run (#91) ==============
+# Every check above compares the citation to its row. None compared the row
+# to the run: any earlier attestation of the same gate with the same exit —
+# another campaign's, weeks old — filed a node that never ran the gate as
+# ATTESTED. The run's launch stamp, the commit its tree guard read, and one
+# node per execution now bind it.
+bound() { # $1 = python dict literal overriding summary fields
+  "$FPL_PY" - "$1" <<'PYEOF'
+import ast, json, os, sys
+s = {"campaign": "c", "outcome": "COMPLETE",
+     "results": {"gate": {"gate": "harness", "exit": 0, "attestId": "ATT"}},
+     "contracts": {"gate": "ExecutionV1"}, "prove": {"gate": "harness"},
+     "launch": {"since": "2000-01-01T00:00:00Z"},
+     "provenance": [{"node": "gate", "status": "OK", "detail": ""}]}
+s.update(ast.literal_eval(sys.argv[1]))
+# The cited id arrives through the environment, so a literal placeholder
+# can stand in for it anywhere in the override.
+print(json.dumps(s).replace('"ATT"', json.dumps(os.environ.get("ATT", ""))))
+PYEOF
+}
+runbound() { ATT="$ATT" bound "$1" | "$FPL_PY" "$RECORD" --run-id "$2" --graph WORK.md \
+  --root "$ROOT/r" --state-dir "$ROOT/r/.claude/fluxpoint/runs" 2>&1; }
+
+newrepo; gates
+rec "scripts/harness.sh --full" 0 >/dev/null
+ATT="$(field attestId)"
+HEAD_SHA="$(git -C "$ROOT/r" rev-parse HEAD)"
+out="$(runbound "{'launch': {'since': '2999-01-01T00:00:00Z'}}" wf-f1)"
+case "$out" in *"[STALE]"*"before this run launched"*)
+  ok "a citation minted before the launch is STALE" "stale" ;;
+  *) bad "a citation minted before the launch is STALE" "${out:0:70}" ;; esac
+case "$out" in *"| INCOMPLETE |"*)
+  ok "  and the run is INCOMPLETE, never ATTESTED-clean" "INCOMPLETE" ;;
+  *) bad "  and the run is INCOMPLETE, never ATTESTED-clean" "${out:0:70}" ;; esac
+out="$(runbound "{'launch': None}" wf-f2)"
+case "$out" in *"[STALE]"*"launch stamp"*)
+  ok "a run carrying no launch stamp binds nothing" "stale" ;;
+  *) bad "a run carrying no launch stamp binds nothing" "${out:0:70}" ;; esac
+out="$(runbound "{'tree': {'baseline': {'head': '0000000000000000000000000000000000000000'}}}" wf-f3)"
+case "$out" in *"[STALE]"*"commit"*)
+  ok "a citation from another commit than the campaign's is STALE" "stale" ;;
+  *) bad "a citation from another commit than the campaign's is STALE" "${out:0:70}" ;; esac
+out="$(runbound "{'tree': {'baseline': {'head': '$HEAD_SHA'}}}" wf-f4)"
+case "$out" in *"[ATTESTED]"*"| COMPLETE |"*)
+  ok "the same commit and a fresh row stay ATTESTED" "attested" ;;
+  *) bad "the same commit and a fresh row stay ATTESTED" "${out:0:70}" ;; esac
+out="$(runbound "{'results': {'gate': {'gate': 'harness', 'exit': 0, 'attestId': 'ATT'}, 'gate2': {'gate': 'harness', 'exit': 0, 'attestId': 'ATT'}}, 'contracts': {'gate': 'ExecutionV1', 'gate2': 'ExecutionV1'}, 'prove': {'gate': 'harness', 'gate2': 'harness'}}" wf-f5)"
+case "$out" in *"[ATTESTED]"*"[STALE]"*"already backs"*)
+  ok "one execution cannot verify two nodes" "second is stale" ;;
+  *) bad "one execution cannot verify two nodes" "${out:0:90}" ;; esac
+
+# ================= 11. a long gate, run in the background (#96) ==========
+# The hook cannot see a backgrounded launch finish, and one foreground call
+# is capped at 600 s. attest.py --run executes the DECLARED command itself
+# (the agent names a gate, never a command) and mints the row when it ends;
+# --await blocks in bounded foreground slices until it does.
+newrepo
+printf '#!/usr/bin/env bash\nsleep 1\nexit "${GATE_EXIT:-0}"\n' >scripts/harness.sh
+gates
+tok="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --run harness --detach 2>&1 | sed -n 's/.* as \(bg_[0-9a-f]*\).*/\1/p' | head -1)"
+[ -n "$tok" ] && ok "--run starts a declared gate and names its token" "$tok" \
+  || bad "--run starts a declared gate and names its token" "no token"
+out="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --await "$tok" --timeout 30 2>&1)"; rc=$?
+check "--await returns once the gate has finished" 0 "$rc"
+check "  and the row is the gate's, witnessed by the runner" wrapper "$(field witness)"
+check "  with the gate's own exit" 0 "$(field exit)"
+[ -n "$(field started)" ] && ok "  and the moment it started" "$(field started)" \
+  || bad "  and the moment it started" "missing"
+BGATT="$(field attestId)"
+case "$out" in *"$BGATT"*) ok "  and --await prints the attestId to cite" "$BGATT" ;;
+  *) bad "  and --await prints the attestId to cite" "${out:0:60}" ;; esac
+out="$(ATT="$BGATT" runbound "{'tree': {'baseline': {'head': '$(git -C "$ROOT/r" rev-parse HEAD)'}}}" wf-bg1)"
+case "$out" in *"[ATTESTED]"*) ok "a prove: node citing a runner row is ATTESTED" "attested" ;;
+  *) bad "a prove: node citing a runner row is ATTESTED" "${out:0:70}" ;; esac
+# The hook never sees a failing Bash call, so a red gate was never
+# attested. The runner sees every exit.
+GATE_EXIT=3 "$FPL_PY" "$ATTEST" --root "$ROOT/r" --run harness >/dev/null 2>&1; rc=$?
+check "a red gate run through the runner exits red" 3 "$rc"
+check "  and IS attested, unlike a failing hook call" 3 "$(field exit)"
+tok="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --run harness --detach 2>&1 | sed -n 's/.* as \(bg_[0-9a-f]*\).*/\1/p' | head -1)"
+"$FPL_PY" "$ATTEST" --root "$ROOT/r" --await "$tok" --timeout 0 >/dev/null 2>&1; rc=$?
+check "--await on a gate still running says so (exit 3)" 3 "$rc"
+"$FPL_PY" "$ATTEST" --root "$ROOT/r" --await "$tok" --timeout 30 >/dev/null 2>&1
+mkdir -p "$ROOT/r/.claude/fluxpoint/attest-bg"
+printf '{"token":"bg_dead00000000","gate":"harness","status":"RUNNING","pid":999999,"started":"2026-01-01T00:00:00Z"}' \
+  >"$ROOT/r/.claude/fluxpoint/attest-bg/bg_dead00000000.json"
+out="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --await bg_dead00000000 --timeout 5 2>&1)"; rc=$?
+check "a runner that died attests nothing (exit 4)" 4 "$rc"
+"$FPL_PY" "$ATTEST" --root "$ROOT/r" --run 'rm -rf .' >/dev/null 2>&1; rc=$?
+check "--run names a gate, never a command" 2 "$rc"
+
+# ================= 12. CI's own statuses as a gate (#96) =================
+# The least forgeable evidence a merge rests on is produced outside the
+# agent entirely. attest.py --ci asks the forge for the statuses on a sha
+# and mints a row the way the hook does for a local gate; prove:ci cites it.
+newrepo
+mkdir -p "$ROOT/bin"
+cat >"$ROOT/bin/gh" <<'SH'
+#!/usr/bin/env bash
+# A stand-in forge: the state of every context comes from FAKE_CI.
+case "$*" in
+  *"/status"*) printf '{"state":"%s","statuses":[{"context":"harness","state":"%s"}]}' \
+                 "${FAKE_CI:-success}" "${FAKE_CI:-success}" ;;
+  *"/check-runs"*) printf '{"total_count":1,"check_runs":[{"name":"lint","status":"completed","conclusion":"success"}]}' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$ROOT/bin/gh"
+printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"},"ci":{"forge":"github","contexts":["harness","lint"]}}' \
+  >"$ROOT/r/.fluxpoint-gates.json"
+PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+check "--ci over green statuses exits 0" 0 "$rc"
+check "  and mints a ci row" ci "$(field gate)"
+check "  witnessed by the forge" forge "$(field witness)"
+check "  for the sha it was asked about" abc1234 "$(field headSha)"
+CIATT="$(field attestId)"
+out="$(ATT="$CIATT" bound "{'results': {'merge-gate': {'gate': 'ci', 'exit': 0, 'attestId': 'ATT'}}, 'contracts': {'merge-gate': 'ExecutionV1'}, 'prove': {'merge-gate': 'ci'}, 'tree': {'baseline': {'head': '$(git -C "$ROOT/r" rev-parse HEAD)'}}}" \
+  | "$FPL_PY" "$RECORD" --run-id wf-ci1 --graph WORK.md --root "$ROOT/r" \
+    --state-dir "$ROOT/r/.claude/fluxpoint/runs" 2>&1)"
+case "$out" in *"[ATTESTED]"*"| COMPLETE |"*)
+  ok "a prove:ci node citing the forge row is ATTESTED" "attested" ;;
+  *) bad "a prove:ci node citing the forge row is ATTESTED" "${out:0:70}" ;; esac
+FAKE_CI=failure PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+check "a failing context is a red ci row" 1 "$rc"
+check "  recorded, not smoothed" 1 "$(field exit)"
+n="$(rows)"
+FAKE_CI=pending PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+check "pending statuses are not a verdict (exit 3)" 3 "$rc"
+check "  and mint no row" "$n" "$(rows)"
+printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"},"ci":{"forge":"github","contexts":["harness","deploy-preview"]}}' \
+  >"$ROOT/r/.fluxpoint-gates.json"
+PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+check "a required context the forge never reported is not green" 3 "$rc"
+printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"},"ci":{"forge":"gitlab"}}' \
+  >"$ROOT/r/.fluxpoint-gates.json"
+"$FPL_PY" "$ATTEST" --root "$ROOT/r" --list >/dev/null 2>&1; rc=$?
+check "an unsupported forge is a manifest finding" 1 "$rc"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

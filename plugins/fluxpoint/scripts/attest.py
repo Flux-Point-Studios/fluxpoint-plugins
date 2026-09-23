@@ -16,6 +16,18 @@ agent never touches the number.
   attest.py --record          append a row from a hook payload on stdin
   attest.py --list            what has been attested, for humans
   attest.py --verify          cross-check a run summary on stdin against the log
+  attest.py --run GATE        run a declared gate and attest its exit itself
+  attest.py --await TOKEN     wait, in bounded slices, for a --run to finish
+  attest.py --ci --sha SHA    attest the forge's own commit statuses for SHA
+
+Three witnesses mint rows, and each row names its own: `hook` (the Bash
+PostToolUse payload), `wrapper` (--run, which executes the command the
+manifest declares for a gate name — the agent names a gate, never a
+command — so a gate longer than one tool call can be started in the
+background and awaited under the 600 s cap, and a red exit the hook never
+sees is recorded too), and `forge` (--ci, which asks the forge for the
+statuses on a commit, the least forgeable evidence a merge rests on,
+because the agent produces none of it).
 
 Dormant by design: a repo with no `.fluxpoint-gates.json` attests nothing
 and says nothing, exactly like the DoD gate in a repo with no harness.
@@ -46,11 +58,18 @@ import json
 import os
 import re
 import sys
+import time
 
 GATES = ".fluxpoint-gates.json"
 ATTEST = os.path.join(".claude", "fluxpoint", "attest.jsonl")
-GATE_MANIFEST_FIELDS = {"version", "gates"}
+BACKGROUND = os.path.join(".claude", "fluxpoint", "attest-bg")
+GATE_MANIFEST_FIELDS = {"version", "gates", "ci"}
+CI_FIELDS = {"forge", "contexts"}
+CI_FORGES = {"github"}
 IDENT = re.compile(r"^[a-z][a-z0-9-]*$")
+# One foreground tool call is killed at 600 s; --await returns before that
+# with a verdict or a "still running", never mid-kill.
+AWAIT_DEFAULT = 540
 
 
 def path_for(root):
@@ -170,6 +189,7 @@ def load_gates(root):
          for k in sorted(set(doc) - GATE_MANIFEST_FIELDS)]
     if doc.get("version") != 1:
         f.append(f"{GATES}: version must be 1")
+    f += _ci_problems(doc)
     gates = doc.get("gates")
     if not isinstance(gates, dict) or not gates:
         f.append(f"{GATES}: 'gates' must be a non-empty object of name -> command")
@@ -179,11 +199,52 @@ def load_gates(root):
         if not IDENT.match(str(name)):
             f.append(f"{GATES}: gate name '{name}' must be lowercase kebab-case")
             continue
+        if name == "ci":
+            f.append(f"{GATES}: gate name 'ci' is reserved for the forge's commit "
+                     f"statuses — declare them under a top-level 'ci' section")
+            continue
         if not isinstance(cmd, str) or not cmd.strip():
             f.append(f"{GATES}.{name}: command must be a non-empty string")
             continue
         out[name] = normalize(cmd)
     return ({} if f else out), f
+
+
+def _ci_problems(doc):
+    """Findings for the optional `ci` section: which forge, which contexts."""
+    ci = doc.get("ci")
+    if ci is None:
+        return []
+    if not isinstance(ci, dict):
+        return [f"{GATES}: 'ci' must be an object"]
+    f = [f"{GATES}: ci: unknown field '{k}'" for k in sorted(set(ci) - CI_FIELDS)]
+    if ci.get("forge") not in CI_FORGES:
+        f.append(f"{GATES}: ci.forge must be one of {', '.join(sorted(CI_FORGES))} — "
+                 f"a forge this script cannot query would attest nothing while "
+                 f"looking configured")
+    ctx = ci.get("contexts")
+    if ctx is not None and (not isinstance(ctx, list) or not ctx or not all(
+            isinstance(c, str) and c.strip() for c in ctx)):
+        f.append(f"{GATES}: ci.contexts must be a non-empty list of status or "
+                 f"check names, or absent (every reported context must pass)")
+    return f
+
+
+def load_ci(root):
+    """The manifest's `ci` section, or None. Findings are load_gates' job."""
+    try:
+        with open(gates_path(root), encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    ci = doc.get("ci") if isinstance(doc, dict) else None
+    return ci if isinstance(ci, dict) and not _ci_problems(doc) else None
+
+
+def declared_command(root, gate):
+    """The command a gate name declares, exactly as the manifest writes it."""
+    with open(gates_path(root), encoding="utf-8") as fh:
+        return (json.load(fh).get("gates") or {}).get(gate)
 
 
 def gate_for(gates, command):
@@ -228,6 +289,17 @@ def head_sha(root):
         return r.stdout.strip() if r.returncode == 0 else ""
     except Exception:  # noqa: BLE001 - provenance detail, never worth failing over
         return ""
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def append_row(root, row):
+    p = path_for(root)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(row) + "\n")
 
 
 def record(root, payload):
@@ -285,12 +357,268 @@ def record(root, payload):
         # Subagent Bash calls fire this hook too, and a gate run inside a
         # graph node is exactly the execution record/run needs to bind.
         "agent": str(payload.get("agent_type") or payload.get("agent_id") or ""),
+        "witness": "hook",
     }
-    p = path_for(root)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(row) + "\n")
+    append_row(root, row)
     return row, []
+
+
+# ------------------------------------------------------------ long gates
+def _bg_dir(root):
+    return os.path.join(root, BACKGROUND)
+
+
+def _bg_read(root, token):
+    try:
+        with open(os.path.join(_bg_dir(root), f"{token}.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _bg_write(root, rec):
+    d = _bg_dir(root)
+    os.makedirs(d, exist_ok=True)
+    tmp = os.path.join(d, f".{rec['token']}.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(rec, fh)
+    os.replace(tmp, os.path.join(d, f"{rec['token']}.json"))
+
+
+def run_gate(root, gate, detach=False, token=None):
+    """Run a declared gate and attest its exit. Returns the gate's exit code.
+
+    The command is the manifest's, resolved from the gate NAME, so nothing
+    the caller types can widen what gets attested. The row is minted when
+    the command ends, which is the point: a gate launched in the background
+    finishes long after its Bash call returned, and the hook never sees
+    that. `detach` re-launches this runner as its own background process
+    and returns at once — for a caller with no background facility of its
+    own; under Claude Code, `run_in_background` on a plain --run does the
+    same. Either way the token is printed first, and --await is how the
+    verdict is collected.
+    """
+    gates, findings = load_gates(root)
+    for f in findings:
+        print(f"attest: {f}", file=sys.stderr)
+    if findings:
+        return 2
+    if gate not in gates:
+        print(f"attest: '{gate}' names no gate in {GATES} (declared: "
+              f"{', '.join(sorted(gates)) or 'none'}) — --run takes a gate name, "
+              f"never a command", file=sys.stderr)
+        return 2
+    started = now()
+    token = token or "bg_" + sha(f"{gate}|{started}|{os.getpid()}|{time.monotonic_ns()}")[:12]
+    if detach:
+        import subprocess
+        # The record exists before the child does, so an --await issued the
+        # moment this returns finds it. No pid yet: the child writes its own
+        # when it starts, and never after this line could overwrite a DONE.
+        _bg_write(root, {"token": token, "gate": gate, "status": "RUNNING",
+                         "pid": None, "started": started})
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--root", root, "--run", gate,
+             "--token", token], cwd=root, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=(os.name != "nt"))
+        print(f"attest: started {gate} as {token} — collect it with "
+              f"attest.py --await {token}", flush=True)
+        return 0
+    return _execute(root, gate, started, token)
+
+
+def _execute(root, gate, started, token):
+    import subprocess
+    raw = declared_command(root, gate)
+    norm = normalize(raw)
+    head = head_sha(root)
+    log = os.path.join(_bg_dir(root), f"{token}.log")
+    _bg_write(root, {"token": token, "gate": gate, "status": "RUNNING",
+                     "pid": os.getpid(), "started": started, "headSha": head,
+                     "log": log})
+    print(f"attest: running {gate} as {token} — collect it with "
+          f"attest.py --await {token}", flush=True)
+    with open(log, "wb") as out:
+        code = subprocess.call(["bash", "-c", raw], cwd=root, stdin=subprocess.DEVNULL,
+                               stdout=out, stderr=subprocess.STDOUT)
+    with open(log, "rb") as fh:
+        text = fh.read().decode("utf-8", "replace")
+    row = {
+        "attestId": "att_" + sha(f"{started}|{norm}|{code}|{token}")[:12],
+        "gate": gate, "command": norm, "commandSha": sha(norm), "exit": code,
+        "logSha256": sha(f"{text}\n---\n"), "headSha": head,
+        "started": started, "when": now(), "sessionId": "", "agent": "",
+        "witness": "wrapper", "token": token,
+    }
+    append_row(root, row)
+    _bg_write(root, {"token": token, "gate": gate, "status": "DONE", "exit": code,
+                     "attestId": row["attestId"], "started": started,
+                     "finished": row["when"], "headSha": head, "log": log})
+    print(f"attest: {gate} exit {code} -> {row['attestId']}", flush=True)
+    return code
+
+
+def _alive(pid, started=""):
+    if pid is None:
+        # Launched, not yet started: alive for as long as a start can take.
+        try:
+            t = datetime.datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=datetime.timezone.utc)
+        except (TypeError, ValueError):
+            return False
+        return (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() < 60
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":
+        return True  # no cheap probe; the timeout bounds the wait instead
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def await_gate(root, ref, timeout):
+    """Wait for a --run to finish. 0 done, 3 still running, 4 died, 2 unknown.
+
+    Exit 0 means the verdict is known, not that the gate passed: the gate's
+    own exit is printed with the attestId to cite. A caller loops on 3 with
+    fresh foreground calls, each under the tool's cap.
+    """
+    rec = _bg_read(root, ref)
+    if rec is None and IDENT.match(ref or ""):
+        # A gate name: the newest run of it.
+        d = _bg_dir(root)
+        cands = []
+        for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            if fn.endswith(".json"):
+                r = _bg_read(root, fn[:-5])
+                if r and r.get("gate") == ref:
+                    cands.append(r)
+        rec = max(cands, key=lambda r: str(r.get("started"))) if cands else None
+    if rec is None:
+        print(f"attest: no background run '{ref}' — start one with --run <gate>",
+              file=sys.stderr)
+        return 2
+    deadline = time.monotonic() + max(0, timeout)
+    while True:
+        rec = _bg_read(root, rec["token"]) or rec
+        if rec.get("status") == "DONE":
+            print(f"attest: {rec['gate']} exit {rec['exit']} -> {rec['attestId']}")
+            return 0
+        if not _alive(rec.get("pid"), rec.get("started")):
+            print(f"attest: the runner for {rec['token']} ({rec.get('gate')}) is gone "
+                  f"and left no verdict — nothing was attested; run the gate again",
+                  file=sys.stderr)
+            return 4
+        if time.monotonic() >= deadline:
+            print(f"attest: {rec.get('gate')} ({rec['token']}) still running since "
+                  f"{rec.get('started')} — call --await again")
+            return 3
+        time.sleep(min(2.0, max(0.05, deadline - time.monotonic())))
+
+
+# ------------------------------------------------------------ the forge
+def _gh_json(path):
+    import subprocess
+    r = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or f"gh api {path} exited {r.returncode}")
+    return json.loads(r.stdout or "{}")
+
+
+def forge_contexts(sha_):
+    """{context: 'success'|'failure'|'pending'} for a commit, from GitHub.
+
+    Commit statuses and check runs are both CI's word on a commit, and a
+    repo may use either, so both are read. A context reported by both is
+    the worse of the two.
+    """
+    rank = {"success": 0, "pending": 1, "failure": 2}
+    out = {}
+
+    def put(name, state):
+        if name not in out or rank[state] > rank[out[name]]:
+            out[name] = state
+    status = _gh_json(f"repos/{{owner}}/{{repo}}/commits/{sha_}/status")
+    for st in status.get("statuses") or []:
+        s_ = st.get("state")
+        put(str(st.get("context")), "success" if s_ == "success"
+            else "pending" if s_ == "pending" else "failure")
+    runs = _gh_json(f"repos/{{owner}}/{{repo}}/commits/{sha_}/check-runs")
+    for cr in runs.get("check_runs") or []:
+        if cr.get("status") != "completed":
+            put(str(cr.get("name")), "pending")
+        elif cr.get("conclusion") in ("success", "neutral", "skipped"):
+            put(str(cr.get("name")), "success")
+        else:
+            put(str(cr.get("name")), "failure")
+    return out
+
+
+def ci_verdict(contexts, required):
+    """0 green, 1 red, None undecided. Missing required contexts are pending."""
+    want = required or sorted(contexts)
+    if not want:
+        return None
+    states = [contexts.get(c, "pending") for c in want]
+    if "failure" in states:
+        return 1
+    if "pending" in states:
+        return None
+    return 0
+
+
+def attest_ci(root, sha_, wait=False, timeout=AWAIT_DEFAULT):
+    """Mint a `forge` row for a commit's CI verdict. 0/1 minted, 3 undecided."""
+    gates, findings = load_gates(root)
+    for f in findings:
+        print(f"attest: {f}", file=sys.stderr)
+    if findings:
+        return 2
+    ci = load_ci(root)
+    if not ci:
+        print(f"attest: {GATES} declares no 'ci' section — nothing says which "
+              f"forge or which contexts decide a merge", file=sys.stderr)
+        return 2
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha_ or ""):
+        print("attest: --sha must be a commit sha", file=sys.stderr)
+        return 2
+    required = ci.get("contexts")
+    deadline = time.monotonic() + max(0, timeout)
+    while True:
+        try:
+            contexts = forge_contexts(sha_)
+        except (OSError, RuntimeError, ValueError) as e:
+            print(f"attest: could not read the forge's statuses for {sha_}: {e} — "
+                  f"nothing attested", file=sys.stderr)
+            return 3
+        code = ci_verdict(contexts, required)
+        if code is not None:
+            break
+        if not wait or time.monotonic() >= deadline:
+            missing = [c for c in (required or []) if c not in contexts]
+            pend = sorted(c for c, st in contexts.items() if st == "pending")
+            print(f"attest: CI on {sha_} has no verdict yet"
+                  + (f"; pending: {', '.join(pend)}" if pend else "")
+                  + (f"; not reported: {', '.join(missing)}" if missing else "")
+                  + " — nothing attested", file=sys.stderr)
+            return 3
+        time.sleep(15)
+    when = now()
+    canon = json.dumps(contexts, sort_keys=True)
+    row = {
+        "attestId": "att_" + sha(f"{when}|ci|{sha_}|{code}|{canon}")[:12],
+        "gate": "ci", "command": f"ci:{sha_}", "commandSha": sha(f"ci:{sha_}"),
+        "exit": code, "logSha256": sha(canon), "headSha": sha_, "when": when,
+        "sessionId": "", "agent": "", "witness": "forge", "contexts": contexts,
+    }
+    append_row(root, row)
+    print(f"attest: ci on {sha_} exit {code} -> {row['attestId']}")
+    return code
 
 
 def _each(value):
@@ -302,13 +630,28 @@ def _each(value):
         yield value
 
 
-def _check_cited(rows, node, gate, r):
+def _same_commit(a, b):
+    a, b = str(a or "").strip(), str(b or "").strip()
+    return len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a))
+
+
+def _check_cited(rows, node, gate, r, launch=None, head=None, used=None):
     """Hold a `prove:` node to the attestation it cited.
 
     The node names an attestId; the hook wrote that row when the command
     actually ran. Every way the two can disagree is a different thing to
     say, and collapsing them would either accuse an honest executor of
     tampering or let a real one through.
+
+    A row that matches is still only evidence about THIS run if the run is
+    what minted it. Comparing the citation to its row alone let a node that
+    never executed its gate cite any earlier row of the same gate and exit —
+    another campaign's, weeks old — and be filed ATTESTED. So a matching row
+    is also held to the run: minted no earlier than the launch stamp the
+    compiled graph carries, about the commit the campaign's tree guard read
+    (a forge row is about the commit it names instead), and backing one node
+    only. Failing any of those is STALE: the declared verification did not
+    happen in this run, which is not the same sentence as a contradiction.
     """
     claimed = r.get("exit")
     cited = r.get("attestId")
@@ -335,8 +678,35 @@ def _check_cited(rows, node, gate, r):
         return {**base, "status": "MISMATCH",
                 "detail": (f"cites {cited} but quotes a different log than the "
                            f"one recorded for it")}
+    since = launch.get("since") if isinstance(launch, dict) else None
+    if not since:
+        return {**base, "status": "STALE",
+                "detail": (f"cites {cited}, but the run carries no launch stamp "
+                           f"(args._launch) — nothing binds the citation to this "
+                           f"run, so any earlier row of '{gate}' would pass")}
+    minted = str(row.get("started") or row.get("when") or "")
+    if minted < str(since):
+        return {**base, "status": "STALE",
+                "detail": (f"cites {cited}, minted {minted or 'at an unknown time'}, "
+                           f"before this run launched ({since}) — an execution from "
+                           f"another run, not this node's")}
+    if (head and row.get("witness") != "forge" and row.get("headSha")
+            and not _same_commit(row["headSha"], head)):
+        return {**base, "status": "STALE",
+                "detail": (f"cites {cited}, which ran on commit "
+                           f"{str(row['headSha'])[:12]}, but this campaign ran on "
+                           f"{str(head)[:12]}")}
+    if used is not None:
+        if cited in used:
+            return {**base, "status": "STALE",
+                    "detail": (f"cites {cited}, which already backs node "
+                               f"'{used[cited]}' — one execution cannot verify two "
+                               f"nodes")}
+        used[cited] = node
     return {**base, "status": "ATTESTED",
-            "detail": f"exit {claimed} attested {cited}"}
+            "detail": f"exit {claimed} attested {cited}"
+                      + (f" ({row.get('witness')})" if row.get("witness") not in (None, "hook")
+                         else "")}
 
 
 def verify_claims(root, summary):
@@ -355,6 +725,11 @@ def verify_claims(root, summary):
     # Which nodes declared `verify: prove:<gate>`. Those opted into being
     # held to the hook's record; everything else is still only observed.
     proved = (summary or {}).get("prove") or {}
+    # What binds a citation to this run: the launch stamp and the commit
+    # the tree guard's first reading saw.
+    launch = (summary or {}).get("launch")
+    head = (((summary or {}).get("tree") or {}).get("baseline") or {}).get("head")
+    used = {}
     checks = []
     for node, value in results.items():
         for r in _each(value):
@@ -366,7 +741,7 @@ def verify_claims(root, summary):
                 # An ExecutionV1 cites its attestation directly, so the check
                 # is against the id rather than a command string it never
                 # carries.
-                checks.append(_check_cited(rows, node, declared, r))
+                checks.append(_check_cited(rows, node, declared, r, launch, head, used))
                 continue
             if "exit" not in r or "command" not in r:
                 continue
@@ -403,11 +778,29 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=".")
+    ap.add_argument("--detach", action="store_true",
+                    help="with --run: start the gate as its own background process")
+    ap.add_argument("--token", help=argparse.SUPPRESS)
+    ap.add_argument("--timeout", type=int, default=AWAIT_DEFAULT,
+                    help="seconds --await (or --ci --wait) blocks before answering")
+    ap.add_argument("--sha", help="with --ci: the commit whose statuses decide")
+    ap.add_argument("--wait", action="store_true",
+                    help="with --ci: poll until every context has a verdict")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--record", action="store_true")
     g.add_argument("--list", action="store_true")
     g.add_argument("--verify", action="store_true")
+    g.add_argument("--run", metavar="GATE")
+    g.add_argument("--await", dest="await_", metavar="TOKEN")
+    g.add_argument("--ci", action="store_true")
     a = ap.parse_args()
+
+    if a.run:
+        return run_gate(a.root, a.run, a.detach, a.token)
+    if a.await_:
+        return await_gate(a.root, a.await_, a.timeout)
+    if a.ci:
+        return attest_ci(a.root, a.sha, a.wait, a.timeout)
 
     if a.list:
         gates, findings = load_gates(a.root)
@@ -425,6 +818,14 @@ def main():
             last = f"last {mine[-1]['when']} exit {mine[-1]['exit']}" if mine else "never run"
             print(f"  {name:<16} {cmd}")
             print(f"  {'':<16} {len(mine)} run(s), {last}")
+        ci = load_ci(a.root)
+        if ci:
+            mine = [r for r in rows if r.get("gate") == "ci"]
+            last = (f"last {mine[-1]['when']} exit {mine[-1]['exit']} on "
+                    f"{str(mine[-1].get('headSha'))[:12]}") if mine else "never queried"
+            print(f"  {'ci':<16} {ci['forge']} statuses: "
+                  f"{', '.join(ci.get('contexts') or ['every reported context'])}")
+            print(f"  {'':<16} {len(mine)} verdict(s), {last}")
         return 0
 
     raw = sys.stdin.read()
@@ -455,7 +856,7 @@ def main():
     bad = 0
     for c in checks:
         print(f"  [{c['status']}] {c['node']}: {c['detail']}")
-        bad += c["status"] == "MISMATCH"
+        bad += c["status"] in ("MISMATCH", "STALE")
     return 1 if bad else 0
 
 

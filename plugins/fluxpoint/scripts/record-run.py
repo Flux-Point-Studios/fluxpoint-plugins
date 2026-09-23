@@ -310,7 +310,7 @@ def main():
             print(f"record-run: {f}", file=sys.stderr)
         if checks:
             tally = {"checked": len(checks)}
-            for st in ("ATTESTED", "UNATTESTED", "MISMATCH"):
+            for st in ("ATTESTED", "UNATTESTED", "MISMATCH", "STALE"):
                 n = sum(1 for c in checks if c["status"] == st)
                 if n:
                     tally[st.lower()] = n
@@ -342,6 +342,20 @@ def main():
                         if c["status"] == "MISMATCH" and c.get("declared")]
             unproven = [c for c in checks
                         if c["status"] == "UNATTESTED" and c.get("declared")]
+            # A citation that matches its row but not this run — minted
+            # before the launch, on another commit, or already backing a
+            # node — means the declared verification did not happen here.
+            # Filed INCOMPLETE rather than TAMPERED: a lazy citation and a
+            # resume launched with a fresh stamp look the same from here,
+            # and neither is a clean run.
+            stale = [c for c in checks
+                     if c["status"] == "STALE" and c.get("declared")]
+            if stale and not tampered and outcome in ("COMPLETE", "UNKNOWN"):
+                outcome = "INCOMPLETE"
+                print(f"record-run: {len(stale)} declared prove: node(s) cite an "
+                      f"execution this run did not produce — "
+                      + "; ".join(f"{c['node']}: {c['detail']}" for c in stale),
+                      file=sys.stderr)
             if tampered:
                 outcome = "TAMPERED-EXECUTION"
                 print(f"record-run: {len(tampered)} declared prove: node(s) "
@@ -483,6 +497,9 @@ def main():
         if t.get("mismatch"):
             claim += (f"; {t['mismatch']} gate claim(s) CONTRADICT the attested "
                       f"execution log — the exit codes are not trustworthy")
+        elif t.get("stale"):
+            claim += (f"; {t['stale']} gate claim(s) STALE — they cite executions "
+                      f"from before this run, another commit, or another node")
         elif t.get("unattested"):
             claim += (f"; {t['unattested']} gate claim(s) UNATTESTED — self-reported "
                       f"exit code(s), no hook-minted record")

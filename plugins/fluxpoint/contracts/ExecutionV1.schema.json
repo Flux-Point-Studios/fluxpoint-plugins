@@ -16,7 +16,7 @@
     "attestId": {
       "type": "string",
       "minLength": 1,
-      "description": "The row in .claude/fluxpoint/attest.jsonl this claim cites. Minted by the PostToolUse hook at the moment the command ran; a claim citing an id that does not exist, or one whose recorded exit differs, is TAMPERED-EXECUTION."
+      "description": "The row in .claude/fluxpoint/attest.jsonl this claim cites. Minted when the command ran by a witness the agent does not mediate: the PostToolUse hook, attest.py --run for a gate too long for one tool call, or attest.py --ci from the forge's own statuses. A claim citing an id that does not exist, or one whose recorded exit differs, is TAMPERED-EXECUTION; a row minted before this run launched, on another commit, or already backing another node is STALE."
     },
     "logSha256": {
       "type": "string",
