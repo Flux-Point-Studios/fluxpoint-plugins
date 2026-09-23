@@ -270,6 +270,23 @@ with tempfile.TemporaryDirectory() as root:
     report("another campaign's releases are not consulted", r.stdout.strip() == "{}",
            r.stdout.strip()[:20])
 
+    # A graph compiled against its CONTRACTS: header parks on a proof
+    # contract the plugin does not ship; the release must find it too.
+    os.makedirs(os.path.join(root, ".local-contracts"))
+    with open(os.path.join(root, ".local-contracts", "SignedV1.schema.json"), "w") as fh:
+        json.dump({"$id": "SignedV1", "type": "object", "required": ["txHash"],
+                   "properties": {"txHash": {"type": "string"}}}, fh)
+    with open(os.path.join(root, "GRAPH.sign.md"), "w") as fh:
+        fh.write("STATUS: READY\nCONTRACTS: .local-contracts\n")
+    r = rel("--record", "--campaign", "c", "--node", "sign2", "--contract", "SignedV1",
+            "--graph", "GRAPH.sign.md", stdin='{"txHash":"ab12"}')
+    report("a repo-local proofContract resolves through the CONTRACTS: header",
+           r.returncode == 0, (r.stderr or r.stdout).strip()[:50])
+    r = rel("--record", "--campaign", "c", "--node", "sign2", "--contract", "SignedV1",
+            "--graph", "GRAPH.sign.md", stdin='{"note":"signed"}')
+    report("  and is still validated against it", r.returncode == 1 and "txHash" in r.stderr,
+           r.stderr.strip()[-40:])
+
 # ==================== inbox ==============================================
 with tempfile.TemporaryDirectory() as root:
     def ib(*a):

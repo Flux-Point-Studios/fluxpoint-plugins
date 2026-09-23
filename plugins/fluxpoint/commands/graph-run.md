@@ -14,8 +14,12 @@ Workflow tool requires.
    - `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> --check` exits 0.
      Its findings are the work list; fix the IR, never the compiler.
    - Mutating and irreversible graphs require the locked spec packet.
-     The compiler loads it from the repository root and embeds it in node
-     context. Verify the packet covers this goal, its check commands are
+     The compiler loads it from the path the graph file's `SPEC:` header
+     names (default `.fluxpoint-spec.json` at the repository root), and a
+     `CONTRACTS:` header overlays a repo-local contract directory on the
+     shipped contracts; the `--check` line names both, so confirm they are
+     the ones this campaign was written against. The compiler embeds the
+     packet in node context. Verify the packet covers this goal, its check commands are
      wired into the repo harness, and it and its lock are committed for
      isolated nodes. On Codex's fallback, pass the embedded packet to each
      node and preserve its identity in the summary; recording rejects a

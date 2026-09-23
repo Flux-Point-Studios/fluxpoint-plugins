@@ -163,6 +163,41 @@ def load_contracts(contracts_dir):
     return out
 
 
+def resolve_contracts(shipped_dir, header=None, explicit=None, root="."):
+    """(contracts, description) for one compile.
+
+    `--contracts` replaces the set wholesale, as it always has. A graph
+    file's `CONTRACTS:` header OVERLAYS the shipped set instead: a repo
+    keeps the contracts the plugin does not ship, and any stricter copies,
+    in a directory of its own, and everything else — the sentinel's
+    TreeCheckV1, the refuters' VerdictV1 — still resolves. A header naming
+    a directory that is not there is an error, never a quiet fallback to
+    the shipped set: that fallback is exactly the page of false findings
+    the header exists to prevent.
+    """
+    if explicit:
+        return load_contracts(explicit), explicit
+    shipped = load_contracts(shipped_dir)
+    if not header:
+        return shipped, "shipped"
+    import specification
+    rel = str(specification.in_repo(header, "CONTRACTS:"))
+    local_dir = os.path.join(root or ".", rel)
+    local = load_contracts(local_dir)
+    if not local:
+        raise GraphError(
+            f"CONTRACTS: {header} names no directory of *.schema.json contracts "
+            f"under {root or '.'} — the header is honored, so a missing set is an "
+            f"error rather than a silent fallback to the shipped contracts")
+    replaced = sorted(set(local) & set(shipped))
+    merged = dict(shipped)
+    merged.update(local)
+    desc = (f"shipped + {header} ({len(local) - len(replaced)} added"
+            + (f", {len(replaced)} overriding: {', '.join(replaced)}" if replaced else "")
+            + ")")
+    return merged, desc
+
+
 RUNS_DIR = os.path.join(".claude", "fluxpoint", "runs")
 
 
@@ -2099,6 +2134,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
     extra = ""
     if specification:
         extra += ", specification: SPECIFICATION.identity"
+        if specification.get("path"):
+            extra += ", specificationPath: SPECIFICATION.path"
     if any(n.get("irreversible") for n in nodes):
         extra += ", ledger: LEDGER_WRITES"
     if parked:
@@ -2912,36 +2949,49 @@ def main():
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
-    contracts_dir = args.contracts or os.path.join(os.path.dirname(here), "contracts")
+    shipped_dir = os.path.join(os.path.dirname(here), "contracts")
+    sys.path.insert(0, here)
+    import specification as spec_mod
 
     try:
         with open(args.graph, encoding="utf-8") as fh:
-            ir = extract_ir(fh.read())
-    except (OSError, GraphError) as e:
+            text = fh.read()
+        ir = extract_ir(text)
+        # The graph file's own header says which packet and which contracts
+        # it was written against. Ignoring it compiled a repo-local contract
+        # set as a page of false findings, and bound one campaign's nodes to
+        # whichever packet another campaign had locked last.
+        header = spec_mod.headers(text)
+        contracts, contracts_desc = resolve_contracts(
+            shipped_dir, header.get("CONTRACTS"), args.contracts, args.gates_root)
+    except (OSError, GraphError, ValueError) as e:
         print(f"graph-compile: {e}", file=sys.stderr)
         return 1
 
-    contracts = load_contracts(contracts_dir)
     if not contracts:
-        print(f"graph-compile: no contracts found in {contracts_dir}", file=sys.stderr)
+        print(f"graph-compile: no contracts found in {args.contracts or shipped_dir}",
+              file=sys.stderr)
         return 1
 
     agents = load_agents(args.gates_root)
     gates = load_gates(args.gates_root)
     findings = validate(ir, contracts, gates, agents)
     specification = None
-    from specification import load, required
-    if not findings and (required(args.gates_root) or any(n.get("mutates") or n.get("irreversible") for n in ir["nodes"])):
+    spec_path = header.get("SPEC")
+    if not findings and (spec_path or spec_mod.required(args.gates_root)
+                         or any(n.get("mutates") or n.get("irreversible") for n in ir["nodes"])):
         try:
-            packet, identity = load(args.gates_root)
-            specification = {"packet": packet, "identity": identity}
+            packet_file, _ = spec_mod.packet_paths(args.gates_root, spec_path)
+            packet, identity = spec_mod.load(args.gates_root, spec=spec_path)
+            specification = {"packet": packet, "identity": identity,
+                             "path": os.path.relpath(packet_file, args.gates_root).replace(os.sep, "/")}
             findings = validate(ir, contracts, gates, agents, specification)
         except (OSError, ValueError, TypeError) as e:
             print(f"graph-compile: spec required before implementation: {e}", file=sys.stderr)
             return 1
 
     if findings:
-        print("graph-compile: IR rejected\n", file=sys.stderr)
+        print(f"graph-compile: IR rejected (contracts: {contracts_desc})\n", file=sys.stderr)
         for f in findings:
             print(f"  - {f}", file=sys.stderr)
         return 1
@@ -2970,9 +3020,16 @@ def main():
     if args.check:
         imported = (f", {len(resolved)} imported decision(s) resolved"
                     if resolved else "")
+        # Which inputs the verdict was reached against, said on the line
+        # itself: findings against the wrong contract set used to read as
+        # defects in the IR, with nothing naming the directory used.
+        packet_note = (f"packet {specification['path']} "
+                       f"{specification['identity']['sha256'][:12]}"
+                       if specification else "no packet")
         print(f"graph-compile: IR valid — {len(ir['nodes'])} node(s), "
               f"{planned} planned agent call(s), budget.maxNodes="
-              f"{(ir.get('budget') or {}).get('maxNodes')}, {cost_line}{imported}")
+              f"{(ir.get('budget') or {}).get('maxNodes')}, {cost_line}{imported}; "
+              f"contracts: {contracts_desc}; {packet_note}")
         return 0
 
     js = emit(ir, contracts, resolved, specification)

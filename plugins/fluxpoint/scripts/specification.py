@@ -204,6 +204,59 @@ def unique_keys(pairs):
     return doc
 
 
+# A graph file declares its packet and its contracts in its header. Only
+# lines outside fenced blocks count, so an IR string or a quoted example
+# can never redirect the compiler.
+HEADER = re.compile(r'^(SPEC|CONTRACTS):[ \t]*(\S[^\r\n]*?)[ \t]*\r?$', re.M)
+FENCE = re.compile(r'^```.*?^```[ \t]*\r?$', re.M | re.S)
+
+
+def headers(text):
+    """The SPEC: and CONTRACTS: declarations of a graph file.
+
+    Two different values for one key is an error rather than first-wins:
+    which packet a campaign is held to must not depend on reading order.
+    """
+    out = {}
+    for key, value in HEADER.findall(FENCE.sub('', text)):
+        if key in out and out[key] != value:
+            raise ValueError(f'{key}: declared twice ({out[key]!r} and {value!r})')
+        out[key] = value
+    return out
+
+
+def graph_headers(path):
+    """headers() of a graph file, or {} when there is no such file."""
+    path = Path(path)
+    return headers(path.read_text(encoding='utf-8')) if path.is_file() else {}
+
+
+def in_repo(rel, what):
+    """A header path, checked: relative, inside the repository."""
+    p = Path(rel)
+    if p.is_absolute() or rel.startswith(('/', '\\')) or '..' in p.parts:
+        raise ValueError(f'{what} {rel!r} must be a path inside the repository, '
+                         'relative to its root')
+    return p
+
+
+def packet_paths(root, spec=None):
+    """(packet, lock) for a packet path; the default pair when spec is None.
+
+    The lock sits beside its packet and is named after it, so a campaign
+    that keeps its packet at a path of its own gets a lock of its own too:
+    `.fluxpoint-spec.json` locks into `.fluxpoint-spec-lock.json`, and
+    `.fluxpoint-spec.rollout.json` into `.fluxpoint-spec.rollout-lock.json`.
+    """
+    root = Path(root)
+    if spec is None or spec == SPEC:
+        return root / SPEC, root / LOCK
+    rel = in_repo(spec, 'SPEC:')
+    if rel.suffix != '.json':
+        raise ValueError(f'SPEC: {spec!r} must name a .json packet')
+    return root / rel, root / rel.with_name(rel.name[:-len('.json')] + '-lock.json')
+
+
 def required(root):
     root = Path(root)
     work = root / 'WORK.md'
@@ -212,9 +265,10 @@ def required(root):
                                            work.read_text(encoding='utf-8'), re.M)))
 
 
-def load(root, locked=True):
+def load(root, locked=True, spec=None):
     root = Path(root)
-    snapshot = (root / SPEC).read_bytes().replace(b'\r\n', b'\n')
+    packet_file, lock_file = packet_paths(root, spec)
+    snapshot = packet_file.read_bytes().replace(b'\r\n', b'\n')
     doc = json.loads(snapshot.decode('utf-8'), object_pairs_hook=unique_keys)
     errors = validate(doc)
     identity = {'version': 1, 'sha256': hashlib.sha256(snapshot).hexdigest(),
@@ -230,7 +284,7 @@ def load(root, locked=True):
                 errors.append('unknown or unsupported obligation: ' + oid)
             identity['obligations'] = {oid: observed[oid]['statementSha'] for oid in sorted(ids & observed.keys())}
     if locked:
-        lock = json.loads((root / LOCK).read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
+        lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
         if lock != identity:
             errors.append('spec, obligation or proof baseline changed since lock; review the change and re-lock')
     if errors:
@@ -324,6 +378,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', default='.')
     parser.add_argument('--if-present', action='store_true')
+    parser.add_argument('--spec', help='packet path relative to --root (default ' + SPEC + ')')
+    parser.add_argument('--graph', help="a graph file whose SPEC: header names the packet")
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--lock', action='store_true')
     action.add_argument('--check', action='store_true')
@@ -331,24 +387,32 @@ def main():
     args = parser.parse_args()
     root = Path(args.root).resolve()
     try:
+        spec = args.spec
+        if args.graph:
+            declared = graph_headers(root / args.graph).get('SPEC')
+            if spec and declared and spec != declared:
+                raise ValueError(f'--spec {spec} contradicts {args.graph}, which declares SPEC: {declared}')
+            spec = spec or declared
         if args.if_present and not args.run:
             raise ValueError('--if-present is only for the legacy harness runner')
-        if args.if_present and not required(root):
+        if args.if_present and not spec and not required(root):
             print('specification: legacy loop without a spec; no requirements checked')
             return 0
-        doc, identity = load(root, locked=not args.lock)
+        packet_file, lock_path = packet_paths(root, spec)
+        doc, identity = load(root, locked=not args.lock, spec=spec)
+        name = packet_file.relative_to(root).as_posix()
         if args.lock:
-            with (root / LOCK).open('w', encoding='utf-8', newline='\n') as lock_file:
+            with lock_path.open('w', encoding='utf-8', newline='\n') as lock_file:
                 lock_file.write(json.dumps(identity, indent=2) + '\n')
-            print(f"specification: locked {identity['sha256']}; checks have not run")
+            print(f"specification: locked {name} {identity['sha256']}; checks have not run")
             return 0
-        print(f"specification: validated {identity['sha256']}", flush=True)
+        print(f"specification: validated {name} {identity['sha256']}", flush=True)
         if args.run:
             stack = json.loads(os.environ.get('FPL_SPEC_STACK', '[]'))
             if not strings(stack, nonempty=False) or str(root) in stack:
                 raise ValueError('recursive specification check or invalid check stack')
             result = run_checks(root, doc, stack + [str(root)])
-            _, after = load(root)
+            _, after = load(root, spec=spec)
             if after != identity:
                 raise ValueError('spec, obligation or proof baseline changed during checks')
             return result

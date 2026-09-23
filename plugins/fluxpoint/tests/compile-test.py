@@ -872,5 +872,64 @@ def tree_sentinel_executed_case():
 tree_sentinel_executed_case()
 
 
+def contracts_header_case():
+    """A graph file's CONTRACTS: header is honored (issue #95).
+
+    Contracts came only from --contracts, which defaults to the plugin's
+    own directory, so a repo-local set declared in the header produced a
+    page of false findings that read as defects in the IR — and nothing
+    said which directory had been used.
+    """
+    global passed, failed
+    import subprocess
+    import tempfile
+    stricter = copy.deepcopy(CONTRACTS["SliceV1"])
+    stricter["properties"]["outcome"] = {"enum": ["shipped", "parked"]}
+    local = {"$id": "RuntimeEvidenceV1", "type": "object", "required": ["observed"],
+             "properties": {"observed": {"type": "string"}}}
+    ir = {"version": 1, "campaign": "c", "treeGuard": False, "budget": {"maxNodes": 4},
+          "nodes": [{"id": "slice", "prompt": "do it", "contract": "SliceV1",
+                     "haltWhen": "outcome == 'parked'"},
+                    {"id": "watch", "after": "slice", "prompt": "observe {{prev}}",
+                     "contract": "RuntimeEvidenceV1"}]}
+
+    def run(d, header, *extra):
+        with open(os.path.join(d, "GRAPH.x.md"), "w", encoding="utf-8") as fh:
+            fh.write(header + "\n```json graph-ir\n" + json.dumps(ir) + "\n```\n")
+        return subprocess.run(
+            [sys.executable, os.path.join(PLUGIN, "scripts", "compile-graph.py"),
+             "GRAPH.x.md", "--check", *extra], cwd=d, capture_output=True, text=True)
+
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, ".fluxpoint-contracts"))
+        for c in (stricter, local):
+            with open(os.path.join(d, ".fluxpoint-contracts", f"{c['$id']}.schema.json"),
+                      "w", encoding="utf-8") as fh:
+                json.dump(c, fh)
+        plain = run(d, "STATUS: DESIGN\n")
+        declared = run(d, "STATUS: DESIGN\nCONTRACTS: .fluxpoint-contracts\n")
+        missing = run(d, "CONTRACTS: .nowhere\n")
+        flag = run(d, "CONTRACTS: .fluxpoint-contracts\n", "--contracts",
+                   os.path.join(PLUGIN, "contracts"))
+    for name, ok, detail in [
+        ("without the header, repo-local contracts are unknown",
+         plain.returncode == 1 and "RuntimeEvidenceV1" in plain.stderr, plain.stderr[-80:]),
+        ("CONTRACTS: overlays the repo's set on the shipped one",
+         declared.returncode == 0, declared.stderr[-120:]),
+        ("  and --check names the directory it used",
+         ".fluxpoint-contracts" in declared.stdout and "contracts" in declared.stdout,
+         declared.stdout.strip()[-100:]),
+        ("a CONTRACTS: directory that does not exist is an error, not a fallback",
+         missing.returncode == 1 and ".nowhere" in missing.stderr, missing.stderr[-80:]),
+        ("an explicit --contracts still wins over the header",
+         flag.returncode == 1 and "RuntimeEvidenceV1" in flag.stderr, flag.stderr[-80:]),
+    ]:
+        print(f"{'PASS' if ok else 'FAIL'}  contracts-header: {name:<52} -> {detail[:90]}")
+        passed, failed = (passed + ok, failed + (not ok))
+
+
+contracts_header_case()
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

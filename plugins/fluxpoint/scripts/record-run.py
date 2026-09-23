@@ -170,14 +170,47 @@ def main():
         print(f"record-run: result is not JSON: {e}", file=sys.stderr)
         return 1
 
-    from specification import load, required
-    if "specification" in summary or required(args.root):
+    # 0. Irreversible effects go into the once-only ledger before anything
+    # can refuse this record. The ledger does not vouch for the run — it
+    # records that an effect nobody can undo already happened, so the next
+    # resume replays it instead of performing it twice. Refusing the record
+    # first (a stale packet, say) used to leave the effect on chain with no
+    # row, and the next resume asked to confirm it again.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    ledger_written = []
+    try:
+        import ledger as _ledger
+        ledger_written = _ledger.append_from_summary(args.root, summary, args.run_id)
+        for r in ledger_written:
+            print(f"record-run: ledger recorded {r['node']} — {r['evidence']}")
+    except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
+        print(f"record-run: ledger append failed: {e}", file=sys.stderr)
+
+    import specification as _spec
+    try:
+        # The graph file's SPEC: header names the packet this campaign is
+        # held to; a repository can carry one per campaign.
+        spec_path = _spec.graph_headers(args.graph).get("SPEC")
+    except (OSError, ValueError) as e:
+        print(f"record-run: {args.graph}: {e}", file=sys.stderr)
+        return 1
+    if "specification" in summary or spec_path or _spec.required(args.root):
         try:
-            _, identity = load(args.root)
+            ran = summary.get("specificationPath")
+            if ran and spec_path and ran != spec_path:
+                raise ValueError(f"the run was compiled against {ran}, but {args.graph} "
+                                 f"declares SPEC: {spec_path}")
+            _, identity = _spec.load(args.root, spec=spec_path or ran)
             if summary.get("specification") != identity:
                 raise ValueError("run specification differs from the locked packet")
         except (OSError, ValueError, TypeError) as e:
             print(f"record-run: spec verification failed: {e}", file=sys.stderr)
+            if ledger_written:
+                print(f"record-run: the once-only ledger still recorded "
+                      f"{len(ledger_written)} irreversible effect(s) from this run — "
+                      f"they happened whatever the packet says, and a resume "
+                      f"must replay them rather than fire them again",
+                      file=sys.stderr)
             return 1
 
     prov = summary.get("provenance") or []
@@ -213,16 +246,8 @@ def main():
         # cited no attestation: the declared verification did not happen.
         outcome = "INCOMPLETE"
 
-    # 1a. Irreversible effects go into the once-only ledger first. Written
-    # before anything else in this script, because a row missing here is the
-    # one that lets a resume perform a chain write twice.
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    try:
-        import ledger as _ledger
-        for r in _ledger.append_from_summary(args.root, summary, args.run_id):
-            print(f"record-run: ledger recorded {r['node']} — {r['evidence']}")
-    except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
-        print(f"record-run: ledger append failed: {e}", file=sys.stderr)
+    # 1a. Irreversible effects were filed into the once-only ledger at step
+    # 0, before anything in this script could refuse the record.
 
     # 1b. Park the waits and raise anything that needs a person. A campaign
     # that parks instead of halting is only an improvement if somebody finds

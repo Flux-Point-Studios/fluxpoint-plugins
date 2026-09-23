@@ -371,6 +371,88 @@ time.sleep(float(sys.argv[1]))
                            env=dict(os.environ, PYTHONIOENCODING='utf-8'))
         self.assertEqual(r.returncode, 1)
 
+    # Issue #95: a graph file's SPEC: header names its packet, so two
+    # campaigns on one line stop overwriting each other's packet.
+    def rollout(self):
+        doc = packet()
+        doc['goal'] = 'Roll the merged product out without re-deciding it'
+        (self.root / '.fluxpoint-spec.rollout.json').write_text(json.dumps(doc), encoding='utf-8')
+        r = self.run_cli('--lock', '--spec', '.fluxpoint-spec.rollout.json')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = 'STATUS: READY\nMODE: graph\nSPEC: .fluxpoint-spec.rollout.json\n\n'
+        (self.root / 'GRAPH.rollout.md').write_text(
+            text + '```json graph-ir\n' + json.dumps(graph()) + '\n```\n', encoding='utf-8')
+        return hashlib.sha256((self.root / '.fluxpoint-spec.rollout.json').read_bytes()).hexdigest()
+
+    def test_spec_header_names_the_packet_and_its_own_lock(self):
+        self.lock()
+        digest = self.rollout()
+        self.assertTrue((self.root / '.fluxpoint-spec.rollout-lock.json').exists())
+        # The default packet changing does not stale the rollout's lock.
+        self.doc['goal'] = 'The follow-on campaign locked its own packet'
+        self.lock()
+        r = self.run_cli('--check', '--graph', 'GRAPH.rollout.md')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(digest, r.stdout)
+        compiled = subprocess.run([sys.executable, str(COMPILER), 'GRAPH.rollout.md'], cwd=self.root,
+                                  capture_output=True, encoding='utf-8', timeout=20,
+                                  env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        self.assertIn(digest, compiled.stdout)
+        self.assertIn('Roll the merged product out', compiled.stdout)
+        self.assertNotIn('The follow-on campaign', compiled.stdout)
+        checked = subprocess.run([sys.executable, str(COMPILER), 'GRAPH.rollout.md', '--check'],
+                                 cwd=self.root, capture_output=True, encoding='utf-8', timeout=20,
+                                 env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+        self.assertIn('.fluxpoint-spec.rollout.json', checked.stdout)
+        self.assertIn(digest[:12], checked.stdout)
+
+    def test_record_run_honors_the_graph_spec_header(self):
+        self.lock()
+        digest = self.rollout()
+        identity = json.loads((self.root / '.fluxpoint-spec.rollout-lock.json').read_text())
+        default = json.loads((self.root / '.fluxpoint-spec-lock.json').read_text())
+        self.assertEqual(identity['sha256'], digest)
+        for run_id, ident, want in (('rollout-ok', identity, 0), ('rollout-bad', default, 1)):
+            (self.root / 'result.json').write_text(json.dumps(
+                {'outcome': 'COMPLETE', 'campaign': 'c', 'specification': ident,
+                 'specificationPath': '.fluxpoint-spec.rollout.json'}))
+            r = subprocess.run([sys.executable, str(PLUGIN / 'scripts/record-run.py'),
+                                '--run-id', run_id, '--graph', 'GRAPH.rollout.md', '--result', 'result.json'],
+                               cwd=self.root, capture_output=True, encoding='utf-8',
+                               env=dict(os.environ, PYTHONIOENCODING='utf-8', FPL_MEMORY_INDEX='0'))
+            self.assertEqual(r.returncode, want, r.stderr)
+
+    def test_spec_refusal_still_records_the_irreversible_effect(self):
+        self.lock()
+        summary = {'outcome': 'COMPLETE', 'campaign': 'c', 'specification': {'sha256': 'stale'},
+                   'ledger': [{'key': 'c|mint|abc', 'node': 'mint', 'campaign': 'c',
+                               'result': {'txHash': 'deadbeef'}}]}
+        (self.root / 'result.json').write_text(json.dumps(summary))
+        r = subprocess.run([sys.executable, str(PLUGIN / 'scripts/record-run.py'),
+                            '--run-id', 'spec-stale-ledger', '--result', 'result.json'],
+                           cwd=self.root, capture_output=True, encoding='utf-8',
+                           env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+        self.assertNotEqual(r.returncode, 0)
+        ledger = self.root / '.claude/fluxpoint/irreversible.jsonl'
+        self.assertTrue(ledger.exists(), r.stderr)
+        self.assertIn('c|mint|abc', ledger.read_text())
+        self.assertIn('ledger', r.stderr)
+
+    def test_spec_header_paths_are_checked(self):
+        for header, needle in (('SPEC: ../outside.json\n', 'repository'),
+                               ('SPEC: /abs/spec.json\n', 'repository'),
+                               ('SPEC: .fluxpoint-spec.yaml\n', '.json'),
+                               ('SPEC: a.json\nSPEC: b.json\n', 'twice')):
+            with self.subTest(header=header):
+                (self.root / 'GRAPH.x.md').write_text(header + '```json graph-ir\n'
+                                                      + json.dumps(graph()) + '\n```\n')
+                r = subprocess.run([sys.executable, str(COMPILER), 'GRAPH.x.md', '--check'],
+                                   cwd=self.root, capture_output=True, encoding='utf-8', timeout=20,
+                                   env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+                self.assertEqual(r.returncode, 1)
+                self.assertIn(needle, r.stderr)
+
     def test_check_cannot_change_the_spec_during_execution(self):
         self.doc['checks'][0]['argv'] = ['{python}', '-c',
             'from pathlib import Path; Path(".fluxpoint-spec.json").write_text("{}")']
