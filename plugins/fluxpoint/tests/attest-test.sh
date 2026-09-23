@@ -544,6 +544,16 @@ n="$(rows)"
 # `bash ` prefix is the declared gate run another way.
 rec "sh scripts/harness.sh --full" 0 >/dev/null
 check "an sh prefix is not the declared gate" "$n" "$(rows)"
+# ...and a gate DECLARED with `bash ` needs bash: run bare, a /bin/sh
+# shebang runs it under sh instead. The allowance is one-directional.
+printf '{"version":1,"gates":{"check":"bash scripts/harness.sh --full"}}' >"$ROOT/r/.fluxpoint-gates.json"
+rec "./scripts/harness.sh --full" 0 >/dev/null
+rec "scripts/harness.sh --full" 0 >/dev/null
+check "a gate declared with bash is not the script run bare" "$n" "$(rows)"
+rec "bash scripts/harness.sh --full" 0 >/dev/null
+check "  while run with bash it is" "$((n + 1))" "$(rows)"
+gates
+n="$(rows)"
 # A quoted cd operand does not freeze the plain-word gate after it.
 rec "cd \"$ROOT/r\" &&  scripts/harness.sh   --full" 0 >/dev/null
 check "  while a quoted cd before a spaced-out gate still is" "$((n + 1))" "$(rows)"

@@ -180,8 +180,9 @@ def nonce_of(cmd):
 def normalize(cmd):
     """Canonical form of a command line, for comparison against a manifest.
 
-    Whitespace between plain words is collapsed and a leading `bash ` or `./`
-    is dropped, so
+    Whitespace between plain words is collapsed and a leading `./` is
+    dropped (gate_for() also takes `bash <script>` for a declared bare
+    `<script>`), so
     `bash scripts/harness.sh  --full` and `./scripts/harness.sh --full` are
     the same declared gate.
 
@@ -208,15 +209,18 @@ def normalize(cmd):
     # nothing about the exit the shell reports. It is read by nonce_of(),
     # never matched as part of the gate.
     s = _front(cmd)[2]
-    # Only `bash `: `sh scripts/check.sh` runs a bash script under whatever
-    # sh is (dash on Debian), where `[[` is "not found" and the script can
-    # exit 0 — a different command that passed as the gate. A gate declared
-    # with `sh ` or `zsh ` still matches itself exactly.
-    if s.startswith("bash "):
-        s = s[len("bash "):].lstrip()
     if s.startswith("./"):
         s = s[2:]
     return s
+
+
+def _unbash(n):
+    """A normalized command run as `bash <script>`, without the interpreter,
+    or None. See gate_for() for the one direction this is allowed in."""
+    if not n.startswith("bash "):
+        return None
+    s = n[len("bash "):].lstrip(" \t")
+    return s[2:] if s.startswith("./") else s
 
 
 EXIT_RE = re.compile(r"\A\s*Error: Exit code (\d+)")
@@ -486,8 +490,15 @@ def gate_for(gates, command):
     if FOREIGN_SPACE.search(str(command or "")):
         return None
     n = normalize(command)
+    # `bash scripts/x.sh` is the declared `scripts/x.sh` run another way —
+    # but only in that direction. A gate DECLARED with `bash ` needs bash
+    # (its shebang may say /bin/sh, dash here, where `[[` is "not found" and
+    # the script can exit 0), so running the script bare is not that gate;
+    # nor is `sh scripts/x.sh` any gate but one declared exactly so.
+    alt = _unbash(n)
     for name, declared in gates.items():
-        if declared != n:
+        if declared != n and (alt is None or declared != alt
+                              or declared.startswith(("bash ", "sh ", "zsh "))):
             continue
         want = (getattr(gates, "dirs", None) or {}).get(name) or []
         if want:
