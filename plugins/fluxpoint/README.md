@@ -44,7 +44,8 @@ does.
     `recurrence-guard.py` (a lesson learned twice demands a gate).
   - Graph: `compile-graph.py`, `record-run.py`, `ledger.py` (once-only
     guard), `release.py`, `inbox.py` and `wake-check.sh` (the park layer),
-    `metrics.py` (per-campaign rates).
+    `metrics.py` (per-campaign rates), `sweep.py` (plan and score an
+    effort/model sweep: variants, a held-out split, pass-rate intervals).
   - Memory: `memory.py` (lessons), `recall.py` and `embedder.py` (the
     derived graph and hybrid retrieval).
   - `prompt-audit.py` (advisory prompt hygiene) and `migrate.py` (pre-1.0

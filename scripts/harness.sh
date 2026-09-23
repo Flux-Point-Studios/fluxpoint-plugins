@@ -308,6 +308,7 @@ case "${1:---full}" in
     step "hybrid recall pipeline (executed)" "$FPL_PY" "$PLUGIN/tests/recall-test.py"
     step "embedder quarantine (executed)" "$FPL_PY" "$PLUGIN/tests/embedder-test.py"
     step "graph metrics aggregator (executed)" "$FPL_PY" "$PLUGIN/tests/metrics-test.py"
+    step "effort sweep: plan, split, score (executed)" "$FPL_PY" "$PLUGIN/tests/sweep-test.py"
     step "relation gate" bash "$PLUGIN/tests/pair-test.sh"
     step "relation gate: differential + bite + scan (executed)" bash "$PLUGIN/tests/pair-verify-test.sh"
     step "gate presence + resolver (executed)" bash "$PLUGIN/tests/gate-presence-test.sh"

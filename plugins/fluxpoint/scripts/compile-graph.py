@@ -2266,8 +2266,12 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         # so provenance can tell an imported decision from one this campaign
         # made — record-run.py files only the latter as new Decisions rows.
         extra += ", decisionsImported: DECISIONS_IMPORTED"
+    # What the run was asked, minus the launcher's own state (_ledger,
+    # _releases, _base, ...): an effort sweep scores a run against the case
+    # it was launched for, and the summary is all record-run keeps.
+    a("  const inputs = Object.fromEntries(Object.entries(A).filter(([k]) => !k.startsWith('_')))")
     a("  return { campaign, outcome: final, results: RESULTS, provenance: PROVENANCE,")
-    a(f"           contracts: CONTRACTS{extra} }}")
+    a(f"           contracts: CONTRACTS, inputs{extra} }}")
     a("}")
     a("")
     budget_cfg = ir.get("budget") or {}
