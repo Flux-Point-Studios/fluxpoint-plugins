@@ -66,12 +66,12 @@ gates() { printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"}}'
 # still passed. A fixture that invents its own contract certifies nothing.
 payload() { # $1 = command, $2 = exit code, $3 = stdout (optional)
   "$FPL_PY" - "$1" "$2" "${3:-}" <<'PY'
-import json, sys
+import json, os, sys
 cmd, code, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 resp = ({"stdout": out, "stderr": "", "interrupted": False, "isImage": False}
         if code == 0 else f"Error: Exit code {code}\n{out}")
 print(json.dumps({
-    "session_id": "s1", "cwd": ".", "hook_event_name": "PostToolUse",
+    "session_id": "s1", "cwd": os.environ.get("PAYLOAD_CWD", "."), "hook_event_name": "PostToolUse",
     "tool_name": "Bash", "tool_use_id": "toolu_x",
     "tool_input": {"command": cmd},
     "tool_response": resp,
@@ -519,6 +519,18 @@ stamp="$("$FPL_PY" "$ATTEST" --stamp)"
 newrepo; gates
 rec "FPL_ATTEST_NONCE=run-a scripts/harness.sh --full" 0 >/dev/null
 check "a nonce-prefixed gate run is still the declared gate" harness "$(field gate)"
+# Quoted text is compared byte for byte, as bash passes it: two spaces in a
+# test-name filter is another filter (one that matches nothing, and passes).
+"$FPL_PY" -c 'import json,sys; json.dump({"version": 1, "gates": {"harness": "scripts/harness.sh --full", "slow": "node --test --test-name-pattern=\"slow test\" t.test.js"}}, open(sys.argv[1], "w"))' \
+  "$ROOT/r/.fluxpoint-gates.json"
+n="$(rows)"
+rec 'node --test --test-name-pattern="slow  test" t.test.js' 0 >/dev/null
+rec "$(printf 'node --test --test-name-pattern="slow\ttest" t.test.js')" 0 >/dev/null
+check "whitespace inside quotes is not collapsed into the declared gate" "$n" "$(rows)"
+rec 'node  --test   --test-name-pattern="slow test"  t.test.js' 0 >/dev/null
+check "  while whitespace outside quotes still is" "$((n + 1))" "$(rows)"
+gates
+rec "FPL_ATTEST_NONCE=run-a scripts/harness.sh --full" 0 >/dev/null
 check "  and its row names the run" run-a "$(field nonce)"
 ATT="$(field attestId)"
 out="$(runbound "{'launch': {'since': '2000-01-01T00:00:00Z', 'nonce': 'run-b'}}" wf-n1)"
@@ -681,6 +693,22 @@ check "  while an absolute path ending in the declared directory is" "$((n + 1))
 mkdir -p "$ROOT/foreign/scripts"
 rec "cd $ROOT/foreign/scripts && ./harness.sh --full" 0 >/dev/null
 check "  but not the same-named directory of another checkout" "$((n + 1))" "$(rows)"
+# Where bash RAN is the shell's directory plus the cd: a relative cd, or no
+# cd at all, from another checkout is not the project's gate.
+PAYLOAD_CWD="$ROOT/foreign" rec "cd scripts && ./harness.sh --full" 0 >/dev/null
+check "  nor a relative cd made from another checkout" "$((n + 1))" "$(rows)"
+# A quoted ~ is literal to bash; only a bare one is home.
+HOME="$ROOT" rec "cd '~/r/scripts' && ./harness.sh --full" 0 >/dev/null
+check "  nor a quoted ~, which bash does not expand" "$((n + 1))" "$(rows)"
+HOME="$ROOT" rec "cd ~/r/scripts && ./harness.sh --full" 0 >/dev/null
+check "  while a bare ~ is home" "$((n + 2))" "$(rows)"
+# A declared cd that climbs or is absolute is resolved from the project root.
+printf '{"version":1,"gates":{"harness":"cd scripts/.. && scripts/harness.sh --full"}}' \
+  >"$ROOT/r/.fluxpoint-gates.json"
+rec "cd scripts/.. && scripts/harness.sh --full" 0 >/dev/null
+check "a gate declared with cd .. is witnessed where it resolves" "$((n + 3))" "$(rows)"
+printf '{"version":1,"gates":{"harness":"cd scripts && ./harness.sh --full"}}' \
+  >"$ROOT/r/.fluxpoint-gates.json"
 out="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --last harness --nonce run-d 2>&1)"
 case "$out" in "$(sed -n 1p "$ROOT/r/.claude/fluxpoint/attest.jsonl" | "$FPL_PY" -c 'import json,sys; print(json.load(sys.stdin)["attestId"])')"*)
   ok "--last prints the attestId a node cites, for its nonce" "${out:0:40}" ;;

@@ -103,6 +103,33 @@ CD_RE = re.compile(r"""cd[ \t]+('[^']*'|"(?:[^"$`\\]|\\[^"$`\\])*"|[^\s;&|<>#$`'
 FOREIGN_SPACE = re.compile(r"[^\S \t]")
 
 
+def _collapse(cmd):
+    """Runs of spaces and tabs OUTSIDE quotes become one space; quoted text
+    is kept byte for byte, as bash keeps it. Collapsing inside quotes let
+    `--test-name-pattern="slow  test"` (two spaces, a filter that matches
+    nothing) compare equal to the declared `"slow test"` and pass green."""
+    s, out, q, gap, i = str(cmd or ""), [], None, False, 0
+    while i < len(s):
+        c = s[i]
+        if q is None and c in " \t":
+            gap, i = True, i + 1
+            continue
+        if gap and out:
+            out.append(" ")
+        gap = False
+        if c == "\\" and q != "'" and i + 1 < len(s):
+            out.append(s[i:i + 2])
+            i += 2
+            continue
+        if q is None and c in "'\"":
+            q = c
+        elif c == q:
+            q = None
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _front(cmd):
     """(nonce, cd_dir, rest) of a command line's permitted prefix.
 
@@ -112,7 +139,7 @@ def _front(cmd):
     then `FPL_ATTEST_NONCE=n cd backend && gate`, which used to keep its cd
     and match nothing. One nonce and one cd, never a chain of either.
     """
-    s = re.sub(r"[ \t]+", " ", str(cmd or "")).strip(" \t")
+    s = _collapse(cmd)
     nonce = cd = ""
     m = NONCE_RE.match(s)
     if m:
@@ -250,7 +277,7 @@ def load_gates(root):
                  f" (or empty beside a top-level 'ci' section)")
         return {}, f
     out = Gates()
-    out.dirs = {}
+    out.dirs, out.cds = {}, {}
     for name, cmd in gates.items():
         if not IDENT.match(str(name)):
             f.append(f"{GATES}: gate name '{name}' must be lowercase kebab-case")
@@ -271,6 +298,7 @@ def load_gates(root):
             continue
         out[name] = normalize(cmd)
         out.dirs[name] = _dir_parts(_front(cmd)[1])
+        out.cds[name] = _front(cmd)[1]
     return ({} if f else out), f
 
 
@@ -319,35 +347,87 @@ def _dir_parts(d):
 
 class Gates(dict):
     """{name: normalized command}, with each gate's declared leading `cd`
-    directory (as components) in `.dirs`."""
+    directory as components in `.dirs` and as written in `.cds`."""
     dirs = {}
+    cds = {}
 
 
-def cd_in_project(root, command, want):
-    """Whether a command's leading `cd` lands where the gate is declared to
-    run: inside THIS repository (its checkout or a linked worktree), at the
-    project's own path plus the declared directory.
+def _resolve(base, cd):
+    """The directory a `cd` operand names, as bash reads it, from `base`.
 
-    gate_for() compares text, and a suffix is not a place: `cd
-    /tmp/foreign/backend && npm test` ends like `cd backend`, ran in another
-    checkout, and would be attested against this project's HEAD. A relative
-    `cd` is resolved from the project root, where declared gates run; a
-    command with no `cd` runs where the witness already is.
+    A quoted operand is taken literally — bash expands no `~` inside quotes,
+    and expanding one here validated the real directory while bash ran in a
+    literal `~` beside it. A bare `~` is the home directory. On Windows, Git
+    Bash's `/c/...` is `c:/...`.
     """
-    cd = _front(command)[1]
-    if not cd:
-        return True
-    target = os.path.expanduser(cd.strip().strip("'\""))
-    if not os.path.isabs(target):
-        target = os.path.join(root, target)
+    raw = str(cd or "").strip()
+    if raw[:1] in ("'", '"') and len(raw) >= 2 and raw[-1] == raw[0]:
+        target = raw[1:-1]
+    else:
+        target = os.path.expanduser(raw) if raw.startswith("~") else raw
+    if os.name == "nt":
+        m = re.match(r"^/([A-Za-z])(/.*)?$", target)
+        if m:
+            target = f"{m.group(1)}:{m.group(2) or '/'}"
+    return target if os.path.isabs(target) else os.path.join(base, target)
+
+
+def _place(d):
+    """(repository, path inside it) for a directory, or None."""
+    if not os.path.isdir(d):
+        return None
+    com = _common_dir(d)
+    if not com:
+        return None
+    return (os.path.normcase(os.path.realpath(com)),
+            _dir_parts(_git(d, "rev-parse", "--show-prefix") or ""))
+
+
+def _is_place(target, expected):
+    """`target` is the declared directory, or its twin in a linked worktree."""
     if not os.path.isdir(target):
         return False
-    com_t, com_r = _common_dir(target), _common_dir(root)
-    if not com_t or not com_r or not _same(com_t, com_r):
-        return False
-    at = _dir_parts(_git(target, "rev-parse", "--show-prefix") or "")
-    home = _dir_parts(_git(root, "rev-parse", "--show-prefix") or "")
-    return at == home + list(want)
+    if os.path.isdir(expected) and _same(target, expected):
+        return True
+    pt, pe = _place(target), _place(expected)
+    return bool(pt and pe and pt == pe)
+
+
+def cd_in_project(root, command, cwd=None, declared_cd=""):
+    """Whether bash ran the command where the gate is declared to run.
+
+    gate_for() compares text, and text is not a place. The place the gate
+    runs is the project root plus the declared `cd`; the place bash ran is
+    the shell's directory (the payload's `cwd`) plus the invoked `cd`. They
+    must be the same directory, or its twin in a linked worktree of this
+    repository: `cd /tmp/foreign/backend`, and a relative `cd backend` from
+    another checkout, are not the project's gate, whatever HEAD the project
+    is at. A gate with no `cd` must at least run inside this repository.
+
+    A runtime may report the shell's directory after the command rather
+    than before it. For a plain relative `cd` (no `..`) whose pre-command
+    reading names no directory at all, the reported directory itself is
+    where the cd landed, and is judged instead.
+    """
+    cd = _front(command)[1]
+    expected = _resolve(root, declared_cd) if declared_cd else root
+    base = cwd if (cwd and os.path.isdir(cwd)) else root
+    if not cd:
+        # No cd: bash ran in the shell's directory. It must be this
+        # repository (any directory of its checkout or a linked worktree —
+        # a gate is often run from a subdirectory); another checkout shares
+        # no commit with the project.
+        pb, pr = _place(base), _place(root)
+        return bool(pb and pr and pb[0] == pr[0])
+    pre = _resolve(base, cd)
+    if _is_place(pre, expected):
+        return True
+    parts = _dir_parts(cd)
+    tail = _dir_parts(os.path.realpath(base).replace(os.sep, "/"))
+    if (not os.path.isabs(_resolve("", cd)) and ".." not in parts and parts
+            and not os.path.exists(pre) and tail[len(tail) - len(parts):] == parts):
+        return _is_place(base, expected)
+    return False
 
 
 def gate_for(gates, command):
@@ -522,7 +602,8 @@ def record(root, payload):
         return None, []
     command = (payload.get("tool_input") or {}).get("command")
     gate = gate_for(gates, command)
-    if not gate or not cd_in_project(root, command, gates.dirs.get(gate) or []):
+    if not gate or not cd_in_project(root, command, payload.get("cwd"),
+                                     (getattr(gates, "cds", None) or {}).get(gate, "")):
         return None, []
     resp = payload.get("tool_response")
     # A backgrounded launch returns IMMEDIATELY with a success-shaped payload
