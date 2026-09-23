@@ -106,7 +106,8 @@ What v1.36 changed is the instrumentation, and only that:
 - the compiler prices every graph (`estimate_tokens`: prefix per call,
   warm or cold by the declared `cacheTtl` and the `(model, effort)` of the
   call before it, work scaled by `EFFORT_MULT`, the call weighted by
-  `MODEL_MULT`) and refuses a graph over `budget.maxEstimatedTokens`;
+  `MODEL_MULT`, and since v1.43 each node's own prompt text by its bytes)
+  and refuses a graph over `budget.maxEstimatedTokens`;
 - every compiled script carries `ESTIMATE` and a per-node `PROFILE`
   (effort, model, calls, estimated tokens) into its summary beside
   `spent`;
@@ -126,6 +127,38 @@ assumption until that sweep has run; a flat curve would itself be the
 finding, and would mean the task is not bound by thinking compute and the
 defaults should come down. Until then the templates keep their
 settings, and every one of them is labelled as asserted.
+
+v1.43 settles the evaluation question and builds everything around the
+sweep except the spend. `scripts/sweep.py --plan` writes one graph file per
+setting under test (the role changed, nothing else; a role no node uses,
+or one a node overrides inline, is refused, because a knob that does not
+reach its calls sweeps noise), prices and validates each against the same
+packet the compiler would load, and draws a train/test split of the cases at
+random, stratified by tag, never by score, with the test fraction honored
+over the whole set; a plan that holds out nothing is refused, since no rep
+count can then compare two variants. `--score` grades
+recorded runs per variant — a pass is COMPLETE with no red harness, no
+BLOCK and no WEAKENED — with Wilson intervals on the test split as the
+headline, calls the curve flat when every interval overlaps, and
+`--hillclimb DIR` exports the runs in the layout the claude-api hillclimb
+flow reads (`baseline/` for the unmodified setting, `v<N>/` for the rest,
+transcripts for the train split only). Each compiled summary now carries its launch `inputs`, so a
+run is matched to its case.
+
+The arithmetic that settles whether the harness can serve as the
+evaluation: it can, but only at sample sizes a binary score forces. A pass
+rate over n runs is known to about ±1/sqrt(n). Planned over the feature
+template (four variants, twelve cases, three reps, about 32.6M estimated
+tokens), the four held-out cases give twelve test runs per variant and
+resolve differences of about 40 points; seeing a 20-point difference takes
+about 93 test runs per variant, a 10-point one about 388. So a first sweep
+can only find a large effect or a flat curve, and the flat curve is the
+finding most worth having. A finer-grained score — node death rate, panel
+kill rate, confirmed findings per run — would lower those counts, and is
+the next thing to build if the first sweep comes back flat and ambiguous.
+
+Still not done, and not doable from a repository: running it. It needs a
+session that launches campaigns and a bill someone approved.
 
 ## What the smoke test established
 

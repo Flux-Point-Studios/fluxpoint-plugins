@@ -190,6 +190,27 @@ step; do not stop at copying files.
    the ratchets so their signatures are hashed. A class that genuinely
    cannot apply is waived in the committed file, where review sees it; it
    is never left unspecified.
+   Keep both taxonomies unless the repo has a reason to drop one. When the
+   repo tracks a language whose taxonomy is missing from the manifest,
+   `spec-guard.py` prints a `NO TAXONOMY` line naming the language, how
+   many classes the template holds for it and the first few ids. That line
+   is a note by default. Two optional top-level fields in
+   `.fluxpoint-attacks.json` change it:
+   ```json
+   {"version": 1, "requireAllLanguages": true, "languages": ["typescript"],
+    "taxonomies": [ … ]}
+   ```
+   `"requireAllLanguages": true` turns each `NO TAXONOMY` line into a
+   failure; set it once the manifest carries every half the repo needs.
+   `"languages"` lists the halves the repo gates on purpose. A tracked
+   language left off the list prints one `excluded by declaration` line
+   and never fails, even under `requireAllLanguages`. A language on the
+   list with no taxonomy is still reported as `NO TAXONOMY`, and a
+   taxonomy in the manifest keeps gating whether the list names it or not.
+   Both fields are validated: a `requireAllLanguages` that is not `true`
+   or `false`, a `languages` value that is not a non-empty list, or a name
+   in it that is neither a language spec-guard knows nor the language of
+   a taxonomy in the manifest makes the manifest unreadable, which is red.
    When a Definition-of-Done line rests on a proof, say which one:
    `- [x] withdraw never overdraws — proof: dafny:src/vault.dfy:Withdraw`.
    `spec-guard.py --check` refuses a checked box whose obligation does not
@@ -294,7 +315,32 @@ step; do not stop at copying files.
    with a pipe, a redirect, or a trailing `|| true` reports a different exit
    and is deliberately not attested, so it shows up as UNATTESTED rather
    than being credited to the gate. Commit the manifest; it is part of the
-   trust base.
+   trust base. A gate that outlives one tool call (600 s) runs through
+   `attest.py --run <gate>` in the background and is collected with
+   `attest.py --await <token>`, which attests the exit itself (from a worktree,
+   `--root <this project>` keeps it in this project's log; graph nodes are
+   handed it). A gate declared with a leading `cd <dir> &&` is matched only
+   when run in that directory. A leading `cd` is witnessed only when it
+   names a plain path inside this repository (its checkout or a linked
+   worktree) at the gate's declared place — not `cd "$VAR"`, `cd $(...)`,
+   a `~` form other than `~` and `~/...`, or a relative `cd` under
+   `CDPATH`, which the hook does not model; a gate with no `cd` runs at the
+   project root, not a subdirectory, and only a `bash ` prefix is dropped —
+   and a gate is one line of spaces and tabs. A command with quotes or
+   expansions must match the declared text exactly. The witness catches
+   transcribed, stale and borrowed exits; it is not a defence against an
+   agent that forges rows (the log is a file it can write) — a merge that
+   must hold against that rests on `prove:ci`. A gate may not be
+   named `ci`: that name is the forge's. If merges
+   rest on CI, add a `ci` section so `prove:ci` can cite the forge's own
+   commit statuses (`attest.py --ci --pr <n>`, GitHub via `gh`; the forge
+   names the commit):
+   ```json
+   {"version": 1, "gates": {"harness": "scripts/harness.sh --full"},
+    "ci": {"forge": "github", "contexts": ["harness"]}}
+   ```
+   Without `contexts`, every context the forge reports must pass and at
+   least one must exist.
 11. Fill in the Merge policy block, asking the user once: may green + SHIP
    PRs merge autonomously in this repo, and does merging trigger a deploy?
    If auto-merge is on, verify `gh` is authenticated and record the

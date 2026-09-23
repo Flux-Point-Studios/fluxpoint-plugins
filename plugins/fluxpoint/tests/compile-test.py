@@ -679,8 +679,10 @@ for name, ok in [
     ("the worktree preamble asserts the base, with the sha supplied",
      "basePreamble() +" in tree_js and "merge-base --is-ancestor" in tree_js
      and "${BASE.sha}" in tree_js),
+    # It may READ one — the tree guard compares a launch reading when
+    # there is one (#94) — but never refuses to start without it.
     ("a graph with no isolated nodes demands no base",
-     "A._base" not in plain_js),
+     "no base was passed" not in plain_js),
     # #21: the sentinel brackets the campaign and guards every verdict-minting
     # node; drift halts rather than advancing.
     ("sentinel at start, before the verdict node, and at end",
@@ -870,6 +872,381 @@ def tree_sentinel_executed_case():
 
 
 tree_sentinel_executed_case()
+
+
+def tree_own_writes_and_launch_case():
+    """The guard ignores the plugin's own writes and re-reads at launch (#94).
+
+    The Stop hook appends an Evidence row to the state file whenever the
+    orchestrator ends a turn, which a live graph's sentinel read as an
+    undeclared mutation: TREE-MOVED, and every verdict discarded. And the
+    sentinel is a memoized agent() call, so a resume replayed its first
+    reading instead of taking one — the launcher's own fresh reading in
+    args._base is what a resume is now held to.
+    """
+    global passed, failed
+    import subprocess
+    import tempfile
+
+    ir = copy.deepcopy(BASE)
+    add_verified_mutator(ir)
+    js = cg.emit(ir, CONTRACTS, graph_file="GRAPH.rollout.md")
+
+    plain_js = cg.emit(copy.deepcopy(BASE), CONTRACTS)
+
+    def run(readings, base, js=js):
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "o.json")
+            w = os.path.join(d, "w.mjs")
+            with open(w, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join([
+                    "import {writeFileSync} from 'node:fs';",
+                    "const PROMPTS=[], LOGS=[]; let checks=0;",
+                    f"const READINGS={json.dumps(readings)};",
+                    "const agent=async(p,o)=>{PROMPTS.push(String(p));",
+                    "  if(String(o.label||'').includes('tree-check')) {",
+                    "    const r = READINGS[Math.min(checks, READINGS.length - 1)]; checks++;",
+                    "    return {head: r[0], porcelain: r[1]} }",
+                    "  if(String(o.label||'').includes('refute'))",
+                    "    return {refuted:false, reason:'no'};",
+                    "  if(String(o.label||'').includes('gate'))",
+                    "    return {exit:0, command:'scripts/harness.sh --full', tail:''};",
+                    "  if(String(o.label||'').includes('build'))",
+                    "    return {summary:'done', plan:'p', files:[], risks:[]};",
+                    "  return {findings:[]}};",
+                    "const parallel=async(t)=>Promise.all(t.map(f=>f()));",
+                    "const pipeline=async()=>[],phase=()=>{};",
+                    "const log=(m)=>LOGS.push(String(m));",
+                    f"const args={json.dumps({'_base': base} if base else {})};",
+                    "const budget={total:null,spent:()=>0,remaining:()=>1e9};",
+                    "const workflow=0;",
+                    "(async () => {",
+                    js.replace("export const meta", "const meta"),
+                    "})().then(r=>writeFileSync(" + json.dumps(out)
+                    + ",JSON.stringify({r, LOGS, gateRan: PROMPTS.some(p=>p.includes('re-run the harness'))})))",
+                    ".catch(e=>writeFileSync(" + json.dumps(out)
+                    + ",JSON.stringify({err:String(e&&e.message||e)})))",
+                ]))
+            subprocess.run(["node", w], capture_output=True, timeout=90)
+            return json.load(open(out)) if os.path.exists(out) else {"err": "no output"}
+
+    base = {"sha": "abc123", "branch": "main", "porcelain": ""}
+    hook_row = run([["abc123", ""], ["abc123", " M WORK.md"]], base)
+    own = run([["abc123", ""], ["abc123", "?? .claude/\n M GRAPH.rollout.md"]], base)
+    code = run([["abc123", ""], ["abc123", " M WORK.md\n M src/app.py"]], base)
+    moved_head = run([["abc123", ""]], {"sha": "fff999", "branch": "main", "porcelain": ""})
+    moved_dirt = run([["abc123", ""]], {"sha": "abc123", "porcelain": " M src/app.py"})
+    resumed_dirty_state = run([["abc123", ""]], {"sha": "abc123", "porcelain": " M WORK.md"})
+    no_launch = run([["abc123", ""]], None, js=plain_js)
+
+    def outcome(x):
+        return (x.get("r") or {}).get("outcome")
+
+    # A project below a monorepo's top level: porcelain names paths from the
+    # repository root, so the ignore list carries the project's prefix. And
+    # git octal-escapes a non-ASCII graph name, which must still match.
+    mono_js = cg.emit(ir, CONTRACTS, graph_file="GRAPH-\u00e9.md",
+                      project_prefix="services/api/")
+    mono_hook = run([["abc123", ""], ["abc123", " M services/api/WORK.md\n"
+                                                 "?? services/api/.claude/"]], base, js=mono_js)
+    mono_launch = run([["abc123", " M services/api/WORK.md"]], base, js=mono_js)
+    mono_quoted = run([["abc123", ' M "services/api/GRAPH-\\303\\251.md"']], base, js=mono_js)
+    mono_code = run([["abc123", ""], ["abc123", " M services/api/src/app.py"]], base, js=mono_js)
+    mono_other = run([["abc123", ""], ["abc123", " M WORK.md"]], base, js=mono_js)
+    # Only the plugin's own directories under .claude/ are its writes: a
+    # tracked settings file or project agent edited mid-run is a mutation.
+    settings = run([["abc123", ""], ["abc123", " M .claude/settings.json"]], base)
+    agent_def = run([["abc123", ""], ["abc123", " M .claude/agents/red-team-reviewer.md"]], base)
+    # git quotes a path with a tab and, under core.quotePath=false, leaves an
+    # astral character raw: decoding it must not throw out of the guard.
+    astral = run([["abc123", ""], ["abc123", '?? "x\\t\U0001F600.txt"']], base)
+    plugin_dirs = run([["abc123", ""], ["abc123", "?? .claude/fluxpoint/\n"
+                                                   " M .claude/workflows/g.js\n"
+                                                   "?? .claude/worktrees/"]], base)
+
+    for name, ok, got in [
+        ("the Stop hook's Evidence row is not TREE-MOVED",
+         outcome(hook_row) in ("COMPLETE", "INCOMPLETE"), hook_row),
+        ("  nor in a project below a monorepo's top level",
+         outcome(mono_hook) in ("COMPLETE", "INCOMPLETE"), mono_hook),
+        ("  whose launch-time STATUS edit does not halt a fresh launch",
+         outcome(mono_launch) in ("COMPLETE", "INCOMPLETE"), mono_launch),
+        ("  nor does a graph file git prints octal-escaped",
+         outcome(mono_quoted) in ("COMPLETE", "INCOMPLETE"), mono_quoted),
+        ("  while its code dirt still halts",
+         outcome(mono_code) == "TREE-MOVED", mono_code),
+        ("  and so does a WORK.md that is not the project's",
+         outcome(mono_other) == "TREE-MOVED", mono_other),
+        ("a tracked .claude/settings.json edited mid-run halts",
+         outcome(settings) == "TREE-MOVED", settings),
+        ("  and so does a project agent definition",
+         outcome(agent_def) == "TREE-MOVED", agent_def),
+        ("  but the plugin's own .claude/ directories do not",
+         outcome(plugin_dirs) in ("COMPLETE", "INCOMPLETE"), plugin_dirs),
+        ("a quoted path with an astral character is read, not thrown on",
+         outcome(astral) == "TREE-MOVED" and "err" not in astral, astral),
+        ("nor are .claude/ state and the compiled graph file",
+         outcome(own) in ("COMPLETE", "INCOMPLETE"), own),
+        ("real code dirt beside them still halts the run",
+         outcome(code) == "TREE-MOVED", code),
+        ("a launch on a different HEAD than the run's first reading halts",
+         outcome(moved_head) == "TREE-MOVED" and moved_head.get("gateRan") is False, moved_head),
+        ("  and so does launch-time code dirt the first reading lacked",
+         outcome(moved_dirt) == "TREE-MOVED", moved_dirt),
+        ("  but a launch whose only difference is the state file proceeds",
+         outcome(resumed_dirty_state) in ("COMPLETE", "INCOMPLETE"), resumed_dirty_state),
+        ("with no launch reading the run proceeds and says what it cannot check",
+         outcome(no_launch) in ("COMPLETE", "INCOMPLETE")
+         and any("no launch reading" in m for m in no_launch.get("LOGS", [])), no_launch),
+    ]:
+        detail = "yes" if ok else f"got {str(got)[:160]}"
+        print(f"{'PASS' if ok else 'FAIL'}  tree-own-writes: {name:<52} -> {detail[:120]}")
+        passed, failed = (passed + ok, failed + (not ok))
+
+
+tree_own_writes_and_launch_case()
+
+
+def tree_prefix_from_main_case():
+    """main() derives the project prefix from git, not from the caller."""
+    global passed, failed
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "mono")
+        proj = os.path.join(repo, "services", "api")
+        os.makedirs(proj)
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        work = os.path.join(proj, "WORK.md")
+        with open(work, "w", encoding="utf-8") as fh:
+            fh.write("# w\n\n```json graph-ir\n" + json.dumps(BASE) + "\n```\n")
+        out = os.path.join(d, "g.js")
+        r = subprocess.run([sys.executable, os.path.join(PLUGIN, "scripts", "compile-graph.py"),
+                            work, "--gates-root", proj, "-o", out],
+                           capture_output=True, text=True)
+        js = open(out, encoding="utf-8").read() if os.path.exists(out) else ""
+        line = next((x for x in js.splitlines() if x.startswith("const TREE_IGNORE")), "")
+        ignore = json.loads(line.split("=", 1)[1]) if line else {}
+        outside = cg.git_prefix(d)
+    for name, ok, got in [
+        ("the compiled ignore list carries the project's prefix",
+         "services/api/WORK.md" in ignore.get("files", [])
+         and "services/api/.claude/fluxpoint/" in ignore.get("prefixes", []),
+         line or r.stderr),
+        ("  and a directory outside any repository has none",
+         outside == "", outside),
+    ]:
+        detail = "yes" if ok else f"got {str(got)[:160]}"
+        print(f"{'PASS' if ok else 'FAIL'}  tree-prefix: {name:<55} -> {detail[:120]}")
+        passed, failed = (passed + ok, failed + (not ok))
+
+
+tree_prefix_from_main_case()
+
+
+def duplicate_contract_id_case():
+    """Two files claiming one $id: which binds must not depend on the loader."""
+    global passed, failed
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        for fn, req in (("A-old.schema.json", ["txHash"]), ("SigV1.schema.json", ["txHash", "signer"])):
+            with open(os.path.join(d, fn), "w", encoding="utf-8") as fh:
+                json.dump({"$id": "SigV1", "type": "object", "required": req}, fh)
+        try:
+            cg.load_contracts(d)
+            got = "loaded"
+        except cg.GraphError as e:
+            got = str(e)
+    ok = "both declare $id SigV1" in got
+    print(f"{'PASS' if ok else 'FAIL'}  contracts: two files claiming one $id are refused      -> {got[:100]}")
+    passed, failed = (passed + ok, failed + (not ok))
+
+
+duplicate_contract_id_case()
+
+
+def contracts_header_case():
+    """A graph file's CONTRACTS: header is honored (issue #95).
+
+    Contracts came only from --contracts, which defaults to the plugin's
+    own directory, so a repo-local set declared in the header produced a
+    page of false findings that read as defects in the IR — and nothing
+    said which directory had been used.
+    """
+    global passed, failed
+    import subprocess
+    import tempfile
+    stricter = copy.deepcopy(CONTRACTS["SliceV1"])
+    stricter["properties"]["outcome"] = {"enum": ["shipped", "parked"]}
+    local = {"$id": "RuntimeEvidenceV1", "type": "object", "required": ["observed"],
+             "properties": {"observed": {"type": "string"}}}
+    ir = {"version": 1, "campaign": "c", "treeGuard": False, "budget": {"maxNodes": 4},
+          "nodes": [{"id": "slice", "prompt": "do it", "contract": "SliceV1",
+                     "haltWhen": "outcome == 'parked'"},
+                    {"id": "watch", "after": "slice", "prompt": "observe {{prev}}",
+                     "contract": "RuntimeEvidenceV1"}]}
+
+    def run(d, header, *extra):
+        with open(os.path.join(d, "GRAPH.x.md"), "w", encoding="utf-8") as fh:
+            fh.write(header + "\n```json graph-ir\n" + json.dumps(ir) + "\n```\n")
+        return subprocess.run(
+            [sys.executable, os.path.join(PLUGIN, "scripts", "compile-graph.py"),
+             "GRAPH.x.md", "--check", *extra], cwd=d, capture_output=True, text=True)
+
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, ".fluxpoint-contracts"))
+        for c in (stricter, local):
+            with open(os.path.join(d, ".fluxpoint-contracts", f"{c['$id']}.schema.json"),
+                      "w", encoding="utf-8") as fh:
+                json.dump(c, fh)
+        plain = run(d, "STATUS: DESIGN\n")
+        declared = run(d, "STATUS: DESIGN\nCONTRACTS: .fluxpoint-contracts\n")
+        missing = run(d, "CONTRACTS: .nowhere\n")
+        flag = run(d, "CONTRACTS: .fluxpoint-contracts\n", "--contracts",
+                   os.path.join(PLUGIN, "contracts"))
+    for name, ok, detail in [
+        ("without the header, repo-local contracts are unknown",
+         plain.returncode == 1 and "RuntimeEvidenceV1" in plain.stderr, plain.stderr[-80:]),
+        ("CONTRACTS: overlays the repo's set on the shipped one",
+         declared.returncode == 0, declared.stderr[-120:]),
+        ("  and --check names the directory it used",
+         ".fluxpoint-contracts" in declared.stdout and "contracts" in declared.stdout,
+         declared.stdout.strip()[-100:]),
+        ("a CONTRACTS: directory that does not exist is an error, not a fallback",
+         missing.returncode == 1 and ".nowhere" in missing.stderr, missing.stderr[-80:]),
+        ("an explicit --contracts still wins over the header",
+         flag.returncode == 1 and "RuntimeEvidenceV1" in flag.stderr, flag.stderr[-80:]),
+    ]:
+        print(f"{'PASS' if ok else 'FAIL'}  contracts-header: {name:<52} -> {detail[:90]}")
+        passed, failed = (passed + ok, failed + (not ok))
+
+
+contracts_header_case()
+
+
+def root_arg_literal(js):
+    """The emitted ROOT_ARG, fed a hostile root, reaches bash as that root."""
+    import subprocess
+    import tempfile
+    line = next((x for x in js.splitlines() if x.startswith("const ROOT_ARG = ")), "")
+    if not line:
+        return False
+    hostile = "/srv/build$dir/pr'oj`touch pwned`"
+    with tempfile.TemporaryDirectory() as d:
+        probe = ("const LAUNCH = {root: " + json.dumps(hostile) + "};\n" + line +
+                 "\nprocess.stdout.write(ROOT_ARG)\n")
+        arg = subprocess.run(["node", "-e", probe], capture_output=True, text=True).stdout
+        out = subprocess.run(["bash", "-c", "set -- " + arg + "; printf '%s|%s' \"$1\" \"$2\""],
+                             capture_output=True, text=True, cwd=d).stdout
+        return out == "--root|" + hostile and not os.path.exists(os.path.join(d, "pwned"))
+
+
+def prove_ci_and_launch_case():
+    """CI's statuses guard an irreversible node; citations carry the launch.
+
+    The two strongest attestations a merge has — CI's own commit statuses
+    and a gate longer than one tool call — could not guard an irreversible
+    node, so the terminal merge had to be parked on a person (#96). And a
+    cited attestation was never bound to the run that cited it (#91).
+    """
+    global passed, failed
+    import subprocess
+    import tempfile
+
+    ir = {"version": 1, "campaign": "ship it", "treeGuard": False,
+          "budget": {"maxNodes": 6}, "requiredArgs": ["confirm"],
+          "nodes": [{"id": "push", "prompt": "push the tip", "contract": "HarnessCheckV1"},
+                    {"id": "ci-gate", "prompt": "cite CI's verdict on the tip",
+                     "contract": "ExecutionV1", "verify": "prove:ci",
+                     "independent": True, "verifies": "push", "haltWhen": "exit != 0"},
+                    {"id": "merge", "prompt": "merge the tip",
+                     "contract": "HarnessCheckV1", "irreversible": True}]}
+    with_ci = cg.validate(ir, CONTRACTS, gates={"harness", "ci"})
+    without = cg.validate(ir, CONTRACTS, gates={"harness"})
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, ".fluxpoint-gates.json"), "w") as fh:
+            json.dump({"version": 1, "gates": {"harness": "scripts/harness.sh"},
+                       "ci": {"forge": "github", "contexts": ["harness"]}}, fh)
+        loaded = cg.load_gates(d)
+        # The witness's own rules, at compile time: a manifest attest.py
+        # refuses mints no rows, so a prove: node over it cannot be proved.
+        with open(os.path.join(d, ".fluxpoint-gates.json"), "w") as fh:
+            json.dump({"version": 1, "gates": {"harness": "scripts/harness.sh", "ci": "make ci"}}, fh)
+        refused = cg.validate(ir, CONTRACTS, gates=cg.load_gates(d))
+        with open(os.path.join(d, ".fluxpoint-gates.json"), "w") as fh:
+            json.dump({"version": 1, "gates": {}, "ci": {"forge": "github"}}, fh)
+        ci_only = cg.load_gates(d)
+    js = cg.emit(ir, CONTRACTS, {})
+
+    def run(args):
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "o.json")
+            w = os.path.join(d, "w.mjs")
+            with open(w, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join([
+                    "import {writeFileSync} from 'node:fs';",
+                    "const agent=async(p,o)=>{",
+                    "  if(String(o.label||'').includes('ci-gate')) return {gate:'ci', exit:0, attestId:'att_x'};",
+                    "  return {exit:0, command:'git', tail:''}};",
+                    "const parallel=async(t)=>Promise.all(t.map(f=>f()));",
+                    "const pipeline=async()=>[],log=()=>{},phase=()=>{};",
+                    f"const args={json.dumps(args)};",
+                    "const budget={total:null,spent:()=>0,remaining:()=>1e9};",
+                    "const workflow=0;",
+                    "(async () => {",
+                    js.replace("export const meta", "const meta"),
+                    "})().then(r=>writeFileSync(" + json.dumps(out) + ",JSON.stringify({r})))",
+                    ".catch(e=>writeFileSync(" + json.dumps(out)
+                    + ",JSON.stringify({err:String(e&&e.message||e)})))",
+                ]))
+            subprocess.run(["node", w], capture_output=True, timeout=90)
+            return json.load(open(out)) if os.path.exists(out) else {"err": "no output"}
+
+    stamped = run({"confirm": "merge", "_ledger": {},
+                   "_launch": {"since": "2026-09-23T00:00:00Z", "nonce": "a1b2c3"}})
+    unstamped = run({"confirm": "merge", "_ledger": {}})
+    no_nonce = run({"confirm": "merge", "_ledger": {},
+                    "_launch": {"since": "2026-09-23T00:00:00Z"}})
+    bad_nonce = run({"confirm": "merge", "_ledger": {},
+                     "_launch": {"since": "2026-09-23T00:00:00Z", "nonce": "x; rm -rf ."}})
+    for name, ok, got in [
+        ("prove:ci resolves when the manifest declares a ci section",
+         not with_ci, with_ci),
+        ("prove:ci without a ci section is rejected, and says what to add",
+         any("prove:ci" in f and "'ci' section" in f for f in without), without),
+        ("load_gates lists ci beside the declared gates",
+         loaded == {"harness", "ci"}, loaded),
+        ("a manifest the witness refuses fails a prove: node at compile time",
+         any("which the witness refuses" in f for f in refused), refused),
+        ("  while a CI-only manifest is a manifest",
+         ci_only == {"ci"} and not ci_only.findings, (ci_only, ci_only.findings)),
+        ("a prove: graph refuses to start without a launch stamp",
+         "launch stamp" in str(unstamped.get("err")), unstamped),
+        ("  and carries the stamp into the summary it is recorded from",
+         ((stamped.get("r") or {}).get("launch") or {}).get("since") == "2026-09-23T00:00:00Z",
+         stamped),
+        ("a stamp without a run nonce is refused (overlapping runs, #91 review)",
+         "launch stamp" in str(no_nonce.get("err")), no_nonce),
+        ("  and so is a nonce that is not a plain token",
+         "launch stamp" in str(bad_nonce.get("err")), bad_nonce),
+        ("the prove node is told to bind its gate run to this run's nonce",
+         "FPL_ATTEST_NONCE=${LAUNCH.nonce}" in js and "provePreamble(\"ci\") +" in js
+         and "--match-head-commit" in js, "preamble"),
+        ("  and to name the stamped project root to attest.py",
+         "const ROOT_ARG = " in js and "attest.py --ci${ROOT_ARG}" in js
+         and "--last ${gate}${ROOT_ARG}" in js, "root"),
+        ("  single-quoted, so no path can expand or run in the shell",
+         root_arg_literal(js), "literal"),
+        ("a ci citation that names no commit is UNPROVEN in the run",
+         "gate === 'ci' && !r.sha" in js, "checked"),
+    ]:
+        detail = "yes" if ok else f"got {str(got)[:150]}"
+        print(f"{'PASS' if ok else 'FAIL'}  prove-ci: {name:<58} -> {detail[:120]}")
+        passed, failed = (passed + ok, failed + (not ok))
+
+
+prove_ci_and_launch_case()
 
 
 print(f"\n{passed} passed, {failed} failed")

@@ -15,6 +15,29 @@ fpl_cd_project "$input" || exit 0
 edits="$(printf '%s' "$input" | fpl_edit_paths)"
 [ -n "$edits" ] || exit 0
 
+# Only a path inside the project changes the project. An orchestrator's
+# scratch scripts outside the repository used to arm the gate, and the
+# gate then wrote its Evidence row into the very tree a live graph was
+# guarding — halting the run for a mutation nothing in it made (#94).
+# Resolved in Python so symlinked temp dirs and Windows drive paths
+# compare the way the filesystem does, not the way the strings look.
+edits="$(printf '%s\n' "$edits" | "$FPL_PY" -c '
+import os, sys
+root = os.path.realpath(os.getcwd())
+for line in sys.stdin.read().splitlines():
+    op, _, path = line.partition(" ")
+    if not path:
+        continue
+    full = os.path.realpath(path if os.path.isabs(path) else os.path.join(root, path))
+    try:
+        inside = os.path.commonpath([root, full]) == root
+    except ValueError:  # another drive on Windows
+        inside = False
+    if inside:
+        print(line)
+' 2>/dev/null)"
+[ -n "$edits" ] || exit 0
+
 # Docs, the work file and local state never arm the gate or run the harness:
 # a patch that touches only those is not code changing. A deleted file has
 # nothing to check, and a path the patch names but the tree does not carry

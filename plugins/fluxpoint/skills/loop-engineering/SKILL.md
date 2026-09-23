@@ -229,9 +229,15 @@ Record a real choice with `scripts/decision.py --record`, which validates
 against `DecisionV1` before writing: at least two options, each with the
 best case against it (including against the one that won — an option nobody
 argued against was not examined), and a rationale long enough that a lazy
-sentence cannot satisfy it. The row lands in the Decisions table, which
-SessionStart injects into every future context and the graph compiler can
-bind into a later campaign. If a slice genuinely decided nothing, say so:
+sentence cannot satisfy it. The whole record — question, every option
+with its objection, evidence — is kept in `.claude/fluxpoint/decisions.jsonl`,
+and a row indexing it lands in the Decisions table, which SessionStart
+injects into every future context. The row's cells are cut to fit; a cut
+row points at `decision.py --show <id>`, which prints the record whole, and
+a later campaign's `imports` bind the record itself, not the row. Give an
+operator's ruling an `--id` and paste their words into `evidence` verbatim:
+the condition that decides a ruling is usually the part a cell cuts. If a
+slice genuinely decided nothing, say so:
 `decision.py --none "<why>" --session <id>` makes silence a statement
 rather than an absence.
 

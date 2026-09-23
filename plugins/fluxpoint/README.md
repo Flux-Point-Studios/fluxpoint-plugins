@@ -27,7 +27,9 @@ does.
   - Loop: `lib.sh`, `inject-state.sh`, `verify-changed.sh`, `dod-gate.sh`,
     `precompact.sh`, `prompt-recall.sh`, `evidence.py` (the gate authors
     its own Evidence row; this writes it and executes nothing),
-    `decision.py` (Decisions rows with the `DecisionV1` floors enforced),
+    `decision.py` (whole `DecisionV1` records kept in
+    `.claude/fluxpoint/decisions.jsonl`, indexed by a Decisions row, read
+    back with `--show`, floors enforced),
     `py.sh` (interpreter resolution and UTF-8 stdio).
   - Gates and ratchets: `exec-attest.sh` with `attest.py` (hook-minted exit
     codes for declared gates), `secret-guard.py` (credential gate),
@@ -42,7 +44,8 @@ does.
     `recurrence-guard.py` (a lesson learned twice demands a gate).
   - Graph: `compile-graph.py`, `record-run.py`, `ledger.py` (once-only
     guard), `release.py`, `inbox.py` and `wake-check.sh` (the park layer),
-    `metrics.py` (per-campaign rates).
+    `metrics.py` (per-campaign rates), `sweep.py` (plan and score an
+    effort/model sweep: variants, a held-out split, pass-rate intervals).
   - Memory: `memory.py` (lessons), `recall.py` and `embedder.py` (the
     derived graph and hybrid retrieval).
   - `prompt-audit.py` (advisory prompt hygiene) and `migrate.py` (pre-1.0
@@ -59,6 +62,11 @@ does.
   in the feature campaign), `prover` (proof synthesis apart from program
   synthesis; `SliceV1`, a mutator), `graph-auditor` (semantic review of a
   campaign IR; prose, and outside the graph on purpose).
+- `workflows/` — `graph-audit.js`, the round `/fluxpoint:graph-audit` runs
+  on Claude Code: six lens-scoped `graph-auditor`s, a reduce that merges
+  their duplicates, refuting verifiers (three per finding at HIGH and
+  above), and per-stage counts. SOUND means every lens returned and
+  nothing survived refutation. `--quick` keeps the single auditor.
 - `skills/` — `loop-engineering` (driver selection, conditions, the gate),
   `graph-engineering` (escalation rule, primitives, tiers, shapes),
   `secret-handling` (derive from a credential's path so it can be worked
@@ -76,8 +84,9 @@ does.
   codegen injection, the Stop gate and hook wiring driven with both
   runtimes' payload shapes, attestation, every ratchet, the counterexample
   ledger, relations, the park layer, memory and recall, migration against
-  pre-1.0 fixtures, the outer loop under both CLIs, and the documented
-  claims the code has to keep.
+  pre-1.0 fixtures, the outer loop under both CLIs, the graph-audit
+  workflow under stub agents, and the documented claims the code has to
+  keep.
 
 ## The two contracts
 
@@ -98,7 +107,11 @@ Evidence table both modes append to.
   hook. `verify: "prove:<gate>"` makes a node cite the attestation its run
   produced — a citation that does not exist or disagrees files the run
   `TAMPERED-EXECUTION`, and citing nothing files it `INCOMPLETE` rather
-  than accusing an executor that never touched the Bash tool.
+  than accusing an executor that never touched the Bash tool. A citation
+  older than the run's launch stamp, from another commit, or already
+  backing another node is `STALE`. A gate too long for one tool call runs
+  through `attest.py --run`/`--await`, and `prove:ci` cites CI's own
+  commit statuses on the commit the forge names for a pull request.
 - The DoD gate arms on two independent signals — the PostToolUse marker
   and dirtiness re-derived from `git` — because the marker cannot see
   source written through the Bash tool. Dirtiness is measured against the
@@ -132,8 +145,10 @@ Evidence table both modes append to.
   weighted by model — and `budget.maxEstimatedTokens` is the ceiling on
   that estimate. The constants are stated assumptions in one place;
   `metrics.py` holds them to the runtime's own `spent`. Effort
-  transitions between consecutive nodes are warned about as the cold
-  prefills they are.
+  transitions between consecutive nodes into a key the run has not warmed
+  are warned about as the cold prefills they are, and every expansion the
+  estimate cannot size (`{{prev}}`, a launch arg with no default) is named
+  as unpriced.
 - Ending a discovery sweep on its round ceiling is logged
   `discovery INCOMPLETE, not exhausted` — stopping early and finishing are
   different claims.
@@ -297,7 +312,12 @@ proved one.
   the builder classes the off-chain TypeScript answers for. It is red for
   every class with neither a test of that name nor a waiver with a reason,
   each taxonomy gates only a repo that tracks its language, and a waiver
-  is scoped to its own taxonomy. Where a prover is
+  is scoped to its own taxonomy. A tracked language whose taxonomy is
+  missing from the manifest is named `NO TAXONOMY` with the classes the
+  template holds for it; that is a note until the manifest sets
+  `"requireAllLanguages": true`, and a `"languages"` list names the halves
+  a repo gates on purpose, printing any tracked language it leaves out as
+  excluded by declaration. Where a prover is
   not on PATH the axiom audit says NOT RUN rather than reading clean.
 - **`scripts/plutus-budget.py` gates submittability.** Correct and
   submittable are different properties and only one has a prover:

@@ -101,6 +101,21 @@ EFFORT_MULT = {"low": 0.5, "medium": 1.0, "high": 1.8, "xhigh": 2.5, "max": 3.5}
 # Price weight by model family, matched on a substring of the model id;
 # anything unmatched is the session's default model at weight 1.
 MODEL_MULT = (("haiku", 0.25), ("sonnet", 0.5))
+# The text a node's author writes is priced on the packet's basis: one token
+# per UTF-8 byte, deliberately conservative. The constants above never read
+# a prompt, so a graph under repair could gain kilobytes of prompt per audit
+# round while its estimate — and the ceiling set from it — stayed byte-
+# identical. Only author-controlled text is priced here; the fixed harness
+# wording each call carries is what PREFIX_TOKENS already stands for.
+PROMPT_TOKENS_PER_BYTE = 1
+# Expansions whose size is only known at run time. They are named in the
+# estimate's assumptions rather than guessed, so a reader knows which part
+# of a prompt the number cannot see.
+UNPRICED_EXPANSIONS = ("prev", "decisions", "seen")
+# Tokens whose value differs between calls of ONE node. The prompt cache is
+# prefix-keyed, so a fan-out's workers share the text before the first of
+# these and nothing after it.
+VARYING_ROOTS = {"item", "i", "seen"}
 SPEC_PREAMBLE = ("Implement and verify this locked requirement packet. Defaulted decisions are model choices, "
                  "not user authorization. Do not edit the packet, lock or proof baseline to pass a check. "
                  "If a requirement is wrong, return the counterexample for a spec revision.\n")
@@ -137,15 +152,59 @@ def extract_ir(md_text):
 
 
 def load_contracts(contracts_dir):
-    out = {}
+    """{$id: schema} for a directory. Two files claiming one $id is an error:
+    which one binds used to depend on the loader — the compiler kept the
+    last in sorted order, release.py the first — so a park could be released
+    on a proof the compiled contract refuses."""
+    out, where = {}, {}
     if not os.path.isdir(contracts_dir):
         return out
     for fn in sorted(os.listdir(contracts_dir)):
         if fn.endswith(".schema.json"):
             with open(os.path.join(contracts_dir, fn), encoding="utf-8") as fh:
                 schema = json.load(fh)
-            out[schema.get("$id", fn.split(".")[0])] = schema
+            cid = schema.get("$id", fn.split(".")[0])
+            if cid in where:
+                raise GraphError(f"{contracts_dir}: {where[cid]} and {fn} both declare "
+                                 f"$id {cid} — one contract name, one file")
+            where[cid] = fn
+            out[cid] = schema
     return out
+
+
+def resolve_contracts(shipped_dir, header=None, explicit=None, root="."):
+    """(contracts, description) for one compile.
+
+    `--contracts` replaces the set wholesale, as it always has. A graph
+    file's `CONTRACTS:` header OVERLAYS the shipped set instead: a repo
+    keeps the contracts the plugin does not ship, and any stricter copies,
+    in a directory of its own, and everything else — the sentinel's
+    TreeCheckV1, the refuters' VerdictV1 — still resolves. A header naming
+    a directory that is not there is an error, never a quiet fallback to
+    the shipped set: that fallback is exactly the page of false findings
+    the header exists to prevent.
+    """
+    if explicit:
+        return load_contracts(explicit), explicit
+    shipped = load_contracts(shipped_dir)
+    if not header:
+        return shipped, "shipped"
+    import specification
+    rel = str(specification.in_repo(header, "CONTRACTS:"))
+    local_dir = os.path.join(root or ".", rel)
+    local = load_contracts(local_dir)
+    if not local:
+        raise GraphError(
+            f"CONTRACTS: {header} names no directory of *.schema.json contracts "
+            f"under {root or '.'} — the header is honored, so a missing set is an "
+            f"error rather than a silent fallback to the shipped contracts")
+    replaced = sorted(set(local) & set(shipped))
+    merged = dict(shipped)
+    merged.update(local)
+    desc = (f"shipped + {header} ({len(local) - len(replaced)} added"
+            + (f", {len(replaced)} overriding: {', '.join(replaced)}" if replaced else "")
+            + ")")
+    return merged, desc
 
 
 RUNS_DIR = os.path.join(".claude", "fluxpoint", "runs")
@@ -160,6 +219,12 @@ def _decision_in(artifact, did):
     without `decides`.
     """
     summary = artifact.get("summary") or {}
+    # A decision this run IMPORTED rides in its decisions map as provenance
+    # (record-run.py's decision_rows skips it for the same reason). Read as
+    # a fresh ruling it was dated by this run and could hide a newer one
+    # recorded while the run was parked.
+    if did in (summary.get("decisionsImported") or {}):
+        return None
     rec = (summary.get("decisions") or {}).get(did)
     if isinstance(rec, dict):
         return rec
@@ -169,8 +234,20 @@ def _decision_in(artifact, did):
     return None
 
 
-def resolve_imports(ir, contracts, runs_dir):
-    """Resolve the IR's imports from recorded runs, at compile time.
+def _order_key(when):
+    """decision.py's order_key: both sources as 'YYYY-MM-DD HH:MM:SS'.
+
+    A run artifact carries `recordedAt` to the second (a minute-only `when`
+    before 1.43) and a stored decision carries seconds; compared as raw
+    text, the longer string won every same-minute tie whatever happened
+    first, and 'latest' froze the older choice.
+    """
+    s = str(when or "").replace("T", " ").rstrip("Z").strip()
+    return s + ":00" if len(s) == 16 else s
+
+
+def resolve_imports(ir, contracts, runs_dir, store=None):
+    """Resolve the IR's imports from recorded runs and the decision store.
 
     Returns ({decisionId: {"record": ..., "runId": ...}}, findings).
 
@@ -184,6 +261,11 @@ def resolve_imports(ir, contracts, runs_dir):
 
     A malformed run artifact is a hard finding, never skipped: what
     'latest' names must not depend on which artifacts happened to parse.
+
+    `store` is decision.py's `decisions.jsonl`. Operator rulings are made in
+    chat, not by a graph node, so they never reach a run artifact; without
+    the store they could not bind a later campaign at all. 'latest' spans
+    both sources, and a store record is addressed by its recordId.
     """
     imports = ir.get("imports") or {}
     if not imports:
@@ -211,22 +293,49 @@ def resolve_imports(ir, contracts, runs_dir):
             if not isinstance(art, dict):
                 f.append(f"imports: {p} is not a run artifact (not an object)")
                 continue
-            arts.append((str(art.get("when") or ""), fn[: -len(".json")], art))
+            arts.append((_order_key(art.get("recordedAt") or art.get("when")),
+                         fn[: -len(".json")], art))
+    kept = []  # (when, recordId, decisionId, record)
+    if store and os.path.exists(store):
+        with open(store, encoding="utf-8") as fh:
+            for i, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError as e:
+                    f.append(f"imports: {store}:{i} is not valid JSON ({e}) — a "
+                             f"malformed decision record cannot be skipped")
+                    continue
+                if isinstance(r, dict) and isinstance(r.get("record"), dict):
+                    kept.append((_order_key(r.get("when")), str(r.get("recordId") or ""),
+                                 r.get("id"), r["record"], i))
     for did in sorted(imports):
         ref = imports[did]
         if ref == "latest":
+            # (when, order, source, record): ties in time go to the store
+            # record appended last, then to the run id, never to chance.
             hits = []
             for when, rid, art in arts:
                 rec = _decision_in(art, did)
                 if rec is not None:
-                    hits.append((when, rid, rec))
+                    hits.append((when, (0, 0), rid, rec))
+            hits += [(when, (1, i), rid, rec) for when, rid, kid, rec, i in kept if kid == did]
             if not hits:
                 f.append(
                     f"imports.{did}: no recorded run in {runs_dir} carries this "
-                    f"decision — the campaign that decides it has to run first; "
-                    f"never hand-write a run artifact to get past this")
+                    f"decision, and decision.py has recorded none — the campaign "
+                    f"or the ruling that decides it has to come first; never "
+                    f"hand-write a run artifact to get past this")
                 continue
-            _, rid, rec = max(hits, key=lambda h: (h[0], h[1]))
+            _, _, rid, rec = max(hits, key=lambda h: (h[0], h[1], h[2]))
+        elif str(ref).startswith("dec_"):
+            hit = next(((rid, rec) for _, rid, kid, rec, _ in kept
+                        if rid == ref and kid == did), None)
+            if hit is None:
+                f.append(f"imports.{did}: record '{ref}' not found in {store or 'the decision store'}")
+                continue
+            rid, rec = hit
         else:
             art = next((a for _, rid, a in arts if rid == ref), None)
             if art is None:
@@ -242,6 +351,19 @@ def resolve_imports(ir, contracts, runs_dir):
                 f"imports.{did}: the record in run '{rid}' is missing required "
                 f"DecisionV1 field(s) {missing} — a hand-edited artifact does "
                 f"not count as a decision")
+            continue
+        # The schema's floors, checked the way `decision.py --record` checks
+        # them: a record with every field name but `question: 1`, no options
+        # or string booleans would otherwise freeze into the next campaign.
+        # Not decision.py's stricter chosen-among-options rule: a graph node
+        # was only ever held to the schema, and a decision an honest run
+        # froze ("72h, matching the timelock") must stay importable.
+        bad = _sibling("decision").validate(rec, contracts.get("DecisionV1") or {},
+                                            choice_among_options=False)
+        if bad:
+            f.append(f"imports.{did}: the record in '{rid}' is not a valid DecisionV1 "
+                     f"({bad[0]}) — a corrupted or hand-edited record does not count "
+                     f"as a decision")
             continue
         resolved[did] = {"record": rec, "runId": rid}
     return resolved, f
@@ -320,18 +442,54 @@ def load_agents(root="."):
     return out
 
 
+class GateSet(set):
+    """Declared gate names, carrying what the witness says of the manifest."""
+    findings = ()
+
+
+def _sibling(name):
+    """A script of this directory as a module (attest.py for its manifest
+    rules), loaded by path so the compiler needs no sys.path of its own."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".py")
+    spec = importlib.util.spec_from_file_location("_fpl_" + name.replace("-", "_"), path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def load_gates(root):
-    """Declared gate names, or None when the repo declares no manifest."""
+    """Declared gate names, or None when the repo declares no manifest.
+
+    `ci` is among them when the manifest has a `ci` section: the forge's
+    own commit statuses, which attest.py --ci mints a row for. It is the
+    one gate no node can run inside a tool call, and the least forgeable
+    evidence a merge has.
+
+    The manifest is judged by attest.py's own rules, and its findings ride
+    along (`.findings`): a manifest the witness refuses mints no row, so a
+    prove: node compiled against it could only ever cite a fabrication —
+    and used to compile clean.
+    """
     p = os.path.join(root or ".", GATES)
     if not os.path.exists(p):
         return None
     try:
         with open(p, encoding="utf-8") as fh:
             doc = json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return None
+    except (OSError, json.JSONDecodeError) as e:
+        out = GateSet()
+        out.findings = (f"{GATES} is not readable JSON ({e})",)
+        return out
     gates = doc.get("gates") if isinstance(doc, dict) else None
-    return set(gates) if isinstance(gates, dict) else None
+    out = GateSet(gates if isinstance(gates, dict) else ())
+    if isinstance(doc, dict) and isinstance(doc.get("ci"), dict):
+        out.add("ci")
+    try:
+        out.findings = tuple(_sibling("attest").load_gates(root or ".")[1])
+    except Exception as e:  # noqa: BLE001 - a rule we cannot run is a finding
+        out.findings = (f"attest.py could not judge {GATES}: {e}",)
+    return out
 
 
 def prove_gate(n):
@@ -625,7 +783,12 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
             # `verify: harness` lesson: a tier that resolves to nothing must
             # not compile.
             gate = m.group(4)
-            if gates is None:
+            if gates is not None and getattr(gates, "findings", ()):
+                f.append(
+                    f"{where}: verify prove:{gate} rests on {GATES}, which the "
+                    f"witness refuses ({gates.findings[0]}) — nothing can mint the "
+                    f"row this node must cite until the manifest is fixed")
+            elif gates is None:
                 f.append(
                     f"{where}: verify prove:{gate} needs a {GATES} manifest "
                     f"declaring which commands decide things — without one the "
@@ -634,7 +797,9 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
             elif gate not in gates:
                 f.append(
                     f"{where}: verify prove:{gate} names no gate in {GATES} "
-                    f"(declared: {', '.join(sorted(gates)) or 'none'})")
+                    f"(declared: {', '.join(sorted(gates)) or 'none'})"
+                    + (" — prove:ci needs a top-level 'ci' section naming the "
+                       "forge and the contexts that decide" if gate == "ci" else ""))
             if c != "ExecutionV1":
                 f.append(
                     f"{where}: verify prove:{gate} requires contract ExecutionV1 "
@@ -1171,7 +1336,9 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                     f"own exit code. This repo declares gates in {GATES}, so the "
                     f"guard must use verify prove:<gate> and contract "
                     f"ExecutionV1 — an effect nobody can undo may not rest on a "
-                    f"number the node that ran it typed by hand"
+                    f"number the node that ran it typed by hand. A gate longer "
+                    f"than one tool call runs through attest.py --run and "
+                    f"--await; CI's own statuses are prove:ci"
                 )
             if "confirm" not in (ir.get("requiredArgs") or []):
                 f.append(
@@ -1311,18 +1478,21 @@ def warnings(ir, agents=None):
         if ttl in CACHE_TTLS and CACHE_TTLS[ttl] >= 3600:
             w.append(
                 f"{len(trans)} effort/model transition(s) between consecutive "
-                f"nodes ({hops}{more}) — each is a cold prefill even under the "
+                f"nodes into a key the run has not warmed yet ({hops}{more}) — "
+                f"each is a cold prefill the estimate charges even under the "
                 f"1-hour TTL, so a bump that the node's task shape does not need "
                 f"is a cost error; put same-effort work together, or move the "
-                f"change to a point that is cold anyway (after a park or a fan-out)")
+                f"change to a point that is cold anyway (a node that waits on a "
+                f"park, which runs after the release and is priced cold)")
         else:
             w.append(
                 f"{len(trans)} effort/model transition(s) between consecutive "
-                f"nodes ({hops}{more}) — under the default 5-minute prompt-cache "
-                f"TTL every sequential hop is priced cold, so these cost nothing "
-                f"extra yet; declare budget.cacheTtl '1h' and the same-effort hops "
-                f"become warm, at which point each transition is a cold prefill "
-                f"the estimate charges for")
+                f"nodes into a key the run has not warmed yet ({hops}{more}) — "
+                f"under the default 5-minute prompt-cache TTL every sequential "
+                f"hop is priced cold, so these cost nothing extra yet; declare "
+                f"budget.cacheTtl '1h' and the same-effort hops become warm, at "
+                f"which point each of these is a cold prefill the estimate "
+                f"charges for")
     fans_or_parks = [n.get("id", "?") for n in nodes
                      if n.get("foreach") or n.get("repeat") or panel_size(n)
                      or n.get("actor", "agent") != "agent"]
@@ -1389,39 +1559,168 @@ def plan_groups(ir):
     """The campaign's spawns as groups that run concurrently, in order.
 
     Each group is a list of (nodeId, (model, effort)) — a fan-out's workers,
-    a panel's refuters, a tree sentinel, an advisor. `park` marks a group
-    after which the cache is cold whatever the TTL: nothing survives the
-    hours a person takes. This is the same arithmetic as plan_node_count(),
-    laid out so each call carries the identity the prompt cache keys on.
+    a panel's refuters, a tree sentinel, an advisor. `park` marks an
+    advisor's group. `track` is the set of parked nodes the group waits on
+    (held_by): a node downstream of a park does not spawn until a person
+    releases it, hours later, so it runs in a later run whose cache starts
+    cold; a node that does not wait on the park runs on in the same run,
+    right after the advisor, and keeps whatever that run has warmed. This is
+    the same arithmetic as plan_node_count(), laid out so each call carries
+    the identity the prompt cache keys on.
     """
     lists = ir.get("lists") or {}
     tree_guard = ir.get("treeGuard", True)
+    held = held_by(ir)
     groups = []
     sentinel = ("", "low")
     if tree_guard:
-        groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True})
+        groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True,
+                       "kind": "sentinel", "track": frozenset()})
     for n in ir.get("nodes") or []:
         if is_reduce(n):
             continue
         nid = n.get("id", "?")
+        track = held.get(nid, frozenset())
         if tree_guard and (prove_gate(n) or n.get("independent")):
-            groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True})
+            groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True,
+                           "kind": "sentinel", "track": track})
         if n.get("actor", "agent") != "agent":
-            groups.append({"calls": [(nid, ("", "medium"))], "park": True})
+            groups.append({"calls": [(nid, ("", "medium"))], "park": True,
+                           "kind": "advise", "node": n, "track": track})
             continue
         key = node_key(n, ir)
-        fan = len(lists.get(n.get("foreach"), [None])) if n.get("foreach") else 1
+        items = lists.get(n.get("foreach"), [None]) if n.get("foreach") else [None]
+        fan = len(items)
         rounds = max(1, int((n.get("repeat") or {}).get("maxRounds", 1)))
         cnt = panel_size(n)
         per = int(n.get("expectItems", 3))
         for _ in range(rounds):
-            groups.append({"calls": [(nid, key)] * fan, "park": False})
+            groups.append({"calls": [(nid, key)] * fan, "park": False,
+                           "kind": "work", "node": n, "items": items, "track": track})
             if cnt:
                 groups.append({"calls": [(nid, ("", "low"))] * (fan * per * cnt),
-                               "park": False})
+                               "park": False, "kind": "refute", "track": track})
     if tree_guard:
-        groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True})
+        groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True,
+                       "track": frozenset()})
     return groups
+
+
+def held_by(ir):
+    """nodeId -> the parked nodes it waits on, through `after` and a
+    reduce's `from` — the edges the emitted BLOCKED guard follows.
+
+    A node with an empty set spawns in the run that reaches it, parks or no
+    parks: a parked node only marks itself BLOCKED and the campaign carries
+    on. Only what hangs below a park waits for the release.
+    """
+    nodes = ir.get("nodes") or []
+    by_id = {n.get("id"): n for n in nodes}
+    memo = {}
+
+    def walk(nid, stack):
+        if nid in memo:
+            return memo[nid]
+        n = by_id.get(nid) or {}
+        dep = n.get("after") or (n.get("reduce") or {}).get("from")
+        out = frozenset()
+        if isinstance(dep, str) and dep in by_id and dep not in stack:
+            up = walk(dep, stack | {nid})
+            out = up | ({dep} if by_id[dep].get("actor", "agent") != "agent" else frozenset())
+        memo[nid] = out
+        return out
+
+    return {n.get("id"): walk(n.get("id"), frozenset()) for n in nodes}
+
+
+def _utf8(s):
+    return len(str(s).encode("utf-8"))
+
+
+def _js_text(v):
+    """What the emitted tokenText() renders a value to: text as itself, a
+    list or object as compact JSON, anything else as JS's String() would."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return "null"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _descend(value, path):
+    """Follow a token's dotted path into a value; MISSING when it ends."""
+    cur = value
+    for part in path:
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return _MISSING
+    return cur
+
+
+_MISSING = object()
+
+
+def _item_value(item, tok):
+    """What {{item}} / {{item.<field>}} renders to for one list entry."""
+    v = _descend(item, tok.split(".")[1:])
+    return "undefined" if v is _MISSING else _js_text(v)
+
+
+def _expansion_bytes(tok, ir, item=None, index=0):
+    """Bytes one {{token}} is estimated to render to. 0 when unknowable —
+    unpriced_expansions() names those."""
+    root = tok.split(".")[0].split("[")[0]
+    if root == "A":
+        defaults = ir.get("argDefaults") or {}
+        if "." not in tok:
+            return _utf8(_js_text(defaults))
+        v = _descend(defaults, tok.split(".")[1:])
+        return 0 if v is _MISSING else _utf8(_js_text(v))
+    if root == "campaign":
+        return _utf8(ir.get("campaign", ""))
+    if root == "item" and item is not None:
+        return _utf8(_item_value(item, tok))
+    if root == "i":
+        return len(str(index))
+    return 0
+
+
+def prompt_bytes(texts, ir, item=None, index=0):
+    """(shared, varying) UTF-8 bytes of the author text one call carries.
+
+    `shared` is everything before the first token whose value differs
+    between calls of the same node — the part a sibling's prefix cache can
+    hold. `varying` is the rest, paid in full by every call.
+    """
+    shared = varying = 0
+    split = False
+    for text in texts:
+        pos = 0
+        for m in SUBST.finditer(text):
+            lit = _utf8(text[pos:m.start()])
+            tok = m.group(1)
+            if not split and tok.split(".")[0].split("[")[0] in VARYING_ROOTS:
+                shared += lit
+                split = True
+                varying += _expansion_bytes(tok, ir, item, index)
+            elif split:
+                varying += lit + _expansion_bytes(tok, ir, item, index)
+            else:
+                shared += lit + _expansion_bytes(tok, ir, item, index)
+            pos = m.end()
+        tail = _utf8(text[pos:])
+        if split:
+            varying += tail
+        else:
+            shared += tail
+    return shared, varying
 
 
 def estimate_tokens(ir, contracts=None, specification=None):
@@ -1430,68 +1729,166 @@ def estimate_tokens(ir, contracts=None, specification=None):
     A call's prefix is warm when an earlier call at the same (model, effort)
     key is still in the cache: within one concurrent group always (siblings
     dispatch together), across groups only under a one-hour TTL, and never
-    across a park. Everything else is a cold prefill. Work tokens scale with
-    effort and the whole call with the model's price weight. Returns the
-    total, the call and cold-prefill counts, a per-node breakdown, and the
-    assumptions it rested on, so a reader can disagree with a number rather
-    than a feeling.
+    across a park for a node that waits on it — that node runs in a later
+    run, after the hours a person takes (plan_groups' `track`). Everything
+    else is a cold prefill. Work tokens scale with effort and the whole call
+    with the model's price weight. The node's own prompt is priced by its
+    bytes; its shared part is a cache read only when the same node already
+    sent it under a warm key (a fan-out's siblings, a sweep's later rounds)
+    — a warm key says nothing about a DIFFERENT node's text, which the cache
+    has never seen. Returns the total, the call and cold-prefill counts, a
+    per-node breakdown (the total is its sum), the expansions no number
+    could price, and the assumptions it rested on, so a reader can disagree
+    with a number rather than a feeling.
     """
     budget = ir.get("budget") or {}
     ttl = budget.get("cacheTtl") or DEFAULT_CACHE_TTL
     persist = CACHE_TTLS.get(ttl, 300) >= 3600
-    warm = set()
-    total, calls, cold = 0.0, 0, 0
-    per_node = {}
+    # Per track: the keys this run has warmed, and (key, nodeId) pairs whose
+    # shared text is cached.
+    tracks = {}
+    calls, cold = 0, 0
+    per_node, raw = {}, {}
     # One token per ASCII serialization byte is deliberately conservative.
     # Do not assume the packet, after a varying preamble, shares the cache.
     spec_input = (len(SPEC_PREAMBLE) + len(json.dumps(specification, ensure_ascii=True,
                                                     separators=(',', ':'))) + 1) if specification else 0
     for g in plan_groups(ir):
         if not persist:
-            warm = set()
-        for nid, (model, effort) in g["calls"]:
+            tracks.pop(g["track"], None)
+        warm, warm_prompts = tracks.setdefault(g["track"], (set(), set()))
+        n = g.get("node") or {}
+        for ci, (nid, (model, effort)) in enumerate(g["calls"]):
             calls += 1
             key = (model, effort)
             is_warm = key in warm
             prefix = PREFIX_TOKENS * (CACHED_PREFIX_FRACTION if is_warm else 1.0)
             work = (SENTINEL_WORK_TOKENS if g.get("sentinel")
                     else WORK_TOKENS * EFFORT_MULT.get(effort, 1.0))
-            cost = (prefix + work + (0 if g.get("sentinel") else spec_input)) * _model_mult(model)
+            text = 0.0
+            if g.get("kind") in ("work", "advise"):
+                literal = 0
+                if g["kind"] == "advise":
+                    rel = n.get("release") or {}
+                    texts = [str(n.get("prompt", "")), str(rel.get("instructions", ""))]
+                    # Sent through js_str, not js_template: its braces reach
+                    # the advisor as written, so they cost what they spell.
+                    literal = _utf8(rel.get("whyNotAgent", "unstated"))
+                    item = None
+                else:
+                    texts = [str(n.get("prompt", ""))]
+                    items = g.get("items") or [None]
+                    item = items[ci % len(items)]
+                shared, varying = prompt_bytes(texts, ir, item, ci)
+                shared += literal
+                seen_text = is_warm and (key, nid) in warm_prompts
+                text = (shared * (CACHED_PREFIX_FRACTION if seen_text else 1.0)
+                        + varying) * PROMPT_TOKENS_PER_BYTE
+                warm_prompts.add((key, nid))
+            cost = (prefix + work + text
+                    + (0 if g.get("sentinel") else spec_input)) * _model_mult(model)
             if not is_warm:
                 cold += 1
                 warm.add(key)
-            total += cost
+            raw[nid] = raw.get(nid, 0.0) + cost
             rec = per_node.setdefault(nid, {"calls": 0, "estimatedTokens": 0, "effort": effort,
                                             "model": model or "default"})
             rec["calls"] += 1
-            rec["estimatedTokens"] += int(round(cost))
-        if g["park"]:
-            warm = set()
+    # Rounded once per node, and the headline is the sum of those: a profile
+    # that does not add up to the estimate beside it is two numbers to argue
+    # with, and the sweep and the metrics fold compare against the profile.
+    for nid, rec in per_node.items():
+        rec["estimatedTokens"] = int(round(raw[nid]))
     return {
-        "total": int(round(total)), "calls": calls, "cold": cold, "ttl": ttl,
+        "total": sum(r["estimatedTokens"] for r in per_node.values()),
+        "calls": calls, "cold": cold, "ttl": ttl,
         "perNode": per_node,
+        "unpriced": unpriced_expansions(ir),
         "assumptions": {"prefixTokens": PREFIX_TOKENS,
                         "specificationInputTokens": spec_input,
+                        "promptTokensPerByte": PROMPT_TOKENS_PER_BYTE,
+                        "unpricedExpansions": list(UNPRICED_EXPANSIONS),
                         "cachedPrefixFraction": CACHED_PREFIX_FRACTION,
                         "workTokens": WORK_TOKENS, "effortMult": EFFORT_MULT,
                         "modelMult": dict(MODEL_MULT)},
     }
 
 
-def effort_transitions(ir):
-    """Consecutive agent nodes whose (model, effort) key changes.
+def unpriced_expansions(ir):
+    """[(token, [nodeId, ...])] for every {{token}} the estimate prices at 0.
 
-    Each is a cold prefill for the second node, on top of whatever the TTL
-    already costs. Returns [(from_id, from_key, to_id, to_key)].
+    A run-time value — a predecessor's result, an honored decision, what a
+    sweep has seen — has no size until the run, and neither has a launch
+    argument with no argDefault. The estimate cannot see them, so it says
+    which ones it could not see and where, rather than letting the number
+    read as complete.
     """
-    out, prev = [], None
+    defaults = ir.get("argDefaults") or {}
+    found = {}
     for n in ir.get("nodes") or []:
-        if is_reduce(n) or n.get("actor", "agent") != "agent":
+        if is_reduce(n):
             continue
-        key = node_key(n, ir)
-        if prev is not None and key != prev[1]:
-            out.append((prev[0], prev[1], n.get("id", "?"), key))
-        prev = (n.get("id", "?"), key)
+        texts = [str(n.get("prompt", ""))]
+        if n.get("actor", "agent") != "agent":
+            texts.append(str((n.get("release") or {}).get("instructions", "")))
+        for text in texts:
+            for tok in SUBST.findall(text):
+                root = tok.split(".")[0].split("[")[0]
+                label = None
+                if root in UNPRICED_EXPANSIONS:
+                    label = "{{" + (root + ".*" if root == "decisions" else root) + "}}"
+                elif root == "A":
+                    arg = tok.split(".")[1].split("[")[0] if "." in tok else None
+                    if arg is None:
+                        label = "{{A}} (launch args)"
+                    elif arg not in defaults:
+                        label = "{{A." + arg + "}} (launch arg)"
+                if label:
+                    ids = found.setdefault(label, [])
+                    if n.get("id", "?") not in ids:
+                        ids.append(n.get("id", "?"))
+    return list(found.items())
+
+
+def unpriced_note(est):
+    """The estimate's blind spots as one clause, or '' when it has none."""
+    if not est.get("unpriced"):
+        return ""
+    return "unpriced: " + "; ".join(
+        f"{tok} in {', '.join(ids[:4])}{' …' if len(ids) > 4 else ''}"
+        for tok, ids in est["unpriced"])
+
+
+def effort_transitions(ir):
+    """Consecutive agent nodes of one run whose (model, effort) key changes
+    to a key that run has not warmed yet.
+
+    Each is a cold prefill for the second node the estimate charges under a
+    one-hour TTL. Returns [(from_id, from_key, to_id, to_key)]. It walks the
+    groups estimate_tokens() prices, so a hop is reported exactly when the
+    estimator charges it:
+
+    - A change back to a key an earlier call of the same run already warmed
+      is read from the cache, and is not reported.
+    - A node that waits on a park runs in a later run, after the hours a
+      person takes; its first call is cold whatever its key, so a change
+      placed there costs nothing extra and is not reported either. Reporting
+      it warned authors who followed this warning's own advice.
+    - A node that does NOT wait on the park runs on in the same run, right
+      after the advisor, and keeps its relation to the node before it.
+    """
+    out, warm, prev = [], {}, {}
+    for g in plan_groups(ir):
+        track = g["track"]
+        keys = warm.setdefault(track, set())
+        if g.get("kind") == "work" and g["calls"]:  # an empty foreach spawns nothing
+            nid = g["node"].get("id", "?")
+            key = g["calls"][0][1]
+            p = prev.get(track)
+            if p is not None and p[0] != nid and key != p[1] and key not in keys:
+                out.append((p[0], p[1], nid, key))
+            prev[track] = (nid, key)
+        keys.update(k for _, k in g["calls"])
     return out
 
 
@@ -1581,15 +1978,33 @@ def js_tmpl(s):
             .replace("${", chr(92) + "${"))
 
 
+# Roots whose values are launch or list data: rendered through tokenText(),
+# so an object or a list reaches the prompt as JSON rather than as
+# "[object Object]" or a comma-joined flattening.
+TEXT_ROOTS = {"item", "A"}
+
+
 def js_template(s, mapping=None):
     """Render an IR prompt as a JS template literal, honoring {{expr}}.
 
     mapping rewrites bare tokens to JS expressions, which is how {{prev}}
-    reaches a downstream node's prompt without a global temp binding.
+    reaches a downstream node's prompt without a global temp binding. An
+    unmapped {{item...}} or {{A...}} goes through tokenText(): a bare
+    {{item}} over a list of objects used to hand the worker the string
+    "[object Object]" — no item data at all — while the estimate priced it
+    as the object's JSON.
     """
     mapping = mapping or {}
     s = s.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
-    s = SUBST.sub(lambda m: "${" + mapping.get(m.group(1), m.group(1)) + "}", s)
+
+    def bind(m):
+        tok = m.group(1)
+        if tok in mapping:
+            return "${" + mapping[tok] + "}"
+        if tok.split(".")[0].split("[")[0] in TEXT_ROOTS:
+            return "${tokenText(" + tok + ")}"
+        return "${" + tok + "}"
+    s = SUBST.sub(bind, s)
     return "`" + s + "`"
 
 
@@ -1674,6 +2089,44 @@ def halt_parts(n):
     return field, op, lit
 
 
+def git_prefix(root):
+    """The project's path inside its git repository ('' at the top level).
+
+    A project below a monorepo's top level is supported by every hook, and
+    `git status --porcelain` names paths from the repository root, so the
+    tree guard's ignore list has to carry this prefix to match anything.
+    """
+    try:
+        import subprocess
+        r = subprocess.run(["git", "-C", root or ".", "rev-parse", "--show-prefix"],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def red_team_checked(n):
+    """A node whose raw RedTeamV1 result the emitted code can re-derive."""
+    return (not is_reduce(n) and n.get("contract") == "RedTeamV1"
+            and n.get("actor", "agent") == "agent"
+            and not n.get("repeat") and not panel_size(n))
+
+
+def emit_red_team_check(n, var, many=False):
+    """Halt on a red-team result its own findings contradict."""
+    nid = n["id"]
+    items = var if many else f"[{var}]"
+    return (
+        f"const incoherent_{var} = {items}.map(redTeamIncoherent).filter(Boolean)\n"
+        f"if (incoherent_{var}.length) {{\n"
+        f"  log(`HALT at {nid}: red-team result contradicts itself — ${{incoherent_{var}[0]}}`)\n"
+        f"  note({js_str(nid)}, 'HALTED', incoherent_{var}.join('; '))\n"
+        f"  RESULTS[{js_str(nid)}] = {var}\n"
+        f"  return summary('HALTED')\n"
+        f"}}"
+    )
+
+
 def emit_halt(n, var):
     field, op, lit = halt_parts(n)
     return (
@@ -1701,7 +2154,8 @@ def emit_halt_any(n, var):
     )
 
 
-def emit(ir, contracts, imports_resolved=None, specification=None):
+def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=None,
+         project_prefix=""):
     nodes = ir["nodes"]
     lists = ir.get("lists") or {}
     nodes_by_id = {x.get("id"): x for x in nodes}
@@ -1735,6 +2189,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
       f"{est['cold']} cold prefill(s), prompt-cache TTL {est['ttl']} "
       f"(stated assumptions live in compile-graph.py; metrics.py checks them "
       f"against spent)")
+    if unpriced_note(est):
+        a(f"// {unpriced_note(est)}")
     a("export const meta = {")
     a(f"  name: {js_str(ir.get('name') or 'graph-campaign')},")
     a(f"  description: {js_str(ir['campaign'])},")
@@ -1762,6 +2218,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
     for k, v in (ir.get("argDefaults") or {}).items():
         a(f"if (!A[{js_str(k)}]) A[{js_str(k)}] = {js_str(v)}")
     a(f"const campaign = {js_str(ir['campaign'])}")
+    a("// {{item...}} / {{A...}} render text as itself and structure as JSON.")
+    a("function tokenText(v) { return v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v) }")
     if specification:
         a("const SPECIFICATION = " + json.dumps(specification, ensure_ascii=True))
         a("function specificationPreamble() { return " + js_str(SPEC_PREAMBLE) + " + JSON.stringify(SPECIFICATION) + '\\n'; }")
@@ -1838,11 +2296,53 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
         a("// gate so record-run.py can hold each to the hook's own record.")
         a("const PROVE = " + json.dumps(
             {n["id"]: prove_gate(n) for n in prove_nodes}, sort_keys=True))
+        a("// The launch stamp is what binds a citation to THIS run: record-run.py")
+        a("// refuses a cited row minted before `since`, or by a run with another")
+        a("// nonce, so a node cannot pass by citing an execution it did not cause —")
+        a("// an earlier run's, or an overlapping one's on the same commit. It rides")
+        a("// out in the summary; a resume reuses the stamp of the run it resumes.")
+        a("if (!A._launch || !A._launch.since || !/^[A-Za-z0-9_-]{1,64}$/.test(String(A._launch.nonce || '')))")
+        a("  throw new Error('this graph has prove: nodes but no launch stamp {since, nonce} was passed "
+          "— launch it with /fluxpoint:graph-run, which stamps args._launch with attest.py --stamp')")
+        a("const LAUNCH = A._launch")
+        a("// The project the stamp was minted in: a node that steps into a worktree")
+        a("// names it, so the wrapper attests into the log record-run.py reads.")
+        # Single-quoted for bash: inside double quotes a `$` or a backtick in
+        # the path would still expand, and run.
+        a("const ROOT_ARG = typeof LAUNCH.root === 'string' && LAUNCH.root ? \" --root '\" + LAUNCH.root.replace(/'/g, \"'\\\\''\") + \"'\" : ''")
+        a("// Injected ahead of each prove: node's prompt. The nonce is what makes")
+        a("// the witness's row this run's; a gate run without it is cited as STALE.")
+        a("function provePreamble(gate) {")
+        a("  return gate === 'ci'")
+        a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run the fluxpoint plugin's scripts/py.sh attest.py --ci${ROOT_ARG} --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
+        a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} in the background and collect it with attest.py --await${ROOT_ARG} <token>. Return gate '${gate}', the exit, and the attestId the witness recorded (scripts/py.sh attest.py --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`")
+        a("}")
         a("function citation(id, gate, r) {")
         a("  if (!r || typeof r !== 'object') return `${id}: no result to prove`")
         a("  if (r.gate !== gate) return `${id}: claims gate '${r.gate}', declared '${gate}'`")
         a("  if (typeof r.exit !== 'number') return `${id}: no integer exit`")
         a("  if (!r.attestId) return `${id}: no attestId — an exit code nothing witnessed`")
+        a("  if (gate === 'ci' && !r.sha) return `${id}: CI verdict names no commit — the merge cannot be pinned to it`")
+        a("  return null")
+        a("}")
+        a("")
+    if any(red_team_checked(n) for n in nodes):
+        a("// --- red-team coherence: the verdict its own findings allow ---")
+        a("// RedTeamV1 binds worstSeverity to the findings and refuses a SHIP over")
+        a("// HIGH or CRITICAL, but a runtime validator that skipped conditional")
+        a("// keywords would let exactly that through to the next node — often a")
+        a("// person about to sign. Re-derived here from the findings, in code.")
+        a("const SEVERITY_RANK = { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 }")
+        a("function redTeamIncoherent(r) {")
+        a("  if (!r || typeof r !== 'object') return null")
+        a("  const worst = (Array.isArray(r.findings) ? r.findings : [])")
+        a("    .reduce((w, f) => Math.max(w, SEVERITY_RANK[f && f.severity] || 0), 0)")
+        a("  const name = Object.keys(SEVERITY_RANK).find(k => SEVERITY_RANK[k] === worst)")
+        a("  if (r.verdict === 'SHIP' && worst >= SEVERITY_RANK.HIGH) return `SHIP over a ${name} finding`")
+        a("  // A repo-local RedTeamV1 without the ordinal is still held to the SHIP rule.")
+        a("  if (('worstSeverityRank' in r || 'worstSeverity' in r) &&")
+        a("      (r.worstSeverityRank !== worst || SEVERITY_RANK[r.worstSeverity] !== worst))")
+        a("    return `worstSeverity ${r.worstSeverity}/${r.worstSeverityRank} disagrees with its findings, whose worst is ${name}`")
         a("  return null")
         a("}")
         a("")
@@ -1977,6 +2477,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
     extra = ""
     if specification:
         extra += ", specification: SPECIFICATION.identity"
+        if specification.get("path"):
+            extra += ", specificationPath: SPECIFICATION.path"
     if any(n.get("irreversible") for n in nodes):
         extra += ", ledger: LEDGER_WRITES"
     if parked:
@@ -1986,7 +2488,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
     if mem_nodes:
         extra += ", memory: MEMORY, memorySeeded: MEMORY_SEEDED"
     if prove_nodes:
-        extra += ", prove: PROVE"
+        extra += ", prove: PROVE, launch: LAUNCH"
     if tree_guard:
         extra += ", tree: TREE"
     reducers = [n["id"] for n in nodes if is_reduce(n)]
@@ -2011,8 +2513,12 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
         # so provenance can tell an imported decision from one this campaign
         # made — record-run.py files only the latter as new Decisions rows.
         extra += ", decisionsImported: DECISIONS_IMPORTED"
+    # What the run was asked, minus the launcher's own state (_ledger,
+    # _releases, _base, ...): an effort sweep scores a run against the case
+    # it was launched for, and the summary is all record-run keeps.
+    a("  const inputs = Object.fromEntries(Object.entries(A).filter(([k]) => !k.startsWith('_')))")
     a("  return { campaign, outcome: final, results: RESULTS, provenance: PROVENANCE,")
-    a(f"           contracts: CONTRACTS{extra} }}")
+    a(f"           contracts: CONTRACTS, inputs{extra} }}")
     a("}")
     a("")
     budget_cfg = ir.get("budget") or {}
@@ -2166,7 +2672,54 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
         a("// must be IDENTICAL at every checkpoint — any drift is an undeclared")
         a("// mutation, and the campaign halts on it rather than advancing.")
         a("// treeGuard: false in the IR turns this off, on the record.")
-        a("const TREE = { baseline: null, checks: [] }")
+        a("//")
+        a("// The plugin's own writes are not the campaign's and are left out of")
+        a("// the comparison: the Stop hook appends its Evidence row to the state")
+        a("// file whenever the orchestrator ends a turn, and state, attestations,")
+        a("// run records, recompiled scripts and worktrees live in the plugin's")
+        a("// own directories under .claude/. Counted, one turn end during a live")
+        a("// run discarded every verdict it had minted. Only those directories:")
+        a("// tracked project config under .claude/ (settings, agents) still counts.")
+        a("// Paths carry the project's prefix inside the repository, because")
+        a("// `git status --porcelain` names paths from the repository root.")
+        pre = project_prefix or ""
+        state_files = [pre + f for f in ("WORK.md", "LOOP.md")]
+        if graph_file and pre + graph_file not in state_files:
+            state_files.append(pre + graph_file)
+        a("const TREE_IGNORE = " + json.dumps({
+            "files": state_files,
+            "prefixes": [pre + d for d in (".claude/fluxpoint/", ".claude/workflows/",
+                                            ".claude/worktrees/")],
+            # A wholly untracked .claude/ collapses to one porcelain line.
+            "exact": ["?? " + pre + ".claude/"]}))
+        a("// git quotes a path with special or non-ASCII bytes and octal-escapes")
+        a("// the bytes (core.quotePath); undo that before comparing names.")
+        a("function gitUnquote(p) {")
+        a("  if (!(p.length >= 2 && p[0] === '\"' && p[p.length - 1] === '\"')) return p")
+        a("  const s = p.slice(1, -1)")
+        a("  const esc = { n: 10, t: 9, r: 13, a: 7, b: 8, f: 12, v: 11, '\"': 34, '\\\\': 92 }")
+        a("  let out = ''")
+        a("  for (let i = 0; i < s.length; i++) {")
+        a("    // Whole code points: a lone surrogate half makes encodeURIComponent throw.")
+        a("    const c = String.fromCodePoint(s.codePointAt(i))")
+        a("    if (c !== '\\\\' || i + 1 >= s.length) { try { out += encodeURIComponent(c) } catch (e) { return p } i += c.length - 1; continue }")
+        a("    const oct = /^[0-7]{3}/.exec(s.slice(i + 1, i + 4))")
+        a("    const byte = oct ? parseInt(oct[0], 8) : (esc[s[i + 1]] !== undefined ? esc[s[i + 1]] : s.charCodeAt(i + 1))")
+        a("    out += '%' + (byte < 16 ? '0' : '') + byte.toString(16)")
+        a("    i += oct ? 3 : 1")
+        a("  }")
+        a("  try { return decodeURIComponent(out) } catch (e) { return p }")
+        a("}")
+        a("function treeIgnored(line) {")
+        a("  if (TREE_IGNORE.exact.includes(line)) return true")
+        a("  const rest = line.replace(/^\\S{1,2}\\s+/, '')")
+        a("  const paths = rest.split(' -> ').map(p => gitUnquote(p.trim()))")
+        a("  return paths.every(p => TREE_IGNORE.files.includes(p) ||")
+        a("    TREE_IGNORE.prefixes.some(x => p === x.replace(/\\/$/, '') || p.startsWith(x)))")
+        a("}")
+        a("const treeNorm = s => String(s || '').split('\\n').map(x => x.trim()).filter(Boolean)")
+        a("  .filter(x => !treeIgnored(x)).sort().join('\\n')")
+        a("const TREE = { baseline: null, launch: null, checks: [] }")
         a("async function treeCheck(point, phase) {")
         a("  // agent(), not spawn(): a guard rail must not spend the node budget")
         a("  // and must still run after the ceiling is reached.")
@@ -2181,8 +2734,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
         a("    INCOMPLETE = true")
         a("    return true")
         a("  }")
-        a("  const norm = s => String(s || '').split('\\n').map(x => x.trim()).filter(Boolean).sort().join('\\n')")
-        a("  const rec = { point, head: String(r.head || '').trim(), porcelain: norm(r.porcelain) }")
+        a("  const rec = { point, head: String(r.head || '').trim(), porcelain: treeNorm(r.porcelain) }")
         a("  TREE.checks.push(rec)")
         a("  if (!TREE.baseline) { TREE.baseline = rec; return true }")
         a("  if (rec.head === TREE.baseline.head && rec.porcelain === TREE.baseline.porcelain) return true")
@@ -2195,6 +2747,26 @@ def emit(ir, contracts, imports_resolved=None, specification=None):
     last_phase = nodes[-1].get("phase", "Run") if nodes else "Run"
     if tree_guard:
         a(f"await treeCheck('campaign-start', {js_str(first_phase)})")
+        a("// The sentinel above is an agent() call, so a resume replays its FIRST")
+        a("// reading instead of taking one. The launcher's reading (args._base,")
+        a("// taken fresh at every launch) is compared against it here: a resume on")
+        a("// a tree that moved since the run it replays would otherwise hand back")
+        a("// cached verdicts about a tree that no longer exists.")
+        a("if (A._base && A._base.sha) {")
+        a("  TREE.launch = { head: String(A._base.sha).trim(),")
+        a("    porcelain: typeof A._base.porcelain === 'string' ? treeNorm(A._base.porcelain) : null }")
+        a("  const b = TREE.baseline")
+        a("  if (b && (TREE.launch.head !== b.head ||")
+        a("      (TREE.launch.porcelain !== null && TREE.launch.porcelain !== b.porcelain))) {")
+        a("    note('tree-check', 'TREE-MOVED', `launch: HEAD ${b.head} -> ${TREE.launch.head}` +")
+        a("      (TREE.launch.porcelain !== null && TREE.launch.porcelain !== b.porcelain")
+        a("        ? `; dirt: ${TREE.launch.porcelain || '(none)'} vs ${b.porcelain || '(none)'}` : ''))")
+        a("    log(`TREE-MOVED at launch: this launch's tree is not the one the run's first reading described — a resume would replay verdicts about a tree that no longer exists. Launch fresh (no resumeFromRunId), or restore the tree the run started on.`)")
+        a("    return summary('TREE-MOVED')")
+        a("  }")
+        a("} else {")
+        a("  log('tree guard: no launch reading in args._base — a resume cannot tell whether the tree moved since the run it replays; /fluxpoint:graph-run passes one')")
+        a("}")
         a("")
     for n in nodes:
         if tree_guard and (prove_gate(n) or n.get("independent")):
@@ -2365,6 +2937,8 @@ def emit_node(n, ir, specification=False):
         pre = "measurePreamble() + "
     elif n.get("isolation") in (True, "worktree") or n.get("mutates"):
         pre = "basePreamble() + "
+    if prove_gate(n):
+        pre += f"provePreamble({js_str(prove_gate(n))}) + "
     if specification:
         pre += "specificationPreamble() + "
     prompt = (pre + js_template(n["prompt"], mapping)) if not is_reduce(n) else None
@@ -2485,6 +3059,8 @@ def emit_node(n, ir, specification=False):
                 a("    return summary('BUDGET-EXHAUSTED')")
                 a("  }")
         a("}")
+        if red_team_checked(n):
+            a(emit_red_team_check(n, var, many=True))
         if n.get("haltWhen"):
             # One item tripping the condition halts the campaign: a fan-out
             # gate that only fired when every branch failed would not be a gate.
@@ -2573,6 +3149,8 @@ def emit_node(n, ir, specification=False):
         a("}")
         if n.get("irreversible"):
             a("}")
+        if red_team_checked(n):
+            a(emit_red_team_check(n, raw))
         if n.get("haltWhen"):
             # Halt on the raw contract: the gate reads the node's own fields.
             a(emit_halt(n, raw))
@@ -2785,41 +3363,56 @@ def main():
     ap.add_argument("--contracts", help="contracts directory")
     ap.add_argument("--runs-dir", default=RUNS_DIR,
                     help="recorded-runs directory imports resolve against")
+    ap.add_argument("--decisions", default=os.path.join(".claude", "fluxpoint", "decisions.jsonl"),
+                    help="decision.py's store, which imports also resolve against")
     ap.add_argument("--gates-root", default=".",
                     help=f"directory holding {GATES}, which prove: tiers resolve against")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
-    contracts_dir = args.contracts or os.path.join(os.path.dirname(here), "contracts")
+    shipped_dir = os.path.join(os.path.dirname(here), "contracts")
+    sys.path.insert(0, here)
+    import specification as spec_mod
 
     try:
         with open(args.graph, encoding="utf-8") as fh:
-            ir = extract_ir(fh.read())
-    except (OSError, GraphError) as e:
+            text = fh.read()
+        ir = extract_ir(text)
+        # The graph file's own header says which packet and which contracts
+        # it was written against. Ignoring it compiled a repo-local contract
+        # set as a page of false findings, and bound one campaign's nodes to
+        # whichever packet another campaign had locked last.
+        header = spec_mod.headers(text)
+        contracts, contracts_desc = resolve_contracts(
+            shipped_dir, header.get("CONTRACTS"), args.contracts, args.gates_root)
+    except (OSError, GraphError, ValueError) as e:
         print(f"graph-compile: {e}", file=sys.stderr)
         return 1
 
-    contracts = load_contracts(contracts_dir)
     if not contracts:
-        print(f"graph-compile: no contracts found in {contracts_dir}", file=sys.stderr)
+        print(f"graph-compile: no contracts found in {args.contracts or shipped_dir}",
+              file=sys.stderr)
         return 1
 
     agents = load_agents(args.gates_root)
     gates = load_gates(args.gates_root)
     findings = validate(ir, contracts, gates, agents)
     specification = None
-    from specification import load, required
-    if not findings and (required(args.gates_root) or any(n.get("mutates") or n.get("irreversible") for n in ir["nodes"])):
+    spec_path = header.get("SPEC")
+    if not findings and (spec_path or spec_mod.required(args.gates_root)
+                         or any(n.get("mutates") or n.get("irreversible") for n in ir["nodes"])):
         try:
-            packet, identity = load(args.gates_root)
-            specification = {"packet": packet, "identity": identity}
+            packet_file, _ = spec_mod.packet_paths(args.gates_root, spec_path)
+            packet, identity = spec_mod.load(args.gates_root, spec=spec_path)
+            specification = {"packet": packet, "identity": identity,
+                             "path": os.path.relpath(packet_file, args.gates_root).replace(os.sep, "/")}
             findings = validate(ir, contracts, gates, agents, specification)
         except (OSError, ValueError, TypeError) as e:
             print(f"graph-compile: spec required before implementation: {e}", file=sys.stderr)
             return 1
 
     if findings:
-        print("graph-compile: IR rejected\n", file=sys.stderr)
+        print(f"graph-compile: IR rejected (contracts: {contracts_desc})\n", file=sys.stderr)
         for f in findings:
             print(f"  - {f}", file=sys.stderr)
         return 1
@@ -2832,7 +3425,7 @@ def main():
 
     # Resolved for --check too: a missing decision should fail preflight,
     # not the emission the preflight was supposed to clear.
-    resolved, rfindings = resolve_imports(ir, contracts, args.runs_dir)
+    resolved, rfindings = resolve_imports(ir, contracts, args.runs_dir, args.decisions)
     if rfindings:
         print("graph-compile: imports unresolved\n", file=sys.stderr)
         for f in rfindings:
@@ -2841,19 +3434,35 @@ def main():
 
     est = estimate_tokens(ir, contracts, specification)
     cap = (ir.get("budget") or {}).get("maxEstimatedTokens")
+    blind = unpriced_note(est)
     cost_line = (f"~{est['total']:,} estimated tokens"
                  + (f" of {cap:,} allowed" if cap is not None else "")
                  + f" ({est['cold']} cold prefill(s) of {est['calls']} call(s), "
-                 f"prompt-cache TTL {est['ttl']})")
+                 f"prompt-cache TTL {est['ttl']}"
+                 + (f"; {blind}" if blind else "") + ")")
     if args.check:
         imported = (f", {len(resolved)} imported decision(s) resolved"
                     if resolved else "")
+        # Which inputs the verdict was reached against, said on the line
+        # itself: findings against the wrong contract set used to read as
+        # defects in the IR, with nothing naming the directory used.
+        packet_note = (f"packet {specification['path']} "
+                       f"{specification['identity']['sha256'][:12]}"
+                       if specification else "no packet")
         print(f"graph-compile: IR valid — {len(ir['nodes'])} node(s), "
               f"{planned} planned agent call(s), budget.maxNodes="
-              f"{(ir.get('budget') or {}).get('maxNodes')}, {cost_line}{imported}")
+              f"{(ir.get('budget') or {}).get('maxNodes')}, {cost_line}{imported}; "
+              f"contracts: {contracts_desc}; {packet_note}")
         return 0
 
-    js = emit(ir, contracts, resolved, specification)
+    try:
+        graph_rel = os.path.relpath(os.path.abspath(args.graph),
+                                    os.path.abspath(args.gates_root)).replace(os.sep, "/")
+    except ValueError:  # another drive on Windows: not a file of this project
+        graph_rel = "../"
+    js = emit(ir, contracts, resolved, specification,
+              graph_file=None if graph_rel.startswith("../") else graph_rel,
+              project_prefix=git_prefix(args.gates_root))
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         with open(args.out, "w", encoding="utf-8", newline="\n") as fh:

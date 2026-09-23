@@ -9,6 +9,30 @@ ASCII spaces and tabs after the colon or at the line end are optional; LF
 and CRLF are supported. The filename is literal. A line break between the
 colon and filename is not a declaration.
 
+A graph file (`WORK.md` or a sibling `GRAPH.<name>.md`) may name a packet
+of its own with `SPEC: <path>`, relative to the repository root and ending
+in `.json`. Its lock is named after it: `.fluxpoint-spec.rollout.json`
+locks into `.fluxpoint-spec.rollout-lock.json`
+(`specification.py --lock --spec .fluxpoint-spec.rollout.json`). The
+compiler, `record-run.py --graph` and `specification.py --graph <file>` all
+read the header, so two campaigns on one branch keep separate packets
+instead of overwriting one. A path outside the repository, a non-JSON path,
+or two different `SPEC:` lines in one file is an error. The scaffolded
+harness runs the packet `WORK.md` (else `LOOP.md`) declares, the default
+one when it declares none; wire a sibling campaign's packet `--run` into
+the harness explicitly. `spec-guard.py` treats a campaign as locked when
+the lock of any packet `WORK.md`, `LOOP.md` or a `GRAPH.*.md` declares
+exists, so no locked packet leaves the Decisions-row waiver open. Lines
+inside fenced blocks never count as headers.
+
+A graph file may also declare `CONTRACTS: <dir>`, a repository-local
+directory of `*.schema.json` contracts. The compiler overlays it on the
+contracts the plugin ships, so the directory holds only additions and
+stricter copies, and `release.py --graph <file>` validates a parked node's
+proof against the same set. `compile-graph.py --check` names the contract
+set and the packet it used on its summary line. An explicit `--contracts`
+flag still replaces the set wholesale.
+
 The JSON packet has these fields:
 
 | Field | Required content |

@@ -67,7 +67,38 @@ def validate(proof, schema):
     return problems
 
 
-def load_contract(plugin_root, name):
+def load_contract(plugin_root, name, root=".", graph=None):
+    """The proofContract schema, repo-local first when the graph declares one.
+
+    A graph whose `CONTRACTS:` header names a repo-local directory compiles
+    against that set overlaid on the shipped one, so a park whose
+    proofContract lives there must be released against the same file —
+    otherwise the compiler accepts a node the release can never clear.
+    """
+    if graph:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import specification
+        try:
+            local = specification.graph_headers(os.path.join(root, graph)).get("CONTRACTS")
+            if local:
+                d = os.path.join(root, str(specification.in_repo(local, "CONTRACTS:")))
+                found = []
+                for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+                    if not fn.endswith(".schema.json"):
+                        continue
+                    with open(os.path.join(d, fn), encoding="utf-8") as fh:
+                        schema = json.load(fh)
+                    if schema.get("$id", fn.split(".")[0]) == name:
+                        found.append((fn, schema))
+                # The compiler refuses a directory where two files claim one
+                # $id; so does the release, or each could bind a different one.
+                if len(found) > 1:
+                    raise ValueError(f"{', '.join(f for f, _ in found)} all declare $id "
+                                     f"{name} — one contract name, one file")
+                if found:
+                    return found[0][1]
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"release: {graph}: {e}")
     p = os.path.join(plugin_root, "contracts", f"{name}.schema.json")
     if not os.path.exists(p):
         raise SystemExit(f"release: unknown contract '{name}' ({p} not found)")
@@ -84,6 +115,8 @@ def main():
     ap.add_argument("--campaign")
     ap.add_argument("--node")
     ap.add_argument("--contract", help="the node's release.proofContract")
+    ap.add_argument("--graph", default="WORK.md",
+                    help="the campaign's graph file; its CONTRACTS: header is honored")
     ap.add_argument("--proof", help="file holding the proof JSON (default stdin)")
     ap.add_argument("--by", default=os.environ.get("USER", "operator"))
     g = ap.add_mutually_exclusive_group(required=True)
@@ -125,7 +158,7 @@ def main():
     for req in ("campaign", "node", "contract"):
         if not getattr(a, req.replace("-", "_")):
             ap.error(f"--record requires --{req}")
-    schema = load_contract(a.plugin_root, a.contract)
+    schema = load_contract(a.plugin_root, a.contract, a.root, a.graph)
     raw = open(a.proof, encoding="utf-8").read() if a.proof else sys.stdin.read()
     try:
         proof = json.loads(raw)

@@ -152,6 +152,32 @@ compile_templates() {
   fi
 }
 
+# A shipped workflow is hand-written, not compiled, but the runtime wraps it
+# the same way: checked under the same async wrapper, or a syntax error
+# surfaces when someone runs the command rather than here.
+check_workflow() {
+  {
+    echo 'const agent=0,parallel=0,pipeline=0,log=0,phase=0,args=0,budget=0,workflow=0;(async () => {'
+    sed 's/^export const meta/const meta/' "$1"
+    echo '})()'
+  } >/tmp/fpl-workflow.mjs
+  node --check /tmp/fpl-workflow.mjs
+}
+
+check_workflows() {
+  local f n=0
+  for f in "$PLUGIN"/workflows/*.js; do
+    [ -f "$f" ] || continue
+    n=$((n + 1))
+    check_workflow "$f" || { echo "$f does not parse under the async wrapper" >&2; return 1; }
+  done
+  # A green that checked nothing is not a green.
+  if [ "$n" -lt 1 ]; then
+    echo "expected at least 1 shipped workflow under $PLUGIN/workflows, checked $n" >&2
+    return 1
+  fi
+}
+
 # Commands and agents are run as literal instructions, so a `python3` written
 # into one is reached by no shell resolver — and `python3` is absent from a
 # standard Windows install, which made every slash command a no-op there.
@@ -185,6 +211,16 @@ substrate_tests() {
 case "${1:---full}" in
   --changed)
     f="${2:?usage: harness.sh --changed <file>}"
+    # The per-edit hook passes the tool's file_path, which is absolute; every
+    # pattern below is relative to the repository root, so an absolute path
+    # matched none of them and the scoped checks never ran from the hook.
+    case "$f" in
+      /* | [A-Za-z]:[\\/]*)
+        rel="$("$FPL_PY" -c 'import os, sys
+p = os.path.relpath(os.path.abspath(sys.argv[1]), os.getcwd())
+print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
+        case "$rel" in "" | ../* | ..) : ;; *) f="$rel" ;; esac ;;
+    esac
     case "$f" in
       *.json) step "json: $f" check_json "$f" ;;
       *.sh)   step "bash -n: $f" check_sh "$f" ;;
@@ -216,6 +252,14 @@ case "${1:---full}" in
         step "counterexample ledger" bash "$PLUGIN/tests/cex-test.sh" ;;
       "$PLUGIN"/scripts/blueprint-guard.py)
         step "blueprint conformance" bash "$PLUGIN/tests/blueprint-test.sh" ;;
+      "$PLUGIN"/contracts/RedTeamV1.schema.json)
+        step "red-team severity reaches the gate" "$FPL_PY" "$PLUGIN/tests/redteam-contract-test.py" ;;
+      "$PLUGIN"/workflows/*.js)
+        step "node --check (async wrapper): $f" check_workflow "$f"
+        step "graph-audit workflow" "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py" ;;
+      # Reached only by hand: the per-edit hook skips *.md edits.
+      "$PLUGIN"/commands/graph-audit.md)
+        step "graph-audit workflow" "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py" ;;
     esac
     ;;
   --full)
@@ -238,9 +282,13 @@ case "${1:---full}" in
     step "portable interpreter invocations" portable_invocations
     step "locked specification + executed requirements" "$FPL_PY" "$PLUGIN/scripts/specification.py" --run
     step "templates compile + emit valid JS" compile_templates
+    step "shipped workflows parse under the async wrapper" check_workflows
+    step "graph-audit workflow: lenses, reduce, refutation (executed)" \
+      "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py"
     step "compiler invariants" "$FPL_PY" "$PLUGIN/tests/compile-test.py"
     step "agentType resolution + contract" "$FPL_PY" "$PLUGIN/tests/agenttype-test.py"
     step "proof verdict reaches the record (executed)" "$FPL_PY" "$PLUGIN/tests/proof-verdict-test.py"
+    step "red-team severity reaches the gate (executed)" "$FPL_PY" "$PLUGIN/tests/redteam-contract-test.py"
     step "emission coverage" "$FPL_PY" "$PLUGIN/tests/emission-test.py"
     step "cost model: estimate, ceiling, cache TTL (executed)" "$FPL_PY" "$PLUGIN/tests/cost-test.py"
     step "codegen injection + red-team regressions" "$FPL_PY" "$PLUGIN/tests/security-test.py"
@@ -271,6 +319,7 @@ case "${1:---full}" in
     step "hybrid recall pipeline (executed)" "$FPL_PY" "$PLUGIN/tests/recall-test.py"
     step "embedder quarantine (executed)" "$FPL_PY" "$PLUGIN/tests/embedder-test.py"
     step "graph metrics aggregator (executed)" "$FPL_PY" "$PLUGIN/tests/metrics-test.py"
+    step "effort sweep: plan, split, score (executed)" "$FPL_PY" "$PLUGIN/tests/sweep-test.py"
     step "relation gate" bash "$PLUGIN/tests/pair-test.sh"
     step "relation gate: differential + bite + scan (executed)" bash "$PLUGIN/tests/pair-verify-test.sh"
     step "gate presence + resolver (executed)" bash "$PLUGIN/tests/gate-presence-test.sh"

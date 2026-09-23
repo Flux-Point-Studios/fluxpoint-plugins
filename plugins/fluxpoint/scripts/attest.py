@@ -16,6 +16,20 @@ agent never touches the number.
   attest.py --record          append a row from a hook payload on stdin
   attest.py --list            what has been attested, for humans
   attest.py --verify          cross-check a run summary on stdin against the log
+  attest.py --run GATE        run a declared gate and attest its exit itself
+  attest.py --await TOKEN     wait, in bounded slices, for a --run to finish
+  attest.py --ci --pr N       attest the forge's own commit statuses on PR N's head
+                              (or --ref BRANCH; --sha names a commit the caller chose)
+  attest.py --stamp           a launch stamp ({since, nonce}) for args._launch
+
+Three witnesses mint rows, and each row names its own: `hook` (the Bash
+PostToolUse payload), `wrapper` (--run, which executes the command the
+manifest declares for a gate name — the agent names a gate, never a
+command — so a gate longer than one tool call can be started in the
+background and awaited under the 600 s cap, and a red exit the hook never
+sees is recorded too), and `forge` (--ci, which asks the forge for the
+statuses on a commit, the least forgeable evidence a merge rests on,
+because the agent produces none of it).
 
 Dormant by design: a repo with no `.fluxpoint-gates.json` attests nothing
 and says nothing, exactly like the DoD gate in a repo with no harness.
@@ -38,6 +52,16 @@ information about whether the gate passed, so the binding between a claimed
 exit and the runtime's own holds for zeros and is silent about reds. A node
 claiming green with no row is therefore the shape worth suspecting, and
 record-run.py reports it separately for that reason.
+
+What this is not: a boundary against an agent that sets out to forge. The
+log is a file in the working tree, and an agent with a shell can append a
+row to it as easily as run a gate. The witness binds an honest execution to
+the exit the runtime reported, and makes a transcribed, stale, borrowed or
+laundered exit visible — the shapes a lazy or mistaken executor produces.
+The command matcher below is therefore strict and fails closed (a command
+it cannot place is UNATTESTED, never a pass), but it does not model every
+corner of bash. Evidence that must hold against a deliberate forger is the
+forge's own: prove:ci.
 """
 import argparse
 import datetime
@@ -46,11 +70,18 @@ import json
 import os
 import re
 import sys
+import time
 
 GATES = ".fluxpoint-gates.json"
 ATTEST = os.path.join(".claude", "fluxpoint", "attest.jsonl")
-GATE_MANIFEST_FIELDS = {"version", "gates"}
+BACKGROUND = os.path.join(".claude", "fluxpoint", "attest-bg")
+GATE_MANIFEST_FIELDS = {"version", "gates", "ci"}
+CI_FIELDS = {"forge", "contexts"}
+CI_FORGES = {"github"}
 IDENT = re.compile(r"^[a-z][a-z0-9-]*$")
+# One foreground tool call is killed at 600 s; --await returns before that
+# with a verdict or a "still running", never mid-kill.
+AWAIT_DEFAULT = 540
 
 
 def path_for(root):
@@ -61,10 +92,97 @@ def gates_path(root):
     return os.path.join(root, GATES)
 
 
+# `FPL_ATTEST_NONCE=<token> <gate>`: how a graph node names the run it is
+# executing for. One assignment, at the front (after an optional `cd`), and
+# a token of plain characters, so it cannot smuggle a second command in.
+NONCE_RE = re.compile(r"FPL_ATTEST_NONCE=([A-Za-z0-9_-]{1,64})[ \t]+(?=\S)")
+# ONE leading `cd <dir> &&` (or `;`); the directory is captured for the
+# provenance of which tree the gate ran in.
+# The operand is a plain path: quoted without expansion characters, or bare
+# with no shell metacharacter at all. `cd . # && gate` runs only the cd —
+# bash reads the rest as a comment — and a looser operand matched it as the
+# gate, exit 0 and all.
+# Inside double quotes a backslash is literal before an ordinary character
+# (a Windows path) but escapes `"`, `$`, a backtick or itself; those are
+# refused, so the quote this pattern sees closing is the one bash closes.
+CD_RE = re.compile(r"""cd[ \t]+('[^']*'|"(?:[^"$`\\]|\\[^"$`\\])*"|[^\s;&|<>#$`'"()\\]+)[ \t]*(?:&&|;)[ \t]*(?=\S)""")
+# Whitespace bash does not split on (NBSP, VT, FF, \x1c-\x1f, U+2003, ...) or
+# that ends a command (a line break). str.split() splits on all of it, so
+# `FPL_ATTEST_NONCE=n1<NBSP>gate` — to bash one assignment that runs nothing
+# and exits 0 — read as the nonce and then the gate.
+FOREIGN_SPACE = re.compile(r"[^\S \t]")
+
+
+def _collapse(cmd):
+    """Runs of spaces and tabs become one space — but only in a command of
+    plain words, where that is exactly bash's word splitting. A command
+    carrying any quoting or expansion is kept as written (ends trimmed):
+    collapsing inside quotes let `--test-name-pattern="slow  test"` (two
+    spaces, a filter matching nothing) equal the declared `"slow test"`, and
+    `$(...)`, `${...}` and backticks nest quotes a simple scanner misreads."""
+    raw = str(cmd or "")
+    if re.search(r"[\"'`$\\]", raw):
+        return raw.strip(" \t")
+    s, out, q, gap, i = raw, [], None, False, 0
+    while i < len(s):
+        c = s[i]
+        if q is None and c in " \t":
+            gap, i = True, i + 1
+            continue
+        if gap and out:
+            out.append(" ")
+        gap = False
+        if c == "\\" and q != "'" and i + 1 < len(s):
+            out.append(s[i:i + 2])
+            i += 2
+            continue
+        if q is None and c in "'\"":
+            q = c
+        elif c == q:
+            q = None
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _front(cmd):
+    """(nonce, cd_dir, rest) of a command line's permitted prefix.
+
+    The nonce may sit before or after the one leading `cd`: the compiled
+    preamble tells a node to prefix the declared command, and a declared
+    command may itself start with `cd backend &&` — the instructed form is
+    then `FPL_ATTEST_NONCE=n cd backend && gate`, which used to keep its cd
+    and match nothing. One nonce and one cd, never a chain of either.
+    """
+    # The prefix patterns take any run of spaces and tabs between their own
+    # tokens; only the gate that follows is collapsed, so a quoted cd
+    # operand does not keep the rest of the line from its plain-word form.
+    s = str(cmd or "").strip(" \t")
+    nonce = cd = ""
+    m = NONCE_RE.match(s)
+    if m:
+        nonce, s = m.group(1), s[m.end():]
+    m = CD_RE.match(s)
+    if m:
+        cd, s = m.group(1), s[m.end():]
+    if not nonce:
+        m = NONCE_RE.match(s)
+        if m:
+            nonce, s = m.group(1), s[m.end():]
+    return nonce, cd, _collapse(s)
+
+
+def nonce_of(cmd):
+    """The run nonce a command line carries, or ''."""
+    return _front(cmd)[0]
+
+
 def normalize(cmd):
     """Canonical form of a command line, for comparison against a manifest.
 
-    Whitespace is collapsed and a leading interpreter or `./` is dropped, so
+    Whitespace between plain words is collapsed and a leading `./` is
+    dropped (gate_for() also takes `bash <script>` for a declared bare
+    `<script>`), so
     `bash scripts/harness.sh  --full` and `./scripts/harness.sh --full` are
     the same declared gate.
 
@@ -83,21 +201,28 @@ def normalize(cmd):
     they simply do not match, and an unmatched command is attested as nothing
     at all.
     """
-    s = " ".join(str(cmd or "").split())
     # ONE prefix, never a chain: the match is non-greedy and applied once, so
     # `cd a && cd b && gate` still fails to match — the remainder is not the
     # declared command. An explicit multi-cd check would be dead weight AND
     # wrong, refusing a gate that legitimately starts with `cd` itself.
-    m = re.match(r"cd\s+(?:[^;&|<>]+?)\s*(?:&&|;)\s*(?=\S)", s)
-    if m:
-        s = s[m.end():]
-    for prefix in ("bash ", "sh ", "zsh "):
-        if s.startswith(prefix):
-            s = s[len(prefix):].lstrip()
-            break
+    # The run's nonce rides in as an environment assignment, which changes
+    # nothing about the exit the shell reports. It is read by nonce_of(),
+    # never matched as part of the gate.
+    s = _front(cmd)[2]
     if s.startswith("./"):
         s = s[2:]
+    if s.startswith("bash ./"):  # the same file either way, under the same bash
+        s = "bash " + s[len("bash ./"):]
     return s
+
+
+def _unbash(n):
+    """A normalized command run as `bash <script>`, without the interpreter,
+    or None. See gate_for() for the one direction this is allowed in."""
+    if not n.startswith("bash "):
+        return None
+    s = n[len("bash "):].lstrip(" \t")
+    return s[2:] if s.startswith("./") else s
 
 
 EXIT_RE = re.compile(r"\A\s*Error: Exit code (\d+)")
@@ -170,28 +295,239 @@ def load_gates(root):
          for k in sorted(set(doc) - GATE_MANIFEST_FIELDS)]
     if doc.get("version") != 1:
         f.append(f"{GATES}: version must be 1")
+    f += _ci_problems(doc)
     gates = doc.get("gates")
-    if not isinstance(gates, dict) or not gates:
-        f.append(f"{GATES}: 'gates' must be a non-empty object of name -> command")
+    # A manifest whose only witness is the forge is a natural shape: an empty
+    # `gates` beside a `ci` section declares exactly that.
+    if not isinstance(gates, dict) or (not gates and not isinstance(doc.get("ci"), dict)):
+        f.append(f"{GATES}: 'gates' must be a non-empty object of name -> command"
+                 f" (or empty beside a top-level 'ci' section)")
         return {}, f
-    out = {}
+    out = Gates()
+    out.dirs, out.cds = {}, {}
     for name, cmd in gates.items():
         if not IDENT.match(str(name)):
             f.append(f"{GATES}: gate name '{name}' must be lowercase kebab-case")
+            continue
+        if name == "ci":
+            f.append(f"{GATES}: gate name 'ci' is reserved for the forge's commit "
+                     f"statuses (prove:ci, attest.py --ci) since fluxpoint 1.43 — "
+                     f"rename this gate (e.g. 'ci-local') and cite it as "
+                     f"prove:ci-local; declare the forge under a top-level 'ci' section")
+            continue
+        if isinstance(cmd, str) and FOREIGN_SPACE.search(cmd):
+            f.append(f"{GATES}.{name}: a gate is one command line of spaces and tabs — "
+                     f"a line break ends a command and other whitespace is not a "
+                     f"separator to bash, so the hook cannot witness it; use `&&`")
             continue
         if not isinstance(cmd, str) or not cmd.strip():
             f.append(f"{GATES}.{name}: command must be a non-empty string")
             continue
         out[name] = normalize(cmd)
+        out.dirs[name] = _dir_parts(_front(cmd)[1])
+        out.cds[name] = _front(cmd)[1]
     return ({} if f else out), f
 
 
-def gate_for(gates, command):
-    """The declared gate this exact command is, or None."""
+def _ci_problems(doc):
+    """Findings for the optional `ci` section: which forge, which contexts."""
+    ci = doc.get("ci")
+    if ci is None:
+        return []
+    if not isinstance(ci, dict):
+        return [f"{GATES}: 'ci' must be an object"]
+    f = [f"{GATES}: ci: unknown field '{k}'" for k in sorted(set(ci) - CI_FIELDS)]
+    if ci.get("forge") not in CI_FORGES:
+        f.append(f"{GATES}: ci.forge must be one of {', '.join(sorted(CI_FORGES))} — "
+                 f"a forge this script cannot query would attest nothing while "
+                 f"looking configured")
+    ctx = ci.get("contexts")
+    if ctx is not None and (not isinstance(ctx, list) or not ctx or not all(
+            isinstance(c, str) and c.strip() for c in ctx)):
+        f.append(f"{GATES}: ci.contexts must be a non-empty list of status or "
+                 f"check names, or absent (every reported context must pass)")
+    return f
+
+
+def load_ci(root):
+    """The manifest's `ci` section, or None. Findings are load_gates' job."""
+    try:
+        with open(gates_path(root), encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    ci = doc.get("ci") if isinstance(doc, dict) else None
+    return ci if isinstance(ci, dict) and not _ci_problems(doc) else None
+
+
+def declared_command(root, gate):
+    """The command a gate name declares, exactly as the manifest writes it."""
+    with open(gates_path(root), encoding="utf-8") as fh:
+        return (json.load(fh).get("gates") or {}).get(gate)
+
+
+def _dir_parts(d):
+    """A `cd` target as path components, quotes and `.` dropped."""
+    d = str(d or "").strip().strip("'\"").replace("\\", "/")
+    return [x for x in d.split("/") if x not in ("", ".")]
+
+
+class Gates(dict):
+    """{name: normalized command}, with each gate's declared leading `cd`
+    directory as components in `.dirs` and as written in `.cds`."""
+    dirs = {}
+    cds = {}
+
+
+def _resolve(base, cd):
+    """The directory a `cd` operand names, as bash reads it, from `base`.
+
+    A quoted operand is taken literally — bash expands no `~` inside quotes,
+    and expanding one here validated the real directory while bash ran in a
+    literal `~` beside it. A bare `~` is the home directory. On Windows, Git
+    Bash's `/c/...` is `c:/...`.
+    """
+    raw = str(cd or "").strip()
+    if raw[:1] in ("'", '"') and len(raw) >= 2 and raw[-1] == raw[0]:
+        target = raw[1:-1]
+    else:
+        target = os.path.expanduser(raw) if raw.startswith("~") else raw
+    if os.name == "nt":
+        m = re.match(r"^/([A-Za-z])(/.*)?$", target)
+        if m:
+            target = f"{m.group(1)}:{m.group(2) or '/'}"
+    return target if os.path.isabs(target) else os.path.join(base, target)
+
+
+def _place(d):
+    """(repository, path inside it) for a directory, or None."""
+    if not os.path.isdir(d):
+        return None
+    com = _common_dir(d)
+    if not com:
+        return None
+    return (os.path.normcase(os.path.realpath(com)),
+            _dir_parts(_git(d, "rev-parse", "--show-prefix") or ""))
+
+
+def _is_place(target, expected, root):
+    """`target` is the declared directory, or its twin in a linked worktree —
+    and both are in the project's own repository. An exact path match used
+    to pass before the repository was checked, so a gate declared as `cd
+    /tmp/foreign/backend && ...` was attested against this project's HEAD."""
+    pt, pe, pr = _place(target), _place(expected), _place(root)
+    if not (pt and pe and pr) or pt[0] != pr[0] or pe[0] != pr[0]:
+        return False
+    return _same(target, expected) or pt == pe
+
+
+def cd_in_project(root, command, cwd=None, declared_cd=""):
+    """Whether bash ran the command where the gate is declared to run.
+
+    gate_for() compares text, and text is not a place. The place the gate
+    runs is the project root plus the declared `cd`; the place bash ran is
+    the shell's directory (the payload's `cwd`) plus the invoked `cd`. They
+    must be the same directory, or its twin in a linked worktree of this
+    repository: `cd /tmp/foreign/backend`, and a relative `cd backend` from
+    another checkout, are not the project's gate, whatever HEAD the project
+    is at. A gate with no `cd` runs in the shell's directory, which must be
+    the project's.
+
+    A runtime may report the shell's directory after the command rather
+    than before it. For a plain relative `cd` (no `..`) whose pre-command
+    reading names no directory at all, the reported directory itself is
+    where the cd landed, and is judged instead.
+    """
+    cd = _front(command)[1]
+    raw = cd.strip()
+    bare = raw[:1] not in ("'", '"')
+    # Bash's other tilde forms (~+ is $PWD, ~- $OLDPWD, ~N the dir stack,
+    # ~user another home) are not modeled: refused rather than guessed.
+    if bare and raw.startswith("~") and not (raw == "~" or raw.startswith("~/")):
+        return False
+    # With CDPATH set, bash resolves a relative operand that does not start
+    # with `.` or `/` through it, even over ./<dir>. Not modeled: refused.
+    relative = raw and not (raw.lstrip("'\"").startswith(("/", ".", "~"))
+                            or re.match(r"^['\"]?[A-Za-z]:[\\/]", raw))
+    if relative and os.environ.get("CDPATH"):
+        return False
+    expected = _resolve(root, declared_cd) if declared_cd else root
+    # A reported directory that no longer exists is not the project root:
+    # judging it as one passed a gate run in a directory deleted since.
+    if cwd and not os.path.isdir(cwd):
+        return False
+    base = cwd or root
+    if not cd:
+        # No cd: bash ran in the shell's directory, which must be the
+        # project's own (or its twin in a linked worktree). `pytest -q` from
+        # a subdirectory collects only that subtree, and another checkout
+        # shares no commit with the project; --run's tree_for() holds the
+        # wrapper to the same place.
+        return _is_place(base, root, root)
+    pre = _resolve(base, cd)
+    if _is_place(pre, expected, root):
+        return True
+    parts = _dir_parts(cd)
+    tail = _dir_parts(os.path.realpath(base).replace(os.sep, "/"))
+    if (not os.path.isabs(_resolve("", cd)) and ".." not in parts and parts
+            and not os.path.exists(pre) and tail[len(tail) - len(parts):] == parts):
+        return _is_place(base, expected, root)
+    return False
+
+
+BASH_SHEBANG = re.compile(r"^#![ \t]*\S*/(?:env[ \t]+(?:-\S+[ \t]+)*)?bash(?:[ \t]|$)")
+
+
+def _bash_script(root, cd, script):
+    """Whether `script` (a declared gate's first word) is demonstrably a bash
+    script: its shebang names bash. Running a /bin/sh script under bash is
+    another interpreter, which can give another verdict."""
+    base = _resolve(root, cd) if cd else root
+    try:
+        with open(os.path.join(base, script), "rb") as fh:
+            first = fh.readline(200).decode("utf-8", "replace")
+    except OSError:
+        return False
+    return bool(BASH_SHEBANG.match(first))
+
+
+def gate_for(gates, command, root=None):
+    """The declared gate this exact command is, or None.
+
+    normalize() drops one leading `cd`, so `cd /abs/project && gate` still
+    matches. But a gate whose DECLARATION starts with `cd backend &&` is
+    identified by that directory too: `cd frontend && npm test` normalizes
+    to the same `npm test`, runs against another component of the same
+    commit, and must not be attested as the backend's gate. The invoked
+    directory has to end with the declared one (`backend`, `./backend`,
+    `/abs/checkout/backend` and a worktree's `wt/backend` all do).
+    """
+    # A line break ends a command: `cd .\nexit 0 && gate` exits 0 before
+    # the gate runs, and collapsing whitespace used to read it as one
+    # `cd` and then the gate.
+    if FOREIGN_SPACE.search(str(command or "")):
+        return None
     n = normalize(command)
+    # `bash scripts/x.sh` is the declared `scripts/x.sh` run another way —
+    # when the script is a bash script (its shebang names bash; `root`
+    # locates it), and only in that direction. A gate DECLARED with `bash ` needs bash
+    # (its shebang may say /bin/sh, dash here, where `[[` is "not found" and
+    # the script can exit 0), so running the script bare is not that gate;
+    # nor is `sh scripts/x.sh` any gate but one declared exactly so.
+    alt = _unbash(n)
     for name, declared in gates.items():
-        if declared == n:
-            return name
+        if declared != n and (alt is None or declared != alt
+                              or declared.startswith(("bash ", "sh ", "zsh "))
+                              or root is None
+                              or not _bash_script(root, (getattr(gates, "cds", None) or {})
+                                                  .get(name, ""), declared.split(" ", 1)[0])):
+            continue
+        want = (getattr(gates, "dirs", None) or {}).get(name) or []
+        if want:
+            got = _dir_parts(_front(command)[1])
+            if len(got) < len(want) or got[len(got) - len(want):] != want:
+                continue
+        return name
     return None
 
 
@@ -230,6 +566,100 @@ def head_sha(root):
         return ""
 
 
+def _tree_sha(root, payload, command):
+    """HEAD of the tree a hook-witnessed gate ran in: the session's cwd, then
+    the command's one leading `cd`. Provenance only — headSha, the project's
+    HEAD, is what a citation is bound to, for every witness alike."""
+    cd = _front(command)[1].strip().strip("'\"")
+    base = str(payload.get("cwd") or root)
+    tree = os.path.join(base, os.path.expanduser(cd)) if cd else base
+    return head_sha(tree) if os.path.isdir(tree) else ""
+
+
+def project_root(start="."):
+    """Where the manifest and the attest log live when no --root is given.
+
+    CLAUDE_PROJECT_DIR when it holds a manifest: the PostToolUse hook cds
+    there, so a gate run from a linked worktree of the campaign branch is
+    attested into the project's log by the wrapper as it is by the hook.
+    Otherwise the starting directory, as before: git cannot tell a session
+    that works IN a worktree (Codex sets no project variable) from a graph
+    node that stepped into one, so it is not asked to. A node is handed the
+    root explicitly instead (`--root`, from the launch stamp).
+    """
+    env = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env and os.path.exists(gates_path(env)):
+        return env
+    return start
+
+
+def _git(d, *a):
+    try:
+        import subprocess
+        r = subprocess.run(["git", "-C", d] + list(a), capture_output=True, text=True,
+                           timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (OSError, ValueError):
+        return None
+
+
+def _common_dir(d):
+    """The repository's shared .git directory, absolute."""
+    got = _git(d, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if got:
+        return got
+    got = _git(d, "rev-parse", "--git-common-dir")  # git < 2.31: relative to d
+    return os.path.join(d, got) if got else None
+
+
+def _same(a, b):
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def tree_for(root, start="."):
+    """Where a gate runs: the project's place in the checkout `start` is in.
+
+    From the project's own checkout — its root or any subdirectory — that
+    is the project root: a declared command runs where the manifest says,
+    never in whatever subdirectory an agent's shell last cd'd into (a
+    `pytest` there runs a subset and would be attested as the gate). From a
+    linked worktree of the same repository it is the same place inside that
+    worktree, which is the tree under test. Anywhere else, the root.
+    """
+    top_r, top_s = _git(root, "rev-parse", "--show-toplevel"), _git(start, "rev-parse", "--show-toplevel")
+    if not top_r or not top_s or _same(top_r, top_s):
+        return root
+    com_r, com_s = _common_dir(root), _common_dir(start)
+    if not com_r or not com_s or not _same(com_r, com_s):
+        return root
+    return os.path.join(top_s, _git(root, "rev-parse", "--show-prefix") or "")
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def stamp(root=None):
+    """A launch stamp for args._launch: when the run starts, and its nonce.
+
+    `since` bounds what a citation may be older than; the nonce names the
+    run, so two runs overlapping on one commit and one gate cannot cite each
+    other's executions. Minted here so its format is the rows' own.
+    """
+    import secrets
+    # The project root rides along, so a node that steps into a worktree
+    # can name the log it attests into (`--root`) whatever the runtime.
+    return {"since": now(), "nonce": secrets.token_hex(8),
+            "root": os.path.abspath(root or project_root("."))}
+
+
+def append_row(root, row):
+    p = path_for(root)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
 def record(root, payload):
     """Append a row for a hook payload. Returns (row, findings).
 
@@ -243,8 +673,9 @@ def record(root, payload):
     if tool and tool != "Bash":
         return None, []
     command = (payload.get("tool_input") or {}).get("command")
-    gate = gate_for(gates, command)
-    if not gate:
+    gate = gate_for(gates, command, root)
+    if not gate or not cd_in_project(root, command, payload.get("cwd"),
+                                     (getattr(gates, "cds", None) or {}).get(gate, "")):
         return None, []
     resp = payload.get("tool_response")
     # A backgrounded launch returns IMMEDIATELY with a success-shaped payload
@@ -272,25 +703,408 @@ def record(root, payload):
     log = f"{out.get('stdout') or ''}\n---\n{out.get('stderr') or ''}"
     session = str(payload.get("session_id") or "")
     row = {
+        # The raw command and its nonce are part of the identity: two
+        # executions that normalize alike in one second (a nonce-prefixed
+        # run and a plain one) are two rows, never one id cited for either.
         "attestId": "att_" + sha(f"{when}|{norm}|{code}|{session}"
-                                 f"|{payload.get('tool_use_id') or ''}")[:12],
+                                 f"|{payload.get('tool_use_id') or ''}"
+                                 f"|{nonce_of(command)}|{command}")[:12],
         "gate": gate,
         "command": norm,
         "commandSha": sha(norm),
         "exit": code,
         "logSha256": sha(log),
         "headSha": head_sha(root),
+        "treeSha": _tree_sha(root, payload, command),
         "when": when,
         "sessionId": session,
         # Subagent Bash calls fire this hook too, and a gate run inside a
         # graph node is exactly the execution record/run needs to bind.
         "agent": str(payload.get("agent_type") or payload.get("agent_id") or ""),
+        "witness": "hook",
+        "nonce": nonce_of(command),
     }
-    p = path_for(root)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(row) + "\n")
+    append_row(root, row)
     return row, []
+
+
+# ------------------------------------------------------------ long gates
+def _bg_dir(root):
+    return os.path.join(root, BACKGROUND)
+
+
+def _bg_read(root, token):
+    try:
+        with open(os.path.join(_bg_dir(root), f"{token}.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _bg_write(root, rec):
+    d = _bg_dir(root)
+    os.makedirs(d, exist_ok=True)
+    tmp = os.path.join(d, f".{rec['token']}.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(rec, fh)
+    os.replace(tmp, os.path.join(d, f"{rec['token']}.json"))
+
+
+def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
+    """Run a declared gate and attest its exit. Returns the gate's exit code.
+
+    The command is the manifest's, resolved from the gate NAME, so nothing
+    the caller types can widen what gets attested. The row is minted when
+    the command ends, which is the point: a gate launched in the background
+    finishes long after its Bash call returned, and the hook never sees
+    that. `detach` re-launches this runner as its own background process
+    and returns at once — for a caller with no background facility of its
+    own; under Claude Code, `run_in_background` on a plain --run does the
+    same. Either way the token is printed first, and --await is how the
+    verdict is collected.
+
+    `root` is where the manifest and the log live; `tree` is where the gate
+    runs (root when not given) — a worktree of the campaign branch, say.
+    """
+    root = os.path.abspath(root)
+    tree = os.path.abspath(tree or root)
+    gates, findings = load_gates(root)
+    for f in findings:
+        print(f"attest: {f}", file=sys.stderr)
+    if findings:
+        return 2
+    if gate not in gates:
+        print(f"attest: '{gate}' names no gate in {GATES} (declared: "
+              f"{', '.join(sorted(gates)) or 'none'}) — --run takes a gate name, "
+              f"never a command", file=sys.stderr)
+        return 2
+    # The wrapper is held to the hook's rule: the gate runs at the project's
+    # place — its directory, or that directory's twin in a linked worktree of
+    # this repository — and so does its declared cd. A --tree elsewhere would
+    # run another checkout's files and bind the exit to this project's HEAD.
+    declared = (getattr(gates, "cds", None) or {}).get(gate, "")
+    if _place(root) and (not _is_place(tree, root, root) or (
+            declared and not _is_place(_resolve(tree, declared),
+                                       _resolve(root, declared), root))):
+        print(f"attest: --tree {tree} is not this project's directory or its twin in "
+              f"a linked worktree of this repository (or '{gate}' declares a cd outside "
+              f"it) — a run there would be attested against this project's HEAD",
+              file=sys.stderr)
+        return 2
+    started = now()
+    token = token or "bg_" + sha(f"{gate}|{started}|{os.getpid()}|{time.monotonic_ns()}")[:12]
+    if detach:
+        import subprocess
+        # The record exists before the child does, so an --await issued the
+        # moment this returns finds it. No pid yet: the child writes its own
+        # when it starts, and never after this line could overwrite a DONE.
+        _bg_write(root, {"token": token, "gate": gate, "status": "RUNNING",
+                         "pid": None, "started": started})
+        # Absolute paths: the child starts in `tree`, and a relative root
+        # resolved a second time from there named a directory that does not
+        # exist — the child exited on a missing manifest, silently.
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--root", root, "--tree", tree,
+             "--run", gate, "--token", token] + (["--nonce", nonce] if nonce else []),
+            cwd=tree, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=(os.name != "nt"))
+        print(f"attest: started {gate} as {token} — collect it with "
+              f"attest.py --await {token}", flush=True)
+        return 0
+    return _execute(root, gate, started, token, nonce, tree)
+
+
+def _bash():
+    """The bash to run a gate with, as an absolute path where one is known.
+
+    On Windows a bare "bash" is resolved by CreateProcess, which searches
+    System32 before PATH: on a machine with WSL that is WSL's bash.exe, a
+    different toolchain from the Git Bash the hooks and the Bash tool use.
+    py.sh exports the bash it runs under as FPL_BASH.
+    """
+    import shutil
+    for cand in (os.environ.get("FPL_BASH"), os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")):
+        if cand and os.path.isfile(cand):
+            return cand
+    return shutil.which("bash") or "bash"
+
+
+def _execute(root, gate, started, token, nonce="", tree=None):
+    import subprocess
+    tree = tree or root
+    raw = declared_command(root, gate)
+    norm = normalize(raw)
+    # The project's HEAD, as the hook records it: one notion of the judged
+    # commit for every witness. Where the gate actually ran is treeSha.
+    head = head_sha(root)
+    tree_head = head_sha(tree)
+    log = os.path.join(_bg_dir(root), f"{token}.log")
+    _bg_write(root, {"token": token, "gate": gate, "status": "RUNNING",
+                     "pid": os.getpid(), "started": started, "headSha": head,
+                     "log": log})
+    print(f"attest: running {gate} as {token} — collect it with "
+          f"attest.py --await {token}", flush=True)
+    with open(log, "wb") as out:
+        code = subprocess.call([_bash(), "-c", raw], cwd=tree, stdin=subprocess.DEVNULL,
+                               stdout=out, stderr=subprocess.STDOUT)
+    with open(log, "rb") as fh:
+        text = fh.read().decode("utf-8", "replace")
+    row = {
+        "attestId": "att_" + sha(f"{started}|{norm}|{code}|{token}")[:12],
+        "gate": gate, "command": norm, "commandSha": sha(norm), "exit": code,
+        "logSha256": sha(f"{text}\n---\n"), "headSha": head, "treeSha": tree_head,
+        "started": started, "when": now(), "sessionId": "", "agent": "",
+        "witness": "wrapper", "token": token, "nonce": nonce,
+    }
+    append_row(root, row)
+    _bg_write(root, {"token": token, "gate": gate, "status": "DONE", "exit": code,
+                     "attestId": row["attestId"], "started": started,
+                     "finished": row["when"], "headSha": head, "log": log})
+    print(f"attest: {gate} exit {code} -> {row['attestId']}", flush=True)
+    return code
+
+
+def _alive(pid, started=""):
+    if pid is None:
+        # Launched, not yet started: alive for as long as a start can take.
+        try:
+            t = datetime.datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=datetime.timezone.utc)
+        except (TypeError, ValueError):
+            return False
+        return (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() < 60
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":
+        return _alive_nt(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _alive_nt(pid):
+    """Windows: is the process still running? OpenProcess, then its exit
+    code (STILL_ACTIVE while it runs). Answering True for every pid left a
+    crashed runner RUNNING forever and --await answering 3 to every call."""
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return k.GetLastError() == 5  # access denied: it exists
+        try:
+            code = ctypes.c_ulong()
+            if not k.GetExitCodeProcess(h, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            k.CloseHandle(h)
+    except Exception:  # noqa: BLE001 - no probe: the timeout bounds the wait
+        return True
+
+
+def await_gate(root, ref, timeout):
+    """Wait for a --run to finish. 0 done, 3 still running, 4 died, 2 unknown.
+
+    Exit 0 means the verdict is known, not that the gate passed: the gate's
+    own exit is printed with the attestId to cite. A caller loops on 3 with
+    fresh foreground calls, each under the tool's cap.
+    """
+    rec = _bg_read(root, ref)
+    if rec is None and IDENT.match(ref or ""):
+        # A gate name: the newest run of it.
+        d = _bg_dir(root)
+        cands = []
+        for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            if fn.endswith(".json"):
+                r = _bg_read(root, fn[:-5])
+                if r and r.get("gate") == ref:
+                    cands.append(r)
+        rec = max(cands, key=lambda r: str(r.get("started"))) if cands else None
+    if rec is None:
+        print(f"attest: no background run '{ref}' — start one with --run <gate>",
+              file=sys.stderr)
+        return 2
+    deadline = time.monotonic() + max(0, timeout)
+    while True:
+        rec = _bg_read(root, rec["token"]) or rec
+        if rec.get("status") == "DONE":
+            print(f"attest: {rec['gate']} exit {rec['exit']} -> {rec['attestId']}")
+            return 0
+        if not _alive(rec.get("pid"), rec.get("started")):
+            # The runner writes DONE and exits: between the read above and
+            # the probe it may have done both.
+            again = _bg_read(root, rec["token"]) or rec
+            if again.get("status") == "DONE":
+                print(f"attest: {again['gate']} exit {again['exit']} -> {again['attestId']}")
+                return 0
+            print(f"attest: the runner for {rec['token']} ({rec.get('gate')}) is gone "
+                  f"and left no verdict — nothing was attested; run the gate again",
+                  file=sys.stderr)
+            return 4
+        if time.monotonic() >= deadline:
+            print(f"attest: {rec.get('gate')} ({rec['token']}) still running since "
+                  f"{rec.get('started')} — call --await again")
+            return 3
+        time.sleep(min(2.0, max(0.05, deadline - time.monotonic())))
+
+
+# ------------------------------------------------------------ the forge
+def _gh_json(path):
+    import subprocess
+    r = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or f"gh api {path} exited {r.returncode}")
+    return json.loads(r.stdout or "{}")
+
+
+def _gh_all(path, key, pages=50):
+    """Every item of a paginated GitHub listing, or an error.
+
+    The API answers 30 items a page by default. A matrix CI with more check
+    runs than that had its failing job on page two read as absent, and every
+    reported context passing — a red commit attested green. So the listing
+    is walked to its end and held to the total the API itself reports.
+    """
+    items, total = [], None
+    for page in range(1, pages + 1):
+        sep = "&" if "?" in path else "?"
+        got = _gh_json(f"{path}{sep}per_page=100&page={page}")
+        batch = got.get(key) or []
+        if total is None and isinstance(got.get("total_count"), int):
+            total = got["total_count"]
+        items.extend(batch)
+        if len(batch) < 100 or (total is not None and len(items) >= total):
+            break
+    if total is not None and len(items) < total:
+        raise RuntimeError(f"{path} listed {len(items)} of {total} {key} — "
+                           f"a partial listing is no verdict")
+    return items
+
+
+def forge_contexts(sha_):
+    """{context: 'success'|'failure'|'pending'} for a commit, from GitHub.
+
+    Commit statuses and check runs are both CI's word on a commit, and a
+    repo may use either, so both are read. A context reported by both is
+    the worse of the two.
+    """
+    rank = {"success": 0, "pending": 1, "failure": 2}
+    out = {}
+
+    def put(name, state):
+        if name not in out or rank[state] > rank[out[name]]:
+            out[name] = state
+    for st in _gh_all(f"repos/{{owner}}/{{repo}}/commits/{sha_}/status", "statuses"):
+        s_ = st.get("state")
+        put(str(st.get("context")), "success" if s_ == "success"
+            else "pending" if s_ == "pending" else "failure")
+    for cr in _gh_all(f"repos/{{owner}}/{{repo}}/commits/{sha_}/check-runs", "check_runs"):
+        if cr.get("status") != "completed":
+            put(str(cr.get("name")), "pending")
+        elif cr.get("conclusion") in ("success", "neutral", "skipped"):
+            put(str(cr.get("name")), "success")
+        else:
+            put(str(cr.get("name")), "failure")
+    return out
+
+
+def ci_verdict(contexts, required):
+    """0 green, 1 red, None undecided. Missing required contexts are pending."""
+    want = required or sorted(contexts)
+    if not want:
+        return None
+    states = [contexts.get(c, "pending") for c in want]
+    if "failure" in states:
+        return 1
+    if "pending" in states:
+        return None
+    return 0
+
+
+def resolve_target(pr=None, ref=None):
+    """(sha, target) the forge names for a pull request or a branch.
+
+    The forge chooses the commit, not the caller: a row minted for a sha the
+    node picked could be CI's verdict on any older green commit, cited over
+    a merge of something else.
+    """
+    if pr is not None:
+        head = (_gh_json(f"repos/{{owner}}/{{repo}}/pulls/{int(pr)}").get("head") or {})
+        return str(head.get("sha") or ""), f"pr:{int(pr)}"
+    got = _gh_json(f"repos/{{owner}}/{{repo}}/commits/{ref}")
+    return str(got.get("sha") or ""), f"ref:{ref}"
+
+
+def attest_ci(root, sha_, wait=False, timeout=AWAIT_DEFAULT, pr=None, ref=None, nonce=""):
+    """Mint a `forge` row for a commit's CI verdict. 0/1 minted, 3 undecided.
+
+    With `pr` or `ref` the forge resolves the commit and the row records
+    which; a bare `sha` is the caller's choice, and a prove:ci citation
+    refuses such a row.
+    """
+    gates, findings = load_gates(root)
+    for f in findings:
+        print(f"attest: {f}", file=sys.stderr)
+    if findings:
+        return 2
+    ci = load_ci(root)
+    if not ci:
+        print(f"attest: {GATES} declares no 'ci' section — nothing says which "
+              f"forge or which contexts decide a merge", file=sys.stderr)
+        return 2
+    target = None
+    if pr is not None or ref:
+        if ref and not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", ref):
+            print("attest: --ref must be a branch or tag name", file=sys.stderr)
+            return 2
+        try:
+            sha_, target = resolve_target(pr, ref)
+        except (OSError, RuntimeError, ValueError) as e:
+            print(f"attest: could not resolve {'PR ' + str(pr) if pr is not None else ref} "
+                  f"on the forge: {e} — nothing attested", file=sys.stderr)
+            return 3
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha_ or ""):
+        print("attest: name the commit with --pr, --ref or --sha", file=sys.stderr)
+        return 2
+    required = ci.get("contexts")
+    deadline = time.monotonic() + max(0, timeout)
+    while True:
+        try:
+            contexts = forge_contexts(sha_)
+        except (OSError, RuntimeError, ValueError) as e:
+            print(f"attest: could not read the forge's statuses for {sha_}: {e} — "
+                  f"nothing attested", file=sys.stderr)
+            return 3
+        code = ci_verdict(contexts, required)
+        if code is not None:
+            break
+        if not wait or time.monotonic() >= deadline:
+            missing = [c for c in (required or []) if c not in contexts]
+            pend = sorted(c for c, st in contexts.items() if st == "pending")
+            print(f"attest: CI on {sha_} has no verdict yet"
+                  + (f"; pending: {', '.join(pend)}" if pend else "")
+                  + (f"; not reported: {', '.join(missing)}" if missing else "")
+                  + " — nothing attested", file=sys.stderr)
+            return 3
+        time.sleep(15)
+    when = now()
+    canon = json.dumps(contexts, sort_keys=True)
+    row = {
+        "attestId": "att_" + sha(f"{when}|ci|{sha_}|{code}|{canon}")[:12],
+        "gate": "ci", "command": f"ci:{sha_}", "commandSha": sha(f"ci:{sha_}"),
+        "exit": code, "logSha256": sha(canon), "headSha": sha_, "when": when,
+        "sessionId": "", "agent": "", "witness": "forge", "contexts": contexts,
+        "target": target, "nonce": nonce,
+    }
+    append_row(root, row)
+    print(f"attest: ci on {sha_} exit {code} -> {row['attestId']}")
+    return code
 
 
 def _each(value):
@@ -302,13 +1116,28 @@ def _each(value):
         yield value
 
 
-def _check_cited(rows, node, gate, r):
+def _same_commit(a, b):
+    a, b = str(a or "").strip(), str(b or "").strip()
+    return len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a))
+
+
+def _check_cited(rows, node, gate, r, launch=None, head=None, used=None):
     """Hold a `prove:` node to the attestation it cited.
 
     The node names an attestId; the hook wrote that row when the command
     actually ran. Every way the two can disagree is a different thing to
     say, and collapsing them would either accuse an honest executor of
     tampering or let a real one through.
+
+    A row that matches is still only evidence about THIS run if the run is
+    what minted it. Comparing the citation to its row alone let a node that
+    never executed its gate cite any earlier row of the same gate and exit —
+    another campaign's, weeks old — and be filed ATTESTED. So a matching row
+    is also held to the run: minted no earlier than the launch stamp the
+    compiled graph carries, about the commit the campaign's tree guard read
+    (a forge row is about the commit it names instead), and backing one node
+    only. Failing any of those is STALE: the declared verification did not
+    happen in this run, which is not the same sentence as a contradiction.
     """
     claimed = r.get("exit")
     cited = r.get("attestId")
@@ -335,8 +1164,61 @@ def _check_cited(rows, node, gate, r):
         return {**base, "status": "MISMATCH",
                 "detail": (f"cites {cited} but quotes a different log than the "
                            f"one recorded for it")}
+    since = launch.get("since") if isinstance(launch, dict) else None
+    if not since:
+        return {**base, "status": "STALE",
+                "detail": (f"cites {cited}, but the run carries no launch stamp "
+                           f"(args._launch) — nothing binds the citation to this "
+                           f"run, so any earlier row of '{gate}' would pass")}
+    minted = str(row.get("started") or row.get("when") or "")
+    if minted < str(since):
+        return {**base, "status": "STALE",
+                "detail": (f"cites {cited}, minted {minted or 'at an unknown time'}, "
+                           f"before this run launched ({since}) — an execution from "
+                           f"another run, not this node's")}
+    nonce = launch.get("nonce") if isinstance(launch, dict) else None
+    if nonce and row.get("nonce") != nonce:
+        return {**base, "status": "STALE",
+                "detail": (f"cites {cited}, which "
+                           + (f"another run minted (nonce {row['nonce']})" if row.get("nonce")
+                              else "carries no run nonce")
+                           + f" — this run's is {nonce}; a gate run for this node passes "
+                           f"FPL_ATTEST_NONCE (or --nonce) so its row names the run")}
+    if row.get("witness") == "forge":
+        # CI's verdict is about the commit the forge named, and the claim must
+        # say which commit that is, so the merge it guards can be pinned to it
+        # (`gh pr merge --match-head-commit`). A sha the node chose could be
+        # any older green commit.
+        if not row.get("target"):
+            return {**base, "status": "STALE",
+                    "detail": (f"cites {cited}, CI on {str(row.get('headSha'))[:12]}, a commit "
+                               f"the node named itself — mint it with --pr or --ref so the "
+                               f"forge names the tip")}
+        if not r.get("sha"):
+            return {**base, "status": "STALE",
+                    "detail": (f"cites {cited} but does not name the commit it judged (sha) — "
+                               f"the merge cannot be pinned to CI's verdict")}
+        if not _same_commit(r["sha"], row.get("headSha")):
+            return {**base, "status": "MISMATCH",
+                    "detail": (f"claims CI on {str(r['sha'])[:12]} citing {cited}, which the "
+                               f"forge recorded for {str(row.get('headSha'))[:12]}")}
+    if (head and row.get("witness") != "forge" and row.get("headSha")
+            and not _same_commit(row["headSha"], head)):
+        return {**base, "status": "STALE",
+                "detail": (f"cites {cited}, which ran on commit "
+                           f"{str(row['headSha'])[:12]}, but this campaign ran on "
+                           f"{str(head)[:12]}")}
+    if used is not None:
+        if cited in used:
+            return {**base, "status": "STALE",
+                    "detail": (f"cites {cited}, which already backs node "
+                               f"'{used[cited]}' — one execution cannot verify two "
+                               f"nodes")}
+        used[cited] = node
     return {**base, "status": "ATTESTED",
-            "detail": f"exit {claimed} attested {cited}"}
+            "detail": f"exit {claimed} attested {cited}"
+                      + (f" ({row.get('witness')})" if row.get("witness") not in (None, "hook")
+                         else "")}
 
 
 def verify_claims(root, summary):
@@ -347,7 +1229,9 @@ def verify_claims(root, summary):
     reported — this speaks only about commands the repo itself declared.
     """
     gates, findings = load_gates(root)
-    if findings or not gates:
+    # A CI-only manifest ({"gates": {}, "ci": ...}) still has a witness to
+    # hold prove:ci citations to; returning early filed them unchecked.
+    if findings or (not gates and not load_ci(root)):
         return [], findings
     rows = read(root)
     results = (summary or {}).get("results") or {}
@@ -355,6 +1239,11 @@ def verify_claims(root, summary):
     # Which nodes declared `verify: prove:<gate>`. Those opted into being
     # held to the hook's record; everything else is still only observed.
     proved = (summary or {}).get("prove") or {}
+    # What binds a citation to this run: the launch stamp and the commit
+    # the tree guard's first reading saw.
+    launch = (summary or {}).get("launch")
+    head = (((summary or {}).get("tree") or {}).get("baseline") or {}).get("head")
+    used = {}
     checks = []
     for node, value in results.items():
         for r in _each(value):
@@ -366,11 +1255,11 @@ def verify_claims(root, summary):
                 # An ExecutionV1 cites its attestation directly, so the check
                 # is against the id rather than a command string it never
                 # carries.
-                checks.append(_check_cited(rows, node, declared, r))
+                checks.append(_check_cited(rows, node, declared, r, launch, head, used))
                 continue
             if "exit" not in r or "command" not in r:
                 continue
-            gate = gate_for(gates, r.get("command"))
+            gate = gate_for(gates, r.get("command"), root)
             if not gate:
                 continue
             claimed = r.get("exit")
@@ -402,12 +1291,65 @@ def verify_claims(root, summary):
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--root", default=".")
+    ap.add_argument("--root", default=None,
+                    help="the project (manifest and log); default: CLAUDE_PROJECT_DIR "
+                         "when it holds a manifest, else the current directory")
+    ap.add_argument("--tree", default=None,
+                    help="with --run: the tree to run the gate in (default: the project "
+                         "root, or its place in the linked worktree the caller is in)")
+    ap.add_argument("--detach", action="store_true",
+                    help="with --run: start the gate as its own background process")
+    ap.add_argument("--token", help=argparse.SUPPRESS)
+    ap.add_argument("--timeout", type=int, default=AWAIT_DEFAULT,
+                    help="seconds --await (or --ci --wait) blocks before answering")
+    ap.add_argument("--sha", help="with --ci: the commit whose statuses decide")
+    ap.add_argument("--wait", action="store_true",
+                    help="with --ci: poll until every context has a verdict")
+    ap.add_argument("--pr", type=int, help="with --ci: the pull request whose head the forge names")
+    ap.add_argument("--ref", help="with --ci: the branch or tag whose tip the forge names")
+    ap.add_argument("--nonce", default="",
+                    help="with --run or --ci: the run nonce from args._launch")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--record", action="store_true")
     g.add_argument("--list", action="store_true")
     g.add_argument("--verify", action="store_true")
+    g.add_argument("--run", metavar="GATE")
+    g.add_argument("--await", dest="await_", metavar="TOKEN")
+    g.add_argument("--ci", action="store_true")
+    g.add_argument("--stamp", action="store_true",
+                   help="print a launch stamp for args._launch")
+    g.add_argument("--last", metavar="GATE",
+                   help="print the newest attested row of GATE (with --nonce: of this run)")
     a = ap.parse_args()
+    if a.root is None:
+        a.root = project_root(".")
+
+    if a.nonce and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", a.nonce):
+        print("attest: --nonce must be 1-64 letters, digits, '-' or '_'", file=sys.stderr)
+        return 2
+    if a.stamp:
+        print(json.dumps(stamp(a.root)))
+        return 0
+    if a.run:
+        tree = a.tree or (None if a.token else tree_for(a.root, "."))
+        return run_gate(a.root, a.run, a.detach, a.token, a.nonce, tree)
+    if a.last:
+        mine = [r for r in read(a.root) if r.get("gate") == a.last
+                and (not a.nonce or r.get("nonce") == a.nonce)]
+        if not mine:
+            print(f"attest: no attested run of '{a.last}'"
+                  + (f" for nonce {a.nonce}" if a.nonce else "")
+                  + " — a failed gate is not attested by the hook; run it again, or "
+                    "through attest.py --run", file=sys.stderr)
+            return 1
+        r = mine[-1]
+        print(f"{r['attestId']} gate {r['gate']} exit {r['exit']} when {r.get('when')} "
+              f"witness {r.get('witness') or 'hook'} nonce {r.get('nonce') or '-'}")
+        return 0
+    if a.await_:
+        return await_gate(a.root, a.await_, a.timeout)
+    if a.ci:
+        return attest_ci(a.root, a.sha, a.wait, a.timeout, a.pr, a.ref, a.nonce)
 
     if a.list:
         gates, findings = load_gates(a.root)
@@ -422,9 +1364,18 @@ def main():
         print(f"attest: {len(gates)} declared gate(s), {len(rows)} attested execution(s)")
         for name, cmd in sorted(gates.items()):
             mine = [r for r in rows if r.get("gate") == name]
-            last = f"last {mine[-1]['when']} exit {mine[-1]['exit']}" if mine else "never run"
+            last = (f"last {mine[-1]['when']} exit {mine[-1]['exit']} -> "
+                    f"{mine[-1].get('attestId')}") if mine else "never run"
             print(f"  {name:<16} {cmd}")
             print(f"  {'':<16} {len(mine)} run(s), {last}")
+        ci = load_ci(a.root)
+        if ci:
+            mine = [r for r in rows if r.get("gate") == "ci"]
+            last = (f"last {mine[-1]['when']} exit {mine[-1]['exit']} on "
+                    f"{str(mine[-1].get('headSha'))[:12]}") if mine else "never queried"
+            print(f"  {'ci':<16} {ci['forge']} statuses: "
+                  f"{', '.join(ci.get('contexts') or ['every reported context'])}")
+            print(f"  {'':<16} {len(mine)} verdict(s), {last}")
         return 0
 
     raw = sys.stdin.read()
@@ -455,7 +1406,7 @@ def main():
     bad = 0
     for c in checks:
         print(f"  [{c['status']}] {c['node']}: {c['detail']}")
-        bad += c["status"] == "MISMATCH"
+        bad += c["status"] in ("MISMATCH", "STALE")
     return 1 if bad else 0
 
 

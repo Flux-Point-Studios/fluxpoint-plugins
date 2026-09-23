@@ -121,7 +121,16 @@ compiler rejects, at compile time:
   `foreach`/`repeat`
 
 Those are structural. `/fluxpoint:graph-audit` judges what is left:
-scoping, tier-vs-stakes, prompt quality.
+scoping, tier-vs-stakes, prompt quality. It runs as a shipped workflow
+(`workflows/graph-audit.js`): six lens-scoped auditors, a reduce that merges
+their duplicates, and verifiers told to refute each finding, three per
+finding at HIGH and above. One auditor per round read as convergence when
+it was one reader running out of path, so SOUND now means every lens
+returned and nothing survived refutation. Rounds persist under
+`.claude/fluxpoint/audits/`, and what earlier rounds fixed or refuted is
+passed back as a settled list so a round does not relitigate it. `--quick`
+keeps the single auditor for checks between repairs; it never makes a
+graph READY.
 
 ## Work nobody on the graph can do
 
@@ -251,7 +260,16 @@ campaign a wrong answer rather than an error:
   campaign end. Mutators run in worktrees and measurers in snapshots, so
   the shared tree must be IDENTICAL at every checkpoint: any drift halts
   the campaign as `TREE-MOVED` with the dirt named, instead of advancing
-  verdicts about a tree that is gone. The record rides out in the summary
+  verdicts about a tree that is gone. The plugin's own writes are left out
+  of the comparison: the state file (`WORK.md`, `LOOP.md`, the graph file
+  itself), where the Stop hook appends its Evidence row whenever the
+  orchestrator ends a turn, and everything under `.claude/`. The sentinel
+  is an `agent()` call, so a resume replays its first reading rather than
+  taking one; the launcher's fresh reading in `args._base` (HEAD and
+  porcelain, taken at every launch by `/fluxpoint:graph-run`) is compared
+  against it, and a resume on a tree that moved since the run it replays
+  halts `TREE-MOVED` at launch instead of handing back cached verdicts about
+  the old tree. The record rides out in the summary
   as `tree`. `treeGuard: false` in the IR turns it off, on the record.
 
 **Prove the harness in a worktree before you trust a `mutates` node.** Green
@@ -300,6 +318,17 @@ the one that matters:
 3. The gate must be *ordered before* the effect. The compiler requires an
    earlier `independent` node with a `haltWhen`, because a verifier that
    runs afterwards cannot un-mint an NFT.
+
+   `haltWhen` compares one top-level field to a literal; it cannot reach
+   into an array. A contract whose deciding fact lives only inside a list
+   needs a top-level field bound to that list, or the gate reads the wrong
+   thing. `RedTeamV1` carries one: `worstSeverity` and `worstSeverityRank`
+   are bound to `findings[]` and to the verdict, and SHIP over a HIGH or
+   CRITICAL finding is refused by the contract, re-derived by the compiled
+   graph in code (a halt, before the next node), and re-derived again by
+   `record-run.py` (`BLOCKED-REDTEAM`). So `verdict == 'BLOCK'` already
+   stops every HIGH and CRITICAL; halt on `worstSeverityRank >= 2` to stop
+   on a MEDIUM as well.
 
 Two limits, stated rather than papered over. The sandbox running the
 compiled graph has no filesystem, so the ledger row is written from the run
@@ -360,6 +389,45 @@ report clean when its own verification says its exit codes are not what
 happened. A `prove:` node citing nothing is `INCOMPLETE` instead: the
 declared verification did not run, which is not the same accusation.
 
+A citation is also bound to the run that cites it. The compiled graph
+refuses to start without the launch stamp `/fluxpoint:graph-run` passes in
+`args._launch` (`attest.py --stamp`: a `since` and a run nonce), tells each
+`prove:` node to run its gate as `FPL_ATTEST_NONCE=<nonce> <command>`, and
+carries the stamp into the summary. A cited row minted before `since`, by a
+run with another nonce, on a different commit than the one the tree guard
+read, or already backing another node is `STALE`, which files the run
+`INCOMPLETE`. Without that, any earlier row of the same gate and exit —
+another campaign's, weeks old, or an overlapping run's on the same commit —
+passed as this node's execution. A resume reuses the stamp of the run it
+resumes, since its replayed citations carry the original nonce.
+
+Two witnesses cover what one tool call cannot. A gate longer than the
+600-second cap runs through `attest.py --run <gate>` (the manifest's
+command, resolved from the gate name) started in the background, and
+`attest.py --await <token>` collects it in bounded foreground slices; the
+runner mints the row itself when the command ends, including a red exit
+the hook never sees. CI's own statuses on a commit are `prove:ci`: a
+top-level `ci` section in the manifest names the forge and the contexts
+that decide, `attest.py --ci --pr <n> [--wait]` (or `--ref <branch>`) has
+the forge name the commit and mints a row from its statuses (every page of
+them, held to the total the forge reports), and pending, unreported or
+partially listed contexts mint nothing. A `prove:ci` claim returns that `sha`
+and must match the row; a row for a sha the node chose (`--sha`) cannot
+back it, since CI on any older green commit would pass. Pin the merge after
+the gate to the same commit with `gh pr merge --match-head-commit <sha>`.
+Each row names its witness — `hook`, `wrapper` or `forge`. A gate run from
+a linked worktree of the campaign branch is attested into the project's log
+and bound to the project's HEAD, whichever witness saw it: the launch stamp
+carries the project `root` and the prove preamble passes it as `--root`
+(under Claude Code, `CLAUDE_PROJECT_DIR` names it too). The gate runs at
+the project's place in the checkout the caller is in, never in a
+subdirectory its shell last entered, and the tree it ran on is recorded
+beside it as `treeSha`. A gate declared as `cd <dir> && ...` matches only a
+run in that directory. `attest.py --last <gate> --nonce
+<nonce>` prints the attestId a node cites. A manifest the witness refuses
+(a gate named `ci`, an unknown forge) fails every `prove:` node at compile
+time, and a run under one is filed `INCOMPLETE`.
+
 Nodes that merely happen to match a declared gate stay observed rather than
 enforced. Opting in is what earns the stricter reading, and a check that
 starts by failing runs is a check people switch off.
@@ -368,7 +436,9 @@ And where a repo declares gates, an `irreversible` node's mandatory earlier
 guard **must** use `prove:`. The ordering invariant — gate before effect —
 was always sound in structure and hollow in fidelity while the guard typed
 its own exit code. An effect nobody can undo may not rest on a number the
-node that ran it wrote by hand.
+node that ran it wrote by hand. `prove:ci` and a `--run`/`--await` gate
+qualify, so a merge guarded by CI's statuses or a long suite no longer has
+to park on a person for want of a gate that fits one call.
 
 ## Canonical shapes
 
@@ -453,6 +523,18 @@ every graph in cold-input-token equivalents: a shared prefix per call
 (priced at a tenth when warm), work tokens scaled by effort (`low` 0.5×,
 `medium` 1×, `high` 1.8×, `xhigh` 2.5×, `max` 3.5×), the whole call
 weighted by the model's price, refuters and tree sentinels included. The
+text the author writes is priced too, one token per UTF-8 byte like the
+packet: each node's prompt with its `{{A.<arg>}}` defaults and `{{item}}`
+values expanded as the script renders them (text as itself, a list or an
+object as JSON), and a park's release instructions in its advisor call.
+A fan-out's workers read their shared prompt prefix from cache after the
+first; a different node's prompt is never discounted, because the cache
+has not seen it. `{{prev}}`, `{{decisions.*}}`, `{{seen}}` and a launch
+argument with no `argDefault` are sized only at run time; `--check` and
+the compiled header name each one and the nodes that use it as
+`unpriced`, so the number never reads as complete when it is not. So a prompt
+that grows between audit rounds moves the estimate, and the ceiling set
+from it can refuse the growth. The
 constants are stated assumptions in `compile-graph.py`, and `metrics.py`
 folds the estimate against the runtime's own `spent` per run so they get
 corrected by evidence rather than argued. `budget.maxEstimatedTokens` is
@@ -474,15 +556,24 @@ siblings that dispatch together are, and every sequential hop is a cold
 prefill. The runtime sets the TTL per session, never per call, so the
 declaration is a requirement on the session that runs the graph —
 `/fluxpoint:graph-run` names it in preflight — and the compiled script
-logs it at launch. A resume past a parked node is a cold start whatever
-the TTL and is priced as one. Every shipped template declares `1h`.
+logs it at launch. A node that waits on a park (through `after` or a
+reduce's `from`) runs after the release, in a later run: a cold start
+whatever the TTL, and priced as one. A node that does not wait on it runs
+on in the same run and keeps what that run warmed. Every shipped template
+declares `1h`.
 
 **An effort transition is a cold prefill.** The compiler warns on every
-consecutive pair of nodes whose `(model, effort)` differs, and on an inline
+consecutive pair of nodes whose `(model, effort)` changes to a key the run
+has not warmed yet — the hops the estimate charges cold — and on an inline
 `effort` equal to what the role or defaults already give (it changes
-nothing and reads as a decision). Where a change is justified, put it
-where the cache is cold anyway — after a park, or on the first node of a
-phase — and put same-effort work together; `graph-audit` judges whether
+nothing and reads as a decision). A return to a key an earlier call
+already warmed is a cache read and is not reported. A park ends the
+relation for what waits on it: the first call after the release is priced
+cold whatever its key, so a change placed there costs nothing extra and is
+not reported; a node that does not wait on the park still runs right after
+the one before it and is judged against it. Where a change is justified,
+put it where the cache is cold anyway — on a node that waits on a park —
+and put same-effort work together; `graph-audit` judges whether
 the bump buys anything, because the compiler cannot know a task's shape.
 Whether `builder: high` is the right setting at all is a separate
 question, and it is asserted today, never measured; see DESIGN-NOTES.

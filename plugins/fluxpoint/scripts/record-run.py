@@ -29,6 +29,26 @@ DEC_HDR = "| When (UTC) | Decision | Chosen | Overturned prior | Frozen by | Rat
 # proof-audit nodes files the worst verdict, the way several harness nodes
 # file the worst exit: one WEAKENED is the campaign's answer.
 PROOF_RANK = {"NOT-APPLICABLE": 0, "SOUND": 1, "UNPROVEN": 2, "WEAKENED": 3}
+# RedTeamV1's severity ordinal. The contract binds worstSeverity to the
+# findings and refuses a SHIP over HIGH or CRITICAL; this re-derives both
+# from the findings themselves, so a validator that skipped the binding
+# cannot file a SHIP over a CRITICAL as shippable.
+SEVERITY_RANK = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+
+def red_team_incoherent(r):
+    """Why a RedTeamV1 result cannot be taken at its verdict, or None."""
+    worst = max((SEVERITY_RANK.get((f or {}).get("severity"), 0)
+                 for f in (r.get("findings") or []) if isinstance(f, dict)), default=0)
+    name = next(k for k, v in SEVERITY_RANK.items() if v == worst)
+    if r.get("verdict") == "SHIP" and worst >= SEVERITY_RANK["HIGH"]:
+        return f"SHIP over a {name} finding"
+    if ("worstSeverityRank" in r or "worstSeverity" in r) and (
+            r.get("worstSeverityRank") != worst
+            or SEVERITY_RANK.get(r.get("worstSeverity")) != worst):
+        return (f"worstSeverity {r.get('worstSeverity')}/{r.get('worstSeverityRank')} "
+                f"disagrees with its findings, whose worst is {name}")
+    return None
 
 
 def cell(s, n=160):
@@ -63,7 +83,7 @@ def decision_rows(summary, ts):
     out = []
     for did, r in rows:
         out.append(
-            f"| {ts} | {cell(did, 40)} | {cell(r.get('chosen'), 60)} "
+            f"| {ts} | {cell(did, 80)} | {cell(r.get('chosen'), 60)} "
             f"| {'YES' if r.get('overturned_prior') else 'no'} "
             f"| {cell(r.get('frozen_by') or 'none', 40)} "
             f"| {cell(r.get('rationale'))} |"
@@ -116,8 +136,9 @@ def derive(summary):
     map precisely so this does not have to guess from a result's shape.
 
     Returns (harness_exit, red_team_verdict, blocked, proof_verdict,
-    proof_surface) with None where the campaign genuinely produced no such
-    node. The proof verdict is the ProofV1 node's, worst of several, and
+    proof_surface, incoherent) with None where the campaign genuinely
+    produced no such node; `incoherent` lists red-team results whose verdict
+    their own findings contradict, each of which blocks like a BLOCK. The proof verdict is the ProofV1 node's, worst of several, and
     proof_surface is how many files, obligations or suites it reviewed —
     a SOUND over zero is vacuous and the row says so.
     """
@@ -125,6 +146,7 @@ def derive(summary):
     contracts = summary.get("contracts") or {}
     harness, verdict, blocked = None, None, False
     proof, proof_surface = None, None
+    incoherent = []
     for node, value in results.items():
         c = contracts.get(node)
         for r in _each(value):
@@ -136,6 +158,10 @@ def derive(summary):
                     harness = e if harness in (None, 0) else harness
             if c == "RedTeamV1" or (c is None and r.get("verdict") in ("SHIP", "BLOCK")):
                 v = r.get("verdict")
+                why = red_team_incoherent(r)
+                if why:
+                    incoherent.append(f"{node}: {why}")
+                    v = "BLOCK"
                 if v == "BLOCK":
                     verdict, blocked = "BLOCK", True
                 elif v and verdict is None:
@@ -146,13 +172,19 @@ def derive(summary):
                     proof = pv
                     sf = r.get("surface")
                     proof_surface = len(sf) if isinstance(sf, list) else 0
-    return harness, verdict, blocked, proof, proof_surface
+    return harness, verdict, blocked, proof, proof_surface, incoherent
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-id", required=True)
-    ap.add_argument("--graph", default="WORK.md", help="work-state file carrying the Evidence table")
+    ap.add_argument("--graph", default="WORK.md",
+                    help="the graph file the run was compiled from: its SPEC: header "
+                         "names the packet the run is held to")
+    ap.add_argument("--evidence", default=None,
+                    help="the file carrying the Evidence and Decisions tables the rows "
+                         "go into (default: --graph). A campaign in GRAPH.<name>.md "
+                         "with a packet of its own files into WORK.md this way")
     ap.add_argument("--result", help="file holding the workflow's return value (default stdin)")
     ap.add_argument("--harness", default="n/a", help="independent harness exit code")
     ap.add_argument("--red-team", default="n/a", help="SHIP | BLOCK | n/a")
@@ -162,6 +194,7 @@ def main():
     ap.add_argument("--state-dir", default=".claude/fluxpoint/runs")
     ap.add_argument("--root", default=".", help="repo root holding .claude/fluxpoint")
     args = ap.parse_args()
+    evidence_file = args.evidence or args.graph
 
     raw = open(args.result, encoding="utf-8").read() if args.result else sys.stdin.read()
     try:
@@ -170,14 +203,47 @@ def main():
         print(f"record-run: result is not JSON: {e}", file=sys.stderr)
         return 1
 
-    from specification import load, required
-    if "specification" in summary or required(args.root):
+    # 0. Irreversible effects go into the once-only ledger before anything
+    # can refuse this record. The ledger does not vouch for the run — it
+    # records that an effect nobody can undo already happened, so the next
+    # resume replays it instead of performing it twice. Refusing the record
+    # first (a stale packet, say) used to leave the effect on chain with no
+    # row, and the next resume asked to confirm it again.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    ledger_written = []
+    try:
+        import ledger as _ledger
+        ledger_written = _ledger.append_from_summary(args.root, summary, args.run_id)
+        for r in ledger_written:
+            print(f"record-run: ledger recorded {r['node']} — {r['evidence']}")
+    except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
+        print(f"record-run: ledger append failed: {e}", file=sys.stderr)
+
+    import specification as _spec
+    try:
+        # The graph file's SPEC: header names the packet this campaign is
+        # held to; a repository can carry one per campaign.
+        spec_path = _spec.canonical(_spec.graph_headers(args.graph).get("SPEC"))
+    except (OSError, ValueError) as e:
+        print(f"record-run: {args.graph}: {e}", file=sys.stderr)
+        return 1
+    if "specification" in summary or spec_path or _spec.required(args.root):
         try:
-            _, identity = load(args.root)
+            ran = _spec.canonical(summary.get("specificationPath"))
+            if ran and spec_path and ran != spec_path:
+                raise ValueError(f"the run was compiled against {ran}, but {args.graph} "
+                                 f"declares SPEC: {spec_path}")
+            _, identity = _spec.load(args.root, spec=spec_path or ran)
             if summary.get("specification") != identity:
                 raise ValueError("run specification differs from the locked packet")
         except (OSError, ValueError, TypeError) as e:
             print(f"record-run: spec verification failed: {e}", file=sys.stderr)
+            if ledger_written:
+                print(f"record-run: the once-only ledger still recorded "
+                      f"{len(ledger_written)} irreversible effect(s) from this run — "
+                      f"they happened whatever the packet says, and a resume "
+                      f"must replay them rather than fire them again",
+                      file=sys.stderr)
             return 1
 
     prov = summary.get("provenance") or []
@@ -195,7 +261,10 @@ def main():
 
     # Derived beats declared: the flags are a fallback for a run whose
     # summary carries no such node, never an override of one that does.
-    d_harness, d_verdict, blocked, d_proof, proof_surface = derive(summary)
+    d_harness, d_verdict, blocked, d_proof, proof_surface, incoherent = derive(summary)
+    for why in incoherent:
+        print(f"record-run: red-team result refused at its verdict — {why}",
+              file=sys.stderr)
     harness = str(d_harness) if d_harness is not None else args.harness
     red_team = d_verdict if d_verdict is not None else args.red_team
     proof_audit = d_proof if d_proof is not None else args.proof_audit
@@ -213,16 +282,8 @@ def main():
         # cited no attestation: the declared verification did not happen.
         outcome = "INCOMPLETE"
 
-    # 1a. Irreversible effects go into the once-only ledger first. Written
-    # before anything else in this script, because a row missing here is the
-    # one that lets a resume perform a chain write twice.
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    try:
-        import ledger as _ledger
-        for r in _ledger.append_from_summary(args.root, summary, args.run_id):
-            print(f"record-run: ledger recorded {r['node']} — {r['evidence']}")
-    except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
-        print(f"record-run: ledger append failed: {e}", file=sys.stderr)
+    # 1a. Irreversible effects were filed into the once-only ledger at step
+    # 0, before anything in this script could refuse the record.
 
     # 1b. Park the waits and raise anything that needs a person. A campaign
     # that parks instead of halting is only an improvement if somebody finds
@@ -283,9 +344,18 @@ def main():
         checks, afindings = _attest.verify_claims(args.root, summary)
         for f in afindings:
             print(f"record-run: {f}", file=sys.stderr)
+        # A manifest the witness refuses mints no rows, so every citation in
+        # this run is unverifiable. For a run that declared prove: nodes that
+        # is the declared verification not happening, not a warning to print
+        # beside a COMPLETE: a fabricated attestId would otherwise be filed
+        # clean.
+        if afindings and outcome in ("COMPLETE", "UNKNOWN") and (summary.get("prove") or {}):
+            outcome = "INCOMPLETE"
+            print("record-run: the gate manifest is refused, so no prove: citation in "
+                  "this run can be checked — filing it INCOMPLETE", file=sys.stderr)
         if checks:
             tally = {"checked": len(checks)}
-            for st in ("ATTESTED", "UNATTESTED", "MISMATCH"):
+            for st in ("ATTESTED", "UNATTESTED", "MISMATCH", "STALE"):
                 n = sum(1 for c in checks if c["status"] == st)
                 if n:
                     tally[st.lower()] = n
@@ -317,12 +387,29 @@ def main():
                         if c["status"] == "MISMATCH" and c.get("declared")]
             unproven = [c for c in checks
                         if c["status"] == "UNATTESTED" and c.get("declared")]
+            # A citation that matches its row but not this run — minted
+            # before the launch, on another commit, or already backing a
+            # node — means the declared verification did not happen here.
+            # Filed INCOMPLETE rather than TAMPERED: a lazy citation and a
+            # resume launched with a fresh stamp look the same from here,
+            # and neither is a clean run.
+            stale = [c for c in checks
+                     if c["status"] == "STALE" and c.get("declared")]
+            if stale and not tampered and outcome in ("COMPLETE", "UNKNOWN"):
+                outcome = "INCOMPLETE"
+                print(f"record-run: {len(stale)} declared prove: node(s) cite an "
+                      f"execution this run did not produce — "
+                      + "; ".join(f"{c['node']}: {c['detail']}" for c in stale),
+                      file=sys.stderr)
             if tampered:
                 outcome = "TAMPERED-EXECUTION"
                 print(f"record-run: {len(tampered)} declared prove: node(s) "
                       f"contradict the attest log — filing this run as "
                       f"TAMPERED-EXECUTION", file=sys.stderr)
-            elif unproven and outcome in ("COMPLETE", "UNKNOWN"):
+            # Said whatever else this run is filed as: a STALE citation beside
+            # it used to set INCOMPLETE first and silence this — the one
+            # absence worth suspecting, hidden behind a lesser one.
+            if unproven and not tampered:
                 # The verification the graph declared did not happen. That is
                 # not tampering — an executor that never routes through the
                 # Bash tool leaves no rows — but it is not a clean run either.
@@ -337,7 +424,8 @@ def main():
                 # exists to catch and structurally cannot: the runtime does
                 # mint rows for passes, so a claimed pass should have left one.
                 silent_green = [c for c in unproven if c.get("claimedExit") == 0]
-                outcome = "INCOMPLETE"
+                if outcome in ("COMPLETE", "UNKNOWN"):
+                    outcome = "INCOMPLETE"
                 print(f"record-run: {len(unproven)} declared prove: node(s) cited "
                       f"no attestation — the declared verification did not run",
                       file=sys.stderr)
@@ -358,6 +446,11 @@ def main():
             {
                 "runId": args.run_id,
                 "when": ts,
+                # To the second: `when` keeps the Evidence row's minute for
+                # every reader that parses it, and this is what orders a run
+                # against a decision recorded in the same minute.
+                "recordedAt": datetime.datetime.now(datetime.timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M:%S"),
                 "executor": args.executor,
                 "outcome": outcome,
                 "nodesOk": ok,
@@ -416,7 +509,10 @@ def main():
 
     # 2. Evidence row, appended under whichever table header the file carries.
     claim = f"graph run: {ok} node(s) OK, {dead} dead, {findings} produced item(s)"
-    if blocked:
+    if incoherent:
+        claim += ("; red-team findings contradict its verdict (" + "; ".join(incoherent[:2])
+                  + ") — filed as BLOCK")
+    elif blocked:
         claim += "; red-team returned BLOCK — not shippable"
     if weakened:
         claim += ("; proof-audit returned WEAKENED — verification got weaker while "
@@ -455,12 +551,18 @@ def main():
         claim += f"; {p.get('node')} INCOMPLETE — {p.get('detail') or 'did not run to exhaustion'}"
     if attestation:
         t = attestation["tally"]
+        # Each category said on its own: one does not excuse another.
         if t.get("mismatch"):
             claim += (f"; {t['mismatch']} gate claim(s) CONTRADICT the attested "
                       f"execution log — the exit codes are not trustworthy")
-        elif t.get("unattested"):
+        if t.get("stale"):
+            claim += (f"; {t['stale']} gate claim(s) STALE — they cite executions "
+                      f"from before this run, another commit, or another node")
+        if t.get("unattested"):
             claim += (f"; {t['unattested']} gate claim(s) UNATTESTED — self-reported "
-                      f"exit code(s), no hook-minted record")
+                      f"exit code(s), no hook-minted record"
+                      + (f", {t['unattested_claiming_pass']} of them claiming a pass"
+                         if t.get("unattested_claiming_pass") else ""))
     if d_proof == "NOT-APPLICABLE":
         proof_cell = "n/a (no proof surface)"
     elif d_proof in ("SOUND", "WEAKENED"):
@@ -481,24 +583,24 @@ def main():
 
     # 2a. Decisions, spliced under their own header when the file has one.
     drows = decision_rows(summary, ts)
-    if drows and os.path.exists(args.graph):
-        text = open(args.graph, encoding="utf-8").read()
+    if drows and os.path.exists(evidence_file):
+        text = open(evidence_file, encoding="utf-8").read()
         if DEC_HDR in text:
             text, n = re.subn(
                 re.escape(DEC_HDR) + r"\n\|[-| ]+\|\n",
                 lambda m: m.group(0) + "\n".join(drows) + "\n", text, count=1)
             if n:
-                open(args.graph, "w", encoding="utf-8", newline="\n").write(text)
+                open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
                 for d in drows:
                     print(d)
         else:
             print(f"record-run: {len(drows)} decision(s) recorded in the run "
-                  f"artifact, but {args.graph} has no Decisions table to append "
+                  f"artifact, but {evidence_file} has no Decisions table to append "
                   f"to — add one so a frozen choice outlives this run",
                   file=sys.stderr)
 
-    if os.path.exists(args.graph):
-        text = open(args.graph, encoding="utf-8").read()
+    if os.path.exists(evidence_file):
+        text = open(evidence_file, encoding="utf-8").read()
         hdr, new_row = (ROW_HDR, row) if ROW_HDR in text else (LEGACY_HDR, legacy_row)
         if hdr in text:
             text, n = re.subn(
@@ -508,17 +610,17 @@ def main():
                 count=1,
             )
             if n:
-                open(args.graph, "w", encoding="utf-8", newline="\n").write(text)
+                open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
                 row = new_row
             else:
                 print(
-                    f"record-run: Evidence header found in {args.graph} but no "
+                    f"record-run: Evidence header found in {evidence_file} but no "
                     f"separator row beneath it; artifact written, row not appended",
                     file=sys.stderr,
                 )
         else:
             print(
-                f"record-run: no Evidence table header in {args.graph}; "
+                f"record-run: no Evidence table header in {evidence_file}; "
                 f"artifact written but row not appended",
                 file=sys.stderr,
             )

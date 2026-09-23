@@ -34,7 +34,9 @@ nothing.
    gates, how many attested executions each has, and the newest exit. Call
    out any recorded run whose `attestation.tally` carries `mismatch` — a
    node claimed a gate exit the hook-minted log contradicts, which makes
-   that run's verdict untrustworthy regardless of what it reported.
+   that run's verdict untrustworthy regardless of what it reported — or
+   `stale`, a node citing an execution from before its run launched, on
+   another commit, or already backing another node.
 3b. If `.claude/fluxpoint/memory.jsonl` exists, add
    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" recurrence-guard.py --scan`:
    what this repo keeps re-learning, and whether each recurrence has a

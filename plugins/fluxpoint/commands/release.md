@@ -27,9 +27,11 @@ Resolve the plugin root: `${CLAUDE_PLUGIN_ROOT}`, else
    ```
    bash "$ROOT/scripts/py.sh" release.py --record \
      --campaign "<the IR's campaign line>" --node <id> \
-     --contract <the node's release.proofContract> --by "<who>" < proof.json
+     --contract <the node's release.proofContract> --graph <the campaign's graph file> \
+     --by "<who>" < proof.json
    ```
-   The script validates the document against the contract and **refuses**
+   `--graph` lets a proof contract from the graph's `CONTRACTS:` directory
+   resolve. The script validates the document against the contract and **refuses**
    anything that does not satisfy it. A refusal is the tool working: the
    graph resumes on the strength of this file, and a run that resumes on a
    half-remembered "yeah that's done" will eventually resume on a mistake.
