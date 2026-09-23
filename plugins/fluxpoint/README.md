@@ -59,6 +59,11 @@ does.
   in the feature campaign), `prover` (proof synthesis apart from program
   synthesis; `SliceV1`, a mutator), `graph-auditor` (semantic review of a
   campaign IR; prose, and outside the graph on purpose).
+- `workflows/` — `graph-audit.js`, the round `/fluxpoint:graph-audit` runs
+  on Claude Code: six lens-scoped `graph-auditor`s, a reduce that merges
+  their duplicates, refuting verifiers (three per finding at HIGH and
+  above), and per-stage counts. SOUND means every lens returned and
+  nothing survived refutation. `--quick` keeps the single auditor.
 - `skills/` — `loop-engineering` (driver selection, conditions, the gate),
   `graph-engineering` (escalation rule, primitives, tiers, shapes),
   `secret-handling` (derive from a credential's path so it can be worked
@@ -76,8 +81,9 @@ does.
   codegen injection, the Stop gate and hook wiring driven with both
   runtimes' payload shapes, attestation, every ratchet, the counterexample
   ledger, relations, the park layer, memory and recall, migration against
-  pre-1.0 fixtures, the outer loop under both CLIs, and the documented
-  claims the code has to keep.
+  pre-1.0 fixtures, the outer loop under both CLIs, the graph-audit
+  workflow under stub agents, and the documented claims the code has to
+  keep.
 
 ## The two contracts
 
