@@ -197,7 +197,11 @@ Five rules, in order of how often they are broken:
    hours, so `--measure` belongs off-session on a Routine; staleness is
    named and raised in the inbox but does not fail the build unless the
    repo asks, because a gate that reds over an un-run expensive job is one
-   people switch off.
+   people switch off. Measurement itself is stricter: it binds the score to a
+   clean Git commit, requires a finished report from a schema/version at least
+   the one the adapter was verified against, and classifies every mutant.
+   Missing Git, unknown statuses, corrupt counters, and unfinished reports are
+   red.
 5. **Green is not stronger.** `/fluxpoint:proof-audit` runs the ratchet and
    then the `proof-auditor` agent, which looks for what a count cannot see:
    a theorem whose statement got weaker, a property proved about an
