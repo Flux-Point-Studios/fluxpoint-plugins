@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "substrate",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Multi-repo primitive registry: each repo declares its reusable primitives in a substrate.json manifest, a zero-dependency generator compiles them into one SUBSTRATE.md graph — nodes, edges, orphans as dormant value, hubs to harden first — and staleness alarms surface at every session start so new work plugs into what exists instead of running parallel to it. A per-repo deliverables.json ledger rides the same check: anything built but not yet sent alarms at session start until the send is recorded. A prose-smell gate rides every Write/Edit: outward prose that carries AI-writing frames (contrastive negation, whether-you're triples, assistant artifacts, stock LLM vocabulary) is bounced back for a rewrite before it can ship. A memory lint rides the same session-start channel: memory files citing paths that no longer exist, index entries pointing at deleted memories, and unsent claims contradicted by the deliverables ledger all alarm until the agent repairs them - detection is mechanical, repair is never.",
   "license": "Apache-2.0",
   "author": {

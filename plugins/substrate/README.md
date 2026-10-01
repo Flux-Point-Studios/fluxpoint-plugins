@@ -11,6 +11,9 @@ sweep-before-build doctrine has something deterministic to sweep.
 
 ## Layout
 
+- `scripts/lifecycle.mjs` — zero-dependency validators the checker leans on:
+  strict ISO-8601 timestamp parsing, duplicate-JSON-key detection, and
+  per-entry deliverable indexing.
 - `scripts/substrate-graph.mjs` — the whole engine: zero dependencies,
   Node ≥ 18, cross-platform. `--emit` writes `SUBSTRATE.md` and exits 1 on
   manifest problems (the CI half); `--check` prints the summary and always
@@ -129,8 +132,12 @@ built <age> ago (<artifact>)` at session start, every session, until someone
 records how it ended. Create the entry when the build **starts**, not when it
 finishes — the half-built state is exactly what a compaction orphans.
 Malformed ledgers and undated entries surface as problems, never alarms and
-never crashes; all fields are sanitized and hard-capped before they reach the
-injected session context.
+never crashes: the ledger is read as a regular non-symlink file, capped at
+1 MiB and 5,000 entries before it is parsed, and a single malformed or
+duplicate-id entry reports only itself — the register keeps alarming every
+other open obligation rather than going dark on one typo. `builtAt` must be a
+full ISO-8601 instant. All printed fields are sanitized and hard-capped before
+they reach the injected session context.
 
 ### How an obligation ends
 
@@ -158,6 +165,14 @@ or its explanation keeps alarming and says what it needs, because going quiet
 on a typo is the failure the field exists to end; an entry carrying both
 `sentAt` and `closedAt` is a problem, since a send and a non-send closure
 cannot both be true.
+
+When the evidence proves only the calendar date rather than an instant, use
+the day-precision fields `sentOn` and `closedOn` with `YYYY-MM-DD`; never put
+a date-only value in an `*At` field. The `*At` and `*On` forms are mutually
+exclusive per obligation, and day-precision chronology is exclusive of its
+bounds. One seam to know: `memory-lint` still recognises `sentAt` only, so an
+obligation closed with `sentOn`/`closedOn` reads as unsent to that lint until
+it is taught the day-precision fields.
 
 An entry may also carry a `warning`. It rides the alarm line as
 `⚠ DO NOT SEND COLD: <warning>` — for the artifact that is built and still

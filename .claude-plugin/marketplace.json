@@ -29,7 +29,7 @@
       "name": "substrate",
       "source": "./plugins/substrate",
       "description": "Multi-repo primitive registry: per-repo substrate.json manifests compiled by a zero-dependency generator into one SUBSTRATE.md graph — nodes, consumes-edges, orphans as dormant value, hubs to harden first — with staleness alarms injected at every session start so new work plugs into existing primitives instead of running parallel to them.",
-      "version": "1.8.0",
+      "version": "1.9.0",
       "category": "workflow",
       "keywords": [
         "substrate",
