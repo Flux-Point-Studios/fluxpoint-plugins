@@ -335,6 +335,9 @@ probe("repeat", "maxRounds", REPEAT_BASE, setrepeat(maxRounds=9))
 probe("repeat", "dedupeBy", REPEAT_BASE, setrepeat(dedupeBy=["file", "line"]))
 probe("repeat", "classBy", REPEAT_BASE, setrepeat(classBy=["defectClass"]))
 probe("repeat", "reframeAfter", REPEAT_BASE, setrepeat(classBy=["defectClass"], reframeAfter=3))
+# Repair rules cannot silently degrade into discovery rules.
+probe("repeat", "until", REPEAT_BASE, setrepeat(until="verdict == 'SHIP'"))
+probe("repeat", "integrate", REPEAT_BASE, setrepeat(integrate=["merge", "review"]))
 
 # ----------------------------------------------------------- budget fields
 probe("budget", "maxNodes", NODE_BASE, lambda ir: ir["budget"].update(maxNodes=1))
@@ -382,7 +385,7 @@ probed = {
         "isolation", "repeat", "irreversible", "actor", "release", "wake",
         "decides", "honors", "memory", "reduce",
     },
-    "repeat": {"untilDryRounds", "maxRounds", "dedupeBy", "classBy", "reframeAfter"},
+    "repeat": {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter"},
     "reduce": {"from", "over", "dedupeBy", "sortBy", "order", "topK"},
     "memory": {"seed", "emit", "key", "priors", "classBy"},
     "release": {"instructions", "proofContract", "whyNotAgent"},

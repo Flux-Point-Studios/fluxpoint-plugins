@@ -65,7 +65,7 @@ ISOLATION = {True, "worktree", "measure"}
 ACTORS = {"agent", "human", "third-party"}
 RELEASE_FIELDS = {"instructions", "proofContract", "whyNotAgent"}
 WAKE_FIELDS = {"check", "everyMinutes", "deadline"}
-REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy", "classBy", "reframeAfter"}
+REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter"}
 # A reduce node is deterministic code between agents: dedupe, rank, cut.
 # Use models for ambiguity and code for plumbing — a synthesis node that
 # receives every raw fan-out item pays a reasoning model to do a Set's job.
@@ -521,6 +521,8 @@ def result_shape(n):
     """
     if is_reduce(n):
         return "items"
+    if isinstance(n.get("repeat"), dict) and "until" in n["repeat"]:
+        return "objects"
     if n.get("repeat") or panel_size(n):
         return "items"
     if n.get("foreach"):
@@ -664,6 +666,78 @@ def _validate_reduce(n, where, seen, contracts):
     return f
 
 
+def repair_loops(ir):
+    return [n for n in ir.get("nodes", []) if isinstance(n.get("repeat"), dict)
+            and "until" in n["repeat"]]
+
+
+def repair_integrations(n):
+    value = (n.get("repeat") or {}).get("integrate")
+    return [x for x in value if isinstance(x, str)] if isinstance(value, list) else []
+
+
+def repair_rounds(n):
+    value = (n.get("repeat") or {}).get("maxRounds", 1)
+    return max(1, value) if isinstance(value, int) and not isinstance(value, bool) else 1
+
+
+def repair_owned(ir):
+    """Nodes emitted inside a fix/check loop rather than again at top level."""
+    return {nid for n in repair_loops(ir) for nid in
+            [n.get("verifies"), *repair_integrations(n)] if isinstance(nid, str)}
+
+
+def validate_repair(n, seen, ir, contracts):
+    where = f"node '{n.get('id')}'"
+    f = []
+    rep = n["repeat"]
+    fixer = seen.get(n.get("verifies")) or {}
+    if not n.get("independent") or not fixer.get("mutates"):
+        f.append(f"{where}: repeat.until requires an independent checker that verifies a mutates node")
+    if n.get("after") != fixer.get("id") or not fixer:
+        f.append(f"{where}: repair checker must consume its fixer with after/verifies")
+    if n.get("isolation") != "measure":
+        f.append(f"{where}: repair checker requires isolation:'measure' for a fresh frozen tree")
+    if panel_size(n) or n.get("haltWhen") or n.get("irreversible"):
+        f.append(f"{where}: repair checker cannot combine repeat.until with verify panel/skeptic, haltWhen or irreversible")
+    if fixer.get("repeat") or fixer.get("irreversible") or panel_size(fixer):
+        f.append(f"{where}: repair fixer cannot repeat, verify with a panel, or be irreversible")
+    if any(k in rep for k in ("untilDryRounds", "dedupeBy")):
+        f.append(f"{where}: repeat.until replaces untilDryRounds/dedupeBy; do not combine repair and discovery rules")
+    m = HALT.fullmatch(str(rep.get("until", "")))
+    if not m:
+        f.append(f"{where}: repeat.until must use the haltWhen '<field> <op> <literal>' grammar")
+    elif m.group(1) not in contracts.get(n.get("contract"), {}).get("properties", {}):
+        f.append(f"{where}: repeat.until tests '{m.group(1)}', which is not a field of {n.get('contract')}")
+    mx = rep.get("maxRounds")
+    if isinstance(mx, bool) or not isinstance(mx, int) or mx < 1:
+        f.append(f"{where}: repeat.maxRounds must be an integer >= 1")
+    if not n.get("foreach") or n.get("foreach") != fixer.get("foreach"):
+        f.append(f"{where}: repair fixer and checker need the same foreach list")
+    items = (ir.get("lists") or {}).get(n.get("foreach"), [])
+    keys = [x.get("key") if isinstance(x, dict) else None for x in items]
+    if not keys or any(not isinstance(k, str) or not IDENT.fullmatch(k) for k in keys) or len(set(keys)) != len(keys):
+        f.append(f"{where}: repair items require unique lowercase kebab-case keys for safe round directories")
+    integration = rep.get("integrate")
+    if integration is not None:
+        by_id = {x.get("id"): x for x in ir.get("nodes", [])}
+        if not isinstance(integration, list) or len(integration) != 2 or not all(isinstance(x, str) for x in integration):
+            f.append(f"{where}: repeat.integrate must name [merge-node, independent-review-node]")
+        else:
+            merge, review = (by_id.get(x) or {} for x in integration)
+            if not merge.get("mutates") or merge.get("after") != n.get("id"):
+                f.append(f"{where}: integration merge must mutate and consume the checker")
+            if (not review.get("independent") or review.get("verifies") != merge.get("id")
+                    or review.get("after") != merge.get("id") or review.get("isolation") != "measure"):
+                f.append(f"{where}: integration review must independently verify/consume merge with isolation:'measure'")
+            if not review.get("haltWhen") or not HALT.fullmatch(str(review.get("haltWhen"))):
+                f.append(f"{where}: integration review needs haltWhen to identify merged-tree failure")
+            for x in (merge, review):
+                if any(x.get(k) for k in ("foreach", "repeat", "irreversible", "decides", "memory")) or panel_size(x):
+                    f.append(f"{where}: integration nodes must be scalar schema-only agents without repeat or irreversible effects")
+    return f
+
+
 def validate(ir, contracts, gates=None, agents=None, specification=None):
     """Return a list of findings. Empty list means the graph may compile."""
     f = []
@@ -682,6 +756,10 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
     lists = ir.get("lists") or {}
     roles = ir.get("roles") or {}
     seen = {}
+    repair_nodes = repair_loops(ir)
+    repair_scoped = repair_owned(ir) | {n.get("id") for n in repair_nodes}
+    if len(repair_nodes) > 1:
+        f.append("one repair loop per graph: round directories must have a single owner")
     decided = {}          # decision id -> the node that makes it
     imports = ir.get("imports") or {}
 
@@ -914,8 +992,10 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
             bound.add("prev")
         if n.get("foreach"):
             bound.update({"item", "i"})
-        if n.get("repeat"):
+        if n.get("repeat") and "until" not in n["repeat"]:
             bound.add("seen")
+        if nid in repair_scoped:
+            bound.update({"roundDir", "lastCheck"})
         # Both fields the emitter interpolates must be checked, or the
         # validator blesses a token the emitter renders into executable
         # position. release.instructions became a `${...}` site when it
@@ -936,6 +1016,9 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                 f.append(f"{where}: haltReason contains an unsupported substitution token")
             for tok in SUBST.findall(site_text):
                 root = tok.split(".")[0].split("[")[0]
+                if root == "roundDir" and tok != "roundDir":
+                    f.append(f"{where}: {site} roundDir is a path, not a projected object")
+                    continue
                 if root == "decisions":
                     # Scoped per id on purpose: honoring one decision must not
                     # hand the node every decision the campaign ever made.
@@ -997,7 +1080,11 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
         if rep is not None:
             if not isinstance(rep, dict):
                 f.append(f"{where}: repeat must be an object")
+            elif "until" in rep:
+                f += validate_repair(n, seen, ir, contracts)
             else:
+                if "integrate" in rep:
+                    f.append(f"{where}: repeat.integrate requires repeat.until")
                 dry = rep.get("untilDryRounds")
                 mx = rep.get("maxRounds")
                 if not isinstance(dry, int) or dry < 1:
@@ -1604,10 +1691,23 @@ def plan_groups(ir):
     if tree_guard:
         groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True,
                        "kind": "sentinel", "track": frozenset()})
+    consumed = repair_owned(ir)
+    by_id = {x.get("id"): x for x in ir.get("nodes", [])}
     for n in ir.get("nodes") or []:
-        if is_reduce(n):
+        if is_reduce(n) or n.get("id") in consumed:
             continue
         nid = n.get("id", "?")
+        if n in repair_loops(ir):
+            fan = len(lists.get(n.get("foreach"), []))
+            rep = n["repeat"]
+            fixer = by_id.get(n.get("verifies"), {})
+            for _ in range(repair_rounds(n)):
+                for work, count in [(fixer, fan), (n, fan), *[(by_id.get(k, {}), 1) for k in repair_integrations(n)]]:
+                    if tree_guard and work.get("independent"):
+                        groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()})
+                    groups.append({"calls": [(work.get("id", "?"), node_key(work, ir))] * count, "park": False,
+                                   "kind": "work", "node": work, "items": lists.get(n.get("foreach"), []) if count == fan else [None], "track": frozenset()})
+            continue
         track = held.get(nid, frozenset())
         if tree_guard and (prove_gate(n) or n.get("independent")):
             groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True,
@@ -1619,7 +1719,7 @@ def plan_groups(ir):
         key = node_key(n, ir)
         items = lists.get(n.get("foreach"), [None]) if n.get("foreach") else [None]
         fan = len(items)
-        rounds = max(1, int((n.get("repeat") or {}).get("maxRounds", 1)))
+        rounds = repair_rounds(n)
         cnt = panel_size(n)
         per = int(n.get("expectItems", 3))
         for _ in range(rounds):
@@ -1921,36 +2021,8 @@ def effort_transitions(ir):
 
 
 def plan_node_count(ir):
-    """Worst-case agent calls: fan-out times verification times rounds."""
-    lists = ir.get("lists") or {}
-    total = 0
-    for n in ir.get("nodes") or []:
-        # A reduce node is pure emitted code: no spawn, no advisor, no cost.
-        if is_reduce(n):
-            continue
-        # A parked node spawns no worker, but it does spawn one advisor to
-        # produce the recommendation that goes with the block. Pricing it at
-        # zero would make the ceiling lie by exactly the number of parks.
-        if n.get("actor", "agent") != "agent":
-            total += 1
-            continue
-        fan = len(lists.get(n.get("foreach"), [None])) if n.get("foreach") else 1
-        per_round = fan
-        m = TIER.match(str(n.get("verify", "schema-only")))
-        if m:
-            cnt = int(m.group(2) or m.group(3) or 0)
-            if cnt:
-                # Verification runs per produced item; assume the declared
-                # expectation, defaulting to 3 items per producing node.
-                per = int(n.get("expectItems", 3))
-                per_round += fan * per * cnt
-            elif m.group(1) == "harness":
-                per_round += fan
-        # A discovery node re-runs until it goes dry; the ceiling must price
-        # the worst case, not one round of it.
-        rounds = int((n.get("repeat") or {}).get("maxRounds", 1))
-        total += per_round * max(1, rounds)
-    return total
+    """Worst-case budgeted calls; sentinels use agent() outside the ceiling."""
+    return sum(len(g["calls"]) for g in plan_groups(ir) if not g.get("sentinel"))
 
 
 # ------------------------------------------------------------------ emission
@@ -2009,7 +2081,7 @@ def js_tmpl(s):
 # Roots whose values are launch or list data: rendered through tokenText(),
 # so an object or a list reaches the prompt as JSON rather than as
 # "[object Object]" or a comma-joined flattening.
-TEXT_ROOTS = {"item", "A"}
+TEXT_ROOTS = {"item", "A", "lastCheck"}
 
 
 def js_template(s, mapping=None):
@@ -2137,7 +2209,7 @@ def red_team_checked(n):
     """A node whose raw RedTeamV1 result the emitted code can re-derive."""
     return (not is_reduce(n) and n.get("contract") == "RedTeamV1"
             and n.get("actor", "agent") == "agent"
-            and not n.get("repeat") and not panel_size(n))
+            and (not n.get("repeat") or "until" in n["repeat"]) and not panel_size(n))
 
 
 def emit_red_team_check(n, var, many=False):
@@ -2489,6 +2561,11 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("    .map(s => s.trim()).filter(Boolean).includes(id)")
         a("}")
         a("")
+    if repair_loops(ir):
+        a("if (!A._launch || !/^[A-Za-z0-9_-]{1,64}$/.test(String(A._launch.nonce || '')) || typeof A._launch.root !== 'string' || !A._launch.root)")
+        a("  throw new Error('repair graph requires args._launch {root, nonce} from attest.py --stamp')")
+        a("const REPAIR_LAUNCH = A._launch")
+        a("function repairRoundDir(key, round) { return REPAIR_LAUNCH.root.replace(/[/\\\\]$/, '') + '/.claude/fluxpoint/rounds/' + REPAIR_LAUNCH.nonce + '/' + key + '/r' + round + '/'; }")
     a("const RESULTS = {}")
     a("const PROVENANCE = []")
     a("const RECURRING_CLASSES = []")
@@ -2532,6 +2609,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         extra += ", memory: MEMORY, memorySeeded: MEMORY_SEEDED"
     if prove_nodes:
         extra += ", prove: PROVE, launch: LAUNCH"
+    elif repair_loops(ir):
+        extra += ", launch: REPAIR_LAUNCH"
     if tree_guard:
         extra += ", tree: TREE"
     reducers = [n["id"] for n in nodes if is_reduce(n)]
@@ -2811,7 +2890,13 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  log('tree guard: no launch reading in args._base — a resume cannot tell whether the tree moved since the run it replays; /fluxpoint:graph-run passes one')")
         a("}")
         a("")
+    consumed = repair_owned(ir)
     for n in nodes:
+        if n.get("id") in consumed:
+            continue
+        if n in repair_loops(ir):
+            a(emit_repair(n, ir, bool(specification)))
+            continue
         if tree_guard and (prove_gate(n) or n.get("independent")):
             a("// The gate is about to mint a verdict about the tree; assert it is")
             a("// still the tree every earlier verdict described.")
@@ -3221,6 +3306,99 @@ def emit_node(n, ir, specification=False):
           f"`DECISION {n['decides']}: overturned the prior — ${{{var}.chosen}}`)")
     if guard:
         a("}")
+    return "\n".join(L)
+
+
+def emit_repair(n, ir, specification=False):
+    """Paired fix/check rounds with per-item dropout and cumulative integration."""
+    nid = n["id"]
+    var = "n_" + nid.replace("-", "_")
+    by_id = {x["id"]: x for x in ir["nodes"]}
+    fixer = by_id[n["verifies"]]
+    rep = n["repeat"]
+    field, op, lit = halt_parts({"haltWhen": rep["until"]})
+    phase_name = n.get("phase", "Repair")
+    L = []; a = L.append
+
+    def prompt(work, prev=None):
+        mapping = subst_mapping(work)
+        if prev is not None:
+            mapping["prev"] = f"tokenText({prev})"
+            for token in SUBST.findall(work["prompt"]):
+                if token.startswith("prev."):
+                    mapping[token] = f"tokenText(({prev} || {{}})[{js_str(token.split('.', 1)[1])}] ?? null)"
+        mapping.update(roundDir="roundDir", lastCheck="tokenText(lastCheck)")
+        pre = "measurePreamble() + " if work.get("isolation") == "measure" else "basePreamble() + " if work.get("mutates") or work.get("isolation") else ""
+        if specification:
+            pre += "specificationPreamble() + "
+        return pre + js_template(work["prompt"], mapping)
+
+    a(f"// ===== repair loop {nid}: fixer + fresh-tree checker =====")
+    a(f"phase({js_str(phase_name)})")
+    a(f"let pending_{var} = {list_var(n['foreach'])}.map((item, i) => ({{ item, i, lastCheck: null }}))")
+    a(f"let passed_{var} = [], round_{var} = 0, integrationLast_{var} = null")
+    a(f"const {var} = []")
+    a(f"while (pending_{var}.length && round_{var} < {int(rep['maxRounds'])}) {{")
+    a(f"  round_{var}++")
+    a(f"  let abort_{var} = null")
+    if ir.get("treeGuard", True):
+        a(f"  if (!await treeCheck(`repair {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary('TREE-MOVED')")
+    a(f"  const batch_{var} = await parallel(pending_{var}.map(state => async () => {{")
+    a("    const { item, i, lastCheck } = state")
+    a(f"    const roundDir = repairRoundDir(item.key, round_{var})")
+    a(f"    if (!affordable(`{fixer['id']}:${{item.key}}`)) {{ abort_{var} = 'BUDGET-EXHAUSTED'; return {{ ...state, roundDir }} }}")
+    a(f"    const fixed = await spawn({prompt(fixer)}, {opts(fixer, ir, fixer.get('phase', phase_name), '`' + fixer['id'] + ':${item.key}:r${round_' + var + '}`')})")
+    a(f"    if (!fixed) {{ abort_{var} = DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD'; return {{ ...state, roundDir }} }}")
+    a(f"    if (!affordable(`{nid}:${{item.key}}`)) {{ abort_{var} = 'BUDGET-EXHAUSTED'; return {{ ...state, fixed, roundDir }} }}")
+    a(f"    const checked = await spawn({prompt(n, 'fixed')}, {opts(n, ir, phase_name, '`' + nid + ':${item.key}:r${round_' + var + '}`')})")
+    a(f"    if (!checked) {{ abort_{var} = DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD'; return {{ ...state, fixed, roundDir }} }}")
+    if n.get("contract") == "RedTeamV1":
+        a(f"    if (redTeamIncoherent(checked)) {{ abort_{var} = 'HALTED'; return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
+    a(f"    const complete = checked[{js_str(field)}] {op} {lit}")
+    a(f"    note({js_str(nid)}, complete ? 'OK' : 'REPAIR', `${{item.key}} round ${{round_{var}}}`, {{ item: item.key, round: round_{var}, roundDir, complete }})")
+    a("    return { ...state, fixed, roundDir, lastCheck: checked, complete }")
+    a("  }))")
+    a(f"  passed_{var}.push(...batch_{var}.filter(x => x.complete))")
+    a(f"  pending_{var} = batch_{var}.filter(x => !x.complete)")
+    a(f"  RESULTS[{js_str(fixer['id'])}] = [...passed_{var}, ...pending_{var}].map(x => x.fixed).filter(Boolean)")
+    a(f"  RESULTS[{js_str(nid)}] = [...passed_{var}, ...pending_{var}].map(x => x.lastCheck).filter(Boolean)")
+    a(f"  if (abort_{var}) {{ INCOMPLETE = true; note({js_str(nid)}, 'INCOMPLETE', abort_{var}); return summary(abort_{var}) }}")
+    integration = rep.get("integrate") or []
+    if integration:
+        merge, review = (by_id[k] for k in integration)
+        mfield, mop, mlit = halt_parts(review)
+        a(f"  if (passed_{var}.length) {{")
+        a(f"    const roundDir = repairRoundDir('_integration', round_{var})")
+        a(f"    const lastCheck = integrationLast_{var}")
+        a(f"    if (!affordable({js_str(merge['id'])})) {{ INCOMPLETE = true; return summary('BUDGET-EXHAUSTED') }}")
+        a(f"    const merged = await spawn({prompt(merge, 'passed_' + var)}, {opts(merge, ir, merge.get('phase', phase_name), '`' + merge['id'] + ':r${round_' + var + '}`')})")
+        a(f"    RESULTS[{js_str(merge['id'])}] = merged")
+        a("    if (!merged) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
+        if ir.get("treeGuard", True):
+            a(f"    if (!await treeCheck(`integration {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary('TREE-MOVED')")
+        a(f"    if (!affordable({js_str(review['id'])})) {{ INCOMPLETE = true; return summary('BUDGET-EXHAUSTED') }}")
+        a(f"    const integrated = await spawn({prompt(review, 'merged')}, {opts(review, ir, review.get('phase', phase_name), '`' + review['id'] + ':r${round_' + var + '}`')})")
+        a(f"    RESULTS[{js_str(review['id'])}] = integrated")
+        a("    if (!integrated) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
+        if review.get("contract") == "RedTeamV1":
+            a("    if (redTeamIncoherent(integrated)) { INCOMPLETE = true; return summary('HALTED') }")
+        a(f"    integrationLast_{var} = integrated")
+        a(f"    if (integrated[{js_str(mfield)}] {mop} {mlit}) {{")
+        a(f"      note({js_str(review['id'])}, 'REPAIR', 'merged-tree review failed; reopen passing slices with its findings', {{ round: round_{var} }})")
+        a(f"      pending_{var}.push(...passed_{var}.map(x => ({{ ...x, complete: false, lastCheck: integrated }})))")
+        a(f"      passed_{var} = []")
+        a("    } else {")
+        a(f"      note({js_str(review['id'])}, 'OK', 'merged-tree review passed', {{ round: round_{var} }})")
+        a("    }")
+        a("  }")
+    a("}")
+    a(f"{var}.push(...[...passed_{var}, ...pending_{var}].map(x => x.lastCheck).filter(Boolean))")
+    a(f"RESULTS[{js_str(nid)}] = {var}")
+    a(f"if (pending_{var}.length) {{")
+    a("  INCOMPLETE = true")
+    a(f"  note({js_str(nid)}, 'INCOMPLETE', 'repair round cap reached', {{ rounds: round_{var}, pending: pending_{var}.map(x => x.item.key) }})")
+    a("  return summary('INCOMPLETE')")
+    a("}")
     return "\n".join(L)
 
 

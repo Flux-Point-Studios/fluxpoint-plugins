@@ -60,7 +60,8 @@ Workflow tool requires.
    runtime's choice, and it has been observed cut from the default branch
    rather than the campaign's, where a file an earlier node committed is
    simply absent and nothing inside says so.
-   If any node declares `verify: prove:<gate>`, stamp the launch; the
+   If any node declares `verify: prove:<gate>` or a repair `repeat.until`,
+   stamp the launch; the
    compiled graph refuses to start without it:
    ```
    bash "$ROOT/scripts/py.sh" attest.py --stamp

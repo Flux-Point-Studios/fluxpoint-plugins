@@ -1289,5 +1289,73 @@ def halt_tokens_case():
 halt_tokens_case()
 
 
+# Execute a repair graph: dropout, feedback, immutable paths and integration (#126).
+def repair_loop_case():
+    import subprocess
+    import tempfile
+    global passed, failed
+    ir = {"version": 1, "campaign": "repair", "treeGuard": False,
+          "budget": {"maxNodes": 40, "cacheTtl": "1h"},
+          "lists": {"slices": [{"key": "a"}, {"key": "b"}]},
+          "nodes": [
+              {"id": "fix", "foreach": "slices", "mutates": True, "prompt": "fix {{item.key}} in {{roundDir}} after {{lastCheck}}", "contract": "SliceV1"},
+              {"id": "check", "foreach": "slices", "after": "fix", "independent": True, "verifies": "fix", "isolation": "measure", "prompt": "check {{prev}} from {{roundDir}}", "contract": "HarnessCheckV1", "repeat": {"until": "exit == 0", "maxRounds": 3, "integrate": ["merge", "review"]}},
+              {"id": "merge", "after": "check", "mutates": True, "prompt": "merge {{prev}} in {{roundDir}}; previous {{lastCheck}}", "contract": "SliceV1"},
+              {"id": "review", "after": "merge", "independent": True, "verifies": "merge", "isolation": "measure", "prompt": "review {{prev}} from {{roundDir}}", "contract": "HarnessCheckV1", "haltWhen": "exit != 0"},
+          ]}
+    checks = [("repair graph accepted", not cg.validate(ir, CONTRACTS)),
+              ("repair budget includes both workers and integration every round", cg.plan_node_count(ir) == 18)]
+    for name, change, needle in [
+        ("invalid round cap", lambda x: x["nodes"][1]["repeat"].update(maxRounds="forever"), "integer >= 1"),
+        ("invalid integration", lambda x: x["nodes"][1]["repeat"].update(integrate=[{}, []]), "must name"),
+        ("checker isolation", lambda x: x["nodes"][1].pop("isolation"), "fresh frozen tree"),
+        ("checker independence", lambda x: x["nodes"][1].pop("independent"), "independent checker"),
+        ("until field", lambda x: x["nodes"][1]["repeat"].update(until="missing == 0"), "not a field"),
+        ("unique output paths", lambda x: x["lists"]["slices"].append({"key": "a"}), "unique lowercase"),
+        ("unsafe path key", lambda x: x["lists"]["slices"][0].update(key="../../escape"), "unique lowercase"),
+        ("integration independent", lambda x: x["nodes"][3].pop("independent"), "integration review"),
+        ("discovery/repair ambiguity", lambda x: x["nodes"][1]["repeat"].update(untilDryRounds=1), "do not combine"),
+    ]:
+        bad = copy.deepcopy(ir); change(bad)
+        checks.append(("repair rejects " + name, any(needle in f for f in cg.validate(bad, CONTRACTS))))
+
+    def run(mode="normal", rounds=3):
+        run_ir = copy.deepcopy(ir); run_ir["nodes"][1]["repeat"]["maxRounds"] = rounds
+        js = cg.emit(run_ir, CONTRACTS).replace("export const meta", "const meta")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "result.json"); script = os.path.join(tmp, "run.mjs")
+            prefix = '''import {writeFileSync} from 'node:fs';
+const calls=[]; const mode=MODE;
+const args={_base:{sha:'base'},_launch:{root:'/campaign',nonce:'launch1'}};
+const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
+const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
+const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
+ if (label.startsWith('check:')) return {exit: mode==='cap' || (label.includes(':b:') && label.endsWith('r1')) ? 1 : 0, command:'check', tail:'finding'};
+ if (label.startsWith('review:')) return {exit: mode==='conflict' && label.endsWith('r1') ? 1 : 0, command:'review',tail:'composition failure'};
+ return {branch:'branch',diffSummary:'patch',testsAdded:[],harnessCommand:'test',harnessExit:0,evidence:['test']};};
+'''.replace("MODE", json.dumps(mode))
+            open(script, "w").write(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
+            proc = subprocess.run(["node", script], capture_output=True, text=True, timeout=20)
+            return json.load(open(out)) if os.path.exists(out) else {"error": proc.stderr}
+
+    normal = run(); cap = run("cap", 2); conflict = run("conflict")
+    calls = normal.get("calls", [])
+    checks.extend([
+        ("repair executes until every slice passes", normal.get("r", {}).get("outcome") == "COMPLETE"),
+        ("passing slice drops out of later rounds", [x["label"] for x in calls if x["label"].startswith("fix:")] == ["fix:a:r1", "fix:b:r1", "fix:b:r2"]),
+        ("failed check reaches next fix", any(x["label"] == "fix:b:r2" and '"exit":1' in x["p"] for x in calls)),
+        ("round output paths are versioned", any('/launch1/b/r2/' in x["p"] for x in calls if x["label"] == "fix:b:r2")),
+        ("fresh-tree checker receives patch artifact directory", any("git archive" in x["p"] and "/launch1/b/r2/" in x["p"] for x in calls if x["label"] == "check:b:r2")),
+        ("integration runs each round over cumulative passing items", [x["label"] for x in calls if x["label"].startswith("merge:")] == ["merge:r1", "merge:r2"]),
+        ("cap is INCOMPLETE with pending item identities", cap.get("r", {}).get("outcome") == "INCOMPLETE" and any(x.get("data", {}).get("pending") == ["a", "b"] for x in cap.get("r", {}).get("provenance", []))),
+        ("failed integration reopens passed items", any(x["label"] == "fix:a:r2" and "composition failure" in x["p"] for x in conflict.get("calls", []))),
+    ])
+    for name, ok in checks:
+        print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f" -> {normal}" if not ok else ""))
+        passed, failed = passed + ok, failed + (not ok)
+
+repair_loop_case()
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
