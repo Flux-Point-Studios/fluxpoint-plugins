@@ -1261,7 +1261,7 @@ def halt_tokens_case():
     js = cg.emit(ir, CONTRACTS)
     checks.append(("halt reason renders args and current result", "{{" not in js[js.index("HALT at check"):]
                    and 'tokenText((n_check || {})["exit"] ?? null)' in js))
-    for token in ["process.env.SECRET", "prev.nope", "prev.exit.deep", "item.key", "A.target + secret"]:
+    for token in ["process.env.SECRET", "prev.nope", "prev.exit.deep", "item.key", "A.target + secret", "A..target", "A[target]", "campaign.nope"]:
         bad = copy.deepcopy(ir); bad["nodes"][0]["haltReason"] = "bad {{" + token + "}}"
         checks.append(("halt reason rejects " + token, any("haltReason" in f for f in cg.validate(bad, CONTRACTS))))
     with tempfile.TemporaryDirectory() as tmp:

@@ -1027,6 +1027,9 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                 f.append(f"{where}: haltReason contains an unsupported substitution token")
             for tok in SUBST.findall(site_text):
                 root = tok.split(".")[0].split("[")[0]
+                if site == "haltReason" and ((root == "A" and not re.fullmatch(r"A(?:\.[A-Za-z_][A-Za-z0-9_]*)*", tok)) or (root == "campaign" and tok != "campaign")):
+                    f.append(f"{where}: haltReason uses unsupported path {{{{{tok}}}}}; use dotted argument fields or the scalar campaign")
+                    continue
                 if root == "roundDir" and tok != "roundDir":
                     f.append(f"{where}: {site} roundDir is a path, not a projected object")
                     continue
