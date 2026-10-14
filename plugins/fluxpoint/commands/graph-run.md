@@ -38,6 +38,11 @@ Workflow tool requires.
    `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> -o .claude/workflows/<name>.graph.js`
    The output is generated code. Never hand-edit it; edit the IR and
    recompile, or the spec and the executor start lying to each other.
+   Repeat preflight on the exact file before invoking Workflow:
+   `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> --check --check-script .claude/workflows/<name>.graph.js`.
+   Both checks enforce the Workflow limit of 524,288 UTF-8 bytes and print
+   headroom; below 16 KiB is a warning. `--max-script-bytes` overrides the
+   limit only when the selected launcher supports the new limit.
 4. Load whatever state the graph refuses to start without.
    Record the launch reading, fresh at every launch including a resume:
    ```

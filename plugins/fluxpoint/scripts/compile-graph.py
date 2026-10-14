@@ -83,6 +83,8 @@ DEFAULTS_FIELDS = {"effort", "model"}
 # (model, effort) share a warm prefix.
 CACHE_TTLS = {"5m": 300, "1h": 3600}
 DEFAULT_CACHE_TTL = "5m"
+WORKFLOW_SCRIPT_LIMIT = 524288
+SCRIPT_HEADROOM_MARGIN = 16384
 
 # ---------------------------------------------------------------- cost model
 # STATED ASSUMPTIONS, not measurements. `budget.maxNodes` counts agent calls,
@@ -118,6 +120,8 @@ UNPRICED_EXPANSIONS = ("prev", "decisions", "seen")
 VARYING_ROOTS = {"item", "i", "seen"}
 SPEC_PREAMBLE = ("Implement and verify this locked requirement packet. Defaulted decisions are model choices, "
                  "not user authorization. Do not edit the packet, lock or proof baseline to pass a check. "
+                 "Do not weaken check commands or harness files; use the documented harness-only re-lock path "
+                 "when wiring changes without changing requirements. "
                  "If a requirement is wrong, return the counterexample for a spec revision.\n")
 
 
@@ -920,11 +924,16 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
         # the provenance note and the run log. Same rule, same message,
         # named by whichever field carried the token.
         subst_sites = [("prompt", str(n.get("prompt", "")))]
+        if "haltReason" in n:
+            subst_sites.append(("haltReason", str(n["haltReason"])))
         rel_block = n.get("release") or {}
         if rel_block.get("instructions") is not None:
             subst_sites.append(("release.instructions",
                                 str(rel_block["instructions"])))
         for site, site_text in subst_sites:
+            site_bound = bound if site != "haltReason" else {"A", "campaign", "prev"}
+            if site == "haltReason" and "{{" in SUBST.sub("", site_text):
+                f.append(f"{where}: haltReason contains an unsupported substitution token")
             for tok in SUBST.findall(site_text):
                 root = tok.split(".")[0].split("[")[0]
                 if root == "decisions":
@@ -945,16 +954,16 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                 # graph that compiled clean and died at launch, which is the
                 # precise failure this scope check exists to prevent. So the
                 # token is validated all the way down, and emission binds it.
-                if root == "prev" and "prev" in bound and tok != "prev":
+                if root == "prev" and "prev" in site_bound and tok != "prev":
                     if "[" in tok or tok.count(".") != 1:
                         f.append(
                             f"{where}: {site} uses {{{{{tok}}}}} — only "
                             f"{{{{prev}}}} or a single-hop {{{{prev.<field>}}}} "
                             f"is supported")
                     else:
-                        pred = seen.get(after) or {}
+                        pred = n if site == "haltReason" else (seen.get(after) or {})
                         field = tok.split(".", 1)[1]
-                        shape = result_shape(pred)
+                        shape = "object" if site == "haltReason" else result_shape(pred)
                         if shape != "object":
                             yields = ("a flat array of judged items"
                                       if shape == "items"
@@ -973,10 +982,10 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                                     f"'{field}' is not a field of {pc} — it "
                                     f"would interpolate null at launch")
                     continue
-                if root not in bound:
+                if root not in site_bound:
                     f.append(
                         f"{where}: {site} uses {{{{{tok}}}}} but '{root}' is not in "
-                        f"scope for this node (available: {', '.join(sorted(bound))}) — "
+                        f"scope for this node (available: {', '.join(sorted(site_bound))}) — "
                         f"it would compile clean and throw at launch"
                     )
 
@@ -2127,11 +2136,22 @@ def emit_red_team_check(n, var, many=False):
     )
 
 
+def halt_reason(n, var):
+    """At halt time prev is the result that tripped the halt, not its input."""
+    text = str(n.get("haltReason", "halt condition met"))
+    mapping = subst_mapping(n, texts=[text])
+    mapping["prev"] = f"tokenText({var})"
+    for tok in SUBST.findall(text):
+        if tok.startswith("prev."):
+            mapping[tok] = f"tokenText(({var} || {{}})[{js_str(tok.split('.', 1)[1])}] ?? null)"
+    return js_template(text, mapping)
+
+
 def emit_halt(n, var):
     field, op, lit = halt_parts(n)
     return (
         f"if ({var} && {var}.{field} {op} {lit}) {{\n"
-        f"  log(`HALT at {n['id']}: {field}=${{{var}.{field}}} — ` + {js_str(n.get('haltReason', 'halt condition met'))})\n"
+        f"  log(`HALT at {n['id']}: {field}=${{{var}.{field}}} — ` + {halt_reason(n, var)})\n"
         f"  RESULTS[{js_str(n['id'])}] = {var}\n"
         f"  return summary('HALTED')\n"
         f"}}"
@@ -2145,7 +2165,7 @@ def emit_halt_any(n, var):
         f"const tripped_{var} = {var}.filter(r => r && r.{field} {op} {lit})\n"
         f"if (tripped_{var}.length) {{\n"
         f"  log(`HALT at {n['id']}: ${{tripped_{var}.length}}/${{{var}.length}} item(s) "
-        f"tripped {js_tmpl(field)} {js_tmpl(op)} {js_tmpl(lit)} — ` + {js_str(n.get('haltReason', 'halt condition met'))})\n"
+        f"tripped {js_tmpl(field)} {js_tmpl(op)} {js_tmpl(lit)} — ` + {halt_reason(n, 'tripped_' + var + '[0]')})\n"
         f"  note({js_str(n['id'])}, 'HALTED', `${{tripped_{var}.length}} item(s) tripped "
         f"{field}`)\n"
         f"  RESULTS[{js_str(n['id'])}] = {var}\n"
@@ -3359,7 +3379,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("graph", nargs="?", default="WORK.md", help="path to WORK.md (or any file with a graph-ir block)")
     ap.add_argument("-o", "--out", help="path to write the compiled .graph.js")
-    ap.add_argument("--check", action="store_true", help="validate only")
+    ap.add_argument("--check", action="store_true", help="validate and measure the compiled script")
+    ap.add_argument("--max-script-bytes", type=int, default=WORKFLOW_SCRIPT_LIMIT,
+                    help="Workflow launch limit in UTF-8 bytes (default: 524288)")
+    ap.add_argument("--script-headroom-bytes", type=int, default=SCRIPT_HEADROOM_MARGIN,
+                    help="warn below this much script headroom (default: 16384)")
+    ap.add_argument("--check-script", help="also measure the exact compiled file about to launch")
     ap.add_argument("--contracts", help="contracts directory")
     ap.add_argument("--runs-dir", default=RUNS_DIR,
                     help="recorded-runs directory imports resolve against")
@@ -3368,6 +3393,8 @@ def main():
     ap.add_argument("--gates-root", default=".",
                     help=f"directory holding {GATES}, which prove: tiers resolve against")
     args = ap.parse_args()
+    if args.max_script_bytes < 1 or args.script_headroom_bytes < 0:
+        ap.error("script limit must be positive and headroom margin nonnegative")
 
     here = os.path.dirname(os.path.abspath(__file__))
     shipped_dir = os.path.join(os.path.dirname(here), "contracts")
@@ -3440,6 +3467,33 @@ def main():
                  + f" ({est['cold']} cold prefill(s) of {est['calls']} call(s), "
                  f"prompt-cache TTL {est['ttl']}"
                  + (f"; {blind}" if blind else "") + ")")
+    # --check measures exactly the script compilation would write.
+    try:
+        graph_rel = os.path.relpath(os.path.abspath(args.graph),
+                                    os.path.abspath(args.gates_root)).replace(os.sep, "/")
+    except ValueError:  # another drive on Windows: not a file of this project
+        graph_rel = "../"
+    js = emit(ir, contracts, resolved, specification,
+              graph_file=None if graph_rel.startswith("../") else graph_rel,
+              project_prefix=git_prefix(args.gates_root))
+    script_bytes = len(js.encode("utf-8"))
+    headroom = args.max_script_bytes - script_bytes
+    size_line = f"script {script_bytes:,} bytes, headroom {headroom:,} of {args.max_script_bytes:,} bytes"
+    if headroom < 0:
+        print(f"graph-compile: script rejected — {size_line}; compact the packet/graph or raise --max-script-bytes only for a launcher that supports it", file=sys.stderr)
+        return 1
+    if headroom < args.script_headroom_bytes:
+        print(f"graph-compile: warning — {size_line}; below {args.script_headroom_bytes:,}-byte margin", file=sys.stderr)
+    if args.check_script:
+        try:
+            actual = os.path.getsize(args.check_script)
+        except OSError as e:
+            print(f"graph-compile: launch script: {e}", file=sys.stderr)
+            return 1
+        if actual > args.max_script_bytes:
+            print(f"graph-compile: launch script rejected — {args.check_script}: {actual:,} bytes exceeds {args.max_script_bytes:,}", file=sys.stderr)
+            return 1
+        print(f"graph-compile: launch script {actual:,} bytes, headroom {args.max_script_bytes - actual:,}")
     if args.check:
         imported = (f", {len(resolved)} imported decision(s) resolved"
                     if resolved else "")
@@ -3452,23 +3506,15 @@ def main():
         print(f"graph-compile: IR valid — {len(ir['nodes'])} node(s), "
               f"{planned} planned agent call(s), budget.maxNodes="
               f"{(ir.get('budget') or {}).get('maxNodes')}, {cost_line}{imported}; "
-              f"contracts: {contracts_desc}; {packet_note}")
+              f"contracts: {contracts_desc}; {packet_note}; {size_line}")
         return 0
 
-    try:
-        graph_rel = os.path.relpath(os.path.abspath(args.graph),
-                                    os.path.abspath(args.gates_root)).replace(os.sep, "/")
-    except ValueError:  # another drive on Windows: not a file of this project
-        graph_rel = "../"
-    js = emit(ir, contracts, resolved, specification,
-              graph_file=None if graph_rel.startswith("../") else graph_rel,
-              project_prefix=git_prefix(args.gates_root))
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(js)
         print(f"graph-compile: wrote {args.out} — {len(ir['nodes'])} node(s), "
-              f"{planned} planned agent call(s), {cost_line}")
+              f"{planned} planned agent call(s), {cost_line}; {size_line}")
     else:
         # Pin the newline on this path too. `--out` above opens with
         # newline="\n"; stdout is a TextIOWrapper with newline=None, which

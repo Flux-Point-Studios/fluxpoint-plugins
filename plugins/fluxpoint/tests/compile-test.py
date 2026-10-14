@@ -1249,5 +1249,45 @@ def prove_ci_and_launch_case():
 prove_ci_and_launch_case()
 
 
+# Halt reasons are executable interpolation sites, validated before launch (#107).
+def halt_tokens_case():
+    import subprocess
+    import tempfile
+    global passed, failed
+    ir = {"version": 1, "campaign": "halt tokens", "treeGuard": False, "budget": {"maxNodes": 8},
+          "nodes": [{"id": "check", "prompt": "check {{A.target}}", "contract": "HarnessCheckV1",
+                     "haltWhen": "exit != 0", "haltReason": "red {{A.target}}: {{prev.exit}}"}]}
+    checks = [("halt reason current-result projection is accepted", not cg.validate(ir, CONTRACTS))]
+    js = cg.emit(ir, CONTRACTS)
+    checks.append(("halt reason renders args and current result", "{{" not in js[js.index("HALT at check"):]
+                   and 'tokenText((n_check || {})["exit"] ?? null)' in js))
+    for token in ["process.env.SECRET", "prev.nope", "prev.exit.deep", "item.key", "A.target + secret"]:
+        bad = copy.deepcopy(ir); bad["nodes"][0]["haltReason"] = "bad {{" + token + "}}"
+        checks.append(("halt reason rejects " + token, any("haltReason" in f for f in cg.validate(bad, CONTRACTS))))
+    with tempfile.TemporaryDirectory() as tmp:
+        graph = os.path.join(tmp, "WORK.md")
+        # Non-ASCII output is measured as UTF-8 bytes, not Python characters.
+        ir["nodes"][0]["prompt"] = "é" * 1000
+        open(graph, "w", encoding="utf-8").write("```json graph-ir\n" + json.dumps(ir) + "\n```\n")
+        script = os.path.join(tmp, "launch.js")
+        cli = [sys.executable, cg.__file__, graph, "--gates-root", tmp]
+        built = subprocess.run(cli + ["-o", script], capture_output=True, text=True)
+        size = os.path.getsize(script)
+        exact = subprocess.run(cli + ["--check", "--max-script-bytes", str(size)], capture_output=True, text=True)
+        over = subprocess.run(cli + ["--check", "--max-script-bytes", str(size-1)], capture_output=True, text=True)
+        open(script, "ab").write(b"x")
+        changed = subprocess.run(cli + ["--check", "--max-script-bytes", str(size), "--check-script", script], capture_output=True, text=True)
+        checks.extend([
+            ("--check measures exact UTF-8 output and permits limit", built.returncode == exact.returncode == 0 and f"script {size:,} bytes" in exact.stdout and "headroom 0" in exact.stdout),
+            ("--check rejects one byte over launcher limit", over.returncode == 1 and "script rejected" in over.stderr),
+            ("launch preflight rechecks the actual output file", changed.returncode == 1 and "launch script rejected" in changed.stderr),
+        ])
+    for name, ok in checks:
+        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        passed, failed = passed + ok, failed + (not ok)
+
+halt_tokens_case()
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
