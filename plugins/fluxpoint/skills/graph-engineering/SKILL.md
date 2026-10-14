@@ -611,12 +611,22 @@ A fixed fan-out finds what one pass happens to find. When the size of the
 work is unknown, add `repeat` to the finder:
 
 ```json
-"repeat": { "untilDryRounds": 2, "maxRounds": 4, "dedupeBy": ["file", "line", "claim"] }
+"repeat": { "untilDryRounds": 2, "maxRounds": 6, "dedupeBy": ["file", "line", "claim"],
+            "classBy": ["defectClass"], "reframeAfter": 2 }
 ```
 
 Rounds re-run until `untilDryRounds` consecutive rounds surface nothing
 new, bounded by `maxRounds`. Use `{{seen}}` in the prompt so each round is
 told what earlier rounds found and spends itself on new ground.
+
+`classBy` names fields of the `verifyOver` items and must agree with
+`memory.classBy` when both are declared. A class producing a new surviving
+variant in `reframeAfter` consecutive rounds (default 2) stops the sweep with
+`RECURRING-CLASS` provenance and `{class, rounds, keys}` records. Under
+`onRed: halt` that is the campaign outcome; otherwise the sweep stops and
+the campaign remains INCOMPLETE. Refuted and unresolved claims never count
+as survivors. Reframe the authoritative invariant instead of starting a
+third narrow patch. The shipped discovery template enables this rule.
 
 **`maxRounds` is a backstop, not a thoroughness dial.** The dry rule is
 what should end a healthy sweep; the ceiling exists for the loop that
@@ -642,7 +652,7 @@ fresh panel to reach verdicts that already exist — which is where the
 `memory` closes that loop:
 
 ```json
-"memory": { "seed": "defect-sweep", "emit": "defect-sweep" }
+"memory": { "seed": "defect-sweep", "emit": "defect-sweep", "classBy": ["defectClass"] }
 ```
 
 `emit` files every judged item as a `LessonV1` row in

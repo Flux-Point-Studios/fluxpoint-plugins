@@ -52,7 +52,9 @@ Copy over `WORK.md`'s Campaign section to use it.
       "repeat": {
         "untilDryRounds": 2,
         "maxRounds": 6,
-        "dedupeBy": ["file", "line", "claim"]
+        "dedupeBy": ["file", "line", "claim"],
+        "classBy": ["defectClass"],
+        "reframeAfter": 2
       },
       "memory": {
         "seed": "defect-sweep",
@@ -97,6 +99,10 @@ Copy over `WORK.md`'s Campaign section to use it.
   the-list shape the recurrence gate exists to kill.
 
 ## Failure policy
+- Recurring class: a new surviving variant in two consecutive rounds stops
+  discovery, records `recurringClasses` with rounds and keys, and marks the
+  run INCOMPLETE. Reframe the class before starting another sweep. Refuted
+  and unresolved claims do not advance this counter.
 - Dry rule: 2 consecutive rounds with nothing new ends the sweep. This is
   what *should* end it.
 - Hard ceiling: 6 rounds — a backstop against a loop that never converges,
@@ -111,8 +117,8 @@ Copy over `WORK.md`'s Campaign section to use it.
   early and finishing are different claims and never get blurred.
 - Budget: `nodeFloorTokens` stops a further round before it starts and
   records the sweep as INCOMPLETE rather than half-running a round.
-- Halt condition a human can name: two dry rounds, six rounds total, or
-  the budget floor — whichever comes first.
+- Halt condition a human can name: two dry rounds, a recurring class, six
+  rounds total, or the budget floor — whichever comes first.
 
 `maxNodes` prices the worst case: 3 modalities x (1 finder + 2 expected
 items x 3 refuters) x 6 rounds = 126. Typical runs cost far less, because
