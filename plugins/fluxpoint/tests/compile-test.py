@@ -1288,6 +1288,12 @@ def halt_tokens_case():
 
 halt_tokens_case()
 
+for scope, want_warning in [("docs/binding.json", True), ("The generation-1 settlement must remain supported.", False)]:
+    diagnostics = cg.warnings(BASE, specification={"packet": {"checks": [{"id": "scope-test", "scope": scope}]}})
+    ok = any("bare path" in w and "scope-test" in w for w in diagnostics) == want_warning
+    print(f"{'PASS' if ok else 'FAIL'}  compiler surfaces opaque scope path: {scope}")
+    passed, failed = passed + ok, failed + (not ok)
+
 
 # Execute a repair graph: dropout, feedback, immutable paths and integration (#126).
 def repair_loop_case():

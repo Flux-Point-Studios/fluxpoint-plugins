@@ -1546,11 +1546,14 @@ def red_team_sources(n, ir):
     return found
 
 
-def warnings(ir, agents=None):
+def warnings(ir, agents=None, specification=None):
     """Non-blocking findings: shapes that compile but will predictably
     disappoint. Returned separately from validate() so they inform without
     refusing to build."""
     w = []
+    for check in ((specification or {}).get("packet") or {}).get("checks", []):
+        if "scopeRef" not in check and re.fullmatch(r"[^\s#]+\.[a-zA-Z0-9]+", str(check.get("scope", ""))):
+            w.append(f"check '{check.get('id', '?')}': scope is a bare path ({check['scope']}); use a repo-relative path#/pointer so the binding text is resolved and frozen")
     prior = []
     for n in ir.get("nodes") or []:
         if n.get("irreversible"):
@@ -3813,7 +3816,7 @@ def main():
     planned = plan_node_count(ir)
     # Warnings inform, never block: these shapes are legal and occasionally
     # deliberate, but they will usually disappoint whoever reads the result.
-    for w in warnings(ir, agents):
+    for w in warnings(ir, agents, specification):
         print(f"graph-compile: warning — {w}", file=sys.stderr)
 
     # Resolved for --check too: a missing decision should fail preflight,
