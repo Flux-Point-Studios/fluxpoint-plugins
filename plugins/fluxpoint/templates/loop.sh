@@ -68,6 +68,33 @@ sd=".claude/fluxpoint"
 mkdir -p "$sd/logs"
 rm -f "$sd/STOP"
 
+# A metric is optional. Resolve the helper through the same plugin roots as
+# the harness; a declared metric with no helper is an explicit setup error.
+loop_metric=""
+if [ -f .fluxpoint-metrics.json ] && "$FPL_PY" -c \
+  'import json,sys; sys.exit(0 if json.load(open(".fluxpoint-metrics.json")).get("metrics") else 1)'; then
+  for _root in "${FPL_PLUGIN_ROOT:-}" "${CLAUDE_PLUGIN_ROOT:-}" "${PLUGIN_ROOT:-}"; do
+    if [ -n "$_root" ] && [ -f "$_root/scripts/loop-metric.py" ]; then
+      loop_metric="$_root/scripts/loop-metric.py"; break
+    fi
+  done
+  if [ -z "$loop_metric" ]; then
+    echo "loop: metrics declared but loop-metric.py unavailable; set FPL_PLUGIN_ROOT" >&2
+    exit 2
+  fi
+fi
+PLATEAU_WINDOW="${PLATEAU_WINDOW:-3}"
+PLATEAU_MIN="${PLATEAU_MIN:-1}"
+record_metric() {
+  local args=(--window "$PLATEAU_WINDOW" --minimum "$PLATEAU_MIN")
+  [ -n "${PLATEAU_METRIC:-}" ] && args+=(--metric "$PLATEAU_METRIC")
+  "$FPL_PY" "$loop_metric" "${args[@]}" "$@"
+}
+# Capture the pre-iteration value so W means W completed iterations.
+[ -z "$loop_metric" ] || record_metric --reset || true
+stop_kind=budget-exhausted
+stop_detail="outer loop spent its iteration budget with the harness red or STATUS not DONE"
+
 for ((i = 1; i <= MAX_ITER; i++)); do
   if [ -f "$sd/STOP" ]; then
     echo "loop: STOP file present, halting after $((i - 1)) iteration(s)"
@@ -89,8 +116,19 @@ for ((i = 1; i <= MAX_ITER; i++)); do
     echo "loop: harness green and STATUS DONE after iteration $i"
     exit 0
   fi
+  if [ -n "$loop_metric" ]; then
+    metric_rc=0
+    record_metric || metric_rc=$?
+    if [ "$metric_rc" -eq 10 ]; then
+      stop_kind=plateau
+      stop_detail="plateau: declared metric improved less than $PLATEAU_MIN over $PLATEAU_WINDOW iterations"
+      echo "loop: $stop_detail" >&2
+      break
+    fi
+  fi
 done
-echo "loop: iteration budget exhausted, harness red or STATUS still ACTIVE. Checkpoint." >&2
+# iteration budget exhausted or the declared metric reached a plateau.
+echo "loop: ${stop_detail:-iteration budget exhausted, harness red or STATUS still ACTIVE. Checkpoint.}" >&2
 # An unattended run that gives up silently is a run nobody learns about
 # until they wonder why nothing shipped.
 # `|| true` is load-bearing, and templates/harness.sh documents the same
@@ -119,6 +157,6 @@ if [ -z "$ib" ]; then
   unset _ic
 fi
 unset _root
-[ -n "$ib" ] && "$FPL_PY" "$ib" --add --kind budget-exhausted \
-  --detail "outer loop spent its iteration budget with the harness red or STATUS not DONE" >/dev/null 2>&1
+[ -n "$ib" ] && "$FPL_PY" "$ib" --add --kind "${stop_kind:-budget-exhausted}" \
+  --detail "${stop_detail:-outer loop spent its iteration budget with the harness red or STATUS not DONE}" >/dev/null 2>&1
 exit 1

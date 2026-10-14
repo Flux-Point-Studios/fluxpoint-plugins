@@ -47,3 +47,13 @@ Mutation tightening re-runs the configured tool; to reuse a CI measurement,
 pass its report with `mutation-guard.py --tighten --from <report.json>`.
 Generated reports and build output must already be ignored by the repo; any
 unexpected dirty output causes tightening to refuse.
+
+The scaffolded `loop.sh` records the first declared metric before starting and
+after each unfinished iteration. Set `PLATEAU_METRIC` to choose another declared
+name. It stops with inbox kind `plateau` when best-so-far gain over
+`PLATEAU_WINDOW` completed iterations (default 3) is less than `PLATEAU_MIN`
+(default 1 integer unit). Both ceiling and floor directions work. A worse
+sample cannot erase an earlier gain. A failed or nondeterministic measurement
+is reported and cannot trigger plateau; no manifest preserves the original
+iteration-budget behavior. `FPL_PLUGIN_ROOT` (or the runtime plugin root) must
+locate the helper when metrics are declared.

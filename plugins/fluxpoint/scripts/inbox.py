@@ -34,6 +34,7 @@ KINDS = {
     "wake-ready": "a parked wait cleared and the campaign can resume",
     "wake-expired": "a wake deadline passed with the condition unmet",
     "confirm-required": "an irreversible node refused to fire unconfirmed",
+    "plateau": "an unattended run stopped after metric progress stalled",
     "budget-exhausted": "an unattended run spent its iteration budget",
     "attest-mismatch": "a node's claimed gate exit contradicts the attested log",
     "cex-ingest-failed": "prover output could not be parsed into a counterexample",
