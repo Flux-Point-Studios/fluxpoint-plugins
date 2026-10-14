@@ -25,6 +25,13 @@ folds it in. When the work stops being one zone with one contract and
 serial evidence, escalate per the graph-engineering skill instead of
 growing the loop.
 
+Completion certifies the scope in that file. A green merge campaign does not
+certify a deployment's field behavior. Keep deployment observation, flag
+retirement and rollback in a separate project-specific campaign whose
+Definition of Done names the deployed identity, check and observation window;
+leave it open until the observation passes or a rollback is recorded. The
+shared state vocabulary stays unchanged (design decision #105).
+
 ## Choosing the driver
 
 - **`/goal <condition>`** — the default for interactive work with a

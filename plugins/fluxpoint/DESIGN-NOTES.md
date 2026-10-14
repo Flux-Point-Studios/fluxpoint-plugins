@@ -1,5 +1,28 @@
 # fluxpoint — design notes
 
+## Definition of Done boundary (decision #105)
+
+Keep the shared Definition of Done at the project's declared engineering and
+merge boundary. Do not introduce a universal `merged-unverified` state or
+infer field success from a green pre-merge suite. The plugin serves libraries,
+on-chain scripts and hosted applications; it has no shared deployment target,
+telemetry source, rollout authority or safe rollback action. A generic state
+without those observations would claim a lifecycle it cannot verify.
+
+Projects that need field verification declare a separate deployment campaign
+with their own attested check, observation window and rollback criteria.
+Record deployment and observed outcomes there, and leave that campaign open
+until its own Definition of Done passes or its rollback is recorded. A merge
+campaign's completion certifies only its stated scope. A feature flag's owner,
+kill-switch or ramp purpose, expiry and retirement check belong to that
+project's deployment specification. Generic deterministic metrics can ratchet
+flag debt when the project declares an exact count; the plugin does not infer
+which flags are safe to retire.
+
+Reconsider this boundary when a concrete integration supplies deployment
+identity, reproducible field checks and a measured rollback workflow that
+cannot already be expressed as an attested campaign.
+
 These notes record what the v0.1 smoke test proved, the redesign it
 pointed to, and how that redesign landed. Not bound by prior conventions —
 the goal was the best design, not symmetry with what came before.
