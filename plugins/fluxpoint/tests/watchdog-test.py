@@ -107,6 +107,37 @@ class WatchdogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             watchdog.resolve_run("../run1", self.projects)
 
+    def test_unknown_agent_lifecycle_cannot_report_quiet_success(self):
+        self.write(self.journal, [{'type': 'agent_started', 'agentId': 'a'}], 16)
+        with self.assertRaisesRegex(ValueError, 'unknown agent lifecycle'):
+            self.observe()
+        self.write(self.journal, [{}], 16)
+        with self.assertRaisesRegex(ValueError, 'event type'):
+            self.observe()
+
+    def test_malformed_internal_launch_and_quota_shapes_exit_two(self):
+        command = [sys.executable, str(SCRIPTS / 'watchdog.py'), '--projects', str(self.projects),
+                   '--root', str(self.root), '--run', 'run1', '--once']
+        for args in ({'_base': []}, {'_base': {'sha': ['invalid']}}):
+            self.write(self.journal, [{'args': args}])
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
+        self.write(self.journal, [{'type': 'failed', 'agentId': 'a'}])
+        self.write(self.run / 'agent-a.jsonl', [{'error': 'rate_limit', 'quotaLimits': [1]}])
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('quotaLimits must be an object', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
+    def test_transcripts_resolve_in_subagents_and_ambiguous_runs_refuse(self):
+        self.write(self.journal, [{'type': 'started', 'agentId': 'a'}])
+        self.write(self.run.parent.parent / 'agent-a.jsonl', [{'cwd': str(self.root)}], 41)
+        self.assertEqual(self.observe()[0], 1)
+        duplicate = self.projects / 'other/session/subagents/workflows/run1'
+        duplicate.mkdir(parents=True)
+        self.write(duplicate / 'journal.jsonl', [])
+        with self.assertRaisesRegex(ValueError, 'found 2'):
+            watchdog.resolve_run('run1', self.projects)
+
 
 if __name__ == "__main__":
     unittest.main()

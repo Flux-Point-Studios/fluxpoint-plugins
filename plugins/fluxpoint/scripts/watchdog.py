@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Watch a Workflow journal; surface stalls and failures with recoverable state.
 
-The journal and transcript formats are internal runtime interfaces. Unknown or
-malformed records exit 2 instead of silently declaring a run healthy. This
+The journal and transcript formats are internal runtime interfaces. Unknown agent
+lifecycle events and malformed records exit 2 instead of declaring a run healthy. This
 observer never kills an agent or resets its checkout.
 """
 import argparse
 import glob
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -98,6 +99,10 @@ def inspect(root, run, run_dir, stall_min=40, quiet_min=15, base=None, now=None)
     states, starts = {}, {}
     for row in events:
         kind = row.get("type")
+        if 'agentId' in row and kind not in ('started', 'result', 'failed'):
+            raise ValueError(f'{journal}: unknown agent lifecycle event {kind!r}')
+        if not isinstance(kind, str) and 'args' not in row:
+            raise ValueError(f'{journal}: record lacks an event type or launch arguments')
         if kind in ("started", "result", "failed"):
             agent = row.get("agentId")
             if not isinstance(agent, str) or not agent:
@@ -107,8 +112,13 @@ def inspect(root, run, run_dir, stall_min=40, quiet_min=15, base=None, now=None)
                 starts[agent] = row
         # Read a captured launch argument where the journal supplies one.
         args = row.get("args")
-        if not base and isinstance(args, dict):
-            base = (args.get("_base") or {}).get("sha")
+        if args is not None:
+            if not isinstance(args, dict) or ('_base' in args and not isinstance(args['_base'], dict)):
+                raise ValueError(f'{journal}: launch args and _base must be objects')
+            if not base:
+                base = args.get('_base', {}).get('sha')
+                if base is not None and (not isinstance(base, str) or not __import__('re').fullmatch(r'[0-9a-fA-F]{7,64}', base)):
+                    raise ValueError(f'{journal}: launch base must be a commit hash')
     clock = time.time() if now is None else now
     alerts, live = [], False
     for agent, kind in states.items():
@@ -121,7 +131,10 @@ def inspect(root, run, run_dir, stall_min=40, quiet_min=15, base=None, now=None)
         if kind == "failed":
             last = records[-1]
             error = last.get("error", "unknown failure")
-            reset = (last.get("quotaLimits") or {}).get("resetsAt")
+            quota = last.get('quotaLimits')
+            if quota is not None and not isinstance(quota, dict):
+                raise ValueError(f'{path}: quotaLimits must be an object')
+            reset = (quota or {}).get("resetsAt")
             note = resume_note(root, run, agent, starts.get(agent, {}), records, base)
             detail = f"{error}; api status {last.get('apiErrorStatus', 'unknown')}"
             if reset:
@@ -154,8 +167,8 @@ def main():
     ap.add_argument("--interval", type=float, default=60)
     ap.add_argument("--once", action="store_true", help="inspect once; exit 3 while pending")
     args = ap.parse_args()
-    if min(args.stall_min, args.quiet_min, args.interval) <= 0:
-        ap.error("time limits must be positive")
+    if any(not math.isfinite(value) or value <= 0 for value in (args.stall_min, args.quiet_min, args.interval)):
+        ap.error("time limits must be finite and positive")
     if args.base and not __import__('re').fullmatch(r"[0-9a-fA-F]{7,64}", args.base):
         ap.error("--base must be a commit hash")
     try:
