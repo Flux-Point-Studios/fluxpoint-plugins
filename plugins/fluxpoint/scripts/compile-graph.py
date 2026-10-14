@@ -719,6 +719,16 @@ def validate_repair(n, seen, ir, contracts):
     keys = [x.get("key") if isinstance(x, dict) else None for x in items]
     if not keys or any(not isinstance(k, str) or not IDENT.fullmatch(k) for k in keys) or len(set(keys)) != len(keys):
         f.append(f"{where}: repair items require unique lowercase kebab-case keys for safe round directories")
+    classes = rep.get("classBy")
+    if classes is not None:
+        item_props = contracts.get(n.get("contract"), {}).get("properties", {}).get(n.get("verifyOver") or "findings", {}).get("items", {}).get("properties", {})
+        if not isinstance(classes, list) or not classes or not all(isinstance(k, str) and k in item_props for k in classes):
+            f.append(f"{where}: repair repeat.classBy must name fields of the checker findings")
+        if isinstance(n.get("memory"), dict) and n["memory"].get("classBy") != classes:
+            f.append(f"{where}: memory.classBy must agree with repeat.classBy")
+    threshold = rep.get("reframeAfter", 2)
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 2:
+        f.append(f"{where}: repeat.reframeAfter must be an integer >= 2")
     integration = rep.get("integrate")
     if integration is not None:
         by_id = {x.get("id"): x for x in ir.get("nodes", [])}
@@ -1593,7 +1603,7 @@ def warnings(ir, agents=None):
                     f"before the dry rule can — expect INCOMPLETE. Prefer "
                     f"maxRounds >= {dry + 3} unless a short sweep is the point."
                 )
-        if n.get("repeat") and not panel_size(n) and n.get("verify", "schema-only") == "schema-only":
+        if n.get("repeat") and "until" not in n["repeat"] and not panel_size(n) and n.get("verify", "schema-only") == "schema-only":
             w.append(
                 f"node '{nid}': discovery with no verification tier — a sweep's "
                 f"output is usually consumed as fact; consider skeptic:1 or panel:3"
@@ -1741,6 +1751,8 @@ def plan_groups(ir):
                         groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()})
                     groups.append({"calls": [(work.get("id", "?"), node_key(work, ir))] * count, "park": False,
                                    "kind": "work", "node": work, "items": lists.get(n.get("foreach"), []) if count == fan else [None], "track": frozenset()})
+                if tree_guard:
+                    groups.extend([{"calls": [("tree-check", sentinel)], "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()} for _ in range(2 if repair_integrations(n) else 1)])
             continue
         track = held.get(nid, frozenset())
         if tree_guard and (prove_gate(n) or n.get("independent")):
@@ -2899,7 +2911,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("}")
         a("const treeNorm = s => String(s || '').split('\\n').map(x => x.trim()).filter(Boolean)")
         a("  .filter(x => !treeIgnored(x)).sort().join('\\n')")
-        a("const TREE = { baseline: null, launch: null, checks: [] }")
+        a("const TREE = { baseline: null, launch: null, checks: [], unknown: false }")
         a("async function treeCheck(point, phase) {")
         a("  // agent(), not spawn(): a guard rail must not spend the node budget")
         a("  // and must still run after the ceiling is reached.")
@@ -2911,8 +2923,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
           "{ label: `tree-check:${point}`, phase, schema: C['TreeCheckV1'], effort: 'low' })")
         a("  if (!r) {")
         a("    note('tree-check', 'DEAD', `${point}: sentinel died — tree state unknown`)")
-        a("    INCOMPLETE = true")
-        a("    return true")
+        a("    INCOMPLETE = true; TREE.unknown = true")
+        a("    return false")
         a("  }")
         a("  const rec = { point, head: String(r.head || '').trim(), porcelain: treeNorm(r.porcelain) }")
         a("  TREE.checks.push(rec)")
@@ -2926,7 +2938,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     first_phase = nodes[0].get("phase", "Run") if nodes else "Run"
     last_phase = nodes[-1].get("phase", "Run") if nodes else "Run"
     if tree_guard:
-        a(f"await treeCheck('campaign-start', {js_str(first_phase)})")
+        a(f"if (!await treeCheck('campaign-start', {js_str(first_phase)})) return summary('TREE-UNKNOWN')")
         a("// The sentinel above is an agent() call, so a resume replays its FIRST")
         a("// reading instead of taking one. The launcher's reading (args._base,")
         a("// taken fresh at every launch) is compared against it here: a resume on")
@@ -2942,7 +2954,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("      (TREE.launch.porcelain !== null && TREE.launch.porcelain !== b.porcelain")
         a("        ? `; dirt: ${TREE.launch.porcelain || '(none)'} vs ${b.porcelain || '(none)'}` : ''))")
         a("    log(`TREE-MOVED at launch: this launch's tree is not the one the run's first reading described — a resume would replay verdicts about a tree that no longer exists. Launch fresh (no resumeFromRunId), or restore the tree the run started on.`)")
-        a("    return summary('TREE-MOVED')")
+        a("    return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
         a("  }")
         a("} else {")
         a("  log('tree guard: no launch reading in args._base — a resume cannot tell whether the tree moved since the run it replays; /fluxpoint:graph-run passes one')")
@@ -2959,11 +2971,11 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             a("// The gate is about to mint a verdict about the tree; assert it is")
             a("// still the tree every earlier verdict described.")
             a(f"if (!await treeCheck({js_str('before ' + n['id'])}, "
-              f"{js_str(n.get('phase', 'Run'))})) return summary('TREE-MOVED')")
+              f"{js_str(n.get('phase', 'Run'))})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
         a(emit_node(n, ir, specification=bool(specification)))
         a("")
     if tree_guard:
-        a(f"if (!await treeCheck('campaign-end', {js_str(last_phase)})) return summary('TREE-MOVED')")
+        a(f"if (!await treeCheck('campaign-end', {js_str(last_phase)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
     a("return summary('COMPLETE')")
     return "\n".join(L) + "\n"
 
@@ -3403,32 +3415,52 @@ def emit_repair(n, ir, specification=False):
     a(f"// ===== repair loop {nid}: fixer + fresh-tree checker =====")
     a(f"phase({js_str(phase_name)})")
     a(f"let pending_{var} = {list_var(n['foreach'])}.map((item, i) => ({{ item, i, lastCheck: null }}))")
-    a(f"let passed_{var} = [], round_{var} = 0, integrationLast_{var} = null")
+    a(f"let passed_{var} = [], round_{var} = 0, integrationLast_{var} = null, integrationStreaks_{var} = [], integrationRecurring_{var} = []")
     a(f"const {var} = []")
+    a(f"const validReframe_{var} = (r, classes, independent = false) => !!r && (!independent || r.validated === true) && Array.isArray(r.classes) && classes.every(c => r.classes.includes(c)) && ['adopt', 'refute', 'remove'].includes(r.disposition) && ['invariant', 'classRewire'].every(k => typeof r[k] === 'string' && r[k].trim()) && r.measurement && ['command', 'result'].every(k => typeof r.measurement[k] === 'string' && r.measurement[k].trim())")
     a(f"while (pending_{var}.length && round_{var} < {int(rep['maxRounds'])}) {{")
     a(f"  round_{var}++")
     a(f"  let abort_{var} = null")
     if ir.get("treeGuard", True):
-        a(f"  if (!await treeCheck(`repair {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary('TREE-MOVED')")
+        a(f"  if (!await treeCheck(`repair {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
     a(f"  const batch_{var} = await parallel(pending_{var}.map(state => async () => {{")
     a("    const { item, i, lastCheck } = state")
+    a("    const requiredClasses = state.recurring || []")
+    a("    const reframeBrief = requiredClasses.length ? 'REFRAME REQUIRED: two or more consecutive checks failed on ' + JSON.stringify(requiredClasses) + '. State the authoritative system-of-record invariant. Adopt or refute a class-level rewire with a command and observed measurement, or remove the mechanism. Return structured reframe {classes,invariant,classRewire,disposition:adopt|refute|remove,measurement:{command,result}}. Another narrow patch is refused.\\n' : ''")
     a(f"    const roundDir = repairRoundDir(item.key, round_{var})")
     a(f"    if (!affordable(`{fixer['id']}:${{item.key}}`)) {{ abort_{var} = 'BUDGET-EXHAUSTED'; return {{ ...state, roundDir }} }}")
-    a(f"    const fixed = await spawn({prompt(fixer)}, {opts(fixer, ir, fixer.get('phase', phase_name), '`' + fixer['id'] + ':${item.key}:r${round_' + var + '}`')})")
+    a(f"    const fixed = await spawn(reframeBrief + {prompt(fixer)}, {opts(fixer, ir, fixer.get('phase', phase_name), '`' + fixer['id'] + ':${item.key}:r${round_' + var + '}`')})")
     a(f"    if (!fixed) {{ abort_{var} = DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD'; return {{ ...state, roundDir }} }}")
+    a(f"    if (requiredClasses.length && !validReframe_{var}(fixed.reframe, requiredClasses)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: third narrow patch refused`, {{ classes: requiredClasses }}); return {{ ...state, fixed, roundDir }} }}")
     a(f"    if (!affordable(`{nid}:${{item.key}}`)) {{ abort_{var} = 'BUDGET-EXHAUSTED'; return {{ ...state, fixed, roundDir }} }}")
-    a(f"    const checked = await spawn({prompt(n, 'fixed')}, {opts(n, ir, phase_name, '`' + nid + ':${item.key}:r${round_' + var + '}`')})")
+    a(f"    const checked = await spawn(reframeBrief + 'Independently validate any supplied reframe against its authoritative invariant and rerun its measurement yourself; return reframe.validated true only with your own measurement.\\n' + {prompt(n, 'fixed')}, {opts(n, ir, phase_name, '`' + nid + ':${item.key}:r${round_' + var + '}`')})")
     a(f"    if (!checked) {{ abort_{var} = DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD'; return {{ ...state, fixed, roundDir }} }}")
     if n.get("contract") == "RedTeamV1":
         a(f"    if (redTeamIncoherent(checked)) {{ abort_{var} = 'HALTED'; return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
+    if n.get("contract") == "FixCheckV1":
+        a(f"    if (checked.verdict === 'PASS' && ((checked.findings || []).length || (checked.blockers || []).length)) {{ abort_{var} = 'HALTED'; return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
     a(f"    const complete = checked[{js_str(field)}] {op} {lit}")
+    a(f"    if (complete && requiredClasses.length && !validReframe_{var}(checked.reframe, requiredClasses, true)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: checker did not validate the class reframe`); return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
+    class_fields = rep.get("classBy") or ["defectClass"]
+    a(f"    const classFields = {json.dumps(class_fields)}")
+    a(f"    const findings = Array.isArray(checked[{js_str(n.get('verifyOver') or 'findings')}]) ? checked[{js_str(n.get('verifyOver') or 'findings')}] : []")
+    a("    const classes = [...new Set(findings.map(f => classFields.every(k => typeof f[k] === 'string' && f[k].trim()) ? classFields.map(k => f[k]).join('|') : '__unclassified__'))]")
+    a("    if (!complete && !classes.length) classes.push('__unclassified__')")
+    a("    const previous = new Map((state.streaks || []).map(x => [x.class, x.rounds]))")
+    a(f"    const streaks = complete ? [] : classes.map(c => ({{ class: c, rounds: [...(previous.get(c) || []), round_{var}] }}))")
+    a(f"    const recurring = streaks.filter(x => x.rounds.length >= {rep.get('reframeAfter', 2)})")
+    a(f"    if (recurring.length) note({js_str(nid)}, 'RECURRING-CLASS', `${{item.key}}: next round must reframe`, {{ item: item.key, classes: recurring }})")
+    if rep.get("classBy"):
+        a(f"    RECURRING_CLASSES.push(...recurring.map(x => ({{ ...x, node: {js_str(nid)}, item: item.key, keys: [] }})))")
     a(f"    note({js_str(nid)}, complete ? 'OK' : 'REPAIR', `${{item.key}} round ${{round_{var}}}`, {{ item: item.key, round: round_{var}, roundDir, complete }})")
-    a("    return { ...state, fixed, roundDir, lastCheck: checked, complete }")
+    a("    return { ...state, fixed, roundDir, lastCheck: checked, complete, streaks, recurring: recurring.map(x => x.class) }")
     a("  }))")
     a(f"  passed_{var}.push(...batch_{var}.filter(x => x.complete))")
     a(f"  pending_{var} = batch_{var}.filter(x => !x.complete)")
     a(f"  RESULTS[{js_str(fixer['id'])}] = [...passed_{var}, ...pending_{var}].map(x => x.fixed).filter(Boolean)")
     a(f"  RESULTS[{js_str(nid)}] = [...passed_{var}, ...pending_{var}].map(x => x.lastCheck).filter(Boolean)")
+    if ir.get("treeGuard", True):
+        a(f"  if (!await treeCheck(`after repair {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
     a(f"  if (abort_{var}) {{ INCOMPLETE = true; note({js_str(nid)}, 'INCOMPLETE', abort_{var}); return summary(abort_{var}) }}")
     integration = rep.get("integrate") or []
     if integration:
@@ -3437,24 +3469,44 @@ def emit_repair(n, ir, specification=False):
         a(f"  if (passed_{var}.length) {{")
         a(f"    const roundDir = repairRoundDir('_integration', round_{var})")
         a(f"    const lastCheck = integrationLast_{var}")
+        a(f"    const requiredClasses = integrationRecurring_{var}")
+        a("    const reframeBrief = requiredClasses.length ? 'REFRAME REQUIRED for merged-tree classes ' + JSON.stringify(requiredClasses) + ': state the authoritative invariant and adopt/refute the class rewire with a command and measured result, or remove the mechanism. Return structured reframe evidence; the independent review must validate it.\\n' : ''")
         a(f"    if (!affordable({js_str(merge['id'])})) {{ INCOMPLETE = true; return summary('BUDGET-EXHAUSTED') }}")
-        a(f"    const merged = await spawn({prompt(merge, 'passed_' + var)}, {opts(merge, ir, merge.get('phase', phase_name), '`' + merge['id'] + ':r${round_' + var + '}`')})")
+        a(f"    const merged = await spawn(reframeBrief + {prompt(merge, 'passed_' + var)}, {opts(merge, ir, merge.get('phase', phase_name), '`' + merge['id'] + ':r${round_' + var + '}`')})")
         a(f"    RESULTS[{js_str(merge['id'])}] = merged")
         a("    if (!merged) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
+        a(f"    if (requiredClasses.length && !validReframe_{var}(merged.reframe, requiredClasses)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'third narrow integration patch refused'); return summary('REFRAME-REQUIRED') }}")
         if ir.get("treeGuard", True):
-            a(f"    if (!await treeCheck(`integration {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary('TREE-MOVED')")
+            a(f"    if (!await treeCheck(`integration {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
         a(f"    if (!affordable({js_str(review['id'])})) {{ INCOMPLETE = true; return summary('BUDGET-EXHAUSTED') }}")
-        a(f"    const integrated = await spawn({prompt(review, 'merged')}, {opts(review, ir, review.get('phase', phase_name), '`' + review['id'] + ':r${round_' + var + '}`')})")
+        a(f"    const integrated = await spawn(reframeBrief + {prompt(review, 'merged')}, {opts(review, ir, review.get('phase', phase_name), '`' + review['id'] + ':r${round_' + var + '}`')})")
         a(f"    RESULTS[{js_str(review['id'])}] = integrated")
         a("    if (!integrated) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
         if review.get("contract") == "RedTeamV1":
             a("    if (redTeamIncoherent(integrated)) { INCOMPLETE = true; return summary('HALTED') }")
+        if ir.get("treeGuard", True):
+            a(f"    if (!await treeCheck(`after integration {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
+        if review.get("contract") == "FixCheckV1":
+            a("    if (integrated.verdict === 'PASS' && ((integrated.findings || []).length || (integrated.blockers || []).length)) { INCOMPLETE = true; return summary('HALTED') }")
+        a(f"    const integrationFailed = integrated[{js_str(mfield)}] {mop} {mlit}")
+        a(f"    if (!integrationFailed && requiredClasses.length && !validReframe_{var}(integrated.reframe, requiredClasses, true)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'independent integration review did not validate the class reframe'); return summary('REFRAME-REQUIRED') }}")
         a(f"    integrationLast_{var} = integrated")
-        a(f"    if (integrated[{js_str(mfield)}] {mop} {mlit}) {{")
+        a("    if (integrationFailed) {")
+        a(f"      const classFields = {json.dumps(class_fields)}")
+        a("      const classes = [...new Set((integrated.findings || []).map(f => classFields.every(k => typeof f[k] === 'string' && f[k].trim()) ? classFields.map(k => f[k]).join('|') : '__unclassified__'))]")
+        a("      if (!classes.length) classes.push('__unclassified__')")
+        a(f"      const previous = new Map(integrationStreaks_{var}.map(x => [x.class, x.rounds]))")
+        a(f"      integrationStreaks_{var} = classes.map(c => ({{ class: c, rounds: [...(previous.get(c) || []), round_{var}] }}))")
+        a(f"      const recurring = integrationStreaks_{var}.filter(x => x.rounds.length >= {rep.get('reframeAfter', 2)})")
+        a(f"      integrationRecurring_{var} = recurring.map(x => x.class)")
+        a(f"      if (recurring.length) note({js_str(review['id'])}, 'RECURRING-CLASS', 'next integration must reframe', {{ classes: recurring }})")
+        if rep.get("classBy"):
+            a(f"      RECURRING_CLASSES.push(...recurring.map(x => ({{ ...x, node: {js_str(review['id'])}, keys: [] }})))")
         a(f"      note({js_str(review['id'])}, 'REPAIR', 'merged-tree review failed; reopen passing slices with its findings', {{ round: round_{var} }})")
-        a(f"      pending_{var}.push(...passed_{var}.map(x => ({{ ...x, complete: false, lastCheck: integrated }})))")
+        a(f"      pending_{var}.push(...passed_{var}.map(x => ({{ ...x, complete: false, lastCheck: integrated, streaks: integrationStreaks_{var}, recurring: integrationRecurring_{var} }})))")
         a(f"      passed_{var} = []")
         a("    } else {")
+        a(f"      integrationStreaks_{var} = []; integrationRecurring_{var} = []")
         a(f"      note({js_str(review['id'])}, 'OK', 'merged-tree review passed', {{ round: round_{var} }})")
         a("    }")
         a("  }")

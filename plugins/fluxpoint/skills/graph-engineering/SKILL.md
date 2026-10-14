@@ -490,7 +490,13 @@ to park on a person for want of a gate that fits one call.
   `isolation: 'measure'`: it applies the current patch onto a fresh
   `git archive HEAD` snapshot and independently attacks it. Passed slices
   leave the loop; failed checks reach the next fixer as `{{lastCheck}}`.
-  The cap files remaining slices INCOMPLETE. This is a feedback loop over
+  The cap files remaining slices INCOMPLETE. FixCheckV1 names each failed
+  mechanism in `defectClass`; `classBy: ["defectClass"]` and
+  `reframeAfter: 2` force the next round to state the authoritative invariant
+  and adopt/refute a class rewire with a measurement, or remove the mechanism.
+  The fixer returns structured reframe evidence and the independent checker
+  reruns its measurement; a third narrow patch is REFRAME-REQUIRED before
+  integration. This is a feedback loop over
   independent findings, rather than a retry on the fixer's own exit.
   `{{roundDir}}` gives each item and round an absolute, versioned output
   directory below `.claude/fluxpoint/rounds/<launch nonce>/`; use it for

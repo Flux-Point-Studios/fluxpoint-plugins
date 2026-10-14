@@ -1,0 +1,153 @@
+{
+  "$id": "FixCheckV1",
+  "type": "object",
+  "required": [
+    "verdict",
+    "findings",
+    "evidence",
+    "blockers"
+  ],
+  "properties": {
+    "verdict": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "INCOMPLETE"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "finding",
+          "severity",
+          "defectClass",
+          "invariant",
+          "classRewire",
+          "measurement"
+        ],
+        "properties": {
+          "finding": {
+            "type": "string",
+            "minLength": 1
+          },
+          "defectClass": {
+            "type": "string",
+            "minLength": 1
+          },
+          "invariant": {
+            "type": "string",
+            "minLength": 1
+          },
+          "classRewire": {
+            "type": "string",
+            "minLength": 1
+          },
+          "measurement": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "enum": [
+              "CRITICAL",
+              "HIGH",
+              "MEDIUM",
+              "LOW"
+            ]
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "reframe": {
+      "type": "object",
+      "required": [
+        "classes",
+        "invariant",
+        "classRewire",
+        "disposition",
+        "measurement"
+      ],
+      "properties": {
+        "classes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "invariant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "classRewire": {
+          "type": "string",
+          "minLength": 1
+        },
+        "disposition": {
+          "enum": [
+            "adopt",
+            "refute",
+            "remove"
+          ]
+        },
+        "measurement": {
+          "type": "object",
+          "required": [
+            "command",
+            "result"
+          ],
+          "properties": {
+            "command": {
+              "type": "string",
+              "minLength": 1
+            },
+            "result": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "validated": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "if": {
+    "required": [
+      "verdict"
+    ],
+    "properties": {
+      "verdict": {
+        "const": "PASS"
+      }
+    }
+  },
+  "then": {
+    "properties": {
+      "findings": {
+        "maxItems": 0
+      },
+      "blockers": {
+        "maxItems": 0
+      }
+    }
+  }
+}

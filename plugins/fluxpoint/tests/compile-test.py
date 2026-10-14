@@ -690,7 +690,7 @@ for name, ok in [
      and "treeCheck(\"before gate\"" in tree_js
      and "treeCheck('campaign-end'" in tree_js),
     ("tree drift is a halt, not a log line",
-     "return summary('TREE-MOVED')" in tree_js),
+     "TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED'" in tree_js),
     ("the sentinel record rides out in the summary",
      "tree: TREE" in tree_js),
     ("the sentinel is schema-forced",
@@ -1355,6 +1355,77 @@ const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
         passed, failed = passed + ok, failed + (not ok)
 
 repair_loop_case()
+
+
+# A recurring repair mechanism needs an independently measured reframe (#125).
+def repair_reframe_case():
+    import subprocess
+    import tempfile
+    global passed, failed
+    ir = {"version": 1, "campaign": "reframe", "treeGuard": False,
+          "budget": {"maxNodes": 30, "cacheTtl": "1h"},
+          "lists": {"slices": [{"key": "parser"}]},
+          "nodes": [
+              {"id": "fix", "foreach": "slices", "mutates": True, "prompt": "fix {{item.key}}: {{lastCheck}} in {{roundDir}}", "contract": "SliceV1"},
+              {"id": "check", "foreach": "slices", "after": "fix", "independent": True, "verifies": "fix", "isolation": "measure", "prompt": "check {{prev}}", "contract": "FixCheckV1", "verifyOver": "findings", "repeat": {"until": "verdict == 'PASS'", "maxRounds": 4, "classBy": ["defectClass"], "reframeAfter": 2}},
+          ]}
+    checks = [("FixCheck repair class configuration accepted", not cg.validate(ir, CONTRACTS))]
+    for key, value in [("classBy", ["missing"]), ("reframeAfter", 1), ("reframeAfter", True)]:
+        bad = copy.deepcopy(ir); bad["nodes"][1]["repeat"][key] = value
+        checks.append(("repair rejects invalid " + key + str(value), bool(cg.validate(bad, CONTRACTS))))
+    def run(mode):
+        run_ir = copy.deepcopy(ir)
+        if mode.startswith("sentinel"):
+            run_ir["treeGuard"] = True
+        if mode.startswith("integration"):
+            run_ir["nodes"][1]["repeat"]["integrate"] = ["merge", "review"]
+            run_ir["nodes"].extend([
+                {"id": "merge", "after": "check", "mutates": True, "prompt": "merge {{prev}}", "contract": "SliceV1"},
+                {"id": "review", "after": "merge", "independent": True, "verifies": "merge", "isolation": "measure", "prompt": "review {{prev}}", "contract": "FixCheckV1", "haltWhen": "verdict != 'PASS'"},
+            ])
+        js = cg.emit(run_ir, CONTRACTS).replace("export const meta", "const meta")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out.json"); script = os.path.join(tmp, "run.mjs")
+            prefix = r'''import {writeFileSync} from 'node:fs';
+const args={_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'nonce'}},calls=[],mode=MODE;
+const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
+const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
+const reframe={classes:['decode'],invariant:'ledger admits only bounded rows',classRewire:'enforce item decoding budget at ingress',disposition:'adopt',measurement:{command:'pytest test_decode_budget',result:'all outsider rows bounded'}};
+const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
+ if(label.startsWith('tree-check:'))return (mode==='sentinel-start'&&label.includes('campaign-start'))||(mode==='sentinel-after'&&label.includes('after repair'))?null:{head:'base',porcelain:''};
+ const round=Number(label.match(/:r(\d+)$/)?.[1]||1);
+ if(label.startsWith('fix:'))return {branch:'patch',diffSummary:'patch',testsAdded:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest exit0'],...(round>=3&&['measured','unchecked','integration-measured','integration-merge-narrow'].includes(mode)?{reframe}: {})};
+ if(label.startsWith('check:')){const pass=mode==='contradictory'||mode.startsWith('integration')||round>=3&&['measured','unchecked','different'].includes(mode);
+  const defectClass=mode==='different'&&round===2?'resource':'decode';
+  return {verdict:pass?'PASS':'FAIL',findings:pass&&mode!=='contradictory'?[]:[{defectClass,finding:'bad outsider row',severity:'HIGH',invariant:'bounded rows',classRewire:'bound parser',measurement:'pytest reproduced'},...(mode==='duplicates'?[{defectClass,finding:'same mechanism another path',severity:'HIGH',invariant:'bounded',classRewire:'bound',measurement:'pytest reproduced'}]:[])],blockers:[],evidence:['pytest observed'],...(['measured','integration-measured','integration-merge-narrow'].includes(mode)&&round>=3?{reframe:{...reframe,validated:true,measurement:{command:'pytest test_independent_budget',result:'independently checked bounds'}}}: {})};}
+ if(label.startsWith('merge:'))return {branch:'integrated',diffSummary:'patch',testsAdded:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest'],...(mode==='integration-measured'&&round>=3?{reframe}: {})};
+ if(label.startsWith('review:'))return {verdict:round>=3?'PASS':'FAIL',findings:round>=3?[]:[{defectClass:'decode',finding:'composition failure',severity:'HIGH',invariant:'bounded rows',classRewire:'enforce whole budget',measurement:'pytest compose'}],blockers:[],evidence:['pytest compose'],...(mode==='integration-measured'&&round>=3?{reframe:{...reframe,validated:true}}: {})};
+ return null;};
+'''.replace("MODE", json.dumps(mode))
+            open(script, "w").write(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
+            proc = subprocess.run(["node", script], capture_output=True, text=True, timeout=20)
+            return json.load(open(out)) if os.path.exists(out) else {"error": proc.stderr}
+    narrow = run("narrow"); measured = run("measured"); unchecked = run("unchecked"); different = run("different"); duplicates = run("duplicates")
+    checks += [
+        ("third narrow patch refused before checker/integration", narrow.get("r", {}).get("outcome") == "REFRAME-REQUIRED" and not any(c["label"] == "check:parser:r3" for c in narrow.get("calls", []))),
+        ("two same-class failures force next fixer to reframe", any(c["label"] == "fix:parser:r3" and c["p"].startswith("REFRAME REQUIRED") for c in narrow.get("calls", []))),
+        ("recurring class and rounds are recorded", any(x.get("class") == "decode" and x.get("rounds") == [1, 2] for x in narrow.get("r", {}).get("recurringClasses", []))),
+        ("independently measured reframe can complete", measured.get("r", {}).get("outcome") == "COMPLETE"),
+        ("fixer's own measurement cannot stand for checker", unchecked.get("r", {}).get("outcome") == "REFRAME-REQUIRED"),
+        ("different failure class resets consecutive-round count", different.get("r", {}).get("outcome") == "COMPLETE"),
+        ("same-class duplicate findings count as one failed round", not any(c["label"] == "fix:parser:r2" and c["p"].startswith("REFRAME REQUIRED") for c in duplicates.get("calls", []))),
+    ]
+    for mode, outcome in [("integration-narrow", "REFRAME-REQUIRED"), ("integration-merge-narrow", "REFRAME-REQUIRED"), ("integration-measured", "COMPLETE"), ("contradictory", "HALTED")]:
+        result = run(mode)
+        checks.append(("integration/class gate " + mode, result.get("r", {}).get("outcome") == outcome))
+    for mode in ["sentinel-start", "sentinel-after"]:
+        result = run(mode)
+        checks.append(("failed tree sentinel stops immediately " + mode, result.get("r", {}).get("outcome") == "TREE-UNKNOWN" and (mode != "sentinel-start" or len(result.get("calls", [])) == 1)))
+    for name, ok in checks:
+        print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f" -> {narrow}" if not ok else ""))
+        passed, failed = passed + ok, failed + (not ok)
+
+repair_reframe_case()
 
 
 print(f"\n{passed} passed, {failed} failed")
