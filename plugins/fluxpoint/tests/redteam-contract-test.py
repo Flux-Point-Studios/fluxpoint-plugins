@@ -51,8 +51,8 @@ def report(name, ok, detail):
 # here instead of being silently skipped — the same failure it guards.
 KNOWN = {"$id", "description", "type", "required", "properties", "items",
          "contains", "maxItems", "enum", "const", "minimum", "maximum",
-         "allOf", "if", "then"}
-TYPES = {"object": dict, "array": list, "string": str}
+         "allOf", "if", "then", "minItems", "minLength"}
+TYPES = {"object": dict, "array": list, "string": str, "boolean": bool}
 
 
 def valid(inst, sch):
@@ -71,7 +71,11 @@ def valid(inst, sch):
         for k, sub in (sch.get("properties") or {}).items():
             if k in inst and not valid(inst[k], sub):
                 return False
+    if isinstance(inst, str) and len(inst) < sch.get("minLength", 0):
+        return False
     if isinstance(inst, list):
+        if len(inst) < sch.get("minItems", 0):
+            return False
         if "items" in sch and not all(valid(x, sch["items"]) for x in inst):
             return False
         if "contains" in sch and not any(valid(x, sch["contains"]) for x in inst):
@@ -94,6 +98,10 @@ def valid(inst, sch):
     return True
 
 
+COVERAGE = {"subject": [{"repository": "repo", "base": "base-sha", "head": "head-sha",
+                         "files": 2, "additions": 10, "deletions": 3}],
+            "attackers": 6, "lenses": ["authority", "composition"], "sampled": False}
+
 RANK = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
 
@@ -112,7 +120,7 @@ def coherent(inst):
 report("RedTeamV1 now requires worstSeverity and worstSeverityRank",
        {"worstSeverity", "worstSeverityRank"} <= set(SCHEMA["required"]),
        str(SCHEMA["required"]))
-the_hole = {"verdict": "SHIP", "findings": [finding("CRITICAL")]}
+the_hole = {"verdict": "SHIP", "coverage": COVERAGE, "findings": [finding("CRITICAL")]}
 report("the issue's object — SHIP over a CRITICAL — is no longer valid",
        not valid(the_hole, SCHEMA), "refused")
 for ws in RANK:
@@ -129,7 +137,7 @@ report("BLOCK with no findings (incomplete coverage) is valid as NONE/0",
        valid({"verdict": "BLOCK", "findings": [], "worstSeverity": "NONE",
               "worstSeverityRank": 0}, SCHEMA), "valid")
 report("SHIP over a MEDIUM, declared MEDIUM/2, is valid",
-       valid({"verdict": "SHIP", "findings": [finding("LOW"), finding("MEDIUM")],
+       valid({"verdict": "SHIP", "coverage": COVERAGE, "findings": [finding("LOW"), finding("MEDIUM")],
               "worstSeverity": "MEDIUM", "worstSeverityRank": 2}, SCHEMA), "valid")
 report("a rank that disagrees with worstSeverity is refused",
        not valid({"verdict": "BLOCK", "findings": [finding("HIGH")],
@@ -151,13 +159,22 @@ for n in range(3):
         for verdict in ("SHIP", "BLOCK"):
             for ws in RANK:
                 for rank in range(5):
-                    inst = {"verdict": verdict, "findings": [finding(c) for c in combo],
+                    inst = {"verdict": verdict, "coverage": COVERAGE, "findings": [finding(c) for c in combo],
                             "worstSeverity": ws, "worstSeverityRank": rank}
                     total += 1
                     if valid(inst, SCHEMA) != coherent(inst):
                         wrong.append(inst)
 report(f"the schema accepts exactly the coherent objects ({total} cases)",
        not wrong, f"{len(wrong)} disagree" + (f", first {wrong[0]}" if wrong else ""))
+
+# Coverage is part of every shippable verdict, including empty findings.
+covered = {"verdict": "SHIP", "findings": [], "worstSeverity": "NONE", "worstSeverityRank": 0,
+           "coverage": copy.deepcopy(COVERAGE)}
+missing = copy.deepcopy(covered); missing.pop("coverage")
+report("SHIP without coverage is refused", not valid(missing, SCHEMA), "refused")
+for field, value in [("subject", []), ("attackers", 0), ("lenses", []), ("sampled", "no")]:
+    broken = copy.deepcopy(covered); broken["coverage"][field] = value
+    report("SHIP refuses invalid coverage " + field, not valid(broken, SCHEMA), "refused")
 
 # ==================== the gate can read it ================================
 gate = {"version": 1, "campaign": "c", "treeGuard": False, "budget": {"maxNodes": 4},
@@ -197,17 +214,17 @@ def run_graph(rt_result):
         return json.load(open(out)) if os.path.exists(out) else {"err": "no output"}
 
 
-lied = run_graph({"verdict": "SHIP", "findings": [finding("CRITICAL")],
+lied = run_graph({"verdict": "SHIP", "coverage": COVERAGE, "findings": [finding("CRITICAL")],
                   "worstSeverity": "NONE", "worstSeverityRank": 0})
 report("in the run, a SHIP over a CRITICAL halts before the next node",
        (lied.get("r") or {}).get("outcome") == "HALTED" and "sign" not in lied.get("LABELS", []),
        str(lied)[:80])
-fine = run_graph({"verdict": "SHIP", "findings": [finding("LOW")],
+fine = run_graph({"verdict": "SHIP", "coverage": COVERAGE, "findings": [finding("LOW")],
                   "worstSeverity": "LOW", "worstSeverityRank": 1})
 report("  while a coherent SHIP proceeds",
        (fine.get("r") or {}).get("outcome") == "COMPLETE" and "sign" in fine.get("LABELS", []),
        str(fine)[:80])
-legacy = run_graph({"verdict": "SHIP", "findings": [finding("MEDIUM")]})
+legacy = run_graph({"verdict": "SHIP", "coverage": COVERAGE, "findings": [finding("MEDIUM")]})
 report("  and a repo-local RedTeamV1 without the ordinal is held to the SHIP rule only",
        (legacy.get("r") or {}).get("outcome") == "COMPLETE", str(legacy)[:80])
 
@@ -219,7 +236,7 @@ with tempfile.TemporaryDirectory() as d:
     with open(work, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(src)
     summary = {"campaign": "c", "outcome": "COMPLETE", "contracts": {"rt": "RedTeamV1"},
-               "results": {"rt": {"verdict": "SHIP", "findings": [finding("CRITICAL")],
+               "results": {"rt": {"verdict": "SHIP", "coverage": COVERAGE, "findings": [finding("CRITICAL")],
                                   "worstSeverity": "NONE", "worstSeverityRank": 0}},
                "provenance": [{"node": "rt", "status": "OK"}]}
     r = subprocess.run([sys.executable, os.path.join(PLUGIN, "scripts", "record-run.py"),
@@ -232,6 +249,59 @@ report("record-run files a SHIP over a CRITICAL as BLOCKED-REDTEAM",
        "| wf_rt | BLOCKED-REDTEAM |" in text, (r.stderr or r.stdout).strip()[-80:])
 report("  and says why in the row", "contradict its verdict" in text
        and "SHIP over a CRITICAL finding" in text, "named")
+
+def multi_lens_gate_case():
+    ir = {"version": 1, "campaign": "multi", "treeGuard": False, "budget": {"maxNodes": 20},
+          "lists": {"lenses": [{"key": "authority"}, {"key": "composition"}]},
+          "nodes": [
+              {"id": "attack", "foreach": "lenses", "prompt": "attack {{item.key}}", "contract": "RedTeamV1", "onRed": "halt"},
+              {"id": "distinct", "reduce": {"from": "attack", "over": "findings", "dedupeBy": ["finding"]}},
+              {"id": "refute", "after": "distinct", "prompt": "collect {{prev}}", "contract": "RedTeamV1", "verify": "panel:3", "verifyOver": "findings", "expectItems": 1},
+              {"id": "gate", "after": "refute", "prompt": "gate {{prev}}", "contract": "RedTeamV1", "independent": True, "verifies": "attack", "haltWhen": "verdict == 'BLOCK'"},
+          ]}
+    final = {"verdict": "SHIP", "findings": [], "worstSeverity": "NONE", "worstSeverityRank": 0,
+             "coverage": copy.deepcopy(COVERAGE)}
+    final["coverage"]["attackers"] = 2
+    def run(mode):
+        js = cg.emit(ir, CONTRACTS).replace("export const meta", "const meta")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out.json"); script = os.path.join(tmp, "run.mjs")
+            prefix = '''import {writeFileSync} from 'node:fs';
+const args={},calls=[],mode=MODE,final=FINAL;
+const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
+const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
+const claim={severity:'HIGH',finding:'reachable vulnerability',exploit_path:'minimal case with valid control',minimal_fix:'fix'};
+const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
+ if(label.startsWith('attack:')){const c=structuredClone(final.coverage);c.attackers=1;c.lenses=[label.split(':')[1]];
+  if(mode==='sampled')c.sampled=true;
+  if(mode==='drift'&&label.endsWith('composition'))c.subject[0].head='other';
+  return {verdict:(mode==='claims'||mode==='missing'||mode==='blockers')?'BLOCK':'SHIP',findings:mode==='claims'||mode==='missing'? [claim]:[],worstSeverity:'NONE',worstSeverityRank:0,coverage:c,review:{blockers:mode==='blockers'?['missing tools']:[]}};}
+ if(label==='refute')return {verdict:'BLOCK',findings:mode==='claims'||mode==='missing'?[claim]:[],worstSeverity:'HIGH',worstSeverityRank:3};
+ if(label.includes(':refute'))return mode==='missing'&&label.endsWith('3')?null:{refuted:mode==='missing',reason:'independent executable evidence'};
+ return final;};
+'''.replace("MODE", json.dumps(mode)).replace("FINAL", json.dumps(final))
+            # Attackers' HIGHs remain coherent; the gate stub deliberately lies to test the backstop.
+            prefix = prefix.replace("worstSeverity:'NONE',worstSeverityRank:0,coverage:c", "worstSeverity:(mode==='claims'||mode==='missing')?'HIGH':'NONE',worstSeverityRank:(mode==='claims'||mode==='missing')?3:0,coverage:c")
+            open(script, "w").write(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
+            proc = subprocess.run(["node", script], capture_output=True, text=True, timeout=20)
+            return json.load(open(out)) if os.path.exists(out) else {"error": proc.stderr}
+    normal = run("normal")
+    report("multi-lens raw coverage survives reduce and panel", normal.get("r", {}).get("outcome") == "COMPLETE" and any("RAW LENS COVERAGE" in x["p"] and '"composition"' in x["p"] for x in normal.get("calls", []) if x["label"] == "gate"), str(normal)[:100])
+    for mode in ["sampled", "drift", "blockers", "claims", "missing"]:
+        result = run(mode)
+        report("multi-lens gate refuses hidden " + mode, result.get("r", {}).get("outcome") == "HALTED", str(result)[:100])
+    claimed = run("claims")
+    report("code panel assigns three independent skeptical lenses", len([x for x in claimed.get("calls", []) if ':refute' in x['label']]) == 3 and all('default refuted=false when uncertain' in x['p'] for x in claimed.get("calls", []) if ':refute' in x['label']), str(claimed)[:100])
+    # The warning distinguishes a single guard from a gate fed by many lenses.
+    effect = {"id": "effect", "prompt": "effect", "contract": "DesignV1", "irreversible": True}
+    wide = copy.deepcopy(ir); wide["nodes"].append(effect)
+    narrow = copy.deepcopy(ir); narrow["nodes"] = [ir["nodes"][0],dict(ir["nodes"][-1],after="attack"),effect]; narrow["nodes"][0].pop("foreach")
+    report("single-reviewer irreversible guard warns", any("single-agent" in w for w in cg.warnings(narrow)) and not any("single-agent" in w for w in cg.warnings(wide)), "coverage fanout inspected")
+    reviewer = open(os.path.join(PLUGIN, "agents", "red-team-reviewer.md")).read()
+    report("typed reviewer can spawn independent skeptics", "tools: Read, Grep, Glob, Bash, Agent" in reviewer and "UNRESOLVED (pending skeptic)" in reviewer, "Agent allowlist and outcome discipline")
+
+multi_lens_gate_case()
+
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

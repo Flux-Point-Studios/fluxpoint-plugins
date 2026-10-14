@@ -114,6 +114,13 @@ with `severity`, `finding`, `exploit_path`, `minimal_fix`, plus
 and `worstSeverityRank` (0 NONE, 1 LOW, 2 MEDIUM, 3 HIGH, 4 CRITICAL). The
 contract binds the three together and refuses SHIP over a HIGH or CRITICAL
 finding, so a halt gate reading one field cannot be passed by the others.
+For SHIP, include top-level `coverage`: `subject` is an array of exact
+`{repository, base, head, files, additions, deletions}` ranges measured with
+git; `attackers` counts completed attacker agents, `lenses` lists their surface
+ids, and `sampled` explicitly states whether changed code was sampled. Never
+infer full coverage from elapsed time or empty findings. Lens-scoped graph
+runs report their one actual lens; the final gate combines the compiler's
+raw lens coverage context and refuses missing or mismatched snapshots.
 Include scope, coverage, composition, skeptic evidence and blockers in an
 additional `review` object. A blocked incomplete review can have
 `findings: []`, `worstSeverity: NONE`, rank 0; `verdict` still must be BLOCK.

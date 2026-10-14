@@ -14,7 +14,7 @@ the repository's normal merge policy after the final gate passes.
   "version": 1,
   "name": "repair-campaign",
   "campaign": "Repair a blocked review with independent fresh-tree checks and per-round integration",
-  "budget": { "maxNodes": 18, "cacheTtl": "1h", "maxEstimatedTokens": 900000 },
+  "budget": { "maxNodes": 18, "cacheTtl": "1h", "maxEstimatedTokens": 800000 },
   "requiredArgs": ["findings"],
   "roles": {
     "fixer": { "effort": "high" },

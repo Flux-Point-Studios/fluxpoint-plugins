@@ -1517,12 +1517,36 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
     return f
 
 
+def red_team_sources(n, ir):
+    """Lens producers on the declared path into a red-team gate."""
+    by_id = {x.get("id"): x for x in ir.get("nodes", [])}
+    found, visited = [], set()
+    current = n
+    while current:
+        dep = current.get("after") or (current.get("reduce") or {}).get("from")
+        if not dep or dep in visited:
+            break
+        visited.add(dep)
+        current = by_id.get(dep)
+        if current and current.get("contract") == "RedTeamV1" and current.get("foreach"):
+            found.append(current["id"])
+    return found
+
+
 def warnings(ir, agents=None):
     """Non-blocking findings: shapes that compile but will predictably
     disappoint. Returned separately from validate() so they inform without
     refusing to build."""
     w = []
+    prior = []
     for n in ir.get("nodes") or []:
+        if n.get("irreversible"):
+            guards = [x for x in prior if x.get("contract") == "RedTeamV1" and x.get("independent") and x.get("haltWhen")]
+            counts = [sum(len((ir.get("lists") or {}).get(next(y for y in prior if y.get("id") == sid).get("foreach"), [])) for sid in red_team_sources(g, ir))
+                      or len((ir.get("lists") or {}).get(g.get("foreach"), [None])) for g in guards]
+            if counts and max(counts) <= 1:
+                w.append(f"node '{n.get('id')}': irreversible effect's only RedTeamV1 guard is a single-agent review; use a multi-lens fan-out and independent refuters for broad changes")
+        prior.append(n)
         nid = n.get("id", "?")
         # A bad agentType fails at the worst possible node: `agent type not
         # found` is raised at the spawn, so a gate late in the graph pays for
@@ -2455,8 +2479,32 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("// keywords would let exactly that through to the next node — often a")
         a("// person about to sign. Re-derived here from the findings, in code.")
         a("const SEVERITY_RANK = { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 }")
+        a("function redTeamPreamble(ids) { return 'RAW LENS COVERAGE — bind the final verdict to these completed source reviews. Missing coverage, blockers, mismatched snapshots or incomplete sampling must be stated and cannot silently become full coverage.\\n' + JSON.stringify(ids.map(id => ({ node: id, reviews: (Array.isArray(RESULTS[id]) ? RESULTS[id] : [RESULTS[id]]).filter(Boolean).map(r => ({ verdict: r.verdict, findingCount: (r.findings || []).length, coverage: r.coverage || null, blockers: (r.review || {}).blockers || [] })) }))) + '\\n'; }")
+        a("function redTeamSourceProblem(ids, result, judged) {")
+        a("  if (!result || result.verdict !== 'SHIP') return null")
+        a("  if (Array.isArray(judged) && judged.some(x => x && (x.unverified || x.severity === 'HIGH' || x.severity === 'CRITICAL'))) return 'final verdict drops a surviving or unverified claim'")
+        a("  const final = result.coverage || {}, sources = ids.flatMap(id => Array.isArray(RESULTS[id]) ? RESULTS[id] : [])")
+        a("  const identity = c => JSON.stringify((c.subject || []).slice().sort((a,b) => String(a.repository).localeCompare(String(b.repository))))")
+        a("  let attackers = 0")
+        a("  for (const source of sources) {")
+        a("    const c = source.coverage")
+        a("    if (source.verdict === 'BLOCK' && !(source.findings || []).length) return 'source lens blocked without a refutable claim'")
+        a("    if (!c || !Array.isArray(c.subject) || !Array.isArray(c.lenses)) return 'source lens lacks coverage'")
+        a("    if (identity(c) !== identity(final)) return 'source lens coverage names a different snapshot or diff counts'")
+        a("    if (((source.review || {}).blockers || []).length) return 'source lens has unresolved coverage blockers'")
+        a("    if (c.sampled && !final.sampled) return 'final verdict hides sampled source coverage'")
+        a("    if (c.lenses.some(lens => !(final.lenses || []).includes(lens))) return 'final verdict omits a source lens'")
+        a("    attackers += Number.isInteger(c.attackers) ? c.attackers : 0")
+        a("  }")
+        a("  return !sources.length || final.attackers < attackers ? 'final verdict omits completed attacker coverage' : null")
+        a("}")
         a("function redTeamIncoherent(r) {")
         a("  if (!r || typeof r !== 'object') return null")
+        a("  if (r.verdict === 'SHIP') {")
+        a("    const c = r.coverage")
+        a("    if (!c || !Array.isArray(c.subject) || !c.subject.length || !Number.isInteger(c.attackers) || c.attackers < 1 || !Array.isArray(c.lenses) || !c.lenses.length || c.lenses.some(x => typeof x !== 'string' || !x) || typeof c.sampled !== 'boolean') return 'SHIP without complete coverage metadata'")
+        a("    if (c.subject.some(s => !s || ['repository','base','head'].some(k => typeof s[k] !== 'string' || !s[k]) || ['files','additions','deletions'].some(k => !Number.isInteger(s[k]) || s[k] < 0))) return 'SHIP with invalid reviewed range/counts'")
+        a("  }")
         a("  const worst = (Array.isArray(r.findings) ? r.findings : [])")
         a("    .reduce((w, f) => Math.max(w, SEVERITY_RANK[f && f.severity] || 0), 0)")
         a("  const name = Object.keys(SEVERITY_RANK).find(k => SEVERITY_RANK[k] === worst)")
@@ -2702,7 +2750,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     if needs_panel:
         a("// --- verification: refuters attack the claim; majority kills it ---")
         a(f"const VERIFY_FLOOR = {int(floor)}")
-        a("async function refute(claimText, label, phase, n, priors) {")
+        a("async function refute(claimText, label, phase, n, priors, codeReview = false) {")
         a("  if (budget.total && budget.remaining() < VERIFY_FLOOR) {")
         a("    log(`budget floor reached — ${label} left UNVERIFIED (no silent caps)`)")
         a("    return { kills: 0, cast: 0, unverified: true }")
@@ -2714,7 +2762,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("      `Attempt to REFUTE this claim. ${claimText}\\n\\n` + (priors || '') +")
         a("        `Re-read the underlying code or evidence YOURSELF; do not trust the claim's own summary. ` +")
         a("        `Hunt for the reason it is wrong: a guard upstream, a type that forbids the state, a test that pins it. ` +")
-        a("        `Default to refuted=true when uncertain.`,")
+        a("        (codeReview ? `Your independent lens is ${['reproduce the minimal case and valid control', 'establish attacker reachability and impact', 'check scope and severity'][i % 3]}. Return refuted=true only with contradictory executable evidence; default refuted=false when uncertain, the fixture breaks or tools are missing.` : `Default to refuted=true when uncertain.`),")
         a("      { label: `${label}:refute${i + 1}`, phase, schema: C.VerdictV1, effort: 'low' }")
         a("    )")
         a("  ))")
@@ -2736,18 +2784,18 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("")
         a("// Applies a node's declared tier to every item it produced. Used by")
         a("// fan-out and single nodes alike, so a declared tier always runs.")
-        a("async function verifyItems(result, field, label, phase, n, need, sink) {")
+        a("async function verifyItems(result, field, label, phase, n, need, sink, codeReview = false) {")
         a("  if (!result) return []")
         a("  const produced = result[field] || []")
         a("  const judged = await parallel(produced.map((it, i) => () =>")
-        a("    refute(JSON.stringify(it), `${label}:${i}`, phase, n).then(v => ({ ...it, ...v }))")
+        a("    refute(JSON.stringify(it), `${label}:${i}`, phase, n, undefined, codeReview).then(v => ({ ...it, ...v }))")
         a("  ))")
         a("  const all = judged.filter(Boolean)")
         a("  // The sink sees every verdict, including the kills the filter")
         a("  // below drops: what a panel rejected, and why, is the half a")
         a("  // later sweep would otherwise pay to rediscover.")
         a("  if (sink) all.forEach(sink)")
-        a("  return all.filter(v => v.kills < need)")
+        a("  return all.filter(v => (codeReview && v.unverified) || v.kills < need)")
         a("}")
         a("")
 
@@ -3075,6 +3123,8 @@ def emit_node(n, ir, specification=False):
         pre = "measurePreamble() + "
     elif n.get("isolation") in (True, "worktree") or n.get("mutates"):
         pre = "basePreamble() + "
+    if n.get("contract") == "RedTeamV1" and n.get("haltWhen") and red_team_sources(n, ir):
+        pre += f"redTeamPreamble({json.dumps(red_team_sources(n, ir))}) + "
     if prove_gate(n):
         pre += f"provePreamble({js_str(prove_gate(n))}) + "
     if specification:
@@ -3157,7 +3207,8 @@ def emit_node(n, ir, specification=False):
               f"{{ produced: produced.length }})")
             need = math.ceil(panel / 2)
             a(f"      const judged = await verifyItems(prev, {js_str(over)}, "
-              f"`{nid}:${{item.key || i}}`, {js_str(phase)}, {panel}, {need})")
+              f"`{nid}:${{item.key || i}}`, {js_str(phase)}, {panel}, {need}"
+              + (", undefined, true" if n.get("contract") == "RedTeamV1" else "") + ")")
             a("      return judged.map(v => ({ ...v, source: item.key || String(i) }))")
             a("    }")
             a("  )).filter(Boolean).flat()")
@@ -3289,6 +3340,10 @@ def emit_node(n, ir, specification=False):
             a("}")
         if red_team_checked(n):
             a(emit_red_team_check(n, raw))
+        source_ids = red_team_sources(n, ir) if n.get("contract") == "RedTeamV1" and n.get("haltWhen") else []
+        if source_ids:
+            a(f"const sourceProblem_{var} = redTeamSourceProblem({json.dumps(source_ids)}, {raw}, RESULTS[{js_str(n.get("after"))}])")
+            a(f"if (sourceProblem_{var}) {{ RESULTS[{js_str(nid)}] = {raw}; note({js_str(nid)}, 'HALTED', sourceProblem_{var}); return summary('HALTED') }}")
         if n.get("haltWhen"):
             # Halt on the raw contract: the gate reads the node's own fields.
             a(emit_halt(n, raw))
@@ -3297,6 +3352,8 @@ def emit_node(n, ir, specification=False):
             need = math.ceil(panel / 2)
             sink = (", " + lesson_sink(n, need)
                     if (n.get("memory") or {}).get("emit") else "")
+            if n.get("contract") == "RedTeamV1":
+                sink = (sink or ", undefined") + ", true"
             a(f"const {var} = await verifyItems({raw}, {js_str(over)}, "
               f"{js_str(nid)}, {js_str(phase)}, {panel}, {need}{sink})")
             a(f"log(`{nid}: ${{{var}.length}} item(s) survived {tier}`)")
