@@ -459,6 +459,9 @@ def measure(root, cfg, accept, reason, src=None, persist=True):
                          else run_cargo_mutants(root, extra))
     for f in findings:
         print(f"mutation-guard: {f}", file=sys.stderr)
+    if findings and not persist:
+        # Tightening cannot lock in a score whose parser dropped unknown data.
+        return 1
     if rec is None:
         if not findings:
             print("mutation-guard: the run produced no scored mutants — "

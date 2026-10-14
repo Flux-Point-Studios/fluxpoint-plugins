@@ -27,7 +27,11 @@ class AikenMetrics(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(self.root / 'bin') + os.pathsep + os.environ['PATH'])
         self.fake()
 
-    def fake(self, version='aiken v1.1.23+8949565', noisy=False):
+    def fake(self, version='aiken v1.1.23+8949565', noisy=False, output=None):
+        source = FIXTURE
+        if output is not None:
+            source = self.root / 'response.json'
+            source.write_text(json.dumps(output))
         script = f'''#!{sys.executable}
 import json,sys
 from pathlib import Path
@@ -35,7 +39,7 @@ if '--version' in sys.argv:
  print({version!r})
 else:
  p=Path('calls'); n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n))
- doc=json.loads(Path({str(FIXTURE)!r}).read_text())
+ doc=json.loads(Path({str(source)!r}).read_text())
  if {noisy!r}: doc['modules'][0]['tests'][0]['execution_units']['mem'] += n
  print(json.dumps(doc))
 '''
@@ -91,6 +95,43 @@ else:
         self.fake(version='aiken v1.2.0')
         self.cli('aiken-metrics.py', '--baseline', ok=False)
         self.assertFalse((self.root / '.fluxpoint-metrics-baseline.json').exists())
+
+    def test_new_unit_test_and_missing_unit_metric_are_unarmed(self):
+        self.cli('aiken-metrics.py', '--baseline')
+        doc = json.loads(FIXTURE.read_text())
+        doc['modules'][0]['tests'].append({'title': 'new_expensive', 'status': 'pass',
+                                          'execution_units': {'mem': 999999999, 'cpu': 999999999}})
+        for summary in (doc['summary'], doc['modules'][0]['summary']):
+            summary['total'] += 1
+            summary['passed'] += 1
+            summary['kind']['unit'] += 1
+        self.fake(output=doc)
+        result = self.cli('metric-guard.py', '--check', ok=False)
+        self.assertIn('unarmed Aiken unit cost', result.stderr)
+        self.assertIn('cost.new_expensive.cpu', result.stderr)
+        self.assertIn('cost.new_expensive.mem', result.stderr)
+        self.fake()
+        manifest_path = self.root / '.fluxpoint-metrics.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['metrics'] = [m for m in manifest['metrics'] if m['extract']['aiken']['unit'] == 'mem']
+        manifest_path.write_text(json.dumps(manifest))
+        result = self.cli('metric-guard.py', '--check', ok=False)
+        self.assertIn('cost.unit_twice.cpu', result.stderr)
+        before = (self.root / '.fluxpoint-metrics-baseline.json').read_bytes()
+        self.cli('metric-guard.py', '--baseline', ok=False)
+        self.assertEqual(before, (self.root / '.fluxpoint-metrics-baseline.json').read_bytes())
+
+    def test_failed_property_or_incomplete_summary_cannot_pass_as_unit_evidence(self):
+        original = json.loads(FIXTURE.read_text())
+        for mutate in [lambda d: d['modules'][0]['tests'][1].update(status='fail'),
+                       lambda d: d['modules'][0]['tests'][1].update(iterations='100'),
+                       lambda d: d['summary'].update(total=999),
+                       lambda d: d['modules'][0]['summary'].update(passed=True),
+                       lambda d: d.update(summary=None)]:
+            doc = copy.deepcopy(original)
+            mutate(doc)
+            with self.assertRaises(ValueError):
+                aiken_units.parse(doc)
 
     def test_measured_costs_replace_hand_entered_budget(self):
         (self.root / 'plutus.json').write_text(json.dumps({'validators': [{'title': 'probe', 'compiledCode': '00'}]}))

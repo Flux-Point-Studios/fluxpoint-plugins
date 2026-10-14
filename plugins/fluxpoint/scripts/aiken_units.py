@@ -17,31 +17,50 @@ def check_version(root):
         raise ValueError(f'Aiken execution metrics pin {VERSION}; found {result.stdout.strip()!r}')
 
 
+def summary_counts(summary, total, units, properties, label):
+    if (not isinstance(summary, dict)
+            or any(type(summary.get(key)) is not int for key in ('total', 'passed', 'failed'))
+            or summary['total'] != total or summary['passed'] != total or summary['failed'] != 0
+            or not isinstance(summary.get('kind'), dict)
+            or type(summary['kind'].get('unit')) is not int or summary['kind']['unit'] != units
+            or type(summary['kind'].get('property')) is not int or summary['kind']['property'] != properties):
+        raise ValueError(f'{label}: malformed, failed or incomplete Aiken test summary')
+
+
 def parse(output):
     doc = json.loads(output) if isinstance(output, str) else output
     if not isinstance(doc, dict) or not isinstance(doc.get('modules'), list):
         raise ValueError('Aiken costs require modules[].tests[] JSON from non-TTY stdout')
-    if doc.get('summary', {}).get('failed', 0):
-        raise ValueError('Aiken reported failed tests; costs cannot arm a green baseline')
-    costs, excluded = {}, []
+    costs, excluded, seen_modules, seen_tests = {}, [], set(), set()
     for module in doc['modules']:
-        if not isinstance(module, dict) or not isinstance(module.get('name'), str) or not isinstance(module.get('tests'), list):
-            raise ValueError('malformed Aiken module')
+        if (not isinstance(module, dict) or not isinstance(module.get('name'), str) or not module['name']
+                or not isinstance(module.get('tests'), list) or module['name'] in seen_modules):
+            raise ValueError('malformed or duplicate Aiken module')
+        seen_modules.add(module['name'])
+        units_before, properties_before = len(costs), len(excluded)
         for test in module['tests']:
-            if not isinstance(test, dict) or not isinstance(test.get('title'), str):
+            if not isinstance(test, dict) or not isinstance(test.get('title'), str) or not test['title']:
                 raise ValueError('malformed Aiken test')
             key = module['name'] + '.' + test['title']
+            if key in seen_tests:
+                raise ValueError(f'duplicate Aiken test {key}')
+            seen_tests.add(key)
+            if test.get('status') != 'pass':
+                raise ValueError(f'{key}: Aiken test did not pass')
             if 'iterations' in test:
+                if type(test['iterations']) is not int or test['iterations'] < 0:
+                    raise ValueError(f'{key}: malformed property iteration count')
                 excluded.append(key)
                 continue
             units = test.get('execution_units')
-            if test.get('status') != 'pass' or not isinstance(units, dict):
+            if not isinstance(units, dict):
                 raise ValueError(f'{key}: missing passing unit-test execution_units')
             if any(type(units.get(k)) is not int or units[k] < 0 for k in ('mem', 'cpu')):
                 raise ValueError(f'{key}: mem/cpu must be nonnegative integers')
-            if key in costs:
-                raise ValueError(f'duplicate Aiken unit test {key}')
             costs[key] = {'mem': units['mem'], 'cpu': units['cpu']}
+        summary_counts(module.get('summary'), len(module['tests']), len(costs) - units_before,
+                       len(excluded) - properties_before, module['name'])
+    summary_counts(doc.get('summary'), len(costs) + len(excluded), len(costs), len(excluded), 'Aiken')
     return costs, excluded
 
 

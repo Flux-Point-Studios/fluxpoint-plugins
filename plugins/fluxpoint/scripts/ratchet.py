@@ -1,18 +1,27 @@
 """Shared precondition for safe, reviewable baseline tightening."""
+import math
 import os
 import subprocess
 
 
-def clean(root):
+def clean(root, expected_head=None):
     result = subprocess.run(['git', '-C', root, 'status', '--porcelain', '--untracked-files=all'],
                             capture_output=True, text=True, check=True)
     if result.stdout.strip():
         raise ValueError('--tighten requires a clean tree (including untracked files)')
+    if expected_head is not None and head(root) != expected_head:
+        raise ValueError('--tighten refused: HEAD changed after the full harness started')
+
+
+def head(root):
+    return subprocess.run(['git', '-C', root, 'rev-parse', '--verify', 'HEAD'],
+                          capture_output=True, text=True, check=True).stdout.strip()
 
 
 def green(root):
     """Run the real full harness; neither cached verdicts nor caller claims suffice."""
     clean(root)
+    checked_head = head(root)
     harness = os.path.join(root, 'scripts', 'harness.sh')
     if not os.path.isfile(harness):
         raise ValueError('--tighten requires scripts/harness.sh --full')
@@ -21,7 +30,8 @@ def green(root):
     if result.returncode:
         raise ValueError('--tighten refused: harness --full is red\n' +
                          (result.stdout + result.stderr)[-3000:])
-    clean(root)
+    clean(root, checked_head)
+    return checked_head
 
 
 def tighten(kind, root, src=None):
@@ -30,7 +40,7 @@ def tighten(kind, root, src=None):
     import json
     import sys
     root = os.path.abspath(root)
-    green(root)
+    checked_head = green(root)
     path = os.path.join(os.path.dirname(__file__), kind + '-guard.py')
     spec = importlib.util.spec_from_file_location('_tightened_guard', path)
     mod = importlib.util.module_from_spec(spec)
@@ -40,12 +50,17 @@ def tighten(kind, root, src=None):
         if findings or cfg is None:
             raise ValueError('--tighten requires an armed mutation manifest: ' + '; '.join(findings))
         prior = mod.load_baseline(root).get('mutation')
-        if not prior:
-            raise ValueError('--tighten requires an existing mutation measurement')
+        if (not isinstance(prior, dict) or type(prior.get('score')) not in (int, float)
+                or not math.isfinite(prior['score']) or not 0 <= prior['score'] <= 1
+                or type(prior.get('survived')) is not int or prior['survived'] < 0):
+            raise ValueError('--tighten requires an existing valid mutation score and survivor count')
         rec = mod.measure(root, cfg, False, '', src, persist=False)
-        if not isinstance(rec, dict):
+        if (not isinstance(rec, dict) or rec['score'] < prior['score']
+                or rec['survived'] > prior['survived']):
+            # --measure tolerates rounding noise; automatic tightening cannot
+            # lower even a fraction of an existing floor.
             raise ValueError('--tighten refused a weaker or failed mutation measurement')
-        clean(root)
+        clean(root, checked_head)
         if rec['score'] != prior['score'] or rec['survived'] != prior['survived']:
             print(f'mutation-guard: score {prior["score"]} -> {rec["score"]}; '
                   f'survivors {prior["survived"]} -> {rec["survived"]}')
@@ -74,6 +89,11 @@ def tighten(kind, root, src=None):
                 changes.append(f'{key}: {old} -> {current[key]}')
                 prior[key] = current[key]
     elif kind == 'guard':
+        if (not isinstance(doc, dict) or type(doc.get('count')) is not int or doc['count'] < 0
+                or not isinstance(doc.get('ids'), list)
+                or any(not isinstance(value, str) for value in doc['ids'])
+                or len(set(doc['ids'])) != len(doc['ids']) or doc['count'] != len(doc['ids'])):
+            raise ValueError('--tighten requires an existing valid guard count and ids')
         guards = mod.load_manifest(root)
         old_ids = set(doc.get('ids', []))
         ids = {g['id'] for g in guards}
@@ -82,7 +102,7 @@ def tighten(kind, root, src=None):
         if ids != old_ids or len(guards) > doc.get('count', 0):
             changes.append(f'guards: {doc.get("count", 0)} -> {len(guards)}')
             doc.update(count=len(guards), ids=sorted(ids))
-    clean(root)
+    clean(root, checked_head)
     if changes:
         for change in changes:
             print(f'{kind}-guard: {change}')

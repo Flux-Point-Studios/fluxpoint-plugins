@@ -92,6 +92,75 @@ class Ratchets(unittest.TestCase):
         self.cli('metric-guard', '--tighten', ok=False)
         self.assertEqual(json.loads((self.root / '.fluxpoint-metrics-baseline.json').read_text())['metrics']['cost']['value'], 10)
 
+    def test_tighten_json_reports_the_persisted_limit(self):
+        self.metric()
+        self.put('value', '8')
+        self.commit()
+        result = self.cli('metric-guard', '--tighten', '--json')
+        self.assertEqual(json.loads(result.stdout)['metrics'][0]['limit'], 8)
+        self.assertIn('10 -> 8', result.stderr)
+
+    def test_committing_harness_cannot_tighten_an_unchecked_head(self):
+        self.metric()
+        self.put('value', '8')
+        self.put('scripts/harness.sh', '#!/bin/bash\ngit commit --allow-empty -qm moved\nexit 0\n')
+        self.commit()
+        before = (self.root / '.fluxpoint-metrics-baseline.json').read_bytes()
+        result = self.cli('metric-guard', '--tighten', ok=False)
+        self.assertIn('HEAD changed', result.stderr)
+        self.assertEqual(before, (self.root / '.fluxpoint-metrics-baseline.json').read_bytes())
+
+    def test_committing_metric_cannot_tighten_after_making_harness_red(self):
+        self.json('.fluxpoint-metrics.json', {'metrics': [
+            {'name': 'cost', 'command': [sys.executable, 'measure.py'], 'direction': 'down'}]})
+        self.put('value', '10')
+        self.put('measure.py', """from pathlib import Path
+import subprocess
+harness = Path('scripts/harness.sh')
+if Path('trigger').exists() and 'exit 0' in harness.read_text():
+    harness.write_text('#!/bin/bash\\nexit 1\\n')
+    subprocess.run(['git', 'add', 'scripts/harness.sh'], check=True)
+    subprocess.run(['git', 'commit', '-qm', 'measurement changed harness'], check=True)
+print(Path('value').read_text())
+""")
+        self.cli('metric-guard', '--baseline')
+        self.commit()
+        self.put('value', '8')
+        self.put('trigger', 'go')
+        self.commit()
+        before = (self.root / '.fluxpoint-metrics-baseline.json').read_bytes()
+        result = self.cli('metric-guard', '--tighten', ok=False)
+        self.assertIn('HEAD changed', result.stderr)
+        self.assertEqual(before, (self.root / '.fluxpoint-metrics-baseline.json').read_bytes())
+
+    def test_noisy_last_metric_and_malformed_extractors_preserve_whole_baseline(self):
+        self.metric()
+        before = (self.root / '.fluxpoint-metrics-baseline.json').read_bytes()
+        manifest = json.loads((self.root / '.fluxpoint-metrics.json').read_text())
+        for command, extract in [([sys.executable, '-c', 'print("true")'], {'pointer': ''}),
+                                 ([sys.executable, '-c', 'print("1.5")'], {'pointer': ''}),
+                                 ([sys.executable, '-c', 'print("1 2")'], {'regex': r'(\d+)'}),
+                                 ([sys.executable, '-c', 'print("10")'], {'regex': r'not a capture'})]:
+            with self.subTest(extract=extract, command=command):
+                self.json('.fluxpoint-metrics.json', {'metrics': [*manifest['metrics'],
+                    {'name': 'invalid', 'command': command, 'extract': extract, 'direction': 'up'}]})
+                self.cli('metric-guard', '--baseline', ok=False)
+                self.assertEqual(before, (self.root / '.fluxpoint-metrics-baseline.json').read_bytes())
+        self.put('counter', '0')
+        code = 'from pathlib import Path; p=Path("counter"); n=int(p.read_text())+1; p.write_text(str(n)); print(n)'
+        self.json('.fluxpoint-metrics.json', {'metrics': [*manifest['metrics'],
+            {'name': 'noise', 'command': [sys.executable, '-c', code], 'direction': 'up'}]})
+        self.cli('metric-guard', '--baseline', ok=False)
+        self.assertEqual(before, (self.root / '.fluxpoint-metrics-baseline.json').read_bytes())
+
+    def test_tighten_does_not_arm_an_empty_guard_baseline(self):
+        self.json('.fluxpoint-guards.json', {'guards': []})
+        self.json('.fluxpoint-guards-baseline.json', {})
+        self.commit()
+        before = (self.root / '.fluxpoint-guards-baseline.json').read_bytes()
+        self.cli('guard-guard', '--tighten', ok=False)
+        self.assertEqual(before, (self.root / '.fluxpoint-guards-baseline.json').read_bytes())
+
     def test_proof_tightening_locks_improvement_in_full(self):
         self.put('proof.lean', 'theorem example : True := by sorry\n')
         self.commit()
@@ -159,6 +228,35 @@ class Ratchets(unittest.TestCase):
         self.commit()
         self.cli('mutation-guard', '--tighten', '--from', str(self.root / 'report.json'), ok=False)
         self.assertEqual(prior, (self.root / '.fluxpoint-proof-baseline.json').read_bytes())
+
+    def test_partial_mutation_measurement_cannot_tighten(self):
+        self.json('.fluxpoint-mutation.json', {'version': 1, 'tool': 'stryker'})
+        def report(statuses):
+            self.json('report.json', {'files': {'a.js': {'mutants': [{'status': s} for s in statuses]}}})
+        report(['Killed'] * 8 + ['Survived'] * 2)
+        self.commit()
+        self.cli('mutation-guard', '--measure', '--from', str(self.root / 'report.json'))
+        self.commit()
+        before = (self.root / '.fluxpoint-proof-baseline.json').read_bytes()
+        report(['Killed'] * 9 + ['Survived', 'NewUnknownStatus'])
+        self.commit()
+        result = self.cli('mutation-guard', '--tighten', '--from', str(self.root / 'report.json'), ok=False)
+        self.assertIn('NewUnknownStatus', result.stderr)
+        self.assertEqual(before, (self.root / '.fluxpoint-proof-baseline.json').read_bytes())
+
+    def test_mutation_tighten_never_lowers_a_floor_within_measurement_tolerance(self):
+        self.json('.fluxpoint-mutation.json', {'version': 1, 'tool': 'stryker'})
+        self.json('report.json', {'files': {'a.js': {'mutants': [
+            *[{'status': 'Killed'} for _ in range(9)], {'status': 'Survived'}]}}})
+        self.commit()
+        self.cli('mutation-guard', '--measure', '--from', str(self.root / 'report.json'))
+        doc = json.loads((self.root / '.fluxpoint-proof-baseline.json').read_text())
+        doc['mutation']['score'] += 1e-10
+        self.json('.fluxpoint-proof-baseline.json', doc)
+        self.commit()
+        before = (self.root / '.fluxpoint-proof-baseline.json').read_bytes()
+        self.cli('mutation-guard', '--tighten', '--from', str(self.root / 'report.json'), ok=False)
+        self.assertEqual(before, (self.root / '.fluxpoint-proof-baseline.json').read_bytes())
 
 
 if __name__ == '__main__':

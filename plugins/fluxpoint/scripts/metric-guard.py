@@ -90,10 +90,14 @@ def extract(output, spec):
     return int(value)
 
 
+def command_key(m):
+    return json.dumps([m['command'], m.get('runs', 2), m.get('timeout', 120)], sort_keys=True)
+
+
 def measure(root, m, outputs=None):
     # Metrics selecting different fields of one command share its repeated
     # executions. A repo with 100 Aiken tests still runs check twice, not 400 times.
-    key = json.dumps([m['command'], m.get('runs', 2), m.get('timeout', 120)], sort_keys=True)
+    key = command_key(m)
     cached = outputs is not None and key in outputs
     if (m.get('extract') or {}).get('aiken') and (outputs is None or not outputs.get('__aiken_version__')):
         from aiken_units import check_version
@@ -129,11 +133,32 @@ def load_baseline(root):
     return doc['metrics']
 
 
+def check_aiken_coverage(metrics, outputs):
+    # Selecting only old fields would leave new unit scenarios (or a deleted
+    # CPU/mem metric) unratcheted while --check stayed green. Every current
+    # unit test from each declared Aiken command needs both measured ceilings.
+    groups = {}
+    for m in metrics:
+        selector = (m.get('extract') or {}).get('aiken')
+        if selector:
+            groups.setdefault(command_key(m), set()).add((selector['test'], selector['unit']))
+    if groups:
+        from aiken_units import parse
+        for key, declared in groups.items():
+            for output in outputs[key]:
+                costs, _ = parse(output)
+                missing = {(test, unit) for test in costs for unit in ('mem', 'cpu')} - declared
+                if missing:
+                    raise ValueError('unarmed Aiken unit cost(s); declare and baseline: ' +
+                                     ', '.join(f'{test}.{unit}' for test, unit in sorted(missing)))
+
+
 def collect(root):
     base = load_baseline(root)
     rows = []
     outputs = {}
-    for m in manifest(root):
+    metrics = manifest(root)
+    for m in metrics:
         value = measure(root, m, outputs)
         prior = base.get(m['name'])
         armed = (isinstance(prior, dict) and prior.get('definition') == definition(m)
@@ -142,6 +167,7 @@ def collect(root):
         good = armed and (value <= limit if m['direction'] == 'down' else value >= limit)
         rows.append({'name': m['name'], 'value': value, 'direction': m['direction'],
                      'limit': limit, 'armed': armed, 'ok': good, 'definition': definition(m)})
+    check_aiken_coverage(metrics, outputs)
     return rows
 
 
@@ -169,7 +195,7 @@ def main():
             return 0
         if a.tighten:
             from ratchet import green
-            green(root)
+            checked_head = green(root)
         rows = collect(root)
         if a.baseline:
             write(root, {r['name']: {k: r[k] for k in ('value', 'direction', 'definition')} for r in rows})
@@ -179,13 +205,15 @@ def main():
             if any(not r['ok'] for r in rows):
                 raise ValueError('--tighten refused: unarmed metric or worse measurement')
             from ratchet import clean
-            clean(root)
+            clean(root, checked_head)
             base = load_baseline(root)
             changed = False
             for r in rows:
                 if r['value'] != r['limit']:
-                    print(f'metric-guard: {r["name"]}: {r["limit"]} -> {r["value"]}')
+                    print(f'metric-guard: {r["name"]}: {r["limit"]} -> {r["value"]}',
+                          file=sys.stderr if a.json else sys.stdout)
                     base[r['name']]['value'] = r['value']
+                    r['limit'] = r['value']
                     changed = True
             if changed:
                 write(root, base)

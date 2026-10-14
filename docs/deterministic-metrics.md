@@ -31,7 +31,9 @@ independent correctness requirement.
 `proof-guard.py`, `seam-guard.py`, `guard-guard.py`, `mutation-guard.py` and
 `metric-guard.py` accept `--tighten`. It requires a clean Git tree, runs the
 actual `scripts/harness.sh --full`, refuses red, then checks cleanliness again
-before writing. It only lowers recorded count ceilings, raises guard floors,
+before writing. The HEAD checked by the full harness must stay unchanged, even
+if a command commits its own edits and leaves a clean tree. Tightening refuses
+partial mutation reports with unknown statuses. It only lowers recorded count ceilings, raises guard floors,
 raises mutation score floors while lowering survivor ceilings, and improves
 metric limits in their declared direction. It preserves sibling sections and
 prints each change. It never arms a new category or silently weakens one.
@@ -62,7 +64,11 @@ For Aiken, `scripts/py.sh aiken-metrics.py --baseline` from the installed plugin
 runs pinned **v1.1.23** twice with seed 1, compares the real unit-test mem/CPU
 counts, and adds one metric ceiling per test and unit. Commit both manifests.
 The full harness remeasures and enforces these ceilings; the shared command
-runs twice regardless of how many tests select its fields. Other compiler
+runs twice regardless of how many tests select its fields. Every current unit
+test emitted by each Aiken measurement command needs both mem and CPU metrics;
+adding a test or dropping one of its metrics fails until explicitly baselined.
+Malformed or incomplete test summaries and failed properties cannot certify
+unit-test costs. Other compiler
 versions are refused until their output and cost behavior are independently
 verified. Rebaseline explicitly when intentionally changing the compiler,
 Plutus version or cost model.
