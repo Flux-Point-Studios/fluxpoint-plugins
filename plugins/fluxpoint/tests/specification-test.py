@@ -344,9 +344,11 @@ time.sleep(float(sys.argv[1]))
         before_identity = self.identity()
         before_script = self.compile().stdout
         (self.root / 'checks.py').write_text('print("fixed harness")\n')
+        (self.root / 'tests/conftest.py').unlink()
         self.assertEqual(self.run_cli('--check').returncode, 0)
         self.assertEqual(self.identity(), before_identity)
         self.assertEqual(self.compile().stdout, before_script)
+        self.assertEqual(self.run_cli('--lock').returncode, 1)
 
     def test_explicit_harness_inputs_reject_missing_and_external_paths(self):
         for path in ('missing.py', '../outside.py', '/tmp/outside.py'):
@@ -395,6 +397,7 @@ time.sleep(float(sys.argv[1]))
         self.harness()
         (self.root / 'checks.py').write_text('print("changed")\n')
         (self.root / 'tests/test_contract.py').unlink()
+        (self.root / 'tests/conftest.py').unlink()
         (self.root / 'WORK.md').write_text('SPEC: .fluxpoint-spec.json\n\n'
             '| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n')
         (self.root / 'result.json').write_text(json.dumps({'outcome': 'COMPLETE', 'specification': self.identity()}))
@@ -404,12 +407,13 @@ time.sleep(float(sys.argv[1]))
         self.assertEqual(result.returncode, 0, result.stderr)
         artifact = json.loads((self.root / '.claude/fluxpoint/runs/harness-edited.json').read_text())
         harness = artifact['harness']
-        self.assertEqual(harness['changedPaths'], ['checks.py', 'tests/test_contract.py'])
+        self.assertEqual(harness['changedPaths'], ['checks.py', 'tests/conftest.py', 'tests/test_contract.py'])
         self.assertIsNone(harness['files']['tests/test_contract.py'])
+        self.assertIsNone(harness['files']['tests/conftest.py'])
         self.assertEqual(harness['files']['checks.py'], hashlib.sha256((self.root / 'checks.py').read_bytes()).hexdigest())
         evidence = (self.root / 'WORK.md').read_text()
         self.assertIn(harness['sha256'], evidence)
-        self.assertIn('harness differs from lock: checks.py, tests/test_contract.py', evidence)
+        self.assertIn('harness differs from lock: checks.py, tests/conftest.py, tests/test_contract.py', evidence)
 
     def test_duplicate_json_keys_are_rejected(self):
         path = self.root / '.fluxpoint-spec.json'

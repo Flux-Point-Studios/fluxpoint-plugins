@@ -282,7 +282,7 @@ def resolve_text(root, doc):
     return walk(doc), dict(sorted(references.items()))
 
 
-def harness_inputs(root, doc):
+def harness_inputs(root, doc, allow_missing=False):
     """Files named by literal argv/witness arguments, plus explicit dependencies."""
     root = Path(root).resolve()
     paths = set()
@@ -301,7 +301,13 @@ def harness_inputs(root, doc):
                     continue  # Executables, switches and code are not repository files.
                 paths.add(path.relative_to(root).as_posix())
     for rel in doc.get('harnessInputs', []):
-        paths.add(repo_file(root, rel, 'harnessInputs').relative_to(root).as_posix())
+        candidate = root / in_repo(rel, 'harnessInputs')
+        if not candidate.resolve().is_relative_to(root):
+            raise ValueError(f'harnessInputs {rel!r} must stay inside the repository')
+        if allow_missing and not candidate.exists():
+            paths.add(candidate.relative_to(root).as_posix())
+        else:
+            paths.add(repo_file(root, rel, 'harnessInputs').relative_to(root).as_posix())
     return {rel: digest(root / rel) for rel in sorted(paths)}
 
 
@@ -313,7 +319,7 @@ def harness_record(root, spec=None):
     if not isinstance(expected, dict):
         raise ValueError('lock harness must be a map of paths to SHA-256 digests')
     doc = json.loads(packet_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
-    current = harness_inputs(root, doc)
+    current = harness_inputs(root, doc, allow_missing=True)
     for rel in expected:
         in_repo(rel, 'locked harness input')
         path = Path(root) / rel
@@ -489,7 +495,7 @@ def load(root, locked=True, spec=None):
         if references:
             identity['references'] = references
         # Validate explicit dependencies even before a harness is frozen.
-        harness_inputs(root, doc)
+        harness_inputs(root, doc, allow_missing=locked)
         ids = {oid for check in doc['checks'] for oid in check.get('obligations', [])}
         if ids:
             module = importlib.util.spec_from_file_location('spec_guard', Path(__file__).with_name('spec-guard.py'))

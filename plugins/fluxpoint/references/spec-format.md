@@ -139,7 +139,9 @@ packet differs from the graph's embedded packet must not certify that graph.
 `--lock` also records `harness: {path: sha256}` beside the specification identity.
 It includes existing repository files named in `argv`/`witness`, including
 `file::node` selectors and `--option=file`, plus every `harnessInputs` file.
-Explicit inputs must exist inside the repository. Add imported helpers, fixtures
+Explicit inputs must exist inside the repository when freezing the harness.
+Deleting a frozen input does not alter the specification identity; its next run
+record names the missing file with a null hash. Add imported helpers, fixtures
 and configs explicitly; the plugin does not infer a language's dependency graph.
 The harness map stays outside the compared identity, so editing check code
 changes neither the graph's IR nor its compiled script and does not stale its
