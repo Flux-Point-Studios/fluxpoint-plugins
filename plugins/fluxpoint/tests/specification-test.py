@@ -350,6 +350,23 @@ time.sleep(float(sys.argv[1]))
         self.assertEqual(self.compile().stdout, before_script)
         self.assertEqual(self.run_cli('--lock').returncode, 1)
 
+    def test_harness_file_and_aggregate_hashes_survive_line_ending_conversion(self):
+        self.harness()
+        sys.path.insert(0, str(PLUGIN / 'scripts'))
+        import specification
+        expected = json.loads((self.root / '.fluxpoint-spec-lock.json').read_text())['harness']
+        original = specification.harness_record(self.root)
+        for ending in (b'\r\n', b'\n'):
+            with self.subTest(ending=ending):
+                for rel in expected:
+                    path = self.root / rel
+                    path.write_bytes(path.read_bytes().replace(b'\r\n', b'\n').replace(b'\n', ending))
+                recorded = specification.harness_record(self.root)
+                self.assertEqual(recorded['files'], expected)
+                self.assertEqual(recorded['sha256'], original['sha256'])
+                self.assertEqual(recorded['changedPaths'], [])
+                self.assertEqual(self.run_cli('--check').returncode, 0)
+
     def test_explicit_harness_inputs_reject_missing_and_external_paths(self):
         for path in ('missing.py', '../outside.py', '/tmp/outside.py'):
             with self.subTest(path=path):
@@ -410,7 +427,8 @@ time.sleep(float(sys.argv[1]))
         self.assertEqual(harness['changedPaths'], ['checks.py', 'tests/conftest.py', 'tests/test_contract.py'])
         self.assertIsNone(harness['files']['tests/test_contract.py'])
         self.assertIsNone(harness['files']['tests/conftest.py'])
-        self.assertEqual(harness['files']['checks.py'], hashlib.sha256((self.root / 'checks.py').read_bytes()).hexdigest())
+        self.assertEqual(harness['files']['checks.py'], hashlib.sha256(
+            (self.root / 'checks.py').read_bytes().replace(b'\r\n', b'\n')).hexdigest())
         evidence = (self.root / 'WORK.md').read_text()
         self.assertIn(harness['sha256'], evidence)
         self.assertIn('harness differs from lock: checks.py, tests/conftest.py, tests/test_contract.py', evidence)
