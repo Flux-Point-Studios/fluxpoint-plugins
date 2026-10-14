@@ -123,9 +123,50 @@ js = cg.emit(disc, CONTRACTS)
 report("a short panel marks the item unverified",
        "unverified: cast.length < n," in js,
        "tagged" if "unverified: cast.length < n," in js else "MISSING")
-report("discovery majority policy stays explicit; code review preserves unresolved claims",
-       "filter(v => (codeReview && v.unverified) || v.kills < need)" in js,
-       "code-review-only unresolved exception")
+def run_panel_votes(contract, votes):
+    """Execute the emitted panel, so policy is pinned independently of spelling."""
+    ir = node(contract=contract, verify="panel:3", verifyOver="findings", expectItems=1)
+    ir["treeGuard"] = False
+    claim = {"severity": "HIGH", "finding": "reachable security boundary bypass",
+             "exploit_path": "passing valid control and a reached attack boundary",
+             "minimal_fix": "enforce the guard at the reached boundary"}
+    result = {"findings": [claim]}
+    if contract == "RedTeamV1":
+        result.update(verdict="BLOCK", worstSeverity="HIGH", worstSeverityRank=3)
+    emitted = cg.emit(ir, CONTRACTS).replace("export const meta", "const meta")
+    with tempfile.TemporaryDirectory() as temp:
+        script = os.path.join(temp, "panel.mjs")
+        prefix = ("const votes=" + json.dumps(votes) + ",raw=" + json.dumps(result) + ";\n"
+                  "const agent=async(p,o)=>{const m=String(o.label).match(/refute(\\d+)$/);"
+                  "return m?votes[Number(m[1])-1]:raw};\n"
+                  "const parallel=async(xs)=>Promise.all(xs.map(f=>f()));\n"
+                  "const args={},log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};\n")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(prefix + "(async()=>{\n" + emitted + "\n})().then(r=>console.log(JSON.stringify(r)));\n")
+        proc = subprocess.run(["node", script], text=True, capture_output=True, timeout=30)
+        if proc.returncode:
+            raise AssertionError(proc.stderr)
+        return json.loads(proc.stdout)["results"]["n"]
+
+
+true_vote = {"refuted": True, "reason": "Independent contradictory executable evidence"}
+false_vote = {"refuted": False, "reason": "The attack reproduced against its passing valid control"}
+for name, contract, votes, survivors, unverified in [
+    ("discovery still drops a majority-refuted claim", "FindingsV1", [true_vote, true_vote, false_vote], 0, None),
+    ("discovery still keeps a minority-refuted claim", "FindingsV1", [true_vote, false_vote, false_vote], 1, False),
+    ("discovery retains its majority with one missing vote", "FindingsV1", [true_vote, true_vote, None], 0, None),
+    ("code review keeps a claim over divided refuters", "RedTeamV1", [true_vote, true_vote, false_vote], 1, False),
+    ("code review keeps a claim with a missing refuter", "RedTeamV1", [true_vote, true_vote, None], 1, True),
+    ("code review rejects a truthy nonboolean refutation", "RedTeamV1", [true_vote, true_vote, {"refuted": "false", "reason": "malformed vote"}], 1, True),
+    ("code review requires evidence from every refuter", "RedTeamV1", [true_vote, true_vote, {"refuted": True, "reason": ""}], 1, True),
+    ("code review drops only a fully refuted claim", "RedTeamV1", [true_vote, true_vote, true_vote], 0, None),
+]:
+    try:
+        result = run_panel_votes(contract, votes)
+        correct = len(result) == survivors and (unverified is None or result[0]["unverified"] is unverified)
+        report(name, correct, str(result)[:90])
+    except (AssertionError, KeyError, ValueError, subprocess.SubprocessError) as exc:
+        report(name, False, str(exc)[:120])
 
 # --- Prompts were already escaped; keep it that way ------------------------
 emits_inert(
