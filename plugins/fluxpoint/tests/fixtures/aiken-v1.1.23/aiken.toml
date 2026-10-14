@@ -1,0 +1,23 @@
+name = "fluxpoint/metric-probe"
+version = "0.0.0"
+compiler = "v1.1.23"
+plutus = "v3"
+license = "Apache-2.0"
+description = "Aiken contracts for project 'fluxpoint/metric-probe'"
+
+[repository]
+user = "fluxpoint"
+project = "metric-probe"
+platform = "github"
+
+[[dependencies]]
+name = "aiken-lang/stdlib"
+version = "v2.2.0"
+source = "github"
+
+[[dependencies]]
+name = "aiken-lang/fuzz"
+version = "v2.2.0"
+source = "github"
+
+[config]

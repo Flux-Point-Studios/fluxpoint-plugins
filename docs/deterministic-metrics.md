@@ -57,3 +57,22 @@ sample cannot erase an earlier gain. A failed or nondeterministic measurement
 is reported and cannot trigger plateau; no manifest preserves the original
 iteration-budget behavior. `FPL_PLUGIN_ROOT` (or the runtime plugin root) must
 locate the helper when metrics are declared.
+
+For Aiken, `scripts/py.sh aiken-metrics.py --baseline` from the installed plugin
+runs pinned **v1.1.23** twice with seed 1, compares the real unit-test mem/CPU
+counts, and adds one metric ceiling per test and unit. Commit both manifests.
+The full harness remeasures and enforces these ceilings; the shared command
+runs twice regardless of how many tests select its fields. Other compiler
+versions are refused until their output and cost behavior are independently
+verified. Rebaseline explicitly when intentionally changing the compiler,
+Plutus version or cost model.
+
+The machine format is `modules[].tests[].execution_units.{mem,cpu}` on non-TTY
+stdout. Tests carrying `iterations` are properties, are listed as excluded,
+and never get parsed as one execution budget. The exact source, dependency
+pins, raw output, release checksum and two-run output hash from the real
+v1.1.23 validation live in `plugins/fluxpoint/tests/fixtures/aiken-v1.1.23/`.
+The scaffolded Aiken harness passes its current check output to
+`plutus-budget.py --aiken-output` when a metrics manifest is present. That gate
+can compare measured unit scenarios to protocol limits instead of typed-in
+`exUnits`; a unit scenario is not a complete transaction or a sum of all tests.

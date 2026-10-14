@@ -52,8 +52,8 @@ def manifest(root):
             raise ValueError(f'{m["name"]}: timeout must be positive')
         ex = m.get('extract')
         if ex is not None and (not isinstance(ex, dict) or len(ex) != 1 or not
-                               ({'regex', 'pointer'} & set(ex))):
-            raise ValueError(f'{m["name"]}: extract must contain only regex or pointer')
+                               ({'regex', 'pointer', 'aiken'} & set(ex))):
+            raise ValueError(f'{m["name"]}: extract must contain only regex, pointer or aiken')
     return doc['metrics']
 
 
@@ -62,6 +62,9 @@ def definition(m):
 
 
 def extract(output, spec):
+    if spec and 'aiken' in spec:
+        from aiken_units import extract as aiken_extract
+        return aiken_extract(output, spec['aiken'])
     if spec and 'regex' in spec:
         regex = re.compile(spec['regex'], re.MULTILINE)
         if regex.groups != 1:
@@ -87,14 +90,29 @@ def extract(output, spec):
     return int(value)
 
 
-def measure(root, m):
-    values = []
-    for _ in range(m.get('runs', 2)):
-        r = subprocess.run(m['command'], shell=isinstance(m['command'], str), cwd=root,
-                           capture_output=True, text=True, timeout=m.get('timeout', 120))
-        if r.returncode:
-            raise ValueError(f'{m["name"]}: command exited {r.returncode}: {r.stderr[-600:]}')
-        values.append(extract(r.stdout, m.get('extract')))
+def measure(root, m, outputs=None):
+    # Metrics selecting different fields of one command share its repeated
+    # executions. A repo with 100 Aiken tests still runs check twice, not 400 times.
+    key = json.dumps([m['command'], m.get('runs', 2), m.get('timeout', 120)], sort_keys=True)
+    cached = outputs is not None and key in outputs
+    if (m.get('extract') or {}).get('aiken') and (outputs is None or not outputs.get('__aiken_version__')):
+        from aiken_units import check_version
+        check_version(root)
+        if outputs is not None:
+            outputs['__aiken_version__'] = True
+    if cached:
+        texts = outputs[key]
+    else:
+        texts = []
+        for _ in range(m.get('runs', 2)):
+            r = subprocess.run(m['command'], shell=isinstance(m['command'], str), cwd=root,
+                               capture_output=True, text=True, timeout=m.get('timeout', 120))
+            if r.returncode:
+                raise ValueError(f'{m["name"]}: command exited {r.returncode}: {r.stderr[-600:]}')
+            texts.append(r.stdout)
+        if outputs is not None:
+            outputs[key] = texts
+    values = [extract(t, m.get('extract')) for t in texts]
     if len(set(values)) != 1:
         raise ValueError(f'{m["name"]}: NOT ARMED: nondeterministic repeated values {values}')
     return values[0]
@@ -114,8 +132,9 @@ def load_baseline(root):
 def collect(root):
     base = load_baseline(root)
     rows = []
+    outputs = {}
     for m in manifest(root):
-        value = measure(root, m)
+        value = measure(root, m, outputs)
         prior = base.get(m['name'])
         armed = (isinstance(prior, dict) and prior.get('definition') == definition(m)
                  and type(prior.get('value')) is int)
@@ -154,6 +173,8 @@ def main():
         rows = collect(root)
         if a.baseline:
             write(root, {r['name']: {k: r[k] for k in ('value', 'direction', 'definition')} for r in rows})
+            for r in rows:
+                r.update(limit=r['value'], armed=True, ok=True)
         elif a.tighten:
             if any(not r['ok'] for r in rows):
                 raise ValueError('--tighten refused: unarmed metric or worse measurement')
@@ -176,7 +197,7 @@ def main():
                 state = 'NOT ARMED' if not r['armed'] else ('green' if r['ok'] else 'RED')
                 print(f'metric-guard: {r["name"]}: {r["value"]} / {bound} {r["limit"]} ({state})')
         return int(a.check and any(not r['ok'] for r in rows))
-    except (ValueError, OSError, KeyError, IndexError, TypeError, subprocess.SubprocessError) as e:
+    except (ValueError, OSError, KeyError, IndexError, TypeError, re.error, subprocess.SubprocessError) as e:
         print(f'metric-guard: {e}', file=sys.stderr)
         return 1
 
