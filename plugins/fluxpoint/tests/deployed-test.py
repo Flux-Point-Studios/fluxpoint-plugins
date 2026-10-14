@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """A suite may certify only the dependency resolution it actually executes."""
 import json
+import os
 import copy
 import importlib.util
 from pathlib import Path
@@ -20,7 +21,9 @@ class DeployedTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        venv.EnvBuilder(with_pip=False).create(self.root / "venv")
+        # Match `python -m venv` on POSIX. Copying a relocatable interpreter
+        # can lose its standard-library prefix; a symlink preserves it.
+        venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(self.root / "venv")
         self.python = self.root / ("venv/Scripts/python.exe" if sys.platform == "win32" else "venv/bin/python")
         site = Path(subprocess.check_output([str(self.python), "-c", "import sysconfig;print(sysconfig.get_path('purelib'))"], text=True).strip())
         dist = site / "demo_package-0.13.1.dist-info"
