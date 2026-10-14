@@ -491,6 +491,7 @@ def load_gates(root):
         out.add("ci")
     try:
         out.findings = tuple(_sibling("attest").load_gates(root or ".")[1])
+        out.deployed = doc.get("deployed", {}) if isinstance(doc, dict) and not out.findings else {}
     except Exception as e:  # noqa: BLE001 - a rule we cannot run is a finding
         out.findings = (f"attest.py could not judge {GATES}: {e}",)
     return out
@@ -1455,6 +1456,15 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                     f"than one tool call runs through attest.py --run and "
                     f"--await; CI's own statuses are prove:ci"
                 )
+            for package, lane in getattr(gates, "deployed", {}).items():
+                required_gate = lane["gate"]
+                checked = [o for o in guards if prove_gate(o) == required_gate
+                           and HALT.match(str(o.get("haltWhen", "")))
+                           and halt_parts(o) == ("exit", "!==", "0")]
+                if not checked:
+                    f.append(f"{where}: irreversible requires an earlier independent prove:{required_gate} "
+                             f"guard for deployed.{package}, with haltWhen 'exit != 0' — "
+                             "every production dependency lane must pass before the effect")
             if "confirm" not in (ir.get("requiredArgs") or []):
                 f.append(
                     f"{where}: irreversible requires 'confirm' in requiredArgs — "

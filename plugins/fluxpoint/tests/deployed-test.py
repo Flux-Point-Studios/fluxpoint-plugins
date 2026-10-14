@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """A suite may certify only the dependency resolution it actually executes."""
 import json
+import copy
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -89,6 +91,28 @@ class DeployedTests(unittest.TestCase):
         path.write_text(json.dumps(row) + "\n")
         self.pins.write_text("demo-package==0.13.1 # changed pins identity\n")
         self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]["status"], "STALE")
+
+    def test_irreversible_effect_needs_every_deployed_guard(self):
+        spec = importlib.util.spec_from_file_location("cg", SCRIPTS / "compile-graph.py")
+        cg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cg)
+        contracts = cg.load_contracts(str(SCRIPTS.parent / "contracts"))
+        gates = cg.load_gates(str(self.root))
+        ir = {"version": 1, "campaign": "submit tested deployment", "requiredArgs": ["confirm"],
+              "budget": {"maxNodes": 8}, "nodes": [
+                  {"id": "build", "prompt": "build proposal", "contract": "HarnessCheckV1"},
+                  {"id": "pins", "after": "build", "prompt": "run deployed gate against {{prev}}", "contract": "ExecutionV1",
+                   "verify": "prove:api-deployed", "independent": True, "verifies": "build", "haltWhen": "exit != 0"},
+                  {"id": "submit", "after": "pins", "prompt": "submit using {{prev}}", "contract": "HarnessCheckV1", "irreversible": True}]}
+        self.assertFalse(cg.validate(ir, contracts, gates=gates))
+        for missing in (True, False):
+            bad = copy.deepcopy(ir)
+            if missing:
+                bad["nodes"].pop(1)
+                bad["nodes"][-1]["after"] = "build"
+            else:
+                bad["nodes"][1]["haltWhen"] = "exit == 0"
+            self.assertTrue(any("deployed.api" in f for f in cg.validate(bad, contracts, gates=gates)))
 
 
 if __name__ == "__main__":
