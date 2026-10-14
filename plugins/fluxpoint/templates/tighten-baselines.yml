@@ -25,7 +25,7 @@ jobs:
           : "${FPL_PLUGIN_ROOT:?Install the pinned Fluxpoint plugin and set its root}"
           git config user.name 'fluxpoint-baseline-bot'
           git config user.email 'fluxpoint-baseline-bot@users.noreply.github.com'
-          git switch -c automation/tighten-baselines
+          # Local main commits are collected into the PR branch by the action below.
           bash scripts/harness.sh --full
           for kind in proof seam guard mutation metric; do
             # Skip ratchets this repo has not armed. --tighten never arms one.
