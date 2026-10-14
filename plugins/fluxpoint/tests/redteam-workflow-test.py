@@ -3,6 +3,7 @@
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -57,12 +58,12 @@ def run(args=None, responder=DEFAULT):
         return json.loads(out.read_text())
 
 
-def record(results, contracts=None, *flags):
+def record(results, contracts=None, *flags, summary=None):
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         graph = root / 'WORK.md'
         graph.write_text('| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n')
-        summary = {'outcome': 'COMPLETE', 'contracts': contracts or {k: 'RedTeamV1' for k in results},
+        summary = summary if summary is not None else {'outcome': 'COMPLETE', 'contracts': contracts or {k: 'RedTeamV1' for k in results},
                    'results': results, 'provenance': []}
         p = subprocess.run([sys.executable, str(PLUGIN / 'scripts/record-run.py'), '--run-id', 'review',
                             '--graph', str(graph), '--root', str(root), '--state-dir', str(root / 'runs'), *flags],
@@ -282,6 +283,115 @@ class RecordTests(unittest.TestCase):
         art, _, _ = record({}, None, '--red-team', 'SHIP')
         self.assertEqual(art['outcome'], 'BLOCKED-REDTEAM')
         self.assertEqual(art['redTeam'], 'BLOCK')
+
+
+class CompilerReviewTests(unittest.TestCase):
+    """Exercise the actual shipped feature red-team shape, with real emitted panels."""
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(PLUGIN / 'scripts'))
+        spec = importlib.util.spec_from_file_location('cg_review', PLUGIN / 'scripts' / 'compile-graph.py')
+        cls.cg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.cg)
+        cls.contracts = cls.cg.load_contracts(str(PLUGIN / 'contracts'))
+
+    def compiled(self, mode='refuted'):
+        ir = self.cg.extract_ir((PLUGIN / 'templates' / 'WORK.feature.md').read_text())
+        ir['nodes'] = ir['nodes'][-4:]
+        ir['nodes'][0].pop('after', None)
+        ir['nodes'][0]['prompt'] = ir['nodes'][0]['prompt'].replace('{{prev}}', 'No prior proof in this isolated review fixture')
+        ir['nodes'][0].pop('isolation', None)
+        ir['nodes'][0]['onRed'] = 'drop+log'
+        if mode == 'underverified':
+            ir['nodes'][2]['verify'] = 'panel:1'
+        ir['treeGuard'] = False
+        ir['requiredArgs'] = []
+        # Keep the exact six-lens/reduce/panel:3/terminal shape and role binding.
+        js = self.cg.emit(ir, self.contracts).replace('export const meta', 'const meta')
+        prefix = r"""
+import {writeFileSync} from 'node:fs';
+const mode=MODE,scope=SCOPE,lenses=LENSES,calls=[];
+const args={},log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
+const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
+const claim={severity:mode==='unknown-source'?'URGENT':mode==='medium'?'MEDIUM':'HIGH',finding:'reachable review boundary bypass',exploit_path:'valid control and attack at pinned subject',minimal_fix:'Enforce the guard at that boundary'};
+const coverage=(lens)=>({subject:structuredClone(scope),attackers:lens?1:lenses.length,lenses:lens?[lens]:lenses,sampled:false});
+const agent=async(p,o)=>{const label=String(o.label);calls.push(label);
+ if(label.startsWith('red-team-lenses:')){
+  const lens=label.split(':')[1];
+  if(mode==='dead-attacker'&&lens==='authority')return null;
+  const raised=lens==='authority'; const c=coverage(lens);
+  if(mode==='sampled'&&raised)c.sampled=true;
+  return {verdict:raised?'BLOCK':'SHIP',findings:raised?[claim]:[],coverage:c,
+   worstSeverity:raised?claim.severity:'NONE',worstSeverityRank:raised?(claim.severity==='MEDIUM'?2:3):0};
+ }
+ if(label==='red-team-refute')return {verdict:'BLOCK',findings:mode==='collector-drop'?[]:[mode==='collector-unknown'?{...claim,severity:'URGENT'}:claim],
+  worstSeverity:mode==='collector-drop'?'NONE':claim.severity,worstSeverityRank:mode==='collector-drop'?0:(claim.severity==='MEDIUM'?2:3),...(mode==='collector-blocker'?{review:{blockers:['Missing control execution']}}:{})};
+ if(label.includes(':refute')){
+  if(mode==='missing-vote'&&label.endsWith('3'))return null;
+  return {refuted:mode==='invalid-vote'?'false':mode==='majority'? !label.endsWith('3'):
+    ['refuted','sampled','dead-attacker','missing-vote','underverified','collector-blocker'].includes(mode),reason:'Contradictory executable case and passing valid control'};
+ }
+ return {verdict:'SHIP',findings:[],worstSeverity:'NONE',worstSeverityRank:0,coverage:coverage(),
+  ...(mode==='terminal-blocker'?{review:{blockers:['Missing deployment configuration']}}:{})};
+};
+""".replace('MODE', json.dumps(mode)).replace('SCOPE', json.dumps(SUBJECT)).replace('LENSES', json.dumps(LENSES))
+        with tempfile.TemporaryDirectory() as tmp:
+            script, out = Path(tmp) / 'run.mjs', Path(tmp) / 'out.json'
+            script.write_text(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(str(out))
+                              + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(str(out))
+                              + ',JSON.stringify({error:String(e)})));')
+            result = subprocess.run(['node', str(script)], capture_output=True, text=True, timeout=30)
+            self.assertTrue(out.exists(), result.stderr)
+            doc = json.loads(out.read_text())
+            self.assertNotIn('error', doc, doc)
+            return doc
+
+    def test_unanimously_refuted_high_claim_ships_and_records_with_actual_receipts(self):
+        doc = self.compiled()
+        self.assertEqual(doc['r']['outcome'], 'COMPLETE')
+        self.assertEqual(len([label for label in doc['calls'] if ':refute' in label]), 3)
+        receipt = doc['r']['redTeamReviews']['checks']['red-team-refute']
+        self.assertEqual(receipt['requested'], 3)
+        self.assertEqual(len(receipt['rows'][0]['votes']), 3)
+        art, _, err = record({}, summary=doc['r'])
+        self.assertEqual((art['outcome'], art['redTeam']), ('COMPLETE', 'SHIP'), err)
+        self.assertEqual(len(art['summary']['redTeamReviews']['checks']['red-team-refute']['rows'][0]['votes']), 3)
+
+    def test_collectors_missing_attackers_and_bad_refuters_cannot_manufacture_ship(self):
+        for mode in ('collector-drop', 'majority', 'invalid-vote', 'missing-vote', 'dead-attacker',
+                     'sampled', 'medium', 'terminal-blocker', 'unknown-source', 'collector-unknown', 'underverified', 'collector-blocker'):
+            with self.subTest(mode=mode):
+                doc = self.compiled(mode)
+                self.assertEqual(doc['r']['outcome'], 'HALTED', doc)
+                if mode == 'collector-drop':
+                    self.assertEqual(len([label for label in doc['calls'] if ':refute' in label]), 3)
+
+    def test_recorder_rechecks_vote_source_and_snapshot_receipts(self):
+        valid = self.compiled()['r']
+        mutations = [lambda s: s.pop('redTeamReviews'),
+                     lambda s: s['redTeamReviews']['checks']['red-team-refute']['rows'][0]['votes'].pop(),
+                     lambda s: s['redTeamReviews']['checks']['red-team-refute']['rows'][0]['votes'][0].update(refuted=False),
+                     lambda s: s['results']['red-team-lenses'].pop(),
+                     lambda s: s['results']['red-team']['coverage']['subject'][0].update(head='c' * 40)]
+        for mutate in mutations:
+            data = copy.deepcopy(valid)
+            mutate(data)
+            art, _, _ = record({}, summary=data)
+            self.assertEqual((art['outcome'], art['redTeam']), ('BLOCKED-REDTEAM', 'BLOCK'))
+
+    def test_unknown_or_non_array_findings_fail_closed_without_schema(self):
+        for findings in ([{'severity': 'URGENT', 'finding': 'hidden claim', 'exploit_path': 'attack', 'minimal_fix': 'fix'}],
+                         [None], 'not an array', None):
+            result = {'verdict': 'SHIP', 'worstSeverity': 'NONE', 'worstSeverityRank': 0,
+                      'findings': findings, 'coverage': {'subject': SUBJECT, 'attackers': 6, 'lenses': LENSES, 'sampled': False}}
+            art, _, _ = record({'rt': result})
+            self.assertEqual(art['outcome'], 'BLOCKED-REDTEAM')
+        for field in ('base', 'head'):
+            result = {'verdict': 'SHIP', 'findings': [], 'worstSeverity': 'NONE', 'worstSeverityRank': 0,
+                      'coverage': {'subject': copy.deepcopy(SUBJECT), 'attackers': 6, 'lenses': LENSES, 'sampled': False}}
+            result['coverage']['subject'][0][field] = 'HEAD'
+            art, _, _ = record({'rt': result})
+            self.assertEqual(art['outcome'], 'BLOCKED-REDTEAM')
 
 
 if __name__ == '__main__':

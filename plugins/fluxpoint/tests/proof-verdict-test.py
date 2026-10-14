@@ -65,7 +65,7 @@ def summary(verdict, surface, **extra):
                      "pa": {"verdict": verdict, "surface": surface, "checker": "dafny verify .",
                             "findings": []},
                      "rt": {"verdict": "SHIP", "findings": [], "coverage": {
-                         "subject": [{"repository": "fixture", "base": "base", "head": "head",
+                         "subject": [{"repository": "fixture", "base": "a" * 40, "head": "b" * 40,
                                       "files": 1, "additions": 1, "deletions": 0}],
                          "attackers": 6, "lenses": ["authority", "value", "state", "input", "operations", "composition"],
                          "sampled": False}}},

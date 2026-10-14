@@ -48,15 +48,22 @@ def red_team_coverage_issue(coverage):
                 not isinstance(item.get(key), str) or not item[key].strip()
                 for key in ("repository", "base", "head")):
             return "SHIP coverage has an invalid repository/base/head"
+        if any(not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", item[key], re.IGNORECASE)
+               for key in ("base", "head")):
+            return "SHIP coverage must pin base/head to full Git object ids"
         if any(type(item.get(key)) is not int or item[key] < 0
                for key in ("files", "additions", "deletions")):
             return "SHIP coverage needs nonnegative integer file and line counts"
+    if len({item["repository"] for item in subject}) != len(subject):
+        return "SHIP coverage repeats a repository"
     if type(coverage.get("attackers")) is not int or coverage["attackers"] < 1:
         return "SHIP coverage needs a positive attacker count"
     lenses = coverage.get("lenses")
     if (not isinstance(lenses, list) or not lenses
             or any(not isinstance(lens, str) or not lens.strip() for lens in lenses)):
         return "SHIP coverage needs named lenses"
+    if len(set(lenses)) != len(lenses):
+        return "SHIP coverage repeats a lens"
     if type(coverage.get("sampled")) is not bool:
         return "SHIP coverage must declare whether the review sampled"
     return None
@@ -80,13 +87,31 @@ def red_team_coverage_records(summary):
     return records
 
 
+
+def red_team_unresolved(r):
+    if "review" not in r:
+        return False
+    review = r["review"]
+    return (not isinstance(review, dict) or any(k in review and
+            (not isinstance(review[k], list) or bool(review[k]))
+            for k in ("blockers", "unverified", "deadLenses")))
+
+
 def red_team_incoherent(r):
     """Why a RedTeamV1 result cannot be taken at its verdict, or None."""
+    if r.get("verdict") not in ("SHIP", "BLOCK") or not isinstance(r.get("findings"), list):
+        return "invalid red-team verdict or findings array"
+    if any(not isinstance(f, dict) or f.get("severity") not in ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+           or any(not isinstance(f.get(k), str) for k in ("finding", "exploit_path", "minimal_fix"))
+           for f in r["findings"]):
+        return "malformed finding or unknown severity cannot be omitted"
     worst = max((SEVERITY_RANK.get((f or {}).get("severity"), 0)
                  for f in (r.get("findings") or []) if isinstance(f, dict)), default=0)
     name = next(k for k, v in SEVERITY_RANK.items() if v == worst)
     if r.get("verdict") == "SHIP" and worst >= SEVERITY_RANK["HIGH"]:
         return f"SHIP over a {name} finding"
+    if "worstSeverityRank" in r and type(r["worstSeverityRank"]) is not int:
+        return "worstSeverityRank must be an integer"
     if ("worstSeverityRank" in r or "worstSeverity" in r) and (
             r.get("worstSeverityRank") != worst
             or SEVERITY_RANK.get(r.get("worstSeverity")) != worst):
@@ -96,10 +121,118 @@ def red_team_incoherent(r):
         issue = red_team_coverage_issue(r.get("coverage"))
         if issue:
             return issue
-        review = r.get("review")
-        if isinstance(review, dict) and any(review.get(key) for key in ("blockers", "unverified", "deadLenses")):
+        if red_team_unresolved(r):
             return "SHIP has unresolved coverage or exploit blockers"
     return None
+
+
+
+def red_team_review_receipts(summary):
+    """Recognize intermediate claims only after complete, source-bound refutation.
+
+    The compiler writes these receipts from actual panel returns, not from the
+    final gate agent. Legacy summaries without receipts retain every BLOCK.
+    """
+    meta = summary.get("redTeamReviews")
+    if meta is None:
+        return set(), []
+    if not isinstance(meta, dict) or any(not isinstance(meta.get(k), dict)
+                                         for k in ("terminals", "checks", "expected")):
+        return set(), ["invalid red-team stage/refutation receipts"]
+    results = summary.get("results") or {}
+    exempt, errors = set(), []
+    key = lambda f: tuple(f.get(k) for k in ("severity", "finding", "exploit_path", "minimal_fix"))
+    identity = lambda c: sorted(tuple(s[k] for k in ("repository", "base", "head", "files", "additions", "deletions")) for s in c["subject"])
+    for terminal, info in meta["terminals"].items():
+        final = results.get(terminal)
+        if not isinstance(final, dict) or final.get("verdict") != "SHIP":
+            continue
+        try:
+            if red_team_incoherent(final):
+                raise ValueError("terminal result is incoherent")
+            if not isinstance(info, dict):
+                raise ValueError("invalid terminal stage identity")
+            sources, stages = info.get("sources"), info.get("stages")
+            if (not isinstance(sources, list) or not sources or not all(isinstance(x, str) for x in sources)
+                    or len(set(sources)) != len(sources) or not isinstance(stages, list)
+                    or not all(isinstance(x, str) for x in stages) or not set(sources) <= set(stages)
+                    or terminal in stages):
+                raise ValueError("missing source/stage bindings")
+            claims, attacker_count = [], 0
+            for source in sources:
+                values, expected = results.get(source), meta["expected"].get(source)
+                if (not isinstance(values, list) or not isinstance(expected, dict)
+                        or type(expected.get("attackers")) is not int or expected["attackers"] < 1
+                        or len(values) != expected["attackers"]):
+                    raise ValueError("missing source attacker")
+                named = []
+                for r in values:
+                    if not isinstance(r, dict) or red_team_incoherent(r):
+                        raise ValueError("malformed source review")
+                    coverage = r.get("coverage")
+                    if red_team_coverage_issue(coverage) or identity(coverage) != identity(final["coverage"]):
+                        raise ValueError("source review lacks matching pinned coverage")
+                    if coverage["sampled"] and not final["coverage"]["sampled"]:
+                        raise ValueError("final review hides sampled source")
+                    if not set(coverage["lenses"]) <= set(final["coverage"]["lenses"]):
+                        raise ValueError("final review omits a source lens")
+                    if red_team_unresolved(r):
+                        raise ValueError("source has unresolved coverage")
+                    if r["verdict"] == "BLOCK" and not r["findings"]:
+                        raise ValueError("source blocked without a refutable claim")
+                    attacker_count += coverage["attackers"]
+                    named.extend(coverage["lenses"])
+                    claims.extend(r["findings"])
+                required = expected.get("lenses")
+                if not isinstance(required, list) or not set(required) <= set(named):
+                    raise ValueError("missing configured source lens")
+            if final["coverage"]["attackers"] != attacker_count:
+                raise ValueError("terminal attacker count differs from completed sources")
+            # Include intermediate collections as well as raw attackers: a new
+            # claim cannot disappear merely because the collector invented it.
+            for stage in stages:
+                if stage not in results:
+                    raise ValueError("missing intermediate review stage")
+                for row in _each(results[stage]):
+                    if "verdict" in row:
+                        if red_team_incoherent(row):
+                            raise ValueError("malformed intermediate review")
+                        if red_team_unresolved(row):
+                            raise ValueError("intermediate review has unresolved blockers")
+                        claims.extend(row["findings"])
+                    elif "severity" in row:
+                        claims.append(row)
+            checked = set()
+            for check in meta["checks"].values():
+                if not isinstance(check, dict) or not isinstance(check.get("ids"), list):
+                    raise ValueError("invalid independent-refuter binding")
+                if not set(check["ids"]) & set(sources):
+                    continue
+                if set(check["ids"]) != set(sources):
+                    raise ValueError("refuter receipt names different sources")
+                if check.get("unresolved") is not False:
+                    raise ValueError("intermediate review has unresolved blockers")
+                requested, rows = check.get("requested"), check.get("rows")
+                if type(requested) is not int or requested < 1 or not isinstance(rows, list):
+                    raise ValueError("invalid requested refuter count")
+                for row in rows:
+                    votes = row.get("votes") if isinstance(row, dict) else None
+                    if (not isinstance(votes, list) or len(votes) != requested
+                            or row.get("unverified") is not False
+                            or type(row.get("cast")) is not int or row["cast"] != requested
+                            or type(row.get("kills")) is not int or row["kills"] != requested
+                            or any(not isinstance(v, dict) or v.get("refuted") is not True
+                                   or not isinstance(v.get("reason"), str) or not v["reason"].strip() for v in votes)):
+                        raise ValueError("missing, divided or unresolved independent refuters")
+                    if row.get("severity") in ("MEDIUM", "HIGH", "CRITICAL") and requested < 3:
+                        raise ValueError("MEDIUM+ claim needs three independent refuters")
+                    checked.add(key(row))
+            if any(key(claim) not in checked for claim in claims):
+                raise ValueError("source/intermediate claim has no unanimous refutation receipt")
+            exempt.update(stages)
+        except (ValueError, TypeError, KeyError) as e:
+            errors.append(f"{terminal}: red-team refutation receipts refused: {e}")
+    return exempt, errors
 
 
 def cell(s, n=160):
@@ -195,9 +328,10 @@ def derive(summary):
     """
     results = summary.get("results") or {}
     contracts = summary.get("contracts") or {}
-    harness, verdict, blocked = None, None, False
+    exempt, receipt_errors = red_team_review_receipts(summary)
+    harness, verdict, blocked = None, ("BLOCK" if receipt_errors else None), bool(receipt_errors)
     proof, proof_surface = None, None
-    incoherent = []
+    incoherent = list(receipt_errors)
     for node, value in results.items():
         c = contracts.get(node)
         for r in _each(value):
@@ -207,7 +341,7 @@ def derive(summary):
                     # Worst exit across every harness node: one red run is
                     # the campaign's answer, whatever a later one says.
                     harness = e if harness in (None, 0) else harness
-            if c == "RedTeamV1" or (c is None and r.get("verdict") in ("SHIP", "BLOCK")):
+            if node not in exempt and (c == "RedTeamV1" or (c is None and r.get("verdict") in ("SHIP", "BLOCK"))):
                 v = r.get("verdict")
                 why = red_team_incoherent(r)
                 if why:

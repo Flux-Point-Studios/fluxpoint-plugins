@@ -21,6 +21,7 @@ import copy
 import itertools
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -51,7 +52,7 @@ def report(name, ok, detail):
 # here instead of being silently skipped — the same failure it guards.
 KNOWN = {"$id", "description", "type", "required", "properties", "items",
          "contains", "maxItems", "enum", "const", "minimum", "maximum",
-         "allOf", "if", "then", "minItems", "minLength"}
+         "allOf", "if", "then", "minItems", "minLength", "pattern", "uniqueItems"}
 TYPES = {"object": dict, "array": list, "string": str, "boolean": bool}
 
 
@@ -73,7 +74,11 @@ def valid(inst, sch):
                 return False
     if isinstance(inst, str) and len(inst) < sch.get("minLength", 0):
         return False
+    if isinstance(inst, str) and "pattern" in sch and not re.search(sch["pattern"], inst):
+        return False
     if isinstance(inst, list):
+        if sch.get("uniqueItems") and len({json.dumps(x, sort_keys=True) for x in inst}) != len(inst):
+            return False
         if len(inst) < sch.get("minItems", 0):
             return False
         if "items" in sch and not all(valid(x, sch["items"]) for x in inst):
@@ -98,7 +103,7 @@ def valid(inst, sch):
     return True
 
 
-COVERAGE = {"subject": [{"repository": "repo", "base": "base-sha", "head": "head-sha",
+COVERAGE = {"subject": [{"repository": "repo", "base": "a" * 40, "head": "b" * 40,
                          "files": 2, "additions": 10, "deletions": 3}],
             "attackers": 6, "lenses": ["authority", "composition"], "sampled": False}
 
@@ -276,7 +281,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
   if(mode==='sampled')c.sampled=true;
   if(mode==='drift'&&label.endsWith('composition'))c.subject[0].head='other';
   return {verdict:(mode==='claims'||mode==='missing'||mode==='blockers')?'BLOCK':'SHIP',findings:mode==='claims'||mode==='missing'? [claim]:[],worstSeverity:'NONE',worstSeverityRank:0,coverage:c,review:{blockers:mode==='blockers'?['missing tools']:[]}};}
- if(label==='refute')return {verdict:'BLOCK',findings:mode==='claims'||mode==='missing'?[claim]:[],worstSeverity:'HIGH',worstSeverityRank:3};
+ if(label==='refute')return {verdict:'BLOCK',findings:mode==='claims'||mode==='missing'?[claim]:[],worstSeverity:(mode==='claims'||mode==='missing')?'HIGH':'NONE',worstSeverityRank:(mode==='claims'||mode==='missing')?3:0};
  if(label.includes(':refute'))return mode==='missing'&&label.endsWith('3')?null:{refuted:mode==='missing',reason:'independent executable evidence'};
  return final;};
 '''.replace("MODE", json.dumps(mode)).replace("FINAL", json.dumps(final))

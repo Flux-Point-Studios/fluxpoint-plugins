@@ -2490,38 +2490,90 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  return null")
         a("}")
         a("")
-    if any(red_team_checked(n) for n in nodes):
+    if any(n.get("contract") == "RedTeamV1" for n in nodes):
         a("// --- red-team coherence: the verdict its own findings allow ---")
         a("// RedTeamV1 binds worstSeverity to the findings and refuses a SHIP over")
         a("// HIGH or CRITICAL, but a runtime validator that skipped conditional")
         a("// keywords would let exactly that through to the next node — often a")
         a("// person about to sign. Re-derived here from the findings, in code.")
         a("const SEVERITY_RANK = { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 }")
+        expected = {n["id"]: list_var(n["foreach"]) for n in nodes if n.get("contract") == "RedTeamV1" and n.get("foreach")}
+        a("const RED_TEAM_EXPECTED = {" + ", ".join(json.dumps(k) + ": " + v for k, v in expected.items()) + "}")
+        a("const RED_TEAM_CHECKS = {}")
+        terminals = {}
+        for gate in nodes:
+            if gate.get("contract") != "RedTeamV1" or not gate.get("haltWhen"):
+                continue
+            sources = red_team_sources(gate, ir)
+            if not sources:
+                continue
+            stages, visited, current = [], set(), gate
+            while current:
+                dep = current.get("after") or (current.get("reduce") or {}).get("from")
+                if not dep or dep in visited:
+                    break
+                visited.add(dep)
+                current = nodes_by_id.get(dep)
+                if current and (current.get("contract") == "RedTeamV1" or is_reduce(current)):
+                    stages.append(dep)
+            terminals[gate["id"]] = {"sources": sources, "stages": stages}
+        a("const RED_TEAM_TERMINALS = " + json.dumps(terminals))
+
+        a("const redTeamClaimKey = f => JSON.stringify(['severity','finding','exploit_path','minimal_fix'].map(k => f && f[k]))")
+        a("function redTeamClaims(ids) { return ids.flatMap(id => (Array.isArray(RESULTS[id]) ? RESULTS[id] : []).flatMap(r => Array.isArray(r && r.findings) ? r.findings : [])) }")
+
         a("function redTeamPreamble(ids) { return 'RAW LENS COVERAGE — bind the final verdict to these completed source reviews. Missing coverage, blockers, mismatched snapshots or incomplete sampling must be stated and cannot silently become full coverage.\\n' + JSON.stringify(ids.map(id => ({ node: id, reviews: (Array.isArray(RESULTS[id]) ? RESULTS[id] : [RESULTS[id]]).filter(Boolean).map(r => ({ verdict: r.verdict, findingCount: (r.findings || []).length, coverage: r.coverage || null, blockers: (r.review || {}).blockers || [] })) }))) + '\\n'; }")
         a("function redTeamSourceProblem(ids, result, judged) {")
         a("  if (!result || result.verdict !== 'SHIP') return null")
-        a("  if (Array.isArray(judged) && judged.some(x => x && (x.unverified || x.severity === 'HIGH' || x.severity === 'CRITICAL'))) return 'final verdict drops a surviving or unverified claim'")
+        a("  const checks = Object.values(RED_TEAM_CHECKS).filter(c => ids.some(id => c.ids.includes(id)))")
+        a("  if (checks.some(c => c.unresolved || c.rows.some(v => v.unverified || v.cast !== c.requested || v.kills !== c.requested))) return 'final verdict drops a surviving or unverified claim'")
+        a("  if (checks.some(c => c.rows.some(v => ['MEDIUM','HIGH','CRITICAL'].includes(v.severity) && c.requested < 3))) return 'MEDIUM+ claim requires three independent refuters'")
+        a("  for (const claim of redTeamClaims(ids)) {")
+        a("    const votes = checks.flatMap(c => c.rows).filter(v => redTeamClaimKey(v) === redTeamClaimKey(claim))")
+        a("    if (!votes.length || votes.some(v => v.unverified || v.kills < v.cast)) return 'final verdict drops an unchecked, surviving or unverified claim'")
+        a("  }")
+        a("  for (const id of ids) {")
+        a("    const expected = RED_TEAM_EXPECTED[id] || []")
+        a("    const returned = Array.isArray(RESULTS[id]) ? RESULTS[id] : []")
+        a("    if (returned.length !== expected.length) return 'final verdict omits a dead or missing source attacker'")
+        a("    const named = returned.flatMap(r => ((r || {}).coverage || {}).lenses || [])")
+        a("    if (expected.some(item => typeof item.key === 'string' && !named.includes(item.key))) return 'final verdict omits a configured source lens'")
+        a("  }")
         a("  const final = result.coverage || {}, sources = ids.flatMap(id => Array.isArray(RESULTS[id]) ? RESULTS[id] : [])")
         a("  const identity = c => JSON.stringify((c.subject || []).slice().sort((a,b) => String(a.repository).localeCompare(String(b.repository))))")
         a("  let attackers = 0")
         a("  for (const source of sources) {")
         a("    const c = source.coverage")
         a("    if (source.verdict === 'BLOCK' && !(source.findings || []).length) return 'source lens blocked without a refutable claim'")
-        a("    if (!c || !Array.isArray(c.subject) || !Array.isArray(c.lenses)) return 'source lens lacks coverage'")
+        a("    if (redTeamCoverageIssue(c)) return 'source lens lacks complete pinned coverage'")
         a("    if (identity(c) !== identity(final)) return 'source lens coverage names a different snapshot or diff counts'")
-        a("    if (((source.review || {}).blockers || []).length) return 'source lens has unresolved coverage blockers'")
+        a("    if (redTeamUnresolved(source)) return 'source lens has unresolved coverage blockers'")
         a("    if (c.sampled && !final.sampled) return 'final verdict hides sampled source coverage'")
         a("    if (c.lenses.some(lens => !(final.lenses || []).includes(lens))) return 'final verdict omits a source lens'")
         a("    attackers += Number.isInteger(c.attackers) ? c.attackers : 0")
         a("  }")
-        a("  return !sources.length || final.attackers < attackers ? 'final verdict omits completed attacker coverage' : null")
+        a("  return !sources.length || final.attackers !== attackers ? 'final verdict misstates completed attacker coverage' : null")
+        a("}")
+        a("function redTeamUnresolved(r) {")
+        a("  if (r.review === undefined) return false")
+        a("  if (!r.review || typeof r.review !== 'object' || Array.isArray(r.review)) return true")
+        a("  return ['blockers','unverified','deadLenses'].some(k => r.review[k] !== undefined && (!Array.isArray(r.review[k]) || r.review[k].length > 0))")
+        a("}")
+        a("function redTeamCoverageIssue(c) {")
+        a("  if (!c || !Array.isArray(c.subject) || !c.subject.length || !Number.isSafeInteger(c.attackers) || c.attackers < 1 || !Array.isArray(c.lenses) || !c.lenses.length || c.lenses.some(x => typeof x !== 'string' || !x.trim()) || new Set(c.lenses).size !== c.lenses.length || typeof c.sampled !== 'boolean') return 'SHIP without complete coverage metadata'")
+        a("  const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i")
+        a("  if (c.subject.some(s => !s || typeof s.repository !== 'string' || !s.repository.trim() || !oid.test(s.base) || !oid.test(s.head) || ['files','additions','deletions'].some(k => !Number.isSafeInteger(s[k]) || s[k] < 0)) || new Set(c.subject.map(s => s.repository)).size !== c.subject.length) return 'SHIP with invalid or unpinned reviewed range/counts'")
+        a("  return null")
         a("}")
         a("function redTeamIncoherent(r) {")
         a("  if (!r || typeof r !== 'object') return null")
+        a("  if (!['SHIP','BLOCK'].includes(r.verdict) || !Array.isArray(r.findings)) return 'invalid red-team verdict or findings array'")
+        a("  if (r.findings.some(f => !f || !Object.prototype.hasOwnProperty.call(SEVERITY_RANK, f.severity) || f.severity === 'NONE' || ['finding','exploit_path','minimal_fix'].some(k => typeof f[k] !== 'string'))) return 'malformed finding or unknown severity cannot be omitted'")
+
         a("  if (r.verdict === 'SHIP') {")
         a("    const c = r.coverage")
-        a("    if (!c || !Array.isArray(c.subject) || !c.subject.length || !Number.isInteger(c.attackers) || c.attackers < 1 || !Array.isArray(c.lenses) || !c.lenses.length || c.lenses.some(x => typeof x !== 'string' || !x) || typeof c.sampled !== 'boolean') return 'SHIP without complete coverage metadata'")
-        a("    if (c.subject.some(s => !s || ['repository','base','head'].some(k => typeof s[k] !== 'string' || !s[k]) || ['files','additions','deletions'].some(k => !Number.isInteger(s[k]) || s[k] < 0))) return 'SHIP with invalid reviewed range/counts'")
+        a("    if (redTeamUnresolved(r)) return 'SHIP has unresolved coverage or exploit blockers'")
+        a("    const issue = redTeamCoverageIssue(c); if (issue) return issue")
         a("  }")
         a("  const worst = (Array.isArray(r.findings) ? r.findings : [])")
         a("    .reduce((w, f) => Math.max(w, SEVERITY_RANK[f && f.severity] || 0), 0)")
@@ -2715,6 +2767,9 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     # _releases, _base, ...): an effort sweep scores a run against the case
     # it was launched for, and the summary is all record-run keeps.
     a("  const inputs = Object.fromEntries(Object.entries(A).filter(([k]) => !k.startsWith('_')))")
+    if any(n.get("contract") == "RedTeamV1" for n in nodes):
+        a("  const redTeamReviews = { terminals: RED_TEAM_TERMINALS, checks: RED_TEAM_CHECKS, expected: Object.fromEntries(Object.entries(RED_TEAM_EXPECTED).map(([id, items]) => [id, { attackers: items.length, lenses: items.map(x => x.key).filter(x => typeof x === 'string') }])) }")
+        extra += ", redTeamReviews"
     a("  return { campaign, outcome: final, results: RESULTS, provenance: PROVENANCE,")
     a(f"           contracts: CONTRACTS, inputs{extra} }}")
     a("}")
@@ -2784,7 +2839,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("      { label: `${label}:refute${i + 1}`, phase, schema: C.VerdictV1, effort: 'low' }")
         a("    )")
         a("  ))")
-        a("  const cast = votes.filter(Boolean)")
+        a("  const cast = codeReview ? votes.filter(v => v && typeof v.refuted === 'boolean' && typeof v.reason === 'string' && v.reason.trim()) : votes.filter(Boolean)")
         a("  // Any missing vote — a dead refuter or one declined by the node")
         a("  // ceiling — means this claim was not fully checked, and says so.")
         a("  if (cast.length < n) log(`${label}: only ${cast.length}/${n} votes cast — UNVERIFIED`)")
@@ -2797,23 +2852,27 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("    // makes: a survivor with its strongest objection recorded is")
         a("    // worth more later than a survivor with a vote count.")
         a("    objections: cast.map(v => v.reason).filter(Boolean).slice(0, 5),")
+        a("    ...(codeReview ? { votes: cast.map(v => ({ refuted: v.refuted, reason: v.reason })) } : {}),")
         a("  }")
         a("}")
         a("")
         a("// Applies a node's declared tier to every item it produced. Used by")
         a("// fan-out and single nodes alike, so a declared tier always runs.")
-        a("async function verifyItems(result, field, label, phase, n, need, sink, codeReview = false) {")
+        a("async function verifyItems(result, field, label, phase, n, need, sink, codeReview = false, sourceIds = []) {")
         a("  if (!result) return []")
-        a("  const produced = result[field] || []")
+        a("  const produced = codeReview && sourceIds.length ? [...new Map([...redTeamClaims(sourceIds), ...(result[field] || [])].map(f => [redTeamClaimKey(f), f])).values()] : result[field] || []")
         a("  const judged = await parallel(produced.map((it, i) => () =>")
         a("    refute(JSON.stringify(it), `${label}:${i}`, phase, n, undefined, codeReview).then(v => ({ ...it, ...v }))")
         a("  ))")
         a("  const all = judged.filter(Boolean)")
+        if any(n.get("contract") == "RedTeamV1" for n in nodes):
+            a("  if (codeReview) RED_TEAM_CHECKS[label] = { ids: sourceIds, requested: n, rows: all, unresolved: redTeamUnresolved(result) }")
+
         a("  // The sink sees every verdict, including the kills the filter")
         a("  // below drops: what a panel rejected, and why, is the half a")
         a("  // later sweep would otherwise pay to rediscover.")
         a("  if (sink) all.forEach(sink)")
-        a("  return all.filter(v => (codeReview && v.unverified) || v.kills < need)")
+        a("  return all.filter(v => (codeReview && v.unverified) || v.kills < (codeReview ? n : need))")
         a("}")
         a("")
 
@@ -3356,7 +3415,7 @@ def emit_node(n, ir, specification=False):
         a("}")
         if n.get("irreversible"):
             a("}")
-        if red_team_checked(n):
+        if red_team_checked(n) or (n.get("contract") == "RedTeamV1" and verified):
             a(emit_red_team_check(n, raw))
         source_ids = red_team_sources(n, ir) if n.get("contract") == "RedTeamV1" and n.get("haltWhen") else []
         if source_ids:
@@ -3371,7 +3430,7 @@ def emit_node(n, ir, specification=False):
             sink = (", " + lesson_sink(n, need)
                     if (n.get("memory") or {}).get("emit") else "")
             if n.get("contract") == "RedTeamV1":
-                sink = (sink or ", undefined") + ", true"
+                sink = (sink or ", undefined") + ", true, " + json.dumps(red_team_sources(n, ir))
             a(f"const {var} = await verifyItems({raw}, {js_str(over)}, "
               f"{js_str(nid)}, {js_str(phase)}, {panel}, {need}{sink})")
             a(f"log(`{nid}: ${{{var}.length}} item(s) survived {tier}`)")
