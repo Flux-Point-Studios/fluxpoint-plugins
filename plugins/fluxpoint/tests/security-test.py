@@ -123,9 +123,9 @@ js = cg.emit(disc, CONTRACTS)
 report("a short panel marks the item unverified",
        "unverified: cast.length < n," in js,
        "tagged" if "unverified: cast.length < n," in js else "MISSING")
-report("survival is decided by the majority alone",
-       "filter(v => v.kills < need)" in js and "v.unverified || v.kills" not in js,
-       "kills-only" if "v.unverified || v.kills" not in js else "unverified still grants survival")
+report("discovery majority policy stays explicit; code review preserves unresolved claims",
+       "filter(v => (codeReview && v.unverified) || v.kills < need)" in js,
+       "code-review-only unresolved exception")
 
 # --- Prompts were already escaped; keep it that way ------------------------
 emits_inert(
