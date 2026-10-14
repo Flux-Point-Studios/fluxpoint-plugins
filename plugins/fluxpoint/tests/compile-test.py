@@ -600,7 +600,7 @@ for needle, why in [
     ("VERIFY_FLOOR", "budget floor present"),
     ("Attempt to REFUTE", "refuters attack, never confirm"),
     ("Default to refuted=true when uncertain", "uncertainty kills, never carries"),
-    ("kills < need", "survival is decided by the majority threshold"),
+    ("v.kills < (codeReview ? n : need)", "discovery uses majority; code refutation requires unanimity"),
     ('"Find", 3, 2)', "panel:3 passes need=2, a true majority"),
     ("PROVENANCE", "provenance recorded"),
     ("const MAX_NODES", "the ceiling exists at run time, not only at compile time"),
