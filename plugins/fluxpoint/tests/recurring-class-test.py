@@ -21,7 +21,7 @@ IR = {"version": 1, "campaign": "reframe recurring defects", "treeGuard": False,
                             "classBy": ["defectClass"]}, "onRed": "halt"}]}
 
 
-def execute(sequence, killed=False, on_red="halt"):
+def execute(sequence, killed=False, on_red="halt", unverified_rounds=()):
     ir = copy.deepcopy(IR)
     ir["nodes"][0]["onRed"] = on_red
     assert not cg.validate(ir, CONTRACTS), cg.validate(ir, CONTRACTS)
@@ -30,8 +30,9 @@ def execute(sequence, killed=False, on_red="halt"):
                "const budget={spent:()=>0,remaining:()=>1e9};"
                "const parallel=async ts=>Promise.all(ts.map(t=>t()));"
                "const pipeline=async()=>[];let rounds=0;"
-               f"const sequence={json.dumps(sequence)};"
-               "const agent=async(p,o)=>{if(o.schema?.properties?.refuted) return "
+               f"const sequence={json.dumps(sequence)},unverifiedRounds={json.dumps(list(unverified_rounds))};"
+               "const agent=async(p,o)=>{if(o.schema?.properties?.refuted && unverifiedRounds.includes(rounds)) return null;"
+               "if(o.schema?.properties?.refuted) return "
                f"{{refuted:{json.dumps(killed)},reason:'independent reproduction'}};"
                "const cls=sequence[rounds++];return {findings:cls===undefined||cls===false?[]:"
                "[{file:'route-'+rounds+'.py',line:rounds,claim:'outsider input crosses a missing bound',"
@@ -63,6 +64,28 @@ class RecurringTests(unittest.TestCase):
     def test_refuted_variants_do_not_count(self):
         result = execute(["a"] * 6, killed=True)
         self.assertEqual(result["rounds"], 6)
+        self.assertEqual(result["r"]["recurringClasses"], [])
+
+    def test_unverified_variants_never_count_as_surviving_classes(self):
+        result = execute(["same-class", "same-class", False, False], unverified_rounds=(1, 2))
+        self.assertEqual(result["rounds"], 4)
+        self.assertEqual(result["r"]["outcome"], "INCOMPLETE")
+        self.assertEqual(result["r"]["recurringClasses"], [])
+        unresolved = result["r"]["results"]["sweep"]
+        self.assertEqual(len(unresolved), 2)
+        self.assertTrue(all(f["unverified"] for f in unresolved))
+        self.assertTrue(any(p["status"] == "INCOMPLETE" and "UNVERIFIED" in p["detail"]
+                            for p in result["r"]["provenance"]))
+
+    def test_unverified_item_without_class_is_not_a_confirmed_class_violation(self):
+        result = execute([None, False, False], unverified_rounds=(1,))
+        self.assertEqual(result["r"]["outcome"], "INCOMPLETE")
+        self.assertEqual(result["r"]["recurringClasses"], [])
+
+    def test_unverified_round_breaks_the_consecutive_class_run(self):
+        result = execute(["same-class", "same-class", "same-class", False, False], unverified_rounds=(2,))
+        self.assertEqual(result["rounds"], 5)
+        self.assertEqual(result["r"]["outcome"], "INCOMPLETE")
         self.assertEqual(result["r"]["recurringClasses"], [])
 
     def test_drop_mode_records_incomplete_and_stops(self):

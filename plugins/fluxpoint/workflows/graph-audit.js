@@ -438,15 +438,27 @@ for (const round of HISTORY) {
 }
 if (HISTORY.length >= 2) {
   const [before, last] = HISTORY.slice(-2)
-  const classes = r => unique(r.confirmed.flatMap(f => typeof f === 'object' && f
-    ? (f.defectClasses || [f.defectClass]).filter(Boolean) : []))
+  const classes = r => unique(r.confirmed.flatMap(f => {
+    // Historical summaries may contain unresolved rows. Only a confirmed
+    // finding can establish a surviving class; titles in legacy logs still
+    // support the count plateau, but cannot invent a class identity.
+    if (!f || typeof f !== 'object' || f.unverified ||
+        (f.status !== undefined && f.status !== 'CONFIRMED') ||
+        (Array.isArray(f.votes) && f.votes.some(v => !v || typeof v.refuted !== 'boolean'))) return []
+    const values = Array.isArray(f.defectClasses) ? f.defectClasses : [f.defectClass]
+    return values.filter(c => typeof c === 'string' && c.trim()).map(c => c.trim())
+  }))
   const common = classes(last).filter(c => classes(before).includes(c))
   if (common.length || (last.counts.confirmed > 0 && last.counts.confirmed >= before.counts.confirmed)) {
     const why = `plateau: ${common.length ? common.join(', ') : 'confirmed count did not fall'}`
     log(`verdict: REWIRE (${why})`)
     return {mode: MODE, graph: A.graph, verdict: 'REWIRE', why, plateau: true,
-      recurringClasses: common, confirmed: last.confirmed, unverified: [], refuted: [],
-      counts: last.counts, settled: SETTLED, lenses: [], deadLenses: []}
+      recurringClasses: common, confirmed: last.confirmed,
+      unverified: Array.isArray(last.unverified) ? last.unverified : [],
+      refuted: Array.isArray(last.refuted) ? last.refuted : [],
+      counts: last.counts, settled: SETTLED,
+      lenses: Array.isArray(last.lenses) ? last.lenses : [],
+      deadLenses: Array.isArray(last.deadLenses) ? last.deadLenses : [], historyStop: true}
   }
 }
 

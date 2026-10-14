@@ -3625,6 +3625,11 @@ def emit_repeat(n, ir, prompt, phase, panel, over):
             a(f"  judged_{var}.filter(Boolean).forEach({lesson_sink(n, need)})")
         a(f"  const kept_{var} = judged_{var}.filter(Boolean)"
           f".filter(v => v.kills < {need})")
+        a(f"  const unchecked_{var} = judged_{var}.filter(v => v && v.unverified)")
+        a(f"  if (unchecked_{var}.length) {{")
+        a("    INCOMPLETE = true")
+        a(f"    note({js_str(nid)}, 'INCOMPLETE', `round ${{round_{var}}}: ${{unchecked_{var}.length}} claim(s) left UNVERIFIED by missing refuters`, {{ round: round_{var}, unverified: unchecked_{var}.length }})")
+        a("  }")
     else:
         a(f"  const kept_{var} = fresh_{var}")
     a(f"  {var}.push(...kept_{var})")
@@ -3632,6 +3637,8 @@ def emit_repeat(n, ir, prompt, phase, panel, over):
         fields = json.dumps(classes)
         a(f"  const currentClasses_{var} = new Map()")
         a(f"  for (const it of kept_{var}) {{")
+        a("    // An unanswered refutation is unresolved, not a surviving defect class.")
+        a("    if (it.unverified) continue")
         a(f"    const values = {fields}.map(k => it[k])")
         a("    if (values.some(v => v === undefined || v === null || String(v).trim() === '')) {")
         a(f"      note({js_str(nid)}, 'INCOMPLETE', 'surviving item omitted its declared defect class')")
