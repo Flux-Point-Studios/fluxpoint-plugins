@@ -58,6 +58,10 @@ class DeployedTests(unittest.TestCase):
         log = (self.root / attest.BACKGROUND / "mismatch.log").read_text()
         self.assertIn("demo-package 0.13.1 != 0.19.2", log)
         self.assertIn("missing not installed != 1.0", log)
+        summary = {'launch': {'since': row['started'], 'nonce': 'n'},
+                   'prove': {'check': 'api-deployed'}, 'contracts': {'check': 'HarnessCheckV1'},
+                   'results': {'check': {'exit': 1, 'attestId': row['attestId']}}}
+        self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]['status'], 'ATTESTED')
 
     def test_nonexact_or_empty_pins_refuse(self):
         for text in ("demo-package>=0.13\n", "# nothing\n", "-r other.txt\n"):
@@ -75,6 +79,50 @@ class DeployedTests(unittest.TestCase):
         self.doc["gates"]["api-deployed"] = "python suite.py"
         self.save()
         self.assertTrue(any("declared python" in s for s in attest.load_gates(str(self.root))[1]))
+
+    def test_compound_shell_commands_cannot_borrow_checked_interpreter(self):
+        for suffix in (f' -c "pass" && "{sys.executable}" suite.py',
+                       ' suite.py || true', ' suite.py | cat', ' suite.py > ignored.log',
+                       ' -c "pass"; echo green'):
+            with self.subTest(suffix=suffix):
+                self.doc['gates']['api-deployed'] = f'"{self.python.as_posix()}"' + suffix
+                self.save()
+                self.assertTrue(attest.load_gates(str(self.root))[1])
+                self.assertEqual(attest.run_gate(str(self.root), 'api-deployed'), 2)
+        self.assertFalse((self.root / 'ran').exists())
+
+    def test_probe_uses_the_suites_python_startup_flags(self):
+        self.doc['gates']['api-deployed'] = f'"{self.python.as_posix()}" -S suite.py'
+        self.save()
+        self.assertEqual(self.execute('no-site-packages'), 1)
+        self.assertFalse((self.root / 'ran').exists())
+        row = attest.read(str(self.root))[-1]
+        self.assertFalse(row['resolutionChecked'])
+        self.assertIsNone(row['dependencies']['api']['demo-package'])
+
+    def test_leading_cd_and_literal_code_use_same_interpreter_and_directory(self):
+        (self.root / 'api').mkdir()
+        self.doc['gates']['api-deployed'] = (f'cd api && "{self.python.as_posix()}" -I -c '
+            '"from pathlib import Path; Path(\'ran\').write_text(\'yes\')"')
+        self.save()
+        self.assertEqual(attest.load_gates(str(self.root))[1], [])
+        self.assertEqual(self.execute('cd-suite'), 0)
+        self.assertTrue((self.root / 'api/ran').exists())
+
+    def test_changed_command_or_lane_cannot_reuse_resolution_witness(self):
+        self.execute('original-lane')
+        row = attest.read(str(self.root))[-1]
+        summary = {'launch': {'since': row['started'], 'nonce': 'n'},
+                   'prove': {'check': 'api-deployed'}, 'contracts': {'check': 'HarnessCheckV1'},
+                   'results': {'check': {'exit': 0, 'attestId': row['attestId']}}}
+        self.doc['gates']['api-deployed'] = f'"{self.python.as_posix()}" -c "pass"'
+        self.save()
+        self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]['status'], 'STALE')
+        self.doc['gates']['api-deployed'] = f'"{self.python.as_posix()}" suite.py'
+        (self.root / 'other-pins.txt').write_bytes(self.pins.read_bytes())
+        self.doc['deployed']['api']['pins'] = 'other-pins.txt'
+        self.save()
+        self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]['status'], 'STALE')
 
     def test_hook_cannot_prove_resolution_and_changed_pins_are_stale(self):
         self.execute("proof")

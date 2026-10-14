@@ -334,7 +334,6 @@ def load_gates(root):
 
 def _deployed(root, doc, gates):
     """Validate explicit pip lanes; the suite must use the checked interpreter."""
-    import shlex
     lanes = doc.get("deployed", {})
     if not isinstance(lanes, dict):
         return {}, [f"{GATES}: deployed must be an object"]
@@ -356,15 +355,13 @@ def _deployed(root, doc, gates):
             findings.append(f"{label}: gate '{lane['gate']}' is not declared")
             continue
         try:
-            command = shlex.split(_front(gates[lane["gate"]])[2])
-            cd = getattr(gates, "cds", {}).get(lane["gate"], "")
-            cd = shlex.split(cd)[0] if cd else ""
-            actual = os.path.abspath(os.path.join(root, cd, command[0]))
+            command, _, _ = deployed_invocation(root, gates, lane['gate'])
+            actual = command[0]
             if actual != interpreter:
                 findings.append(f"{label}: gate must invoke the declared python directly; "
                                 "otherwise the checked resolution would not be the tested one")
-        except (ValueError, IndexError):
-            findings.append(f"{label}: cannot parse gate executable")
+        except (ValueError, IndexError) as exc:
+            findings.append(f"{label}: cannot parse direct Python invocation: {exc}")
     return lanes, findings
 
 
@@ -373,10 +370,51 @@ def load_deployed(root):
     return {} if findings else getattr(gates, "deployed", {})
 
 
-def deployed_resolution(root, tree, gate):
+def deployed_invocation(tree, gates, gate):
+    """One literal Python argv and its startup flags, shared by probe and suite."""
+    import shlex
+    lexer = shlex.shlex(gates[gate], posix=True, punctuation_chars=';&|<>()')
+    lexer.whitespace_split = True
+    lexer.commenters = ''
+    argv = list(lexer)
+    if not argv or any(re.fullmatch(r'[;&|<>()]+', token) or '$' in token or '`' in token
+                       for token in argv):
+        raise ValueError('deployed gates accept one command without shell operators or expansions')
+    cwd = os.path.abspath(_resolve(tree, getattr(gates, 'cds', {}).get(gate, '')))
+    argv[0] = os.path.abspath(os.path.join(cwd, argv[0]))
+    flags, i = [], 1
+    while i < len(argv) and argv[i].startswith('-') and argv[i] not in ('-', '-m', '-c'):
+        token = argv[i]
+        if token.startswith(('-m', '-c')) or token in ('-h', '-V', '--help', '--version'):
+            raise ValueError('use a separate -m/-c operand or a script, not an interpreter information flag')
+        flags.append(token)
+        if token in ('-W', '-X', '--check-hash-based-pycs'):
+            i += 1
+            if i >= len(argv):
+                raise ValueError(f'{token} needs an argument')
+            flags.append(argv[i])
+        i += 1
+    if i >= len(argv) or argv[i] == '-':
+        raise ValueError('deployed gates require a module, script or -c suite')
+    if argv[i] in ('-m', '-c') and i + 1 >= len(argv):
+        raise ValueError(f'{argv[i]} needs an argument')
+    return argv, cwd, flags
+
+
+def deployed_lane_sha(gates, gate):
+    lanes = {name: lane for name, lane in getattr(gates, 'deployed', {}).items()
+             if lane['gate'] == gate}
+    return sha(json.dumps(lanes, sort_keys=True, separators=(',', ':')))
+
+
+def deployed_resolution(root, tree, gate, gates=None):
     """Compare exact pins under the lane's interpreter before executing its suite."""
     import subprocess
-    lanes = {name: lane for name, lane in load_deployed(root).items() if lane["gate"] == gate}
+    if gates is None:
+        gates, problems = load_gates(root)
+        if problems:
+            return {}, {}, problems
+    lanes = {name: lane for name, lane in getattr(gates, 'deployed', {}).items() if lane["gate"] == gate}
     hashes, versions, findings = {}, {}, []
     for name, lane in lanes.items():
         path = os.path.join(tree, lane["pins"])
@@ -406,8 +444,11 @@ def deployed_resolution(root, tree, gate):
                      " except m.PackageNotFoundError: v[p]=None\n"
                      "print(json.dumps(v))\n")
             interpreter = os.path.abspath(os.path.join(tree, lane["python"]))
-            result = subprocess.run([interpreter, "-c", probe, json.dumps(list(pins))],
-                                    cwd=tree, capture_output=True, text=True, timeout=60)
+            command, cwd, flags = deployed_invocation(tree, gates, gate)
+            if command[0] != interpreter:
+                raise ValueError('suite interpreter differs from the declared deployed interpreter in this tree')
+            result = subprocess.run([interpreter, *flags, "-c", probe, json.dumps(list(pins))],
+                                    cwd=cwd, capture_output=True, text=True, timeout=60)
             if result.returncode:
                 raise ValueError(f"interpreter probe exited {result.returncode}: {result.stderr[-500:]}")
             versions[name] = actual = json.loads(result.stdout)
@@ -935,13 +976,16 @@ def _execute(root, gate, started, token, nonce="", tree=None):
                      "log": log})
     print(f"attest: running {gate} as {token} — collect it with "
           f"attest.py --await {token}", flush=True)
-    pins_hashes, dependencies, pin_findings = deployed_resolution(root, tree, gate)
+    gates, problems = load_gates(root)
+    deployed = any(lane['gate'] == gate for lane in getattr(gates, 'deployed', {}).values())
+    pins_hashes, dependencies, pin_findings = deployed_resolution(root, tree, gate, gates) if not problems else ({}, {}, problems)
     with open(log, "wb") as out:
         if pin_findings:
             out.write(("\n".join(pin_findings) + "\nSuite not started.\n").encode("utf-8"))
             code = 1
         else:
-            code = subprocess.call([_bash(), "-c", raw], cwd=tree, stdin=subprocess.DEVNULL,
+            command, cwd, _ = deployed_invocation(tree, gates, gate) if deployed else ([_bash(), '-c', raw], tree, [])
+            code = subprocess.call(command, cwd=cwd, stdin=subprocess.DEVNULL,
                                    stdout=out, stderr=subprocess.STDOUT)
     with open(log, "rb") as fh:
         text = fh.read().decode("utf-8", "replace")
@@ -955,6 +999,8 @@ def _execute(root, gate, started, token, nonce="", tree=None):
     if pins_hashes or dependencies or pin_findings:
         row.update(pinsSha256=pins_hashes, dependencies=dependencies,
                    resolutionChecked=not pin_findings)
+        if deployed:
+            row['deployedLaneSha256'] = deployed_lane_sha(gates, gate)
     append_row(root, row)
     _bg_write(root, {"token": token, "gate": gate, "status": "DONE", "exit": code,
                      "attestId": row["attestId"], "started": started,
@@ -1362,10 +1408,13 @@ def verify_claims(root, summary):
                     for name, lane in lanes.items():
                         with open(os.path.join(root, lane["pins"]), "rb") as fh:
                             current[name] = hashlib.sha256(fh.read()).hexdigest()
-                    if row.get("witness") != "wrapper" or not row.get("resolutionChecked"):
+                    if row.get("witness") != "wrapper" or (r.get('exit') == 0 and not row.get("resolutionChecked")):
                         check.update(status="MISMATCH", detail="deployed gate requires a wrapper run with a checked dependency resolution")
                     elif row.get("pinsSha256") != current:
                         check.update(status="STALE", detail="deployed pins changed since the attested execution")
+                    elif (row.get('commandSha') != sha(gates[declared])
+                          or row.get('deployedLaneSha256') != deployed_lane_sha(gates, declared)):
+                        check.update(status='STALE', detail='deployed gate command or lane changed since the attested execution')
                 checks.append(check)
                 continue
             if "exit" not in r or "command" not in r:

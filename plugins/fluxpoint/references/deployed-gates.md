@@ -22,7 +22,9 @@ deployed lane when production installs a different resolution from development:
 Create this environment using the production installation procedure before
 declaring it. The plugin validates it, and does not install or alter packages.
 The pins file must exist inside the repository, the interpreter must exist,
-and the gate must invoke that interpreter directly. This last rule prevents a
+and the gate must invoke that interpreter directly as one command, with literal
+arguments and no shell chains, redirects, substitutions or environment prefixes.
+The wrapper executes that argv directly. This rule prevents a
 probe of one environment from certifying a suite run in another. A leading
 `cd directory &&` is supported; the interpreter path in the lane remains
 relative to the repository. On Windows use the environment's `Scripts/python.exe`.
@@ -30,16 +32,20 @@ relative to the repository. On Windows use the environment's `Scripts/python.exe
 Start the lane as a background task with
 `bash "$ROOT/scripts/py.sh" attest.py --run api-deployed --nonce <launch-nonce>`,
 then collect it with `attest.py --await <token>`. Before starting the suite,
-the wrapper asks the declared interpreter's `importlib.metadata` for each
+the wrapper asks the declared interpreter's `importlib.metadata` with the same
+Python startup flags and working directory as the suite for each
 installed version and compares it with the exact `package==version` pins.
 Missing packages, mismatches, empty files, ranges, includes and environment
 markers produce a red attestation without starting the suite. This initial
 reader supports exact pip pins (including extras), blank lines and comments;
 use a resolved lane-specific pins file for other requirement forms.
 
-The row records `pinsSha256` and installed `dependencies` per deployed package.
-A `prove:` citation for a deployed gate requires this wrapper witness with a
-successful resolution check and unchanged pin hashes. A hook observation
+The row records `pinsSha256`, installed `dependencies` per deployed package, and
+`deployedLaneSha256` binding the lane declarations to that execution.
+A passing `prove:` citation for a deployed gate requires this wrapper witness with a
+successful resolution check, unchanged pin hashes, and the same gate command
+and lane declarations. A truthful red citation can attest a failed resolution
+preflight without claiming that the suite started. A hook observation
 alone does not prove the resolution. Every irreversible graph effect requires
 each declared deployed gate's independent, red-halting proof before it. These
 long suites run through `--run`/`--await`, outside the Stop hook's time budget.
