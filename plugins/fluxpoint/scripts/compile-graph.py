@@ -3360,7 +3360,7 @@ def emit_node(n, ir, specification=False):
             a(emit_red_team_check(n, raw))
         source_ids = red_team_sources(n, ir) if n.get("contract") == "RedTeamV1" and n.get("haltWhen") else []
         if source_ids:
-            a(f"const sourceProblem_{var} = redTeamSourceProblem({json.dumps(source_ids)}, {raw}, RESULTS[{js_str(n.get("after"))}])")
+            a(f"const sourceProblem_{var} = redTeamSourceProblem({json.dumps(source_ids)}, {raw}, RESULTS[{js_str(n.get('after'))}])")
             a(f"if (sourceProblem_{var}) {{ RESULTS[{js_str(nid)}] = {raw}; note({js_str(nid)}, 'HALTED', sourceProblem_{var}); return summary('HALTED') }}")
         if n.get("haltWhen"):
             # Halt on the raw contract: the gate reads the node's own fields.
