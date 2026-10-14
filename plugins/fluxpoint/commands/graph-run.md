@@ -132,7 +132,20 @@ Workflow tool requires.
 5. Set `STATUS: RUNNING`. Invoke the Workflow tool (Claude Code) with
    `{scriptPath: ".claude/workflows/<name>.graph.js", args: {...}}`.
    Pass args as a real JSON object, not a stringified one. Watch with
-   `/workflows`; never poll with sleep.
+   `/workflows`; never poll with sleep. As soon as the tool returns its run id,
+   start the observer with the Bash tool's `run_in_background: true`:
+   ```
+   bash "$ROOT/scripts/py.sh" watchdog.py --run <runId> --root <project-root> --base <args._base.sha>
+   ```
+   Do this for every launch and resume, so a stall or failure wakes the
+   orchestrator through the background task's completion. Exit 1 names the
+   affected agents and adds inbox items; a killed agent also gets a resume
+   note with its checkout state and commits since launch. Exit 2 means the
+   internal journal/transcript format could not be read: inspect it and
+   report the missing observation. Exit 0 means no agents remain live and
+   the journal has been quiet for 15 minutes. Hand-written Workflow scripts
+   use this same command. `--stall-min` defaults to 40; `--once` performs one
+   inspection (exit 3 while the run is still pending).
 6. On completion, record the run — evidence is a build artifact, not
    something you remember to write:
    ```
