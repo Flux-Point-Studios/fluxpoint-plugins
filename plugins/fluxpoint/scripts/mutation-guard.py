@@ -437,7 +437,7 @@ def parse_stryker(doc):
 
 
 # ------------------------------------------------------------------ commands
-def measure(root, cfg, accept, reason, src=None):
+def measure(root, cfg, accept, reason, src=None, persist=True):
     prior = load_baseline(root).get("mutation") or {}
     if src:
         # The run already happened — commonly in CI, where the mutation job
@@ -500,6 +500,8 @@ def measure(root, cfg, accept, reason, src=None):
                                      "from": {"score": prior.get("score"),
                                               "survived": prior.get("survived")}}
 
+    if not persist:
+        return rec
     p = write_measurement(root, rec)
     verdict = "stronger" if prior and rec["score"] > prior.get("score", 0) else "recorded"
     print(f"mutation-guard: {verdict} — score {rec['score']}, "
@@ -618,8 +620,13 @@ def main():
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--measure", action="store_true")
     g.add_argument("--check", action="store_true")
+    g.add_argument("--tighten", action="store_true")
     g.add_argument("--report", action="store_true")
     a = ap.parse_args()
+    if a.tighten:
+        from ratchet import cli
+        return cli("mutation", a.root, a.src)
+
 
     if a.check:
         return check(a.root)

@@ -157,7 +157,12 @@ def main():
     g.add_argument("--scan", action="store_true")
     g.add_argument("--baseline", action="store_true")
     g.add_argument("--check", action="store_true")
+    g.add_argument("--tighten", action="store_true")
     args = ap.parse_args()
+    if args.tighten:
+        from ratchet import cli
+        return cli("seam", args.root)
+
 
     root = os.path.abspath(args.root)
     bpath = os.path.join(root, BASELINE)

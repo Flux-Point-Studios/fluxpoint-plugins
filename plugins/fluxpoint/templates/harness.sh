@@ -403,6 +403,10 @@ full() {
   if need_gate blueprint-guard.py .fluxpoint-blueprint.json plutus.json; then
     "$FPL_PY" "$FPL_GATE" --check
   fi
+  # Exact deterministic metrics provide graded scores and hold improvements.
+  if need_gate metric-guard.py .fluxpoint-metrics.json .fluxpoint-metrics-baseline.json; then
+    "$FPL_PY" "$FPL_GATE" --check
+  fi
   # Mutation score. Every check above asks whether the tests pass; this asks
   # whether they can fail. Cheap here on purpose — it re-runs nothing and
   # only asks whether a measurement exists and still describes this tree.
