@@ -180,8 +180,24 @@ finding most worth having. A finer-grained score — node death rate, panel
 kill rate, confirmed findings per run — would lower those counts, and is
 the next thing to build if the first sweep comes back flat and ambiguous.
 
-Still not done, and not doable from a repository: running it. It needs a
-session that launches campaigns and a bill someone approved.
+Still not done: running it needs an authenticated campaign runner with access
+to the requested models and usage metering.
+
+Review on 2026-10-14: issue #67 remains open. The attached cloud environment
+reports current observations with no configured secrets, runtime variables,
+capabilities or outbound identities; `claude` is absent from PATH. The Codex
+CLI is present, but does not establish access to the requested Claude model
+and effort grid or its billing meter. No held-out model runs or actual bill
+were produced, so no role default was changed and no measured curve is claimed.
+
+The deterministic metric ratchet added for #101 supplies exact graded counts
+and can now measure real pinned Aiken unit-test costs (#102). It does not by
+itself show that an effort choice improves coding quality. A useful calibration
+still needs campaign-specific held-out tasks, the unchanged full correctness
+harness, per-run task scores, and actual token/cost observations across the
+architect, builder and red-team effort/model grid. The existing sweep planner,
+train/test split and scorer prepare those runs; the unavailable authenticated
+runner and usage meter are the concrete blocker to completing #67 here.
 
 ## What the smoke test established
 
