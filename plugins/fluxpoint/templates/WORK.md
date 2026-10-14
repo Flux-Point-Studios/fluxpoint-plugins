@@ -95,7 +95,7 @@ silently re-decide the other way.
 
 ## Evidence
 One table for both modes, and two classes of row. `Source: gate` rows are
-written by the Stop hook, which ran `scripts/harness.sh --full` itself and
+written by the Stop hook, which ran the configured harness invocation itself (`--full` unless `FPL_HARNESS_ARGS` says otherwise) and
 recorded the exit code, the tree state, and a hash of the log — nobody
 writes those by hand. Everything else (`loop` rows per slice, a runId for a
 graph run appended by `scripts/record-run.py`) is a claim by whoever wrote

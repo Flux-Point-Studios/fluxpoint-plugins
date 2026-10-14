@@ -76,13 +76,25 @@ touches at most 15 files, or stop after 30 turns and report gaps."
 
 ## Working with the DoD gate
 
-The Stop hook blocks stops while `scripts/harness.sh --full` or the hygiene
-scan is red, up to FPL_MAX_BLOCKS (default 3) consecutive times, then
+The Stop hook blocks stops while its configured harness invocation (`--full`
+unless `FPL_HARNESS_ARGS` says otherwise) or the hygiene scan is red, up to FPL_MAX_BLOCKS (default 3) consecutive times, then
 yields with a checkpoint notice. The correct responses, in order: fix what
 is red; never weaken the harness, delete tests, or edit WORK.md's
 Definition of Done to reach green; on the third block, write a checkpoint —
 what failed, what was attempted, two alternative paths — and hand control
 back to the user.
+
+`FPL_HARNESS_ARGS` chooses a gate-sized contract when `--full` exceeds the
+hook budget; keep `--full` in CI. Explicit process environment wins, then the
+resolved repo's `.claude/settings.local.json` and `.claude/settings.json`
+`env` entries. SessionStart reports the actual invocation.
+`FPL_GATE_TIMEOUT` defaults to 540 seconds and is capped at 570 to leave room
+within the 600-second hook ceiling. `FPL_MAX_BLOCKS` defaults to 3.
+
+Gate evidence defaults to the ignored local `.claude/fluxpoint/evidence.jsonl`
+and is shown at SessionStart. `FPL_GATE_EVIDENCE=work` retains shared work-file
+rows and announces the uncommitted write; `off` disables evidence recording.
+The gate reuses a pass only for the same complete tree and invocation.
 
 ## The ship pipeline
 

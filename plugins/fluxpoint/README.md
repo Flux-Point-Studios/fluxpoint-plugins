@@ -96,7 +96,26 @@ gate stays dormant in repos that lack it.
 
 **Spec side:** `WORK.md` — goal, `MODE`, Definition of Done, Plan (loop
 slices), Campaign (the graph IR), Constraints, Merge policy, and one
-Evidence table both modes append to.
+Evidence table both modes append to. Stop-gate verdicts are stored locally
+in `.claude/fluxpoint/evidence.jsonl` and shown at SessionStart, so a final
+stop leaves tracked files clean.
+
+The Stop gate can use a shorter repo-defined contract when `--full` cannot
+fit its hook budget; CI should still run the full suite.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `FPL_HARNESS_ARGS` | `--full` | Harness arguments; process environment, then repo `.claude/settings.local.json`, then `.claude/settings.json` `env`. |
+| `FPL_GATE_TIMEOUT` | 540 | Harness seconds, capped at 570 within the 600-second hook ceiling. |
+| `FPL_MAX_BLOCKS` | 3 | Consecutive blocked stops before a checkpoint yield. |
+| `FPL_GATE_EVIDENCE` | `local` | Ignored JSONL verdicts; `work` opts into tracked work-file rows with an uncommitted-write notice; `off` skips recording. |
+
+The hygiene scan reads added lines and untracked source. The hedge `for now`
+is checked in comments, so Python loop variables named `now` do not match.
+`.fluxpoint-hygiene-allow` holds one Python regex per line for justified source
+lines (for example `skip\(f?"UNVERIFIED:`); blank lines and `#` comments are
+ignored. Both that policy and `.fluxpoint-hygiene-ignore` belong to the trust
+base and cannot disable the gate's code-change detection.
 
 ## Invariants worth naming
 
@@ -117,7 +136,9 @@ Evidence table both modes append to.
   source written through the Bash tool. Dirtiness is measured against the
   commit the session started from, so committing work mid-session
   is not a way to stop being judged; the hygiene scan uses the same
-  baseline. It falls back to HEAD when that commit is not an ancestor of
+  baseline. A checkout rebases the session baseline to the imported HEAD
+  while later session commits remain judged. It falls back to HEAD when the
+  baseline commit is not an ancestor of
   the current one (a rebase or branch switch), because a gate that fires
   spuriously gets switched off.
 - The files that decide what green means — the harness, the proof and pair

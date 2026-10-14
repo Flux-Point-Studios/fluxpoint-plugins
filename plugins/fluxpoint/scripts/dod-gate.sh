@@ -31,6 +31,7 @@ if [ ! -f "$dirty" ] && ! fpl_code_dirty; then
   exit 0
 fi
 mkdir -p "$sd"
+[ -f "$sd/.gitignore" ] || printf '*\n' >"$sd/.gitignore"
 
 if [ ! -f scripts/harness.sh ]; then
   rm -f "$dirty"
@@ -52,7 +53,7 @@ yielded="$sd/$sid.yielded"
 # A cheaper contract enforced every stop beats a perfect one enforced never.
 # Resolved HERE, above the yield guard, because that guard names it too and
 # `set -u` turns a use-before-assign into a crashed gate rather than a warning.
-read -r -a harness_args <<<"${FPL_HARNESS_ARGS:---full}"
+read -r -a harness_args <<<"$(fpl_harness_args)"
 harness_desc="${harness_args[*]}"
 
 # The work file is excluded throughout: this gate writes its own row into it,
@@ -77,15 +78,13 @@ gate_status() {
 # one hash for both made every green verdict look new — the run itself moves
 # the tree — and duplicated its row on every stop.
 gate_tree_sha() {
-  local d
-  if [ -n "$work_file" ]; then
-    d="$(git diff HEAD -- . ":!$work_file" 2>/dev/null)"
-  else
-    d="$(git diff HEAD 2>/dev/null)"
-  fi
-  printf '%s\n%s' "$(gate_status)" "$d" | "$FPL_PY" -c '
-import hashlib, sys
-print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:8])' 2>/dev/null || echo unknown
+  "$FPL_PY" "$here/gate-tree.py" "$work_file" 2>/dev/null || echo unknown
+}
+
+# Verdict reuse is bound to both the complete tree and the configured
+# invocation. A contract change must be judged even when source is unchanged.
+gate_verdict_key() {
+  printf '%s\n%s\n%s\n' "$1" "$harness_desc" "${FPL_DISTILL:-0}"
 }
 
 # Yielding is a decision about a TREE, and it has to hold until that tree
@@ -97,7 +96,13 @@ print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:8])' 2>/dev/null || e
 # Any real edit moves the hash, which re-arms the gate, so this cannot decay
 # into "yielded once, disabled forever".
 guard_sha="$(gate_tree_sha)"
-if [ "$guard_sha" != unknown ] && [ "$(cat "$yielded" 2>/dev/null)" = "$guard_sha" ]; then
+guard_key="$(gate_verdict_key "$guard_sha")"
+passed="$sd/$sid.passed"
+if [ "$guard_sha" != unknown ] && [ "$(cat "$passed" 2>/dev/null)" = "$guard_key" ]; then
+  rm -f "$dirty"
+  exit 0
+fi
+if [ "$guard_sha" != unknown ] && [ "$(cat "$yielded" 2>/dev/null)" = "$guard_key" ]; then
   fpl_json_obj systemMessage "fluxpoint DoD gate: already yielded on this exact tree (${guard_sha}); not re-running the harness until something changes. Run scripts/harness.sh ${harness_desc} yourself to re-establish a verdict."
   exit 0
 fi
@@ -108,6 +113,14 @@ fi
 start_ts="$(date -u +%FT%TZ)"
 printf 'RUNNING %s\n' "$start_ts" >"$sd/last-harness"
 gate_timeout="${FPL_GATE_TIMEOUT:-540}"
+timeout_notice=""
+case "$gate_timeout" in
+  ''|*[!0-9]*|0) timeout_notice="Invalid FPL_GATE_TIMEOUT; using 540s. "; gate_timeout=540 ;;
+esac
+if [ "${#gate_timeout}" -gt 3 ] || [ "$gate_timeout" -gt 570 ]; then
+  timeout_notice="FPL_GATE_TIMEOUT=${gate_timeout}s exceeds the safe budget; clamped to 570s. "
+  gate_timeout=570
+fi
 if command -v timeout >/dev/null 2>&1; then
   timeout "$gate_timeout" bash scripts/harness.sh "${harness_args[@]}" >"$hlog" 2>&1
   hrc=$?
@@ -119,10 +132,13 @@ if [ "$hrc" -eq 124 ] || [ "$hrc" -eq 137 ]; then
   # Not red and not green: nothing was established either way, and saying so
   # is the whole point.
   printf 'TIMEOUT %s\n' "$(date -u +%FT%TZ)" >"$sd/last-harness"
-  findings="harness ${harness_desc} did not finish within ${gate_timeout}s and was killed.${nl}\
+  findings="${timeout_notice}harness ${harness_desc} did not finish within ${gate_timeout}s and was killed.${nl}\
 This is not a pass and not a failure — nothing was established. Either the${nl}\
-suite got slower than the gate allows or something hung. Run it yourself,${nl}\
-then split it or raise FPL_GATE_TIMEOUT (the hook ceiling is 600s).${nl}\
+suite got slower than the gate allows or something hung. If it cannot fit,${nl}\
+set FPL_HARNESS_ARGS in the repo settings env to a gate-sized contract (for${nl}\
+example --changed <file> or a repo-defined fast mode), and keep --full in CI.${nl}\
+FPL_GATE_TIMEOUT is capped at 570s, below the 600s hook ceiling to leave${nl}\
+room for hygiene and recording the verdict.${nl}\
 Last 40 lines before the kill:${nl}$(tail -n 40 "$hlog")${nl}${nl}"
 elif [ "$hrc" -ne 0 ]; then
   findings="harness ${harness_desc} RED (last 40 lines):${nl}$(tail -n 40 "$hlog")${nl}${nl}"
@@ -159,14 +175,33 @@ ts="$(date -u +%FT%TZ)"
 # verdict rather than asking the agent to describe it afterwards. Rows are
 # written only where a stop actually happens: an ordinary blocked stop is not
 # an outcome, it is a correction.
+evidence_notice=""
 fpl_record_evidence() { # outcome, claim, proof
-  local ev state
-  state="$(fpl_state_file || true)"
-  [ -n "$state" ] || return 0
-  ev="$(dirname "$0")/evidence.py"
+  local ev state mode destination
+  ev="$here/evidence.py"
   [ -f "$ev" ] || return 0
-  "$FPL_PY" "$ev" --record --source gate --graph "$state" \
-    --outcome "$1" --claim "$2" --proof "$3" >/dev/null 2>&1 || true
+  mode="${FPL_GATE_EVIDENCE:-local}"
+  case "$mode" in
+    off) return 0 ;;
+    local)
+      destination="$sd/evidence.jsonl"
+      if "$FPL_PY" "$ev" --record --source gate --local "$destination" \
+        --outcome "$1" --claim "$2" --proof "$3" >/dev/null 2>&1; then
+        evidence_notice=" Gate evidence recorded locally in .claude/fluxpoint/evidence.jsonl."
+      else
+        evidence_notice=" WARNING: could not record local gate evidence."
+      fi ;;
+    work)
+      state="$(fpl_state_file || true)"
+      [ -n "$state" ] || return 0
+      if "$FPL_PY" "$ev" --record --source gate --graph "$state" \
+        --outcome "$1" --claim "$2" --proof "$3" >/dev/null 2>&1; then
+        evidence_notice=" Gate evidence written to ${state}; the uncommitted gate row must be committed or discarded intentionally."
+      else
+        evidence_notice=" WARNING: could not record gate evidence in ${state}."
+      fi ;;
+    *) evidence_notice=" WARNING: invalid FPL_GATE_EVIDENCE=${mode}; expected local, work or off." ;;
+  esac
 }
 
 head_sha="$(git rev-parse --short HEAD 2>/dev/null || echo none)"
@@ -190,17 +225,20 @@ proof="harness ${harness_desc} exit ${hrc} @${head_sha} tree:${tree_sha} dirty:$
 
 if [ -z "$findings" ]; then
   printf 'PASS %s\n' "$ts" >"$sd/last-harness"
-  rm -f "$dirty" "$counter"
+  rm -f "$dirty" "$counter" "$yielded"
   fpl_record_evidence PASS \
     "Stop-gate DoD: scripts/harness.sh ${harness_desc} green over ${dirty_n} changed path(s), hygiene scan clean" \
     "$proof"
   # This tree passed, so it is what the next verdict should be measured
   # against. Refreshed only on green: a red or timed-out run has not
   # established anything worth inheriting as a starting point.
-  fpl_set_base "$sid"
   touched="$(fpl_trust_base_modified | sort -u | tr '\n' ' ')"
+  fpl_set_base "$sid"
+  [ "$tree_sha" = unknown ] || gate_verdict_key "$tree_sha" >"$passed"
   if [ -n "${touched// /}" ]; then
-    fpl_json_obj systemMessage "fluxpoint: gate green, but this session changed the files that decide what green means: ${touched}. A verdict is only as trustworthy as the contract that produced it — review those diffs before trusting this pass."
+    fpl_json_obj systemMessage "fluxpoint: gate green, but this session changed the files that decide what green means: ${touched}. A verdict is only as trustworthy as the contract that produced it — review those diffs before trusting this pass.${timeout_notice:+ ${timeout_notice}}${evidence_notice}"
+  elif [ -n "$evidence_notice$timeout_notice" ]; then
+    fpl_json_obj systemMessage "fluxpoint: gate green.${timeout_notice:+ ${timeout_notice}}${evidence_notice}"
   fi
   exit 0
 fi
@@ -226,8 +264,8 @@ if [ "$count" -ge "$max" ]; then
   # Record WHICH tree was abandoned, so the guard at the top can skip a
   # re-run that cannot change this outcome. Not the counter: the counter says
   # how many times we blocked, the tree says what we blocked over.
-  printf '%s\n' "$guard_sha" >"$yielded"
-  fpl_json_obj systemMessage "fluxpoint DoD gate: still red after $max blocked stops. Checkpoint: the task is NOT done.${nl}${findings}"
+  printf '%s\n' "$guard_key" >"$yielded"
+  fpl_json_obj systemMessage "fluxpoint DoD gate: still red after $max blocked stops. Checkpoint: the task is NOT done.${evidence_notice}${nl}${findings}"
   exit 0
 fi
 printf '%s\n' "$((count + 1))" >"$counter"

@@ -592,49 +592,51 @@ def main():
         + f" | {red_team} |"
     )
 
-    # 2a. Decisions, spliced under their own header when the file has one.
-    drows = decision_rows(summary, ts)
-    if drows and os.path.exists(evidence_file):
-        text = open(evidence_file, encoding="utf-8").read()
-        if DEC_HDR in text:
-            text, n = re.subn(
-                re.escape(DEC_HDR) + r"\n\|[-| ]+\|\n",
-                lambda m: m.group(0) + "\n".join(drows) + "\n", text, count=1)
-            if n:
-                open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
-                for d in drows:
-                    print(d)
-        else:
-            print(f"record-run: {len(drows)} decision(s) recorded in the run "
-                  f"artifact, but {evidence_file} has no Decisions table to append "
-                  f"to — add one so a frozen choice outlives this run",
-                  file=sys.stderr)
+    from workfile_lock import workfile_lock
+    with workfile_lock(evidence_file):
+        # 2a. Decisions, spliced under their own header when the file has one.
+        drows = decision_rows(summary, ts)
+        if drows and os.path.exists(evidence_file):
+            text = open(evidence_file, encoding="utf-8").read()
+            if DEC_HDR in text:
+                text, n = re.subn(
+                    re.escape(DEC_HDR) + r"\n\|[-| ]+\|\n",
+                    lambda m: m.group(0) + "\n".join(drows) + "\n", text, count=1)
+                if n:
+                    open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
+                    for d in drows:
+                        print(d)
+            else:
+                print(f"record-run: {len(drows)} decision(s) recorded in the run "
+                      f"artifact, but {evidence_file} has no Decisions table to append "
+                      f"to — add one so a frozen choice outlives this run",
+                      file=sys.stderr)
 
-    if os.path.exists(evidence_file):
-        text = open(evidence_file, encoding="utf-8").read()
-        hdr, new_row = (ROW_HDR, row) if ROW_HDR in text else (LEGACY_HDR, legacy_row)
-        if hdr in text:
-            text, n = re.subn(
-                re.escape(hdr) + r"\n\|[-| ]+\|\n",
-                lambda m: m.group(0) + new_row + "\n",
-                text,
-                count=1,
-            )
-            if n:
-                open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
-                row = new_row
+        if os.path.exists(evidence_file):
+            text = open(evidence_file, encoding="utf-8").read()
+            hdr, new_row = (ROW_HDR, row) if ROW_HDR in text else (LEGACY_HDR, legacy_row)
+            if hdr in text:
+                text, n = re.subn(
+                    re.escape(hdr) + r"\n\|[-| ]+\|\n",
+                    lambda m: m.group(0) + new_row + "\n",
+                    text,
+                    count=1,
+                )
+                if n:
+                    open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
+                    row = new_row
+                else:
+                    print(
+                        f"record-run: Evidence header found in {evidence_file} but no "
+                        f"separator row beneath it; artifact written, row not appended",
+                        file=sys.stderr,
+                    )
             else:
                 print(
-                    f"record-run: Evidence header found in {evidence_file} but no "
-                    f"separator row beneath it; artifact written, row not appended",
+                    f"record-run: no Evidence table header in {evidence_file}; "
+                    f"artifact written but row not appended",
                     file=sys.stderr,
                 )
-        else:
-            print(
-                f"record-run: no Evidence table header in {evidence_file}; "
-                f"artifact written but row not appended",
-                file=sys.stderr,
-            )
     print(f"record-run: {art}")
     print(row)
     return 0
