@@ -14,7 +14,7 @@ export const meta = {
   phases: [
     { title: 'Lenses', detail: 'independent attackers on five surfaces plus composition' },
     { title: 'Reduce', detail: 'merge duplicate exploit paths without judging them' },
-    { title: 'Verify', detail: 'reproduction, reachability and scope refuters' },
+    { title: 'Verify', detail: 'reproduction, reachability and scope refuters; no-claim coverage skeptic' },
     { title: 'Snapshot', detail: 'fresh final identity and coverage recheck' },
   ],
 }
@@ -212,10 +212,11 @@ async function verify(d) {
 
 phase('Lenses')
 const lensResults = await parallel(RUN_LENSES.map(l => () => agent(lensPrompt(l), { label: `lens:${l.id}`, phase: 'Lenses', schema: FINDINGS })))
-const raw = [], blockers = [], dead = [], reports = []
+const raw = [], blockers = [], dead = [], reports = [], completedLenses = []
 RUN_LENSES.forEach((l, i) => {
   const r = lensResults[i]
   if (!r || !Array.isArray(r.findings)) { dead.push(l.id); blockers.push(`${l.id}: attacker returned no valid report`); return }
+  const blockersBefore = blockers.length
   reports.push({ lens: l.id, subject: r.subject, completed: r.completed, sampled: r.sampled, evidence: r.evidence, blockers: r.blockers })
   if (!sameSubject(r.subject) || r.completed !== true || typeof r.sampled !== 'boolean' || !text(r.evidence, 10) || !stringList(r.blockers)) {
     blockers.push(`${l.id}: incomplete coverage, invalid evidence or mismatched reviewed subject`)
@@ -227,7 +228,30 @@ RUN_LENSES.forEach((l, i) => {
     }
     raw.push({ ...f, id: `F${raw.length + 1}`, lens: l.id })
   })
+  if (blockers.length === blockersBefore) completedLenses.push(l.id)
 })
+let skeptic = null
+if (!raw.length && !blockers.length) {
+  phase('Verify')
+  skeptic = await agent([
+    `Read ${A.pluginRoot}/agents/red-team-reviewer.md. Independently challenge a no-claims code review; do not edit shared source.`, scope,
+    'No attacker claimed an exploit. Reconstruct representative defended cases yourself in an isolated copy at the pinned head. Check valid controls, actual entry-point reachability and that rejection occurred at the intended boundary. Look for failures the attackers missed, including composition. A generic failing test, an earlier unrelated rejection, missing tools or a broken fixture cannot count as a defense.',
+    'Return subject, completed, sampled, evidence, blockers and findings. Set completed only after executable sampling with cited commands/artifacts, or a justified complete-diff determination that no executable surface exists. Report newly found exploit paths as findings; uncertainty or unavailable checks are blockers. Your independent sampling does not replace any primary attacker or expand their declared coverage.',
+    'PRIMARY COVERAGE REPORTS:\n' + JSON.stringify(reports),
+    settled,
+  ].join('\n\n'), { label: 'skeptic:coverage', phase: 'Verify', schema: FINDINGS })
+  if (!skeptic || !sameSubject(skeptic.subject) || skeptic.completed !== true || typeof skeptic.sampled !== 'boolean'
+    || !text(skeptic.evidence, 10) || !stringList(skeptic.blockers) || !Array.isArray(skeptic.findings)) {
+    blockers.push('independent no-claims coverage skeptic returned no complete valid verification')
+  }
+  if (stringList(skeptic?.blockers)) blockers.push(...skeptic.blockers.map(b => `coverage skeptic: ${b}`))
+  if (Array.isArray(skeptic?.findings)) skeptic.findings.forEach(f => {
+    if (!f || !Object.prototype.hasOwnProperty.call(RANK, f.severity) || !text(f.title, 8) || !text(f.failurePath, 20) || !text(f.evidence, 10) || !text(f.rewire, 10)) {
+      blockers.push('coverage skeptic: malformed exploit claim remains unresolved'); return
+    }
+    raw.push({ ...f, id: `F${raw.length + 1}`, lens: 'coverage-skeptic' })
+  })
+}
 let distinct = []
 if (raw.length) {
   phase('Reduce')
@@ -252,6 +276,7 @@ if (!blockers.length) {
     'Independently recheck the review identity after the attackers and refuters finished. Do not review their conclusions or edit files.', scope,
     'Resolve the repository HEAD and base/head objects, inspect working status and recompute the reviewed diff counts. Verify every experiment and coverage artifact names this head. Return stable true only when this exact reviewed state is still current and all range identities and counts match. Missing access or drift is a blocker. Return observed subject, evidence and blockers.',
     'COVERAGE REPORTS:\n' + JSON.stringify(reports),
+    'INDEPENDENT COVERAGE SKEPTIC:\n' + JSON.stringify(skeptic),
     'REFUTATION RECORDS:\n' + JSON.stringify(judged),
   ].join('\n\n'), { label: 'snapshot:final', phase: 'Snapshot', schema: SNAPSHOT })
   if (!identity || identity.stable !== true || !sameSubject(identity.subject) || !text(identity.evidence, 10) || !stringList(identity.blockers)) {
@@ -263,6 +288,7 @@ const standing = [...confirmed, ...unverified].sort(bySeverity)
 const worstSeverity = standing[0]?.severity || 'NONE'
 const verdict = blockers.length ? 'BLOCK' : 'SHIP'
 const counts = { lenses: RUN_LENSES.length, lensesReturned: RUN_LENSES.length - dead.length, raw: raw.length, distinct: distinct.length,
+  attackersCompleted: completedLenses.length,
   confirmed: confirmed.length, refuted: refuted.length, unverified: unverified.length,
   verifiers: judged.reduce((n, d) => n + d.verifiers, 0), deadVerifiers: judged.reduce((n, d) => n + d.deadVerifiers, 0) }
 log(`counts: ${counts.lensesReturned}/${counts.lenses} attackers, ${counts.raw} raw -> ${counts.distinct} distinct -> ${counts.confirmed} confirmed, ${counts.refuted} refuted, ${counts.unverified} unresolved`)
@@ -270,7 +296,9 @@ log(`verdict: ${verdict}${blockers.length ? ` (${blockers.join('; ')})` : ''}`)
 return {
   verdict, worstSeverity, worstSeverityRank: worstSeverity === 'NONE' ? 0 : 4 - RANK[worstSeverity],
   findings: standing.map(d => ({ severity: d.severity, finding: d.title, exploit_path: d.failurePath, minimal_fix: d.rewire })),
-  coverage: { subject: SUBJECTS, attackers: RUN_LENSES.length, lenses: RUN_LENSES.map(l => l.id), sampled: A.sampled === true || reports.some(r => r.sampled === true) },
-  review: { counts, blockers: unique(blockers), deadLenses: dead, reports, snapshot: identity, settled: SETTLED,
+  ...(completedLenses.length ? { coverage: { subject: SUBJECTS, attackers: completedLenses.length, lenses: completedLenses,
+    sampled: A.sampled === true || reports.some(r => r.sampled === true) } } : {}),
+  review: { subject: SUBJECTS, plannedLenses: RUN_LENSES.map(l => l.id), counts, blockers: unique(blockers), deadLenses: dead,
+    reports, skeptic, snapshot: identity, settled: SETTLED,
     confirmed, unverified, refuted: refuted.map(d => ({ ...d, titles: [d.title, ...d.variants] })) },
 }

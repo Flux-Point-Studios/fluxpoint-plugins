@@ -64,10 +64,16 @@ supplies the target or attack focus.
    unresolved. A majority reproducing a claim confirms it. Settled titles
    supply context and never count as evidence against a current exploit.
 
+   A no-claims round still runs an independent coverage skeptic. It rebuilds
+   representative valid controls and defended attacks, checks the reached
+   boundary and looks for false negatives. Missing or incomplete skeptical
+   execution blocks SHIP; any exploit it discovers goes through the same
+   independent refutation stages.
+
    After a clean round, a fresh agent rechecks Git objects, current state,
    diff counts and the experiment identities. Drift or a missing recheck
-   blocks SHIP. Expect six attackers and this final checker before any
-   reduce/refutation work; a finding-bearing round adds one reducer, three
+   blocks SHIP. A no-claims default round uses six attackers, an independent
+   coverage skeptic and this final checker. A finding-bearing round adds one reducer, three
    refuters per MEDIUM+ claim, and one per LOW. Use available concurrency;
    serial execution has the same coverage obligations. Scheduled agents
    and token consumption are not evidence of completed verification.
@@ -87,6 +93,9 @@ supplies the target or attack focus.
 5. Synthesize using the agent's verdict rule. The Workflow returns RedTeamV1
    directly, including top-level `coverage` with `subject` (the repository
    ranges and file/line counts), `attackers`, `lenses`, and `sampled`. Its
+   attacker count and lens names include completed primary attackers only;
+   planned coverage and failures remain in `review`. A round with zero
+   completed attackers omits `coverage` and returns BLOCK. Its
    `review` contains stage counts, every attacker report, confirmed and
    unresolved claims, refutation evidence, blockers and the identity recheck.
    Preserve incomplete coverage and

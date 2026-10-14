@@ -40,7 +40,7 @@ const log=s=>logs.push(s),phase=s=>phases.push(s);
 (async()=>{__SCRIPT__})().then(r=>writeFileSync(__OUT__,JSON.stringify({r,calls,logs,phases})),
  e=>writeFileSync(__OUT__,JSON.stringify({err:String(e.message||e),calls,logs,phases})));
 '''
-DEFAULT = r'''(p,o)=>o.label.startsWith('lens:')?lens():o.label==='snapshot:final'?snapshot():null'''
+DEFAULT = r'''(p,o)=>o.label.startsWith('lens:')||o.label==='skeptic:coverage'?lens():o.label==='snapshot:final'?snapshot():null'''
 
 
 def run(args=None, responder=DEFAULT):
@@ -80,7 +80,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'SHIP')
         self.assertEqual(result['coverage'], {'subject': SUBJECT, 'attackers': 6, 'lenses': LENSES, 'sampled': False})
         self.assertEqual((result['worstSeverity'], result['worstSeverityRank'], result['findings']), ('NONE', 0, []))
-        self.assertEqual([c['label'] for c in out['calls']], ['lens:' + l for l in LENSES] + ['snapshot:final'])
+        self.assertEqual([c['label'] for c in out['calls']], ['lens:' + l for l in LENSES] + ['skeptic:coverage', 'snapshot:final'])
         for c in out['calls'][:6]:
             self.assertIn('/plug/agents/red-team-reviewer.md', c['prompt'])
             for s in SUBJECT:
@@ -117,7 +117,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_sampling_is_explicit_and_durable(self):
         out = run(responder='''(p,o)=>o.label.startsWith('lens:')?
-            lens([], {sampled:o.label==='lens:authority'}):snapshot()''')
+            lens([], {sampled:o.label==='lens:authority'}):o.label==='skeptic:coverage'?lens():snapshot()''')
         self.assertEqual(out['r']['verdict'], 'SHIP')
         self.assertTrue(out['r']['coverage']['sampled'])
         art, row, _ = record({'rt': out['r']})
@@ -192,9 +192,42 @@ class WorkflowTests(unittest.TestCase):
     def test_final_drift_missing_recheck_and_mismatched_counts_block_ship(self):
         for snapshot in ['null', 'snapshot({stable:false})', 'snapshot({subject:[]})',
                          'snapshot({blockers:["Working tree changed during review"]})']:
-            out = run(responder=f"(p,o)=>o.label.startsWith('lens:')?lens():{snapshot}")
+            out = run(responder=f"(p,o)=>o.label.startsWith('lens:')||o.label==='skeptic:coverage'?lens():{snapshot}")
             self.assertEqual(out['r']['verdict'], 'BLOCK')
             self.assertTrue(out['r']['review']['blockers'])
+
+    def test_coverage_counts_completed_attackers_and_retains_planned_scope_separately(self):
+        out = run(responder='''(p,o)=>o.label==='lens:authority'?null:
+            o.label==='lens:value'?lens([], {completed:false}):lens()''')
+        result = out['r']
+        self.assertEqual(result['verdict'], 'BLOCK')
+        self.assertEqual(result['coverage']['attackers'], 4)
+        self.assertEqual(result['coverage']['lenses'], LENSES[2:])
+        self.assertEqual(result['review']['plannedLenses'], LENSES)
+        self.assertEqual(result['review']['counts']['attackersCompleted'], 4)
+        empty = run(responder='(p,o)=>null')['r']
+        self.assertEqual(empty['verdict'], 'BLOCK')
+        self.assertNotIn('coverage', empty)
+        self.assertEqual(empty['review']['subject'], SUBJECT)
+
+    def test_no_claims_still_requires_executed_independent_skeptic_sampling(self):
+        for response in ['null', 'lens([], {completed:false})', 'lens([], {subject:[]})',
+                         'lens([], {blockers:["Valid control did not build"]})']:
+            out = run(responder=f"(p,o)=>o.label==='skeptic:coverage'?{response}:o.label.startsWith('lens:')?lens():snapshot()")
+            self.assertEqual(out['r']['verdict'], 'BLOCK', response)
+            self.assertTrue(out['r']['review']['blockers'])
+            self.assertEqual(out['r']['coverage']['attackers'], 6)
+
+    def test_skeptic_finds_missed_exploit_and_sends_it_to_fresh_refuters(self):
+        out = run(responder='''(p,o)=>o.label.startsWith('lens:')?lens():
+            o.label==='skeptic:coverage'?lens([F('HIGH','defended case rejected at wrong boundary')]):
+            o.label==='reduce'?singletons(p):o.label.startsWith('refute:')?
+            {resolution:'CONFIRMED',evidence:'Fresh reproduction proves the missed attack violates the invariant'}:snapshot()''')
+        self.assertEqual(out['r']['verdict'], 'BLOCK')
+        self.assertEqual(out['r']['review']['counts']['confirmed'], 1)
+        self.assertEqual(out['r']['review']['counts']['verifiers'], 3)
+        self.assertEqual(out['r']['coverage']['attackers'], 6)
+        self.assertEqual(out['r']['review']['confirmed'][0]['sources'], ['coverage-skeptic'])
 
 
 class RecordTests(unittest.TestCase):
