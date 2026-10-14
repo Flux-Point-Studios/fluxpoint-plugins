@@ -38,7 +38,7 @@ function defaultMemoryDir(root) {
   return path.join(os.homedir(), ".claude", "projects", key, "memory");
 }
 
-function pathCandidates(body) {
+function pathCandidates(body, root) {
   const out = [];
   for (const m of body.matchAll(/`([^`\n]+)`/g)) {
     const t = m[1].trim().replace(/[.,;:]+$/, "");
@@ -47,7 +47,17 @@ function pathCandidates(body) {
     if (/^https?:/i.test(t)) continue;
     if (/[*?{}<>|"…]/.test(t)) continue;
     if (/(^|\s)-/.test(t)) continue; // command lines with flags
-    out.push(t);
+    // Preserve literal filenames with spaces when the whole citation exists;
+    // interpreting that known file as a command would invent a missing prefix.
+    if (/\s/.test(t) && fs.existsSync(path.join(root, stripLineRef(t.replace(/\\/g, "/"))))) {
+      out.push(t);
+      continue;
+    }
+    // A command or annotated citation may follow its path with other words.
+    // Only its leading word can name the file; a later slash-bearing word in
+    // `User-Agent: app/1.0` is not a citation.
+    const head = t.split(/\s+/)[0];
+    if (/[\\/]/.test(head)) out.push(head);
   }
   return out;
 }
@@ -58,10 +68,10 @@ function isAbsolute(p) {
   return /^[A-Za-z]:[\\/]/.test(p);
 }
 
-// Alarm only where absence is provable: an anchored relative path whose first
-// segment exists under root, or an absolute path whose parent dir exists.
-// Everything else (unknown anchors, other machines, repo-relative citations)
-// stays silent rather than guessing.
+// Alarm only where absence is provable: a relative path with an existing
+// anchor that runs through a repository, including when root itself is one.
+// A same-named directory under root is not enough to establish that a citation
+// is root-relative. Unknown anchors and other machines stay silent.
 // `path/to/file.ts:44` and `:44-58` are the house citation convention — they are
 // what makes a reference clickable — so the line part must come off before the
 // file is looked for. Left on, every cited line number reads as a missing file,
@@ -70,18 +80,34 @@ function stripLineRef(p) {
   return p.replace(/:\d+(?::\d+)?(?:-\d+)?$/, "");
 }
 
-function missingPath(root, cand) {
+function isRepo(dir) {
+  return fs.existsSync(path.join(dir, ".git")) ||
+    fs.existsSync(path.join(dir, "substrate.json"));
+}
+
+function inRepo(root, norm) {
+  if (isRepo(root)) return true;
+  let dir = root;
+  for (const segment of norm.split("/").slice(0, -1)) {
+    dir = path.join(dir, segment);
+    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return false;
+    if (isRepo(dir)) return true;
+  }
+  return false;
+}
+
+function missingPath(root, norm) {
   // A drive-letter path names a filesystem this process cannot see: our cold
   // keys live on a Windows box by deliberate policy. Checking it here can only
   // ever produce a false alarm — and worse, POSIX path.dirname cannot parse a
   // backslashed path, so `C:\a\b\` collapses to "." which always exists and the
   // "parent exists, file does not" heuristic fires every single session.
-  if (isAbsolute(cand)) return false;
-  const norm = stripLineRef(cand.replace(/\\/g, "/"));
+  if (isAbsolute(norm)) return false;
   const first = norm.split("/")[0];
   if (first === "" || first === "." || first === "..") return false;
   const anchor = path.join(root, first);
   if (!fs.existsSync(anchor) || !fs.statSync(anchor).isDirectory()) return false;
+  if (!inRepo(root, norm)) return false;
   return !fs.existsSync(path.join(root, norm));
 }
 
@@ -134,8 +160,14 @@ function main() {
   for (const f of files) {
     const name = f.replace(/\.md$/, "");
     const body = fs.readFileSync(path.join(memDir, f), "utf8");
-    for (const cand of pathCandidates(body)) {
-      if (missingPath(root, cand)) {
+    const seenPaths = new Set();
+    for (const cand of pathCandidates(body, root)) {
+      // Different line references and slash spellings still cite one file.
+      // Keep the first spelling for the alarm, and count it once per memory.
+      const norm = stripLineRef(cand.replace(/\\/g, "/"));
+      if (seenPaths.has(norm)) continue;
+      seenPaths.add(norm);
+      if (missingPath(root, norm)) {
         lines.push(
           `ALARM: memory-lint: ${clean(name)} cites missing path: ${clean(cand.replace(/\\/g, "/"))}`
         );

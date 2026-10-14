@@ -55,7 +55,7 @@ test("a non-boolean terminal is a manifest problem", () => {
   writeManifest(ws, "t", { repo: "t", primitives: [prim("t-bad", { terminal: "yes" })] });
   const res = run(["--emit", "--root", ws]);
   assert.equal(res.status, 1);
-  has(res.stderr, 'problem: invalid primitive t-bad in t: "terminal" must be a boolean');
+  has(res.stderr, 'problem: invalid primitive t-bad in t/substrate.json: "terminal" must be a boolean');
 });
 
 test("a workspace with no terminal products still renders the section", () => {
