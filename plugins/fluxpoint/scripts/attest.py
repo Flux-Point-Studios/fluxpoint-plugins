@@ -75,7 +75,7 @@ import time
 GATES = ".fluxpoint-gates.json"
 ATTEST = os.path.join(".claude", "fluxpoint", "attest.jsonl")
 BACKGROUND = os.path.join(".claude", "fluxpoint", "attest-bg")
-GATE_MANIFEST_FIELDS = {"version", "gates", "ci"}
+GATE_MANIFEST_FIELDS = {"version", "gates", "ci", "deployed"}
 CI_FIELDS = {"forge", "contexts"}
 CI_FORGES = {"github"}
 IDENT = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -326,7 +326,97 @@ def load_gates(root):
         out[name] = normalize(cmd)
         out.dirs[name] = _dir_parts(_front(cmd)[1])
         out.cds[name] = _front(cmd)[1]
+    deployed, problems = _deployed(root, doc, out)
+    out.deployed = deployed
+    f += problems
     return ({} if f else out), f
+
+
+def _deployed(root, doc, gates):
+    """Validate explicit pip lanes; the suite must use the checked interpreter."""
+    import shlex
+    lanes = doc.get("deployed", {})
+    if not isinstance(lanes, dict):
+        return {}, [f"{GATES}: deployed must be an object"]
+    findings = []
+    for name, lane in lanes.items():
+        label = f"{GATES}: deployed.{name}"
+        if not isinstance(lane, dict) or set(lane) != {"pins", "python", "gate"} or not all(
+                isinstance(v, str) and v.strip() for v in lane.values()):
+            findings.append(f"{label}: needs exactly nonempty pins, python and gate strings")
+            continue
+        pins = os.path.realpath(os.path.join(root, lane["pins"]))
+        if (os.path.isabs(lane["pins"]) or os.path.commonpath([os.path.realpath(root), pins])
+                != os.path.realpath(root) or not os.path.isfile(pins)):
+            findings.append(f"{label}: pins must name an existing file inside the repository")
+        interpreter = os.path.abspath(os.path.join(root, lane["python"]))
+        if not os.path.isfile(interpreter):
+            findings.append(f"{label}: python interpreter does not exist: {lane['python']}")
+        if lane["gate"] not in gates:
+            findings.append(f"{label}: gate '{lane['gate']}' is not declared")
+            continue
+        try:
+            command = shlex.split(_front(gates[lane["gate"]])[2])
+            cd = getattr(gates, "cds", {}).get(lane["gate"], "")
+            cd = shlex.split(cd)[0] if cd else ""
+            actual = os.path.abspath(os.path.join(root, cd, command[0]))
+            if actual != interpreter:
+                findings.append(f"{label}: gate must invoke the declared python directly; "
+                                "otherwise the checked resolution would not be the tested one")
+        except (ValueError, IndexError):
+            findings.append(f"{label}: cannot parse gate executable")
+    return lanes, findings
+
+
+def load_deployed(root):
+    gates, findings = load_gates(root)
+    return {} if findings else getattr(gates, "deployed", {})
+
+
+def deployed_resolution(root, tree, gate):
+    """Compare exact pins under the lane's interpreter before executing its suite."""
+    import subprocess
+    lanes = {name: lane for name, lane in load_deployed(root).items() if lane["gate"] == gate}
+    hashes, versions, findings = {}, {}, []
+    for name, lane in lanes.items():
+        path = os.path.join(tree, lane["pins"])
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            hashes[name] = hashlib.sha256(raw).hexdigest()
+            pins = {}
+            for line in raw.decode("utf-8").splitlines():
+                line = re.split(r"\s+#", line, maxsplit=1)[0].strip()
+                if not line or line.startswith("#"):
+                    continue
+                match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\[[A-Za-z0-9_,.-]+\])?==([^\s;*]+)", line)
+                if not match:
+                    raise ValueError(f"unsupported pin {line!r}; deployed lanes require exact package==version lines")
+                package, version = match.groups()
+                key = re.sub(r"[-_.]+", "-", package).lower()
+                if key in pins and pins[key] != version:
+                    raise ValueError(f"conflicting pins for {package}")
+                pins[key] = version
+            if not pins:
+                raise ValueError("pins file contains no exact package==version lines")
+            probe = ("import importlib.metadata as m,json,sys\n"
+                     "v={}\n"
+                     "for p in json.loads(sys.argv[1]):\n"
+                     " try: v[p]=m.version(p)\n"
+                     " except m.PackageNotFoundError: v[p]=None\n"
+                     "print(json.dumps(v))\n")
+            interpreter = os.path.abspath(os.path.join(tree, lane["python"]))
+            result = subprocess.run([interpreter, "-c", probe, json.dumps(list(pins))],
+                                    cwd=tree, capture_output=True, text=True, timeout=60)
+            if result.returncode:
+                raise ValueError(f"interpreter probe exited {result.returncode}: {result.stderr[-500:]}")
+            versions[name] = actual = json.loads(result.stdout)
+            for package, expected in pins.items():
+                if actual.get(package) != expected:
+                    findings.append(f"{name}: {package} {actual.get(package) or 'not installed'} != {expected}")
+        except (OSError, UnicodeError, ValueError, subprocess.SubprocessError) as exc:
+            findings.append(f"{name}: cannot verify deployed resolution: {exc}")
+    return hashes, versions, findings
 
 
 def _ci_problems(doc):
@@ -845,9 +935,14 @@ def _execute(root, gate, started, token, nonce="", tree=None):
                      "log": log})
     print(f"attest: running {gate} as {token} — collect it with "
           f"attest.py --await {token}", flush=True)
+    pins_hashes, dependencies, pin_findings = deployed_resolution(root, tree, gate)
     with open(log, "wb") as out:
-        code = subprocess.call([_bash(), "-c", raw], cwd=tree, stdin=subprocess.DEVNULL,
-                               stdout=out, stderr=subprocess.STDOUT)
+        if pin_findings:
+            out.write(("\n".join(pin_findings) + "\nSuite not started.\n").encode("utf-8"))
+            code = 1
+        else:
+            code = subprocess.call([_bash(), "-c", raw], cwd=tree, stdin=subprocess.DEVNULL,
+                                   stdout=out, stderr=subprocess.STDOUT)
     with open(log, "rb") as fh:
         text = fh.read().decode("utf-8", "replace")
     row = {
@@ -857,6 +952,9 @@ def _execute(root, gate, started, token, nonce="", tree=None):
         "started": started, "when": now(), "sessionId": "", "agent": "",
         "witness": "wrapper", "token": token, "nonce": nonce,
     }
+    if pins_hashes or dependencies or pin_findings:
+        row.update(pinsSha256=pins_hashes, dependencies=dependencies,
+                   resolutionChecked=not pin_findings)
     append_row(root, row)
     _bg_write(root, {"token": token, "gate": gate, "status": "DONE", "exit": code,
                      "attestId": row["attestId"], "started": started,
@@ -1255,7 +1353,20 @@ def verify_claims(root, summary):
                 # An ExecutionV1 cites its attestation directly, so the check
                 # is against the id rather than a command string it never
                 # carries.
-                checks.append(_check_cited(rows, node, declared, r, launch, head, used))
+                check = _check_cited(rows, node, declared, r, launch, head, used)
+                lanes = {name: lane for name, lane in getattr(gates, "deployed", {}).items()
+                         if lane["gate"] == declared}
+                if lanes and check["status"] == "ATTESTED":
+                    row = next(a for a in rows if a.get("attestId") == r.get("attestId"))
+                    current = {}
+                    for name, lane in lanes.items():
+                        with open(os.path.join(root, lane["pins"]), "rb") as fh:
+                            current[name] = hashlib.sha256(fh.read()).hexdigest()
+                    if row.get("witness") != "wrapper" or not row.get("resolutionChecked"):
+                        check.update(status="MISMATCH", detail="deployed gate requires a wrapper run with a checked dependency resolution")
+                    elif row.get("pinsSha256") != current:
+                        check.update(status="STALE", detail="deployed pins changed since the attested execution")
+                checks.append(check)
                 continue
             if "exit" not in r or "command" not in r:
                 continue
