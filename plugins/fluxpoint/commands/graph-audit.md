@@ -26,13 +26,20 @@ is for a graph run.
      {"round": 1, "mode": "multi", "verdict": "REWIRE",
       "counts": {"raw": 41, "distinct": 22, "settledMatched": 0,
                  "confirmed": 13, "refuted": 9, "unverified": 0},
-      "confirmed": ["<title>"], "unverified": [], "refuted": ["<title>"],
+      "confirmed": [{"title": "<title>", "defectClass": "<class>", "classRewire": "<invariant-level repair>"}],
+      "unverified": [], "refuted": ["<title>"],
       "fixed": ["<title>"]}
    ]}
    ```
    The settled list is every round's `fixed` titles plus every round's
    `refuted` titles, without duplicates. No log means a first round and an
    empty list.
+   Preserve each confirmed finding's `defectClass`, `defectClasses` and
+   `classRewire` beside its title. Read the last two multi-lens rounds
+   before launching: if a class was confirmed in both, or the positive
+   confirmed count did not fall, end with `VERDICT: REWIRE — plateau:
+   <classes or confirmed count>`. Reframe before another audit. Old logs
+   containing title strings still support the count rule.
 4. Run the audit. What it judges that the compiler cannot:
    - contracts that are structurally valid but semantically vacuous for
      this campaign (a schema no useful answer would fail either).
@@ -55,7 +62,8 @@ is for a graph run.
    ```
    {scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/graph-audit.js",
     args: {graph: "<graph>", pluginRoot: "${CLAUDE_PLUGIN_ROOT}",
-           check: "<the --check summary line>", settled: ["<title>", ...]}}
+           check: "<the --check summary line>", settled: ["<title>", ...],
+           history: [<recorded rounds from step 3>]}}
    ```
    with args as a real JSON object. A round runs six lenses in parallel,
    each a `graph-auditor` with the same scope and evidence rule:
@@ -97,7 +105,7 @@ is for a graph run.
    share one context, which makes them weaker evidence than independent
    subagents.
 5. Append the round to the audit log from step 3: its mode, verdict and
-   counts, the titles in the result's `confirmed`, `unverified` and
+   counts, the full findings in the result's `confirmed`, titles in `unverified` and
    `refuted` lists, and an empty `fixed` list.
 6. Report the per-stage counts first, from the result's `counts`:
    ```
@@ -121,6 +129,13 @@ is for a graph run.
    deleting tests. The settled list is the same kind of lever: a title
    goes in `fixed` only once its repair is in the IR, and an UNVERIFIED
    finding is never recorded as refuted.
+   For a plateaued class, state the invariant its system of record enforces
+   (for example the ledger, validator or a code-derived census). Adopt the
+   finding's `classRewire`, refute that repair with a measurement, or remove
+   the mechanism. A third patch to just the last reported shape is refused.
+   Once that reframe is recorded with its measurement in Notes and the audit
+   log, begin a new history epoch; retain earlier rounds under `epochs` so
+   resetting the active `rounds` never erases the record of the plateau.
 8. Record the final verdict in WORK.md Notes, with the mode and the counts
    line. A graph runs only from `STATUS: READY`, and READY requires both a
    clean compile and a SOUND from the multi-lens audit, the workflow or its

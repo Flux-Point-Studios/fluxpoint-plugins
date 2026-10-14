@@ -65,7 +65,7 @@ ISOLATION = {True, "worktree", "measure"}
 ACTORS = {"agent", "human", "third-party"}
 RELEASE_FIELDS = {"instructions", "proofContract", "whyNotAgent"}
 WAKE_FIELDS = {"check", "everyMinutes", "deadline"}
-REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy"}
+REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy", "classBy", "reframeAfter"}
 # A reduce node is deterministic code between agents: dedupe, rank, cut.
 # Use models for ambiguity and code for plumbing — a synthesis node that
 # receives every raw fan-out item pays a reasoning model to do a Set's job.
@@ -1021,6 +1021,25 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                     for k in keys:
                         if item_props and k not in item_props:
                             f.append(f"{where}: repeat.dedupeBy '{k}' is not a field of {c}.{n['verifyOver']} items")
+                classes = rep.get("classBy")
+                if classes is not None:
+                    if not isinstance(classes, list) or not classes or not all(isinstance(k, str) and k for k in classes):
+                        f.append(f"{where}: repeat.classBy must be a non-empty list of item field names")
+                    elif not n.get("verifyOver"):
+                        f.append(f"{where}: repeat.classBy needs verifyOver")
+                    elif c in contracts:
+                        props = contracts[c].get("properties", {}).get(n["verifyOver"], {}).get("items", {}).get("properties", {})
+                        for key in classes:
+                            if key not in props:
+                                f.append(f"{where}: repeat.classBy '{key}' is not a field of {c}.{n['verifyOver']} items")
+                    if isinstance(n.get("memory"), dict) and "classBy" in n["memory"] and n["memory"]["classBy"] != classes:
+                        f.append(f"{where}: memory.classBy must agree with repeat.classBy")
+                if "reframeAfter" in rep:
+                    threshold = rep["reframeAfter"]
+                    if not classes:
+                        f.append(f"{where}: repeat.reframeAfter requires repeat.classBy")
+                    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 2:
+                        f.append(f"{where}: repeat.reframeAfter must be an integer >= 2")
 
         # Lessons: what this node contributes to, and reads from, across
         # runs. Both directions are declared, because a sweep that silently
@@ -2184,6 +2203,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     worktree_nodes = [n for n in nodes
                       if n.get("isolation") in (True, "worktree") or n.get("mutates")]
     used = sorted({n["contract"] for n in nodes if not is_reduce(n)}
+                  | ({"VerdictV1"} if any(panel_size(n) for n in nodes) else set())
                   # The advisor emits DecisionV1 whether or not a node
                   # declares it, so its schema has to be in scope.
                   | ({"DecisionV1"} if any(
@@ -2471,6 +2491,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("")
     a("const RESULTS = {}")
     a("const PROVENANCE = []")
+    a("const RECURRING_CLASSES = []")
     a("// The optional data arg is structured, not prose: round counts, worker")
     a("// tallies, reduce before/after. metrics.py aggregates these across runs,")
     a("// and numbers buried in detail strings would make it parse sentences.")
@@ -2495,6 +2516,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("function summary(outcome) {")
     a("  const final = outcome === 'COMPLETE' && INCOMPLETE ? 'INCOMPLETE' : outcome")
     extra = ""
+    if any((n.get("repeat") or {}).get("classBy") for n in nodes):
+        extra += ", recurringClasses: RECURRING_CLASSES"
     if specification:
         extra += ", specification: SPECIFICATION.identity"
         if specification.get("path"):
@@ -3224,6 +3247,9 @@ def emit_repeat(n, ir, prompt, phase, panel, over):
     mem = n.get("memory") or {}
     a(f"const {var} = []")
     a(f"const seen_{var} = new Set()")
+    classes = rep.get("classBy")
+    if classes:
+        a(f"const classes_{var} = new Map()")
     if mem.get("seed"):
         # Prior keys land in the advisory list only. seen_ stays empty on
         # purpose: it decides what this run discards, and a run must never
@@ -3357,6 +3383,39 @@ def emit_repeat(n, ir, prompt, phase, panel, over):
     else:
         a(f"  const kept_{var} = fresh_{var}")
     a(f"  {var}.push(...kept_{var})")
+    if classes:
+        fields = json.dumps(classes)
+        a(f"  const currentClasses_{var} = new Map()")
+        a(f"  for (const it of kept_{var}) {{")
+        a(f"    const values = {fields}.map(k => it[k])")
+        a("    if (values.some(v => v === undefined || v === null || String(v).trim() === '')) {")
+        a(f"      note({js_str(nid)}, 'INCOMPLETE', 'surviving item omitted its declared defect class')")
+        a("      INCOMPLETE = true")
+        a(f"      RESULTS[{js_str(nid)}] = {var}")
+        a("      return summary('MISSING-DEFECT-CLASS')")
+        a("    }")
+        a("    const cls = JSON.stringify(values)")
+        a(f"    if (!currentClasses_{var}.has(cls)) currentClasses_{var}.set(cls, {{ class: values.join('|'), keys: [] }})")
+        a(f"    currentClasses_{var}.get(cls).keys.push(key_{var}(it))")
+        a("  }")
+        a(f"  const recurring_{var} = []")
+        a(f"  for (const [cls, found] of currentClasses_{var}) {{")
+        a(f"    const previous = classes_{var}.get(cls)")
+        a(f"    const consecutive = previous && previous.lastRound === round_{var} - 1")
+        a(f"    const entry = {{ class: found.class, lastRound: round_{var}, rounds: [...(consecutive ? previous.rounds : []), round_{var}], keys: [...(consecutive ? previous.keys : []), ...found.keys] }}")
+        a(f"    classes_{var}.set(cls, entry)")
+        a(f"    if (entry.rounds.length >= {rep.get('reframeAfter', 2)}) recurring_{var}.push({{ class: entry.class, rounds: entry.rounds, keys: entry.keys }})")
+        a("  }")
+        a(f"  if (recurring_{var}.length) {{")
+        a(f"    RECURRING_CLASSES.push(...recurring_{var})")
+        a(f"    note({js_str(nid)}, 'RECURRING-CLASS', 'reframe the class before another repair', {{ recurringClasses: recurring_{var} }})")
+        a("    INCOMPLETE = true")
+        a(f"    RESULTS[{js_str(nid)}] = {var}")
+        if on_red == "halt":
+            a("    return summary('RECURRING-CLASS')")
+        else:
+            a("    break")
+        a("  }")
     a(f"  note({js_str(nid)}, 'OK', `round ${{round_{var}}}: ${{kept_{var}.length}} kept "
       f"of ${{fresh_{var}.length}} new`, {{ round: round_{var}, found: found_{var}, "
       f"fresh: fresh_{var}.length, kept: kept_{var}.length, "

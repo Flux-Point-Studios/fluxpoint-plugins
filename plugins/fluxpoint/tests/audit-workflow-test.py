@@ -61,6 +61,7 @@ const CALLS = [], LOGS = [], PHASES = [];
 Date.now = () => { throw new Error('Date.now is unavailable in a workflow'); };
 Math.random = () => { throw new Error('Math.random is unavailable in a workflow'); };
 const F = (severity, title) => ({severity, title,
+  defectClass: 'fixture-class', classRewire: 'derive the invariant from its system of record',
   failurePath: 'a concrete failure path for: ' + title,
   evidence: 'read WORK.md line 12 and ran the check',
   rewire: 'rewire the node so that ' + title + ' cannot happen'});
@@ -470,6 +471,22 @@ for name, ok in (
          "`LENSES`" in CMD and "`REFUTERS`" in CMD
          and re.search(r"^const LENSES = \[", SRC, re.M) and re.search(r"^const REFUTERS = \[", SRC, re.M))):
     report(name, bool(ok), "stated" if ok else "MISSING OR STALE")
+
+history = [{"mode": "multi", "counts": {"confirmed": n}, "confirmed": [
+    {"title": "variant " + str(i), "defectClass": "unbounded-reader"}]} for i, n in enumerate([3, 2])]
+stopped = run({"graph": "WORK.md", "pluginRoot": "/plugin", "history": history})
+report("a repeated class stops the next audit before spawning",
+       stopped.get("r", {}).get("plateau") and not stopped["calls"]
+       and "unbounded-reader" in stopped["r"]["why"], "class persisted across rounds")
+history[0]["confirmed"][0]["defectClass"] = "other"
+history[1]["counts"]["confirmed"] = 3
+stopped = run({"graph": "WORK.md", "pluginRoot": "/plugin", "history": history})
+report("flat confirmed counts require reframe before another audit",
+       stopped.get("r", {}).get("plateau") and not stopped["calls"], "plateau before spawn")
+history[1]["counts"]["confirmed"] = 1
+continued = run({"graph": "WORK.md", "pluginRoot": "/plugin", "history": history})
+report("falling counts of different classes continue auditing",
+       continued.get("r", {}).get("verdict") == "SOUND" and bool(continued["calls"]), "new audit ran")
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
