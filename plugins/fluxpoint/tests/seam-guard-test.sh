@@ -3,9 +3,8 @@
 #
 # The property is narrow: the count of module mocks may fall and never rise,
 # first-party and third-party tracked apart because they fail differently.
-# What matters most is what is NOT counted — a stub of the process boundary is
-# the thing this ratchet is trying to push people toward, so counting it would
-# punish the fix and train people to ignore the check.
+# Process-edge doubles count too: their payloads need checked captures, as
+# exercised by recordings-test.py.
 #
 # Executed end to end: every case builds a real repo, runs the real script, and
 # reads the real exit code and baseline file.
@@ -59,21 +58,18 @@ commit
 out="$(guard --scan)"
 case "$out" in *"first_party = 2"*) ok "counts aliased and relative as first-party" "2" ;;
   *) bad "counts aliased and relative as first-party" "${out//$'\n'/ }" ;; esac
-case "$out" in *"third_party = 1"*) ok "counts a bare specifier as third-party" "1" ;;
-  *) bad "counts a bare specifier as third-party" "${out//$'\n'/ }" ;; esac
-# The mixed-file assertions above already pin stubGlobal's exclusion (its
-# 'fetch' would land in third_party), but pin it alone too: matching the
-# scan output against the literal 'stubGlobal' was vacuous, because where
-# lines print the SPECIFIER and could never contain the call's name.
+case "$out" in *"third_party = 2"*) ok "counts a bare specifier and fetch stub as third-party" "2" ;;
+  *) bad "counts a bare specifier and fetch stub as third-party" "${out//$'\n'/ }" ;; esac
+# A process-boundary stub must also count on its own.
 newrepo
 printf "vi.stubGlobal('fetch', () => {});\n" >src/__tests__/a.test.ts
 commit
 out="$(guard --scan)"
 if case "$out" in *"first_party = 0"*) true ;; *) false ;; esac \
-   && case "$out" in *"third_party = 0"*) true ;; *) false ;; esac; then
-  ok "does NOT count a process-boundary stub" "0/0"
+   && case "$out" in *"third_party = 1"*) true ;; *) false ;; esac; then
+  ok "counts a process-boundary stub" "0/1"
 else
-  bad "does NOT count a process-boundary stub" "${out//$'\n'/ }"
+  bad "counts a process-boundary stub" "${out//$'\n'/ }"
 fi
 
 # --- the ratchet ---
@@ -203,15 +199,15 @@ out="$(guard --scan)"
 case "$out" in *"first_party = 1"*) ok "an untracked test file is scanned" "counted" ;;
   *) bad "an untracked test file is scanned" "${out//$'\n'/ }" ;; esac
 
-# --- arming where nothing applies says so, instead of exiting 0 in silence ---
+# --- Python test repos arm the same ratchet, even before adding doubles ---
 newrepo
 printf 'def test_x(): pass\n' >src/test_app.py; commit
 out="$(guard --baseline 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && case "$out" in *dormant*) true ;; *) false ;; esac \
-   && [ ! -f .fluxpoint-proof-baseline.json ]; then
-  ok "--baseline in a non-JS repo is dormant and says so" "loud no-op"
+if [ "$rc" -eq 0 ] && case "$out" in *"baseline armed"*) true ;; *) false ;; esac \
+   && [ -f .fluxpoint-proof-baseline.json ]; then
+  ok "--baseline in a Python repo arms and says so" "armed"
 else
-  bad "--baseline in a non-JS repo is dormant and says so" "rc=$rc ${out//$'\n'/ }"
+  bad "--baseline in a Python repo arms and says so" "rc=$rc ${out//$'\n'/ }"
 fi
 
 # --- the SCAFFOLDED harness enforces it, not just this repo's test suite ---

@@ -124,6 +124,13 @@ step; do not stop at copying files.
    ```
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" seam-guard.py --baseline
    ```
+   This counts Python patches and HTTP/process doubles as well as JS/TS module
+   mocks. For provider fixtures, declare captures with provenance in
+   `.fluxpoint-recordings.json`, then run `seam-guard.py --check`; the manifest
+   enforces recursive shape conformance even before a count baseline is armed.
+   Follow [the recording format](../references/recordings.md), name the checked
+   recording in each provider test, and compare derived IDs/hashes against
+   recorded values independently of the code being tested.
    If the repo tracks proof-language files (`.ak`, `.dfy`, `.lean`, `.v`,
    `.thy`, `.tla`, or verified Rust) **or TypeScript**, arm the hatch
    ratchet; add the statement ratchet where a prover is involved:

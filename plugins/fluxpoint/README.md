@@ -36,7 +36,7 @@ does.
     `proof-guard.py` (escape hatches), `spec-guard.py` (statements),
     `cex.py` (counterexample ledger for Aiken, Dafny, Kani, Apalache and
     fast-check, plus the off-session seed sweep),
-    `mutation-guard.py` (mutation score), `seam-guard.py` (module mocks),
+    `mutation-guard.py` (mutation score), `seam-guard.py` (module/Python/HTTP doubles and provider recordings),
     `guard-guard.py` (named guards and the tests that hold them down),
     `pair-guard.py` (relations: co-change, parity, differential, bite and
     `--scan`), `plutus-budget.py` (on-chain size and execution units),
@@ -384,6 +384,12 @@ baseline rather than indicting the repo; a false positive would train
 people to ignore the ratchet. The ratchet remains a floor: a
 theorem that lost a conjunct, or a `fail` test that trips an earlier guard
 than the one it is named for, still needs the semantic pass.
+
+Provider fixtures can be held to captured response shapes with
+`.fluxpoint-recordings.json` and `seam-guard.py --conform`; the manifest is
+checked inside the scaffolded `--full` even without a count baseline. See
+[provider recordings](references/recordings.md) for provenance, conformance,
+provider counters and the independent review needed for derived values.
 
 ## Migrating from the split plugins
 
