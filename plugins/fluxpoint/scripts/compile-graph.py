@@ -65,7 +65,7 @@ ISOLATION = {True, "worktree", "measure"}
 ACTORS = {"agent", "human", "third-party"}
 RELEASE_FIELDS = {"instructions", "proofContract", "whyNotAgent"}
 WAKE_FIELDS = {"check", "everyMinutes", "deadline"}
-REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy"}
+REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter"}
 # A reduce node is deterministic code between agents: dedupe, rank, cut.
 # Use models for ambiguity and code for plumbing — a synthesis node that
 # receives every raw fan-out item pays a reasoning model to do a Set's job.
@@ -83,6 +83,8 @@ DEFAULTS_FIELDS = {"effort", "model"}
 # (model, effort) share a warm prefix.
 CACHE_TTLS = {"5m": 300, "1h": 3600}
 DEFAULT_CACHE_TTL = "5m"
+WORKFLOW_SCRIPT_LIMIT = 524288
+SCRIPT_HEADROOM_MARGIN = 16384
 
 # ---------------------------------------------------------------- cost model
 # STATED ASSUMPTIONS, not measurements. `budget.maxNodes` counts agent calls,
@@ -118,6 +120,8 @@ UNPRICED_EXPANSIONS = ("prev", "decisions", "seen")
 VARYING_ROOTS = {"item", "i", "seen"}
 SPEC_PREAMBLE = ("Implement and verify this locked requirement packet. Defaulted decisions are model choices, "
                  "not user authorization. Do not edit the packet, lock or proof baseline to pass a check. "
+                 "Do not weaken check commands or harness files; use the documented harness-only re-lock path "
+                 "when wiring changes without changing requirements. "
                  "If a requirement is wrong, return the counterexample for a spec revision.\n")
 
 
@@ -487,6 +491,7 @@ def load_gates(root):
         out.add("ci")
     try:
         out.findings = tuple(_sibling("attest").load_gates(root or ".")[1])
+        out.deployed = doc.get("deployed", {}) if isinstance(doc, dict) and not out.findings else {}
     except Exception as e:  # noqa: BLE001 - a rule we cannot run is a finding
         out.findings = (f"attest.py could not judge {GATES}: {e}",)
     return out
@@ -517,6 +522,8 @@ def result_shape(n):
     """
     if is_reduce(n):
         return "items"
+    if isinstance(n.get("repeat"), dict) and "until" in n["repeat"]:
+        return "objects"
     if n.get("repeat") or panel_size(n):
         return "items"
     if n.get("foreach"):
@@ -660,6 +667,88 @@ def _validate_reduce(n, where, seen, contracts):
     return f
 
 
+def repair_loops(ir):
+    return [n for n in ir.get("nodes", []) if isinstance(n.get("repeat"), dict)
+            and "until" in n["repeat"]]
+
+
+def repair_integrations(n):
+    value = (n.get("repeat") or {}).get("integrate")
+    return [x for x in value if isinstance(x, str)] if isinstance(value, list) else []
+
+
+def repair_rounds(n):
+    value = (n.get("repeat") or {}).get("maxRounds", 1)
+    return max(1, value) if isinstance(value, int) and not isinstance(value, bool) else 1
+
+
+def repair_owned(ir):
+    """Nodes emitted inside a fix/check loop rather than again at top level."""
+    return {nid for n in repair_loops(ir) for nid in
+            [n.get("verifies"), *repair_integrations(n)] if isinstance(nid, str)}
+
+
+def validate_repair(n, seen, ir, contracts):
+    where = f"node '{n.get('id')}'"
+    f = []
+    rep = n["repeat"]
+    fixer = seen.get(n.get("verifies")) or {}
+    if not n.get("independent") or not fixer.get("mutates"):
+        f.append(f"{where}: repeat.until requires an independent checker that verifies a mutates node")
+    if n.get("after") != fixer.get("id") or not fixer:
+        f.append(f"{where}: repair checker must consume its fixer with after/verifies")
+    if n.get("isolation") != "measure":
+        f.append(f"{where}: repair checker requires isolation:'measure' for a fresh frozen tree")
+    if panel_size(n) or n.get("haltWhen") or n.get("irreversible"):
+        f.append(f"{where}: repair checker cannot combine repeat.until with verify panel/skeptic, haltWhen or irreversible")
+    if fixer.get("repeat") or fixer.get("irreversible") or panel_size(fixer):
+        f.append(f"{where}: repair fixer cannot repeat, verify with a panel, or be irreversible")
+    if any(k in rep for k in ("untilDryRounds", "dedupeBy")):
+        f.append(f"{where}: repeat.until replaces untilDryRounds/dedupeBy; do not combine repair and discovery rules")
+    m = HALT.fullmatch(str(rep.get("until", "")))
+    if not m:
+        f.append(f"{where}: repeat.until must use the haltWhen '<field> <op> <literal>' grammar")
+    elif m.group(1) not in contracts.get(n.get("contract"), {}).get("properties", {}):
+        f.append(f"{where}: repeat.until tests '{m.group(1)}', which is not a field of {n.get('contract')}")
+    mx = rep.get("maxRounds")
+    if isinstance(mx, bool) or not isinstance(mx, int) or mx < 1:
+        f.append(f"{where}: repeat.maxRounds must be an integer >= 1")
+    if not n.get("foreach") or n.get("foreach") != fixer.get("foreach"):
+        f.append(f"{where}: repair fixer and checker need the same foreach list")
+    items = (ir.get("lists") or {}).get(n.get("foreach"), [])
+    keys = [x.get("key") if isinstance(x, dict) else None for x in items]
+    if not keys or any(not isinstance(k, str) or not IDENT.fullmatch(k) for k in keys) or len(set(keys)) != len(keys):
+        f.append(f"{where}: repair items require unique lowercase kebab-case keys for safe round directories")
+    classes = rep.get("classBy")
+    if classes is not None:
+        item_props = contracts.get(n.get("contract"), {}).get("properties", {}).get(n.get("verifyOver") or "findings", {}).get("items", {}).get("properties", {})
+        if not isinstance(classes, list) or not classes or not all(isinstance(k, str) and k in item_props for k in classes):
+            f.append(f"{where}: repair repeat.classBy must name fields of the checker findings")
+        if isinstance(n.get("memory"), dict) and n["memory"].get("classBy") != classes:
+            f.append(f"{where}: memory.classBy must agree with repeat.classBy")
+    threshold = rep.get("reframeAfter", 2)
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 2:
+        f.append(f"{where}: repeat.reframeAfter must be an integer >= 2")
+    integration = rep.get("integrate")
+    if integration is not None:
+        by_id = {x.get("id"): x for x in ir.get("nodes", [])}
+        if not isinstance(integration, list) or len(integration) != 2 or not all(isinstance(x, str) for x in integration):
+            f.append(f"{where}: repeat.integrate must name [merge-node, independent-review-node]")
+        else:
+            merge, review = (by_id.get(x) or {} for x in integration)
+            if not merge.get("mutates") or merge.get("after") != n.get("id"):
+                f.append(f"{where}: integration merge must mutate and consume the checker")
+            if (not review.get("independent") or review.get("verifies") != merge.get("id")
+                    or review.get("after") != merge.get("id") or review.get("isolation") != "measure"):
+                f.append(f"{where}: integration review must independently verify/consume merge with isolation:'measure'")
+            if not review.get("haltWhen") or not HALT.fullmatch(str(review.get("haltWhen"))):
+                f.append(f"{where}: integration review needs haltWhen to identify merged-tree failure")
+            for x in (merge, review):
+                if any(x.get(k) for k in ("foreach", "repeat", "irreversible", "decides", "memory")) or panel_size(x):
+                    f.append(f"{where}: integration nodes must be scalar schema-only agents without repeat or irreversible effects")
+    return f
+
+
 def validate(ir, contracts, gates=None, agents=None, specification=None):
     """Return a list of findings. Empty list means the graph may compile."""
     f = []
@@ -678,6 +767,10 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
     lists = ir.get("lists") or {}
     roles = ir.get("roles") or {}
     seen = {}
+    repair_nodes = repair_loops(ir)
+    repair_scoped = repair_owned(ir) | {n.get("id") for n in repair_nodes}
+    if len(repair_nodes) > 1:
+        f.append("one repair loop per graph: round directories must have a single owner")
     decided = {}          # decision id -> the node that makes it
     imports = ir.get("imports") or {}
 
@@ -910,8 +1003,10 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
             bound.add("prev")
         if n.get("foreach"):
             bound.update({"item", "i"})
-        if n.get("repeat"):
+        if n.get("repeat") and "until" not in n["repeat"]:
             bound.add("seen")
+        if nid in repair_scoped:
+            bound.update({"roundDir", "lastCheck"})
         # Both fields the emitter interpolates must be checked, or the
         # validator blesses a token the emitter renders into executable
         # position. release.instructions became a `${...}` site when it
@@ -920,13 +1015,24 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
         # the provenance note and the run log. Same rule, same message,
         # named by whichever field carried the token.
         subst_sites = [("prompt", str(n.get("prompt", "")))]
+        if "haltReason" in n:
+            subst_sites.append(("haltReason", str(n["haltReason"])))
         rel_block = n.get("release") or {}
         if rel_block.get("instructions") is not None:
             subst_sites.append(("release.instructions",
                                 str(rel_block["instructions"])))
         for site, site_text in subst_sites:
+            site_bound = bound if site != "haltReason" else {"A", "campaign", "prev"}
+            if site == "haltReason" and "{{" in SUBST.sub("", site_text):
+                f.append(f"{where}: haltReason contains an unsupported substitution token")
             for tok in SUBST.findall(site_text):
                 root = tok.split(".")[0].split("[")[0]
+                if site == "haltReason" and ((root == "A" and not re.fullmatch(r"A(?:\.[A-Za-z_][A-Za-z0-9_]*)*", tok)) or (root == "campaign" and tok != "campaign")):
+                    f.append(f"{where}: haltReason uses unsupported path {{{{{tok}}}}}; use dotted argument fields or the scalar campaign")
+                    continue
+                if root == "roundDir" and tok != "roundDir":
+                    f.append(f"{where}: {site} roundDir is a path, not a projected object")
+                    continue
                 if root == "decisions":
                     # Scoped per id on purpose: honoring one decision must not
                     # hand the node every decision the campaign ever made.
@@ -945,16 +1051,16 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                 # graph that compiled clean and died at launch, which is the
                 # precise failure this scope check exists to prevent. So the
                 # token is validated all the way down, and emission binds it.
-                if root == "prev" and "prev" in bound and tok != "prev":
+                if root == "prev" and "prev" in site_bound and tok != "prev":
                     if "[" in tok or tok.count(".") != 1:
                         f.append(
                             f"{where}: {site} uses {{{{{tok}}}}} — only "
                             f"{{{{prev}}}} or a single-hop {{{{prev.<field>}}}} "
                             f"is supported")
                     else:
-                        pred = seen.get(after) or {}
+                        pred = n if site == "haltReason" else (seen.get(after) or {})
                         field = tok.split(".", 1)[1]
-                        shape = result_shape(pred)
+                        shape = "object" if site == "haltReason" else result_shape(pred)
                         if shape != "object":
                             yields = ("a flat array of judged items"
                                       if shape == "items"
@@ -973,10 +1079,10 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                                     f"'{field}' is not a field of {pc} — it "
                                     f"would interpolate null at launch")
                     continue
-                if root not in bound:
+                if root not in site_bound:
                     f.append(
                         f"{where}: {site} uses {{{{{tok}}}}} but '{root}' is not in "
-                        f"scope for this node (available: {', '.join(sorted(bound))}) — "
+                        f"scope for this node (available: {', '.join(sorted(site_bound))}) — "
                         f"it would compile clean and throw at launch"
                     )
 
@@ -988,7 +1094,11 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
         if rep is not None:
             if not isinstance(rep, dict):
                 f.append(f"{where}: repeat must be an object")
+            elif "until" in rep:
+                f += validate_repair(n, seen, ir, contracts)
             else:
+                if "integrate" in rep:
+                    f.append(f"{where}: repeat.integrate requires repeat.until")
                 dry = rep.get("untilDryRounds")
                 mx = rep.get("maxRounds")
                 if not isinstance(dry, int) or dry < 1:
@@ -1012,6 +1122,25 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                     for k in keys:
                         if item_props and k not in item_props:
                             f.append(f"{where}: repeat.dedupeBy '{k}' is not a field of {c}.{n['verifyOver']} items")
+                classes = rep.get("classBy")
+                if classes is not None:
+                    if not isinstance(classes, list) or not classes or not all(isinstance(k, str) and k for k in classes):
+                        f.append(f"{where}: repeat.classBy must be a non-empty list of item field names")
+                    elif not n.get("verifyOver"):
+                        f.append(f"{where}: repeat.classBy needs verifyOver")
+                    elif c in contracts:
+                        props = contracts[c].get("properties", {}).get(n["verifyOver"], {}).get("items", {}).get("properties", {})
+                        for key in classes:
+                            if key not in props:
+                                f.append(f"{where}: repeat.classBy '{key}' is not a field of {c}.{n['verifyOver']} items")
+                    if isinstance(n.get("memory"), dict) and "classBy" in n["memory"] and n["memory"]["classBy"] != classes:
+                        f.append(f"{where}: memory.classBy must agree with repeat.classBy")
+                if "reframeAfter" in rep:
+                    threshold = rep["reframeAfter"]
+                    if not classes:
+                        f.append(f"{where}: repeat.reframeAfter requires repeat.classBy")
+                    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 2:
+                        f.append(f"{where}: repeat.reframeAfter must be an integer >= 2")
 
         # Lessons: what this node contributes to, and reads from, across
         # runs. Both directions are declared, because a sweep that silently
@@ -1340,6 +1469,15 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                     f"than one tool call runs through attest.py --run and "
                     f"--await; CI's own statuses are prove:ci"
                 )
+            for package, lane in getattr(gates, "deployed", {}).items():
+                required_gate = lane["gate"]
+                checked = [o for o in guards if prove_gate(o) == required_gate
+                           and HALT.match(str(o.get("haltWhen", "")))
+                           and halt_parts(o) == ("exit", "!==", "0")]
+                if not checked:
+                    f.append(f"{where}: irreversible requires an earlier independent prove:{required_gate} "
+                             f"guard for deployed.{package}, with haltWhen 'exit != 0' — "
+                             "every production dependency lane must pass before the effect")
             if "confirm" not in (ir.get("requiredArgs") or []):
                 f.append(
                     f"{where}: irreversible requires 'confirm' in requiredArgs — "
@@ -1392,12 +1530,39 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
     return f
 
 
-def warnings(ir, agents=None):
+def red_team_sources(n, ir):
+    """Lens producers on the declared path into a red-team gate."""
+    by_id = {x.get("id"): x for x in ir.get("nodes", [])}
+    found, visited = [], set()
+    current = n
+    while current:
+        dep = current.get("after") or (current.get("reduce") or {}).get("from")
+        if not dep or dep in visited:
+            break
+        visited.add(dep)
+        current = by_id.get(dep)
+        if current and current.get("contract") == "RedTeamV1" and current.get("foreach"):
+            found.append(current["id"])
+    return found
+
+
+def warnings(ir, agents=None, specification=None):
     """Non-blocking findings: shapes that compile but will predictably
     disappoint. Returned separately from validate() so they inform without
     refusing to build."""
     w = []
+    for check in ((specification or {}).get("packet") or {}).get("checks", []):
+        if "scopeRef" not in check and re.fullmatch(r"[^\s#]+\.[a-zA-Z0-9]+", str(check.get("scope", ""))):
+            w.append(f"check '{check.get('id', '?')}': scope is a bare path ({check['scope']}); use a repo-relative path#/pointer so the binding text is resolved and frozen")
+    prior = []
     for n in ir.get("nodes") or []:
+        if n.get("irreversible"):
+            guards = [x for x in prior if x.get("contract") == "RedTeamV1" and x.get("independent") and x.get("haltWhen")]
+            counts = [sum(len((ir.get("lists") or {}).get(next(y for y in prior if y.get("id") == sid).get("foreach"), [])) for sid in red_team_sources(g, ir))
+                      or len((ir.get("lists") or {}).get(g.get("foreach"), [None])) for g in guards]
+            if counts and max(counts) <= 1:
+                w.append(f"node '{n.get('id')}': irreversible effect's only RedTeamV1 guard is a single-agent review; use a multi-lens fan-out and independent refuters for broad changes")
+        prior.append(n)
         nid = n.get("id", "?")
         # A bad agentType fails at the worst possible node: `agent type not
         # found` is raised at the spawn, so a gate late in the graph pays for
@@ -1444,7 +1609,7 @@ def warnings(ir, agents=None):
                     f"before the dry rule can — expect INCOMPLETE. Prefer "
                     f"maxRounds >= {dry + 3} unless a short sweep is the point."
                 )
-        if n.get("repeat") and not panel_size(n) and n.get("verify", "schema-only") == "schema-only":
+        if n.get("repeat") and "until" not in n["repeat"] and not panel_size(n) and n.get("verify", "schema-only") == "schema-only":
             w.append(
                 f"node '{nid}': discovery with no verification tier — a sweep's "
                 f"output is usually consumed as fact; consider skeptic:1 or panel:3"
@@ -1576,10 +1741,25 @@ def plan_groups(ir):
     if tree_guard:
         groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True,
                        "kind": "sentinel", "track": frozenset()})
+    consumed = repair_owned(ir)
+    by_id = {x.get("id"): x for x in ir.get("nodes", [])}
     for n in ir.get("nodes") or []:
-        if is_reduce(n):
+        if is_reduce(n) or n.get("id") in consumed:
             continue
         nid = n.get("id", "?")
+        if n in repair_loops(ir):
+            fan = len(lists.get(n.get("foreach"), []))
+            rep = n["repeat"]
+            fixer = by_id.get(n.get("verifies"), {})
+            for _ in range(repair_rounds(n)):
+                for work, count in [(fixer, fan), (n, fan), *[(by_id.get(k, {}), 1) for k in repair_integrations(n)]]:
+                    if tree_guard and work.get("independent"):
+                        groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()})
+                    groups.append({"calls": [(work.get("id", "?"), node_key(work, ir))] * count, "park": False,
+                                   "kind": "work", "node": work, "items": lists.get(n.get("foreach"), []) if count == fan else [None], "track": frozenset()})
+                if tree_guard:
+                    groups.extend([{"calls": [("tree-check", sentinel)], "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()} for _ in range(2 if repair_integrations(n) else 1)])
+            continue
         track = held.get(nid, frozenset())
         if tree_guard and (prove_gate(n) or n.get("independent")):
             groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True,
@@ -1591,7 +1771,7 @@ def plan_groups(ir):
         key = node_key(n, ir)
         items = lists.get(n.get("foreach"), [None]) if n.get("foreach") else [None]
         fan = len(items)
-        rounds = max(1, int((n.get("repeat") or {}).get("maxRounds", 1)))
+        rounds = repair_rounds(n)
         cnt = panel_size(n)
         per = int(n.get("expectItems", 3))
         for _ in range(rounds):
@@ -1893,36 +2073,8 @@ def effort_transitions(ir):
 
 
 def plan_node_count(ir):
-    """Worst-case agent calls: fan-out times verification times rounds."""
-    lists = ir.get("lists") or {}
-    total = 0
-    for n in ir.get("nodes") or []:
-        # A reduce node is pure emitted code: no spawn, no advisor, no cost.
-        if is_reduce(n):
-            continue
-        # A parked node spawns no worker, but it does spawn one advisor to
-        # produce the recommendation that goes with the block. Pricing it at
-        # zero would make the ceiling lie by exactly the number of parks.
-        if n.get("actor", "agent") != "agent":
-            total += 1
-            continue
-        fan = len(lists.get(n.get("foreach"), [None])) if n.get("foreach") else 1
-        per_round = fan
-        m = TIER.match(str(n.get("verify", "schema-only")))
-        if m:
-            cnt = int(m.group(2) or m.group(3) or 0)
-            if cnt:
-                # Verification runs per produced item; assume the declared
-                # expectation, defaulting to 3 items per producing node.
-                per = int(n.get("expectItems", 3))
-                per_round += fan * per * cnt
-            elif m.group(1) == "harness":
-                per_round += fan
-        # A discovery node re-runs until it goes dry; the ceiling must price
-        # the worst case, not one round of it.
-        rounds = int((n.get("repeat") or {}).get("maxRounds", 1))
-        total += per_round * max(1, rounds)
-    return total
+    """Worst-case budgeted calls; sentinels use agent() outside the ceiling."""
+    return sum(len(g["calls"]) for g in plan_groups(ir) if not g.get("sentinel"))
 
 
 # ------------------------------------------------------------------ emission
@@ -1981,7 +2133,7 @@ def js_tmpl(s):
 # Roots whose values are launch or list data: rendered through tokenText(),
 # so an object or a list reaches the prompt as JSON rather than as
 # "[object Object]" or a comma-joined flattening.
-TEXT_ROOTS = {"item", "A"}
+TEXT_ROOTS = {"item", "A", "lastCheck"}
 
 
 def js_template(s, mapping=None):
@@ -2109,7 +2261,7 @@ def red_team_checked(n):
     """A node whose raw RedTeamV1 result the emitted code can re-derive."""
     return (not is_reduce(n) and n.get("contract") == "RedTeamV1"
             and n.get("actor", "agent") == "agent"
-            and not n.get("repeat") and not panel_size(n))
+            and (not n.get("repeat") or "until" in n["repeat"]) and not panel_size(n))
 
 
 def emit_red_team_check(n, var, many=False):
@@ -2127,11 +2279,22 @@ def emit_red_team_check(n, var, many=False):
     )
 
 
+def halt_reason(n, var):
+    """At halt time prev is the result that tripped the halt, not its input."""
+    text = str(n.get("haltReason", "halt condition met"))
+    mapping = subst_mapping(n, texts=[text])
+    mapping["prev"] = f"tokenText({var})"
+    for tok in SUBST.findall(text):
+        if tok.startswith("prev."):
+            mapping[tok] = f"tokenText(({var} || {{}})[{js_str(tok.split('.', 1)[1])}] ?? null)"
+    return js_template(text, mapping)
+
+
 def emit_halt(n, var):
     field, op, lit = halt_parts(n)
     return (
         f"if ({var} && {var}.{field} {op} {lit}) {{\n"
-        f"  log(`HALT at {n['id']}: {field}=${{{var}.{field}}} — ` + {js_str(n.get('haltReason', 'halt condition met'))})\n"
+        f"  log(`HALT at {n['id']}: {field}=${{{var}.{field}}} — ` + {halt_reason(n, var)})\n"
         f"  RESULTS[{js_str(n['id'])}] = {var}\n"
         f"  return summary('HALTED')\n"
         f"}}"
@@ -2145,7 +2308,7 @@ def emit_halt_any(n, var):
         f"const tripped_{var} = {var}.filter(r => r && r.{field} {op} {lit})\n"
         f"if (tripped_{var}.length) {{\n"
         f"  log(`HALT at {n['id']}: ${{tripped_{var}.length}}/${{{var}.length}} item(s) "
-        f"tripped {js_tmpl(field)} {js_tmpl(op)} {js_tmpl(lit)} — ` + {js_str(n.get('haltReason', 'halt condition met'))})\n"
+        f"tripped {js_tmpl(field)} {js_tmpl(op)} {js_tmpl(lit)} — ` + {halt_reason(n, 'tripped_' + var + '[0]')})\n"
         f"  note({js_str(n['id'])}, 'HALTED', `${{tripped_{var}.length}} item(s) tripped "
         f"{field}`)\n"
         f"  RESULTS[{js_str(n['id'])}] = {var}\n"
@@ -2164,6 +2327,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     worktree_nodes = [n for n in nodes
                       if n.get("isolation") in (True, "worktree") or n.get("mutates")]
     used = sorted({n["contract"] for n in nodes if not is_reduce(n)}
+                  | ({"VerdictV1"} if any(panel_size(n) for n in nodes) else set())
                   # The advisor emits DecisionV1 whether or not a node
                   # declares it, so its schema has to be in scope.
                   | ({"DecisionV1"} if any(
@@ -2326,15 +2490,91 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  return null")
         a("}")
         a("")
-    if any(red_team_checked(n) for n in nodes):
+    if any(n.get("contract") == "RedTeamV1" for n in nodes):
         a("// --- red-team coherence: the verdict its own findings allow ---")
         a("// RedTeamV1 binds worstSeverity to the findings and refuses a SHIP over")
         a("// HIGH or CRITICAL, but a runtime validator that skipped conditional")
         a("// keywords would let exactly that through to the next node — often a")
         a("// person about to sign. Re-derived here from the findings, in code.")
         a("const SEVERITY_RANK = { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 }")
+        expected = {n["id"]: list_var(n["foreach"]) for n in nodes if n.get("contract") == "RedTeamV1" and n.get("foreach")}
+        a("const RED_TEAM_EXPECTED = {" + ", ".join(json.dumps(k) + ": " + v for k, v in expected.items()) + "}")
+        a("const RED_TEAM_CHECKS = {}")
+        terminals = {}
+        for gate in nodes:
+            if gate.get("contract") != "RedTeamV1" or not gate.get("haltWhen"):
+                continue
+            sources = red_team_sources(gate, ir)
+            if not sources:
+                continue
+            stages, visited, current = [], set(), gate
+            while current:
+                dep = current.get("after") or (current.get("reduce") or {}).get("from")
+                if not dep or dep in visited:
+                    break
+                visited.add(dep)
+                current = nodes_by_id.get(dep)
+                if current and (current.get("contract") == "RedTeamV1" or is_reduce(current)):
+                    stages.append(dep)
+            terminals[gate["id"]] = {"sources": sources, "stages": stages}
+        a("const RED_TEAM_TERMINALS = " + json.dumps(terminals))
+
+        a("const redTeamClaimKey = f => JSON.stringify(['severity','finding','exploit_path','minimal_fix'].map(k => f && f[k]))")
+        a("function redTeamClaims(ids) { return ids.flatMap(id => (Array.isArray(RESULTS[id]) ? RESULTS[id] : []).flatMap(r => Array.isArray(r && r.findings) ? r.findings : [])) }")
+
+        a("function redTeamPreamble(ids) { return 'RAW LENS COVERAGE — bind the final verdict to these completed source reviews. Missing coverage, blockers, mismatched snapshots or incomplete sampling must be stated and cannot silently become full coverage.\\n' + JSON.stringify(ids.map(id => ({ node: id, reviews: (Array.isArray(RESULTS[id]) ? RESULTS[id] : [RESULTS[id]]).filter(Boolean).map(r => ({ verdict: r.verdict, findingCount: (r.findings || []).length, coverage: r.coverage || null, blockers: (r.review || {}).blockers || [] })) }))) + '\\n'; }")
+        a("function redTeamSourceProblem(ids, result, judged) {")
+        a("  if (!result || result.verdict !== 'SHIP') return null")
+        a("  const checks = Object.values(RED_TEAM_CHECKS).filter(c => ids.some(id => c.ids.includes(id)))")
+        a("  if (checks.some(c => c.unresolved || c.rows.some(v => v.unverified || v.cast !== c.requested || v.kills !== c.requested))) return 'final verdict drops a surviving or unverified claim'")
+        a("  if (checks.some(c => c.rows.some(v => ['MEDIUM','HIGH','CRITICAL'].includes(v.severity) && c.requested < 3))) return 'MEDIUM+ claim requires three independent refuters'")
+        a("  for (const claim of redTeamClaims(ids)) {")
+        a("    const votes = checks.flatMap(c => c.rows).filter(v => redTeamClaimKey(v) === redTeamClaimKey(claim))")
+        a("    if (!votes.length || votes.some(v => v.unverified || v.kills < v.cast)) return 'final verdict drops an unchecked, surviving or unverified claim'")
+        a("  }")
+        a("  for (const id of ids) {")
+        a("    const expected = RED_TEAM_EXPECTED[id] || []")
+        a("    const returned = Array.isArray(RESULTS[id]) ? RESULTS[id] : []")
+        a("    if (returned.length !== expected.length) return 'final verdict omits a dead or missing source attacker'")
+        a("    const named = returned.flatMap(r => ((r || {}).coverage || {}).lenses || [])")
+        a("    if (expected.some(item => typeof item.key === 'string' && !named.includes(item.key))) return 'final verdict omits a configured source lens'")
+        a("  }")
+        a("  const final = result.coverage || {}, sources = ids.flatMap(id => Array.isArray(RESULTS[id]) ? RESULTS[id] : [])")
+        a("  const identity = c => JSON.stringify((c.subject || []).slice().sort((a,b) => String(a.repository).localeCompare(String(b.repository))))")
+        a("  let attackers = 0")
+        a("  for (const source of sources) {")
+        a("    const c = source.coverage")
+        a("    if (source.verdict === 'BLOCK' && !(source.findings || []).length) return 'source lens blocked without a refutable claim'")
+        a("    if (redTeamCoverageIssue(c)) return 'source lens lacks complete pinned coverage'")
+        a("    if (identity(c) !== identity(final)) return 'source lens coverage names a different snapshot or diff counts'")
+        a("    if (redTeamUnresolved(source)) return 'source lens has unresolved coverage blockers'")
+        a("    if (c.sampled && !final.sampled) return 'final verdict hides sampled source coverage'")
+        a("    if (c.lenses.some(lens => !(final.lenses || []).includes(lens))) return 'final verdict omits a source lens'")
+        a("    attackers += Number.isInteger(c.attackers) ? c.attackers : 0")
+        a("  }")
+        a("  return !sources.length || final.attackers !== attackers ? 'final verdict misstates completed attacker coverage' : null")
+        a("}")
+        a("function redTeamUnresolved(r) {")
+        a("  if (r.review === undefined) return false")
+        a("  if (!r.review || typeof r.review !== 'object' || Array.isArray(r.review)) return true")
+        a("  return ['blockers','unverified','deadLenses'].some(k => r.review[k] !== undefined && (!Array.isArray(r.review[k]) || r.review[k].length > 0))")
+        a("}")
+        a("function redTeamCoverageIssue(c) {")
+        a("  if (!c || !Array.isArray(c.subject) || !c.subject.length || !Number.isSafeInteger(c.attackers) || c.attackers < 1 || !Array.isArray(c.lenses) || !c.lenses.length || c.lenses.some(x => typeof x !== 'string' || !x.trim()) || new Set(c.lenses).size !== c.lenses.length || typeof c.sampled !== 'boolean') return 'SHIP without complete coverage metadata'")
+        a("  const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i")
+        a("  if (c.subject.some(s => !s || typeof s.repository !== 'string' || !s.repository.trim() || !oid.test(s.base) || !oid.test(s.head) || ['files','additions','deletions'].some(k => !Number.isSafeInteger(s[k]) || s[k] < 0)) || new Set(c.subject.map(s => s.repository)).size !== c.subject.length) return 'SHIP with invalid or unpinned reviewed range/counts'")
+        a("  return null")
+        a("}")
         a("function redTeamIncoherent(r) {")
         a("  if (!r || typeof r !== 'object') return null")
+        a("  if (!['SHIP','BLOCK'].includes(r.verdict) || !Array.isArray(r.findings)) return 'invalid red-team verdict or findings array'")
+        a("  if (r.findings.some(f => !f || !Object.prototype.hasOwnProperty.call(SEVERITY_RANK, f.severity) || f.severity === 'NONE' || ['finding','exploit_path','minimal_fix'].some(k => typeof f[k] !== 'string'))) return 'malformed finding or unknown severity cannot be omitted'")
+
+        a("  if (r.verdict === 'SHIP') {")
+        a("    const c = r.coverage")
+        a("    if (redTeamUnresolved(r)) return 'SHIP has unresolved coverage or exploit blockers'")
+        a("    const issue = redTeamCoverageIssue(c); if (issue) return issue")
+        a("  }")
         a("  const worst = (Array.isArray(r.findings) ? r.findings : [])")
         a("    .reduce((w, f) => Math.max(w, SEVERITY_RANK[f && f.severity] || 0), 0)")
         a("  const name = Object.keys(SEVERITY_RANK).find(k => SEVERITY_RANK[k] === worst)")
@@ -2449,8 +2689,14 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("    .map(s => s.trim()).filter(Boolean).includes(id)")
         a("}")
         a("")
+    if repair_loops(ir):
+        a("if (!A._launch || !/^[A-Za-z0-9_-]{1,64}$/.test(String(A._launch.nonce || '')) || typeof A._launch.root !== 'string' || !A._launch.root)")
+        a("  throw new Error('repair graph requires args._launch {root, nonce} from attest.py --stamp')")
+        a("const REPAIR_LAUNCH = A._launch")
+        a("function repairRoundDir(key, round) { return REPAIR_LAUNCH.root.replace(/[/\\\\]$/, '') + '/.claude/fluxpoint/rounds/' + REPAIR_LAUNCH.nonce + '/' + key + '/r' + round + '/'; }")
     a("const RESULTS = {}")
     a("const PROVENANCE = []")
+    a("const RECURRING_CLASSES = []")
     a("// The optional data arg is structured, not prose: round counts, worker")
     a("// tallies, reduce before/after. metrics.py aggregates these across runs,")
     a("// and numbers buried in detail strings would make it parse sentences.")
@@ -2475,6 +2721,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("function summary(outcome) {")
     a("  const final = outcome === 'COMPLETE' && INCOMPLETE ? 'INCOMPLETE' : outcome")
     extra = ""
+    if any((n.get("repeat") or {}).get("classBy") for n in nodes):
+        extra += ", recurringClasses: RECURRING_CLASSES"
     if specification:
         extra += ", specification: SPECIFICATION.identity"
         if specification.get("path"):
@@ -2489,6 +2737,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         extra += ", memory: MEMORY, memorySeeded: MEMORY_SEEDED"
     if prove_nodes:
         extra += ", prove: PROVE, launch: LAUNCH"
+    elif repair_loops(ir):
+        extra += ", launch: REPAIR_LAUNCH"
     if tree_guard:
         extra += ", tree: TREE"
     reducers = [n["id"] for n in nodes if is_reduce(n)]
@@ -2517,6 +2767,9 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     # _releases, _base, ...): an effort sweep scores a run against the case
     # it was launched for, and the summary is all record-run keeps.
     a("  const inputs = Object.fromEntries(Object.entries(A).filter(([k]) => !k.startsWith('_')))")
+    if any(n.get("contract") == "RedTeamV1" for n in nodes):
+        a("  const redTeamReviews = { terminals: RED_TEAM_TERMINALS, checks: RED_TEAM_CHECKS, expected: Object.fromEntries(Object.entries(RED_TEAM_EXPECTED).map(([id, items]) => [id, { attackers: items.length, lenses: items.map(x => x.key).filter(x => typeof x === 'string') }])) }")
+        extra += ", redTeamReviews"
     a("  return { campaign, outcome: final, results: RESULTS, provenance: PROVENANCE,")
     a(f"           contracts: CONTRACTS, inputs{extra} }}")
     a("}")
@@ -2570,7 +2823,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     if needs_panel:
         a("// --- verification: refuters attack the claim; majority kills it ---")
         a(f"const VERIFY_FLOOR = {int(floor)}")
-        a("async function refute(claimText, label, phase, n, priors) {")
+        a("async function refute(claimText, label, phase, n, priors, codeReview = false) {")
         a("  if (budget.total && budget.remaining() < VERIFY_FLOOR) {")
         a("    log(`budget floor reached — ${label} left UNVERIFIED (no silent caps)`)")
         a("    return { kills: 0, cast: 0, unverified: true }")
@@ -2582,11 +2835,11 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("      `Attempt to REFUTE this claim. ${claimText}\\n\\n` + (priors || '') +")
         a("        `Re-read the underlying code or evidence YOURSELF; do not trust the claim's own summary. ` +")
         a("        `Hunt for the reason it is wrong: a guard upstream, a type that forbids the state, a test that pins it. ` +")
-        a("        `Default to refuted=true when uncertain.`,")
+        a("        (codeReview ? `Your independent lens is ${['reproduce the minimal case and valid control', 'establish attacker reachability and impact', 'check scope and severity'][i % 3]}. Return refuted=true only with contradictory executable evidence; default refuted=false when uncertain, the fixture breaks or tools are missing.` : `Default to refuted=true when uncertain.`),")
         a("      { label: `${label}:refute${i + 1}`, phase, schema: C.VerdictV1, effort: 'low' }")
         a("    )")
         a("  ))")
-        a("  const cast = votes.filter(Boolean)")
+        a("  const cast = codeReview ? votes.filter(v => v && typeof v.refuted === 'boolean' && typeof v.reason === 'string' && v.reason.trim()) : votes.filter(Boolean)")
         a("  // Any missing vote — a dead refuter or one declined by the node")
         a("  // ceiling — means this claim was not fully checked, and says so.")
         a("  if (cast.length < n) log(`${label}: only ${cast.length}/${n} votes cast — UNVERIFIED`)")
@@ -2599,23 +2852,27 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("    // makes: a survivor with its strongest objection recorded is")
         a("    // worth more later than a survivor with a vote count.")
         a("    objections: cast.map(v => v.reason).filter(Boolean).slice(0, 5),")
+        a("    ...(codeReview ? { votes: cast.map(v => ({ refuted: v.refuted, reason: v.reason })) } : {}),")
         a("  }")
         a("}")
         a("")
         a("// Applies a node's declared tier to every item it produced. Used by")
         a("// fan-out and single nodes alike, so a declared tier always runs.")
-        a("async function verifyItems(result, field, label, phase, n, need, sink) {")
+        a("async function verifyItems(result, field, label, phase, n, need, sink, codeReview = false, sourceIds = []) {")
         a("  if (!result) return []")
-        a("  const produced = result[field] || []")
+        a("  const produced = codeReview && sourceIds.length ? [...new Map([...redTeamClaims(sourceIds), ...(result[field] || [])].map(f => [redTeamClaimKey(f), f])).values()] : result[field] || []")
         a("  const judged = await parallel(produced.map((it, i) => () =>")
-        a("    refute(JSON.stringify(it), `${label}:${i}`, phase, n).then(v => ({ ...it, ...v }))")
+        a("    refute(JSON.stringify(it), `${label}:${i}`, phase, n, undefined, codeReview).then(v => ({ ...it, ...v }))")
         a("  ))")
         a("  const all = judged.filter(Boolean)")
+        if any(n.get("contract") == "RedTeamV1" for n in nodes):
+            a("  if (codeReview) RED_TEAM_CHECKS[label] = { ids: sourceIds, requested: n, rows: all, unresolved: redTeamUnresolved(result) }")
+
         a("  // The sink sees every verdict, including the kills the filter")
         a("  // below drops: what a panel rejected, and why, is the half a")
         a("  // later sweep would otherwise pay to rediscover.")
         a("  if (sink) all.forEach(sink)")
-        a("  return all.filter(v => v.kills < need)")
+        a("  return all.filter(v => (codeReview && v.unverified) || v.kills < (codeReview ? n : need))")
         a("}")
         a("")
 
@@ -2719,7 +2976,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("}")
         a("const treeNorm = s => String(s || '').split('\\n').map(x => x.trim()).filter(Boolean)")
         a("  .filter(x => !treeIgnored(x)).sort().join('\\n')")
-        a("const TREE = { baseline: null, launch: null, checks: [] }")
+        a("const TREE = { baseline: null, launch: null, checks: [], unknown: false }")
         a("async function treeCheck(point, phase) {")
         a("  // agent(), not spawn(): a guard rail must not spend the node budget")
         a("  // and must still run after the ceiling is reached.")
@@ -2731,8 +2988,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
           "{ label: `tree-check:${point}`, phase, schema: C['TreeCheckV1'], effort: 'low' })")
         a("  if (!r) {")
         a("    note('tree-check', 'DEAD', `${point}: sentinel died — tree state unknown`)")
-        a("    INCOMPLETE = true")
-        a("    return true")
+        a("    INCOMPLETE = true; TREE.unknown = true")
+        a("    return false")
         a("  }")
         a("  const rec = { point, head: String(r.head || '').trim(), porcelain: treeNorm(r.porcelain) }")
         a("  TREE.checks.push(rec)")
@@ -2746,7 +3003,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     first_phase = nodes[0].get("phase", "Run") if nodes else "Run"
     last_phase = nodes[-1].get("phase", "Run") if nodes else "Run"
     if tree_guard:
-        a(f"await treeCheck('campaign-start', {js_str(first_phase)})")
+        a(f"if (!await treeCheck('campaign-start', {js_str(first_phase)})) return summary('TREE-UNKNOWN')")
         a("// The sentinel above is an agent() call, so a resume replays its FIRST")
         a("// reading instead of taking one. The launcher's reading (args._base,")
         a("// taken fresh at every launch) is compared against it here: a resume on")
@@ -2762,22 +3019,28 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("      (TREE.launch.porcelain !== null && TREE.launch.porcelain !== b.porcelain")
         a("        ? `; dirt: ${TREE.launch.porcelain || '(none)'} vs ${b.porcelain || '(none)'}` : ''))")
         a("    log(`TREE-MOVED at launch: this launch's tree is not the one the run's first reading described — a resume would replay verdicts about a tree that no longer exists. Launch fresh (no resumeFromRunId), or restore the tree the run started on.`)")
-        a("    return summary('TREE-MOVED')")
+        a("    return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
         a("  }")
         a("} else {")
         a("  log('tree guard: no launch reading in args._base — a resume cannot tell whether the tree moved since the run it replays; /fluxpoint:graph-run passes one')")
         a("}")
         a("")
+    consumed = repair_owned(ir)
     for n in nodes:
+        if n.get("id") in consumed:
+            continue
+        if n in repair_loops(ir):
+            a(emit_repair(n, ir, bool(specification)))
+            continue
         if tree_guard and (prove_gate(n) or n.get("independent")):
             a("// The gate is about to mint a verdict about the tree; assert it is")
             a("// still the tree every earlier verdict described.")
             a(f"if (!await treeCheck({js_str('before ' + n['id'])}, "
-              f"{js_str(n.get('phase', 'Run'))})) return summary('TREE-MOVED')")
+              f"{js_str(n.get('phase', 'Run'))})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
         a(emit_node(n, ir, specification=bool(specification)))
         a("")
     if tree_guard:
-        a(f"if (!await treeCheck('campaign-end', {js_str(last_phase)})) return summary('TREE-MOVED')")
+        a(f"if (!await treeCheck('campaign-end', {js_str(last_phase)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
     a("return summary('COMPLETE')")
     return "\n".join(L) + "\n"
 
@@ -2937,6 +3200,8 @@ def emit_node(n, ir, specification=False):
         pre = "measurePreamble() + "
     elif n.get("isolation") in (True, "worktree") or n.get("mutates"):
         pre = "basePreamble() + "
+    if n.get("contract") == "RedTeamV1" and n.get("haltWhen") and red_team_sources(n, ir):
+        pre += f"redTeamPreamble({json.dumps(red_team_sources(n, ir))}) + "
     if prove_gate(n):
         pre += f"provePreamble({js_str(prove_gate(n))}) + "
     if specification:
@@ -3019,7 +3284,8 @@ def emit_node(n, ir, specification=False):
               f"{{ produced: produced.length }})")
             need = math.ceil(panel / 2)
             a(f"      const judged = await verifyItems(prev, {js_str(over)}, "
-              f"`{nid}:${{item.key || i}}`, {js_str(phase)}, {panel}, {need})")
+              f"`{nid}:${{item.key || i}}`, {js_str(phase)}, {panel}, {need}"
+              + (", undefined, true" if n.get("contract") == "RedTeamV1" else "") + ")")
             a("      return judged.map(v => ({ ...v, source: item.key || String(i) }))")
             a("    }")
             a("  )).filter(Boolean).flat()")
@@ -3149,8 +3415,12 @@ def emit_node(n, ir, specification=False):
         a("}")
         if n.get("irreversible"):
             a("}")
-        if red_team_checked(n):
+        if red_team_checked(n) or (n.get("contract") == "RedTeamV1" and verified):
             a(emit_red_team_check(n, raw))
+        source_ids = red_team_sources(n, ir) if n.get("contract") == "RedTeamV1" and n.get("haltWhen") else []
+        if source_ids:
+            a(f"const sourceProblem_{var} = redTeamSourceProblem({json.dumps(source_ids)}, {raw}, RESULTS[{js_str(n.get('after'))}])")
+            a(f"if (sourceProblem_{var}) {{ RESULTS[{js_str(nid)}] = {raw}; note({js_str(nid)}, 'HALTED', sourceProblem_{var}); return summary('HALTED') }}")
         if n.get("haltWhen"):
             # Halt on the raw contract: the gate reads the node's own fields.
             a(emit_halt(n, raw))
@@ -3159,6 +3429,8 @@ def emit_node(n, ir, specification=False):
             need = math.ceil(panel / 2)
             sink = (", " + lesson_sink(n, need)
                     if (n.get("memory") or {}).get("emit") else "")
+            if n.get("contract") == "RedTeamV1":
+                sink = (sink or ", undefined") + ", true, " + json.dumps(red_team_sources(n, ir))
             a(f"const {var} = await verifyItems({raw}, {js_str(over)}, "
               f"{js_str(nid)}, {js_str(phase)}, {panel}, {need}{sink})")
             a(f"log(`{nid}: ${{{var}.length}} item(s) survived {tier}`)")
@@ -3178,6 +3450,139 @@ def emit_node(n, ir, specification=False):
           f"`DECISION {n['decides']}: overturned the prior — ${{{var}.chosen}}`)")
     if guard:
         a("}")
+    return "\n".join(L)
+
+
+def emit_repair(n, ir, specification=False):
+    """Paired fix/check rounds with per-item dropout and cumulative integration."""
+    nid = n["id"]
+    var = "n_" + nid.replace("-", "_")
+    by_id = {x["id"]: x for x in ir["nodes"]}
+    fixer = by_id[n["verifies"]]
+    rep = n["repeat"]
+    field, op, lit = halt_parts({"haltWhen": rep["until"]})
+    phase_name = n.get("phase", "Repair")
+    L = []; a = L.append
+
+    def prompt(work, prev=None):
+        mapping = subst_mapping(work)
+        if prev is not None:
+            mapping["prev"] = f"tokenText({prev})"
+            for token in SUBST.findall(work["prompt"]):
+                if token.startswith("prev."):
+                    mapping[token] = f"tokenText(({prev} || {{}})[{js_str(token.split('.', 1)[1])}] ?? null)"
+        mapping.update(roundDir="roundDir", lastCheck="tokenText(lastCheck)")
+        pre = "measurePreamble() + " if work.get("isolation") == "measure" else "basePreamble() + " if work.get("mutates") or work.get("isolation") else ""
+        if specification:
+            pre += "specificationPreamble() + "
+        return pre + js_template(work["prompt"], mapping)
+
+    a(f"// ===== repair loop {nid}: fixer + fresh-tree checker =====")
+    a(f"phase({js_str(phase_name)})")
+    a(f"let pending_{var} = {list_var(n['foreach'])}.map((item, i) => ({{ item, i, lastCheck: null }}))")
+    a(f"let passed_{var} = [], round_{var} = 0, integrationLast_{var} = null, integrationStreaks_{var} = [], integrationRecurring_{var} = []")
+    a(f"const {var} = []")
+    a(f"const validReframe_{var} = (r, classes, independent = false) => !!r && (!independent || r.validated === true) && Array.isArray(r.classes) && classes.every(c => r.classes.includes(c)) && ['adopt', 'refute', 'remove'].includes(r.disposition) && ['invariant', 'classRewire'].every(k => typeof r[k] === 'string' && r[k].trim()) && r.measurement && ['command', 'result'].every(k => typeof r.measurement[k] === 'string' && r.measurement[k].trim())")
+    a(f"while (pending_{var}.length && round_{var} < {int(rep['maxRounds'])}) {{")
+    a(f"  round_{var}++")
+    a(f"  let abort_{var} = null")
+    if ir.get("treeGuard", True):
+        a(f"  if (!await treeCheck(`repair {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
+    a(f"  const batch_{var} = await parallel(pending_{var}.map(state => async () => {{")
+    a("    const { item, i, lastCheck } = state")
+    a("    const requiredClasses = state.recurring || []")
+    a("    const reframeBrief = requiredClasses.length ? 'REFRAME REQUIRED: two or more consecutive checks failed on ' + JSON.stringify(requiredClasses) + '. State the authoritative system-of-record invariant. Adopt or refute a class-level rewire with a command and observed measurement, or remove the mechanism. Return structured reframe {classes,invariant,classRewire,disposition:adopt|refute|remove,measurement:{command,result}}. Another narrow patch is refused.\\n' : ''")
+    a(f"    const roundDir = repairRoundDir(item.key, round_{var})")
+    a(f"    if (!affordable(`{fixer['id']}:${{item.key}}`)) {{ abort_{var} = 'BUDGET-EXHAUSTED'; return {{ ...state, roundDir }} }}")
+    a(f"    const fixed = await spawn(reframeBrief + {prompt(fixer)}, {opts(fixer, ir, fixer.get('phase', phase_name), '`' + fixer['id'] + ':${item.key}:r${round_' + var + '}`')})")
+    a(f"    if (!fixed) {{ abort_{var} = DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD'; return {{ ...state, roundDir }} }}")
+    a(f"    if (requiredClasses.length && !validReframe_{var}(fixed.reframe, requiredClasses)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: third narrow patch refused`, {{ classes: requiredClasses }}); return {{ ...state, fixed, roundDir }} }}")
+    a(f"    if (!affordable(`{nid}:${{item.key}}`)) {{ abort_{var} = 'BUDGET-EXHAUSTED'; return {{ ...state, fixed, roundDir }} }}")
+    a(f"    const checked = await spawn(reframeBrief + 'Independently validate any supplied reframe against its authoritative invariant and rerun its measurement yourself; return reframe.validated true only with your own measurement.\\n' + {prompt(n, 'fixed')}, {opts(n, ir, phase_name, '`' + nid + ':${item.key}:r${round_' + var + '}`')})")
+    a(f"    if (!checked) {{ abort_{var} = DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD'; return {{ ...state, fixed, roundDir }} }}")
+    if n.get("contract") == "RedTeamV1":
+        a(f"    if (redTeamIncoherent(checked)) {{ abort_{var} = 'HALTED'; return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
+    if n.get("contract") == "FixCheckV1":
+        a(f"    if (checked.verdict === 'PASS' && ((checked.findings || []).length || (checked.blockers || []).length)) {{ abort_{var} = 'HALTED'; return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
+    a(f"    const complete = checked[{js_str(field)}] {op} {lit}")
+    a(f"    if (complete && requiredClasses.length && !validReframe_{var}(checked.reframe, requiredClasses, true)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: checker did not validate the class reframe`); return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
+    class_fields = rep.get("classBy") or ["defectClass"]
+    a(f"    const classFields = {json.dumps(class_fields)}")
+    a(f"    const findings = Array.isArray(checked[{js_str(n.get('verifyOver') or 'findings')}]) ? checked[{js_str(n.get('verifyOver') or 'findings')}] : []")
+    a("    const classes = [...new Set(findings.map(f => classFields.every(k => typeof f[k] === 'string' && f[k].trim()) ? classFields.map(k => f[k]).join('|') : '__unclassified__'))]")
+    a("    if (!complete && !classes.length) classes.push('__unclassified__')")
+    a("    const previous = new Map((state.streaks || []).map(x => [x.class, x.rounds]))")
+    a(f"    const streaks = complete ? [] : classes.map(c => ({{ class: c, rounds: [...(previous.get(c) || []), round_{var}] }}))")
+    a(f"    const recurring = streaks.filter(x => x.rounds.length >= {rep.get('reframeAfter', 2)})")
+    a(f"    if (recurring.length) note({js_str(nid)}, 'RECURRING-CLASS', `${{item.key}}: next round must reframe`, {{ item: item.key, classes: recurring }})")
+    if rep.get("classBy"):
+        a(f"    RECURRING_CLASSES.push(...recurring.map(x => ({{ ...x, node: {js_str(nid)}, item: item.key, keys: [] }})))")
+    a(f"    note({js_str(nid)}, complete ? 'OK' : 'REPAIR', `${{item.key}} round ${{round_{var}}}`, {{ item: item.key, round: round_{var}, roundDir, complete }})")
+    a("    return { ...state, fixed, roundDir, lastCheck: checked, complete, streaks, recurring: recurring.map(x => x.class) }")
+    a("  }))")
+    a(f"  passed_{var}.push(...batch_{var}.filter(x => x.complete))")
+    a(f"  pending_{var} = batch_{var}.filter(x => !x.complete)")
+    a(f"  RESULTS[{js_str(fixer['id'])}] = [...passed_{var}, ...pending_{var}].map(x => x.fixed).filter(Boolean)")
+    a(f"  RESULTS[{js_str(nid)}] = [...passed_{var}, ...pending_{var}].map(x => x.lastCheck).filter(Boolean)")
+    if ir.get("treeGuard", True):
+        a(f"  if (!await treeCheck(`after repair {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
+    a(f"  if (abort_{var}) {{ INCOMPLETE = true; note({js_str(nid)}, 'INCOMPLETE', abort_{var}); return summary(abort_{var}) }}")
+    integration = rep.get("integrate") or []
+    if integration:
+        merge, review = (by_id[k] for k in integration)
+        mfield, mop, mlit = halt_parts(review)
+        a(f"  if (passed_{var}.length) {{")
+        a(f"    const roundDir = repairRoundDir('_integration', round_{var})")
+        a(f"    const lastCheck = integrationLast_{var}")
+        a(f"    const requiredClasses = integrationRecurring_{var}")
+        a("    const reframeBrief = requiredClasses.length ? 'REFRAME REQUIRED for merged-tree classes ' + JSON.stringify(requiredClasses) + ': state the authoritative invariant and adopt/refute the class rewire with a command and measured result, or remove the mechanism. Return structured reframe evidence; the independent review must validate it.\\n' : ''")
+        a(f"    if (!affordable({js_str(merge['id'])})) {{ INCOMPLETE = true; return summary('BUDGET-EXHAUSTED') }}")
+        a(f"    const merged = await spawn(reframeBrief + {prompt(merge, 'passed_' + var)}, {opts(merge, ir, merge.get('phase', phase_name), '`' + merge['id'] + ':r${round_' + var + '}`')})")
+        a(f"    RESULTS[{js_str(merge['id'])}] = merged")
+        a("    if (!merged) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
+        a(f"    if (requiredClasses.length && !validReframe_{var}(merged.reframe, requiredClasses)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'third narrow integration patch refused'); return summary('REFRAME-REQUIRED') }}")
+        if ir.get("treeGuard", True):
+            a(f"    if (!await treeCheck(`integration {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
+        a(f"    if (!affordable({js_str(review['id'])})) {{ INCOMPLETE = true; return summary('BUDGET-EXHAUSTED') }}")
+        a(f"    const integrated = await spawn(reframeBrief + {prompt(review, 'merged')}, {opts(review, ir, review.get('phase', phase_name), '`' + review['id'] + ':r${round_' + var + '}`')})")
+        a(f"    RESULTS[{js_str(review['id'])}] = integrated")
+        a("    if (!integrated) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
+        if review.get("contract") == "RedTeamV1":
+            a("    if (redTeamIncoherent(integrated)) { INCOMPLETE = true; return summary('HALTED') }")
+        if ir.get("treeGuard", True):
+            a(f"    if (!await treeCheck(`after integration {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
+        if review.get("contract") == "FixCheckV1":
+            a("    if (integrated.verdict === 'PASS' && ((integrated.findings || []).length || (integrated.blockers || []).length)) { INCOMPLETE = true; return summary('HALTED') }")
+        a(f"    const integrationFailed = integrated[{js_str(mfield)}] {mop} {mlit}")
+        a(f"    if (!integrationFailed && requiredClasses.length && !validReframe_{var}(integrated.reframe, requiredClasses, true)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'independent integration review did not validate the class reframe'); return summary('REFRAME-REQUIRED') }}")
+        a(f"    integrationLast_{var} = integrated")
+        a("    if (integrationFailed) {")
+        a(f"      const classFields = {json.dumps(class_fields)}")
+        a("      const classes = [...new Set((integrated.findings || []).map(f => classFields.every(k => typeof f[k] === 'string' && f[k].trim()) ? classFields.map(k => f[k]).join('|') : '__unclassified__'))]")
+        a("      if (!classes.length) classes.push('__unclassified__')")
+        a(f"      const previous = new Map(integrationStreaks_{var}.map(x => [x.class, x.rounds]))")
+        a(f"      integrationStreaks_{var} = classes.map(c => ({{ class: c, rounds: [...(previous.get(c) || []), round_{var}] }}))")
+        a(f"      const recurring = integrationStreaks_{var}.filter(x => x.rounds.length >= {rep.get('reframeAfter', 2)})")
+        a(f"      integrationRecurring_{var} = recurring.map(x => x.class)")
+        a(f"      if (recurring.length) note({js_str(review['id'])}, 'RECURRING-CLASS', 'next integration must reframe', {{ classes: recurring }})")
+        if rep.get("classBy"):
+            a(f"      RECURRING_CLASSES.push(...recurring.map(x => ({{ ...x, node: {js_str(review['id'])}, keys: [] }})))")
+        a(f"      note({js_str(review['id'])}, 'REPAIR', 'merged-tree review failed; reopen passing slices with its findings', {{ round: round_{var} }})")
+        a(f"      pending_{var}.push(...passed_{var}.map(x => ({{ ...x, complete: false, lastCheck: integrated, streaks: integrationStreaks_{var}, recurring: integrationRecurring_{var} }})))")
+        a(f"      passed_{var} = []")
+        a("    } else {")
+        a(f"      integrationStreaks_{var} = []; integrationRecurring_{var} = []")
+        a(f"      note({js_str(review['id'])}, 'OK', 'merged-tree review passed', {{ round: round_{var} }})")
+        a("    }")
+        a("  }")
+    a("}")
+    a(f"{var}.push(...[...passed_{var}, ...pending_{var}].map(x => x.lastCheck).filter(Boolean))")
+    a(f"RESULTS[{js_str(nid)}] = {var}")
+    a(f"if (pending_{var}.length) {{")
+    a("  INCOMPLETE = true")
+    a(f"  note({js_str(nid)}, 'INCOMPLETE', 'repair round cap reached', {{ rounds: round_{var}, pending: pending_{var}.map(x => x.item.key) }})")
+    a("  return summary('INCOMPLETE')")
+    a("}")
     return "\n".join(L)
 
 
@@ -3204,6 +3609,9 @@ def emit_repeat(n, ir, prompt, phase, panel, over):
     mem = n.get("memory") or {}
     a(f"const {var} = []")
     a(f"const seen_{var} = new Set()")
+    classes = rep.get("classBy")
+    if classes:
+        a(f"const classes_{var} = new Map()")
     if mem.get("seed"):
         # Prior keys land in the advisory list only. seen_ stays empty on
         # purpose: it decides what this run discards, and a run must never
@@ -3334,9 +3742,49 @@ def emit_repeat(n, ir, prompt, phase, panel, over):
             a(f"  judged_{var}.filter(Boolean).forEach({lesson_sink(n, need)})")
         a(f"  const kept_{var} = judged_{var}.filter(Boolean)"
           f".filter(v => v.kills < {need})")
+        a(f"  const unchecked_{var} = judged_{var}.filter(v => v && v.unverified)")
+        a(f"  if (unchecked_{var}.length) {{")
+        a("    INCOMPLETE = true")
+        a(f"    note({js_str(nid)}, 'INCOMPLETE', `round ${{round_{var}}}: ${{unchecked_{var}.length}} claim(s) left UNVERIFIED by missing refuters`, {{ round: round_{var}, unverified: unchecked_{var}.length }})")
+        a("  }")
     else:
         a(f"  const kept_{var} = fresh_{var}")
     a(f"  {var}.push(...kept_{var})")
+    if classes:
+        fields = json.dumps(classes)
+        a(f"  const currentClasses_{var} = new Map()")
+        a(f"  for (const it of kept_{var}) {{")
+        a("    // An unanswered refutation is unresolved, not a surviving defect class.")
+        a("    if (it.unverified) continue")
+        a(f"    const values = {fields}.map(k => it[k])")
+        a("    if (values.some(v => v === undefined || v === null || String(v).trim() === '')) {")
+        a(f"      note({js_str(nid)}, 'INCOMPLETE', 'surviving item omitted its declared defect class')")
+        a("      INCOMPLETE = true")
+        a(f"      RESULTS[{js_str(nid)}] = {var}")
+        a("      return summary('MISSING-DEFECT-CLASS')")
+        a("    }")
+        a("    const cls = JSON.stringify(values)")
+        a(f"    if (!currentClasses_{var}.has(cls)) currentClasses_{var}.set(cls, {{ class: values.join('|'), keys: [] }})")
+        a(f"    currentClasses_{var}.get(cls).keys.push(key_{var}(it))")
+        a("  }")
+        a(f"  const recurring_{var} = []")
+        a(f"  for (const [cls, found] of currentClasses_{var}) {{")
+        a(f"    const previous = classes_{var}.get(cls)")
+        a(f"    const consecutive = previous && previous.lastRound === round_{var} - 1")
+        a(f"    const entry = {{ class: found.class, lastRound: round_{var}, rounds: [...(consecutive ? previous.rounds : []), round_{var}], keys: [...(consecutive ? previous.keys : []), ...found.keys] }}")
+        a(f"    classes_{var}.set(cls, entry)")
+        a(f"    if (entry.rounds.length >= {rep.get('reframeAfter', 2)}) recurring_{var}.push({{ class: entry.class, rounds: entry.rounds, keys: entry.keys }})")
+        a("  }")
+        a(f"  if (recurring_{var}.length) {{")
+        a(f"    RECURRING_CLASSES.push(...recurring_{var})")
+        a(f"    note({js_str(nid)}, 'RECURRING-CLASS', 'reframe the class before another repair', {{ recurringClasses: recurring_{var} }})")
+        a("    INCOMPLETE = true")
+        a(f"    RESULTS[{js_str(nid)}] = {var}")
+        if on_red == "halt":
+            a("    return summary('RECURRING-CLASS')")
+        else:
+            a("    break")
+        a("  }")
     a(f"  note({js_str(nid)}, 'OK', `round ${{round_{var}}}: ${{kept_{var}.length}} kept "
       f"of ${{fresh_{var}.length}} new`, {{ round: round_{var}, found: found_{var}, "
       f"fresh: fresh_{var}.length, kept: kept_{var}.length, "
@@ -3359,7 +3807,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("graph", nargs="?", default="WORK.md", help="path to WORK.md (or any file with a graph-ir block)")
     ap.add_argument("-o", "--out", help="path to write the compiled .graph.js")
-    ap.add_argument("--check", action="store_true", help="validate only")
+    ap.add_argument("--check", action="store_true", help="validate and measure the compiled script")
+    ap.add_argument("--max-script-bytes", type=int, default=WORKFLOW_SCRIPT_LIMIT,
+                    help="Workflow launch limit in UTF-8 bytes (default: 524288)")
+    ap.add_argument("--script-headroom-bytes", type=int, default=SCRIPT_HEADROOM_MARGIN,
+                    help="warn below this much script headroom (default: 16384)")
+    ap.add_argument("--check-script", help="also measure the exact compiled file about to launch")
     ap.add_argument("--contracts", help="contracts directory")
     ap.add_argument("--runs-dir", default=RUNS_DIR,
                     help="recorded-runs directory imports resolve against")
@@ -3368,6 +3821,8 @@ def main():
     ap.add_argument("--gates-root", default=".",
                     help=f"directory holding {GATES}, which prove: tiers resolve against")
     args = ap.parse_args()
+    if args.max_script_bytes < 1 or args.script_headroom_bytes < 0:
+        ap.error("script limit must be positive and headroom margin nonnegative")
 
     here = os.path.dirname(os.path.abspath(__file__))
     shipped_dir = os.path.join(os.path.dirname(here), "contracts")
@@ -3420,7 +3875,7 @@ def main():
     planned = plan_node_count(ir)
     # Warnings inform, never block: these shapes are legal and occasionally
     # deliberate, but they will usually disappoint whoever reads the result.
-    for w in warnings(ir, agents):
+    for w in warnings(ir, agents, specification):
         print(f"graph-compile: warning — {w}", file=sys.stderr)
 
     # Resolved for --check too: a missing decision should fail preflight,
@@ -3440,6 +3895,33 @@ def main():
                  + f" ({est['cold']} cold prefill(s) of {est['calls']} call(s), "
                  f"prompt-cache TTL {est['ttl']}"
                  + (f"; {blind}" if blind else "") + ")")
+    # --check measures exactly the script compilation would write.
+    try:
+        graph_rel = os.path.relpath(os.path.abspath(args.graph),
+                                    os.path.abspath(args.gates_root)).replace(os.sep, "/")
+    except ValueError:  # another drive on Windows: not a file of this project
+        graph_rel = "../"
+    js = emit(ir, contracts, resolved, specification,
+              graph_file=None if graph_rel.startswith("../") else graph_rel,
+              project_prefix=git_prefix(args.gates_root))
+    script_bytes = len(js.encode("utf-8"))
+    headroom = args.max_script_bytes - script_bytes
+    size_line = f"script {script_bytes:,} bytes, headroom {headroom:,} of {args.max_script_bytes:,} bytes"
+    if headroom < 0:
+        print(f"graph-compile: script rejected — {size_line}; compact the packet/graph or raise --max-script-bytes only for a launcher that supports it", file=sys.stderr)
+        return 1
+    if headroom < args.script_headroom_bytes:
+        print(f"graph-compile: warning — {size_line}; below {args.script_headroom_bytes:,}-byte margin", file=sys.stderr)
+    if args.check_script:
+        try:
+            actual = os.path.getsize(args.check_script)
+        except OSError as e:
+            print(f"graph-compile: launch script: {e}", file=sys.stderr)
+            return 1
+        if actual > args.max_script_bytes:
+            print(f"graph-compile: launch script rejected — {args.check_script}: {actual:,} bytes exceeds {args.max_script_bytes:,}", file=sys.stderr)
+            return 1
+        print(f"graph-compile: launch script {actual:,} bytes, headroom {args.max_script_bytes - actual:,}")
     if args.check:
         imported = (f", {len(resolved)} imported decision(s) resolved"
                     if resolved else "")
@@ -3452,23 +3934,15 @@ def main():
         print(f"graph-compile: IR valid — {len(ir['nodes'])} node(s), "
               f"{planned} planned agent call(s), budget.maxNodes="
               f"{(ir.get('budget') or {}).get('maxNodes')}, {cost_line}{imported}; "
-              f"contracts: {contracts_desc}; {packet_note}")
+              f"contracts: {contracts_desc}; {packet_note}; {size_line}")
         return 0
 
-    try:
-        graph_rel = os.path.relpath(os.path.abspath(args.graph),
-                                    os.path.abspath(args.gates_root)).replace(os.sep, "/")
-    except ValueError:  # another drive on Windows: not a file of this project
-        graph_rel = "../"
-    js = emit(ir, contracts, resolved, specification,
-              graph_file=None if graph_rel.startswith("../") else graph_rel,
-              project_prefix=git_prefix(args.gates_root))
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(js)
         print(f"graph-compile: wrote {args.out} — {len(ir['nodes'])} node(s), "
-              f"{planned} planned agent call(s), {cost_line}")
+              f"{planned} planned agent call(s), {cost_line}; {size_line}")
     else:
         # Pin the newline on this path too. `--out` above opens with
         # newline="\n"; stdout is a TextIOWrapper with newline=None, which

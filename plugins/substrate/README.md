@@ -76,8 +76,26 @@ the root:
 | `primitives[].status` | string | e.g. `live`, `core-only`. |
 | `primitives[].terminal` | boolean, optional | A delivered surface a human uses directly. Terminal primitives are listed in their own section and excluded from the orphan list, because zero in-edges is their correct end state rather than dormant value. |
 
-A repo without a manifest is silently ignored: by doctrine, that absence
-marks demos and pitch artifacts as outside the substrate.
+A repo without a manifest is silently ignored by the graph: by doctrine,
+that absence marks demos and pitch artifacts as outside the substrate.
+A `deliverables.json` in that directory is still checked.
+
+Discovery groups Git worktrees by their real common Git directory and uses
+one checkout: the main worktree when present, otherwise the first directory
+by name. Separate clones are also grouped when they share a normalized
+`remote.origin.url`, or a local clone's origin points at another discovered
+checkout. For a local clone, the source checkout takes precedence. All passes
+use that checkout's files, including the manifest, imports, staleness, and
+ledger; a note names the ignored directories in `--check`, `--json`, and
+`SUBSTRATE.md`. No fetch or other network access is needed.
+
+Directories with the same manifest `repo` label but no shared Git identity
+produce one problem naming their `substrate.json` files. Exclude unwanted
+copies with `excludeRepos`. The graph keeps the first directory's version of
+any colliding id and still validates the other manifests' consumes targets;
+the emit gate stays red until the directory conflict is resolved. Duplicate
+ids across different repo labels, or inside one manifest, remain problems
+naming the exact files.
 
 ## Config reference
 
@@ -86,7 +104,8 @@ Optional `substrate.config.json` at the workspace root:
 | Key | Default | Meaning |
 |---|---|---|
 | `graceHours` | `6` | A manifest edit within this many hours of the code change counts as the same shipment and never alarms. |
-| `excludeDirs` | `[]` | Extra directory names pruned from non-git staleness walks, on top of the built-ins: `node_modules`, `.git`, `dist`, `build`, `out`, `coverage`, `__pycache__`. |
+| `excludeDirs` | `[]` | Extra exact directory names excluded from top-level manifest and ledger discovery and pruned at every depth of import and non-git staleness walks, on top of the built-ins: `node_modules`, `.git`, `dist`, `build`, `out`, `coverage`, `__pycache__`. |
+| `excludeRepos` | `[]` | Top-level directory names or patterns (`*` and `?`) excluded from manifest and ledger discovery only, e.g. `["alpha-copy", "wt-*"]`. Matching names inside a retained repo are still scanned. |
 | `nonGitRepos` | `{}` | Map of non-git repo dirname → relative code paths its staleness check may walk. Undeclared non-git repos are skipped from staleness with a one-line note, never walked blind. |
 
 ## Staleness semantics
@@ -199,12 +218,18 @@ Memory files rot the same way manifests do: a memory cites a module that was
 since renamed, the index points at a deleted entry, a "still unsent" claim
 outlives the send it describes. `memory-lint.mjs` runs at session start over
 `~/.claude/projects/<key>/memory/` and alarms on the three staleness classes
-it can prove: a cited path whose anchor directory exists but whose file is
-gone, a `MEMORY.md` index entry pointing at a missing memory file, and an
-"unsent" claim contradicted by a `deliverables.json` `sentAt`. Detection is
+it can prove: a missing cited path within a repository at the root or along
+the cited path (marked by `.git`, including a worktree gitfile, or
+`substrate.json`), a `MEMORY.md` index entry pointing at a missing memory file,
+and an "unsent" claim contradicted by a `deliverables.json` `sentAt`. Detection is
 mechanical and precision-first — URLs, API-endpoint fragments, command lines
 with flags, and citations without a workspace anchor stay silent, because a
-false alarm teaches the reader to ignore the channel. The lint never rewrites
+false alarm teaches the reader to ignore the channel. A plain directory such
+as a home directory's `bin/` does not anchor a citation. For spans such as
+`tools/run.py check` and `tools/run.py:12 SYMBOL`, only the leading path is
+checked; later slash-bearing words do not create citations. Repeated references
+to the same normalized path in one memory count as one finding, including
+references with different line numbers or slash styles. The lint never rewrites
 a memory: the agent reading the alarm owns the repair, with the truth in
 front of it. Echoed content is control-character-stripped and capped, and the
 exit code is 0 unconditionally — a lint that can wedge a session start is

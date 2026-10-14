@@ -533,7 +533,7 @@ case "$(sg --check)" in *"gates nothing"*) ok "  and the note says it gates noth
 # gates only a repo that carries its language, and a waiver excuses a class
 # in the taxonomy it is written in and nowhere else.
 n_ts="$(tax_n typescript)"
-check "and seven off-chain builder classes" 7 "$n_ts"
+check "and eleven off-chain builder classes, including phase 1" 11 "$n_ts"
 
 write_ts() {  # a builder with one ordinary test and no attack tests
   mkdir -p test src
@@ -692,8 +692,8 @@ both_state
 out="$(sg --check 2>&1)"
 check "a repo carrying both languages is gated by both" "$((n_aiken + n_ts))" \
   "$(printf '%s' "$out" | grep -c 'attack:[a-z]*:attack_')"
-case "$out" in *"gates nothing"*) bad "  and neither taxonomy is dormant" "dormant" ;;
-  *) ok "  and neither taxonomy is dormant" "both live" ;; esac
+case "$out" in *"aiken taxonomy gates nothing"*|*"typescript taxonomy gates nothing"*) bad "  and both tracked taxonomies are live" "dormant" ;;
+  *) ok "  and both tracked taxonomies are live" "both live" ;; esac
 
 # A waiver is scoped to the taxonomy it sits in. The same id excused on one
 # side leaves the other side owed.
@@ -806,7 +806,7 @@ out="$(sg --check 2>&1)"
 case "$out" in *"NOT COVERED: taxonomy 'rust'"*"2 class(es) unchecked"*)
   ok "  it is named, with what it cost" "named" ;;
   *) bad "  it is named, with what it cost" "${out:0:70}" ;; esac
-case "$out" in *"aiken, typescript only"*) ok "  and the known languages are listed beside it" "listed" ;;
+case "$out" in *"aiken, typescript, python only"*) ok "  and the known languages are listed beside it" "listed" ;;
   *) bad "  and the known languages are listed beside it" "silent" ;; esac
 case "$out" in *"attack:rust:"*) bad "  its classes are not findings" "red" ;;
   *) ok "  its classes are not findings" "unchecked" ;; esac
@@ -1036,6 +1036,112 @@ out="$(sg --check 2>&1)"
 case "$out" in *"aiken taxonomy gates although"*) bad "a dormant taxonomy off the list is not said to gate" "contradiction" ;;
   *"aiken taxonomy is not listed in 'languages'; it gates nothing yet"*) ok "a dormant taxonomy off the list is not said to gate" "consistent" ;;
   *) bad "a dormant taxonomy off the list is not said to gate" "${out:0:80}" ;; esac
+
+# ====== 9d. Python services owe outsider-data and resource-budget classes ==
+n_py="$(tax_n python)"
+check "the shipped Python taxonomy names six service classes" 6 "$n_py"
+write_py() {
+  mkdir -p src tests
+  printf 'def read_rows(): return []\n' >src/service.py
+  printf 'def test_control(): assert True\n' >tests/test_service.py
+}
+py_state() { mkrepo; write_py; cp "$TAX" .fluxpoint-attacks.json; commit; }
+write_py_attacks() {
+  printf 'from hypothesis import given, strategies as st\n' >tests/test_attacks.py
+  for cls in $(tax_ids python); do
+    printf '\n@given(st.integers())\ndef test_%s(case):\n    assert isinstance(case, int)\n' "$cls" >>tests/test_attacks.py
+  done
+}
+
+py_state
+check "a Python service with no attack tests is red" 1 "$(rc_of --check)"
+out="$(sg --check 2>&1)"
+check "every Python class is its own named finding" "$n_py" \
+  "$(printf '%s' "$out" | grep -c 'attack:python:attack_')"
+case "$out" in *"attack_outsider_row_decode"*"item by item"*) ok "Python findings carry the binding property" "named" ;;
+  *) bad "Python findings carry the binding property" "missing" ;; esac
+case "$out" in *"attack:aiken:"*|*"attack:typescript:"*) bad "Python-only services owe only Python classes" "other findings" ;;
+  *) ok "Python-only services owe only Python classes" "scoped" ;; esac
+
+write_py_attacks; commit
+check "a Hypothesis test per service class is green" 0 "$(rc_of --check)"
+case "$(sg --check)" in *"python:"*"is specified by an example"*) bad "Hypothesis imports identify property files" "example note" ;;
+  *) ok "Hypothesis imports identify property files" "property" ;; esac
+case "$(sg --scan)" in *"attack class python:attack_shared_pool_exhaustion: specified"*) ok "scan and check agree about Python classes" "specified" ;;
+  *) bad "scan and check agree about Python classes" "missing" ;; esac
+
+py_state
+cat >tests/test_attacks.py <<'EOF'
+# import hypothesis
+doc = 'from hypothesis import given'
+def test_attack_outsider_row_decode_byron(): assert True
+async def test_attack_event_loop_block_heartbeat(): assert True
+class TestResources:
+    def test_attack_shared_pool_exhaustion_sqlite(self): assert True
+EOF
+commit
+out="$(sg --check 2>&1)"
+check "sync, async and Test-class functions specify their classes" "$((n_py - 3))" \
+  "$(printf '%s' "$out" | grep -c 'attack:python:attack_')"
+case "$out" in *"python:attack_outsider_row_decode is specified by an example"*"imports no hypothesis"*) ok "ordinary Python tests are named as examples" "noted" ;;
+  *) bad "ordinary Python tests are named as examples" "silent" ;; esac
+
+py_state
+cat >tests/test_names.py <<'EOF'
+# def test_attack_outsider_row_decode(): pass
+example = '''
+def test_attack_whole_read_fail_closed(): pass
+'''
+def attack_unbounded_literal(): pass
+def helper():
+    def test_attack_read_amplification(): pass
+class Helpers:
+    def test_attack_event_loop_block(self): pass
+EOF
+commit
+out="$(sg --check 2>&1)"
+check "comments, strings, helpers and nested Python functions cannot specify a class" "$n_py" \
+  "$(printf '%s' "$out" | grep -c 'attack:python:attack_')"
+
+py_state
+printf 'def test_attack_outsider_row_decode(): pass\n' >test_decode.py
+printf 'async def test_attack_whole_read_fail_closed(): pass\n' >wallet_test.py
+mkdir -p test src/__tests__
+printf 'def test_attack_unbounded_literal(): pass\n' >test/literals.py
+printf 'def test_attack_read_amplification(): pass\n' >src/__tests__/requests.py
+commit
+out="$(sg --check 2>&1)"
+check "Python test filename suffixes and test directories are recognized" "$((n_py - 4))" \
+  "$(printf '%s' "$out" | grep -c 'attack:python:attack_')"
+
+py_state; write_py_attacks
+sed -i '/@given(st.integers())/d; /def test_attack_shared_pool_exhaustion/,/assert isinstance/d' tests/test_attacks.py
+commit
+check "one omitted Python service class stays red" 1 "$(rc_of --check)"
+waive python attack_shared_pool_exhaustion 'n/a'
+check "Python waivers require a reviewable reason" 1 "$(rc_of --check)"
+waive python attack_shared_pool_exhaustion 'this single-process batch service exposes no concurrent request routes'
+check "a reasoned Python waiver closes only its own class" 0 "$(rc_of --check)"
+case "$(sg --check)" in *"python:attack_shared_pool_exhaustion waived"*) ok "Python waiver is printed for review" "echoed" ;;
+  *) bad "Python waiver is printed for review" "silent" ;; esac
+
+mkrepo; printf 'def read_rows(): return []\n' >src/service.py; cp "$TAX" .fluxpoint-attacks.json; commit
+check "Python source without tracked tests leaves its taxonomy dormant" 0 "$(rc_of --check)"
+case "$(sg --scan)" in *"attack taxonomy python: dormant (no Python test file is tracked)"*) ok "Python dormancy is explicit" "dormant" ;;
+  *) bad "Python dormancy is explicit" "missing" ;; esac
+
+mkrepo; write_py; only_tax typescript; commit
+check "an older manifest missing Python stays green by default" 0 "$(rc_of --check)"
+case "$(sg --check)" in *"NO TAXONOMY: this repo tracks Python tests but"*"no python taxonomy"*"6 known hosted service classes"*) ok "older manifests name the missing Python obligations" "NO TAXONOMY" ;;
+  *) bad "older manifests name the missing Python obligations" "silent" ;; esac
+case "$(sg --scan)" in *"attack taxonomy python: NO TAXONOMY"*) ok "scan reports the same missing Python taxonomy" "named" ;;
+  *) bad "scan reports the same missing Python taxonomy" "silent" ;; esac
+set_key requireAllLanguages true
+check "requireAllLanguages makes missing Python a failure" 1 "$(rc_of --check)"
+set_key languages '["typescript"]'
+check "declared exclusion of Python stays green even in strict mode" 0 "$(rc_of --check)"
+case "$(sg --check)" in *"python excluded by declaration"*) ok "intentional Python exclusions are visible" "named" ;;
+  *) bad "intentional Python exclusions are visible" "silent" ;; esac
 
 # ================= 10. --axioms: the prover's own assumption audit ========
 # The provers are not installed where this suite runs, so each toolchain is

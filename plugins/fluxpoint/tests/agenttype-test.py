@@ -155,7 +155,9 @@ def _bound(tir, agent):
 # The failure mode itself, pinned: a template that binds the security
 # reviewer and leaves the verification reviewer unbound is #72 again.
 for name, tir in TEMPLATES.items():
-    rt = _bound(tir, "red-team-reviewer")
+    # The terminal shipping gate needs the proof gate. Repair-loop checkers
+    # bind the reviewer to independently reproduce a slice between fixes.
+    rt = [n for n in _bound(tir, "red-team-reviewer") if n.get("id") == "red-team"]
     if not rt:
         continue
     pa = _bound(tir, "proof-auditor")

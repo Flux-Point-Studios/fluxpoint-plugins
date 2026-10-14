@@ -215,8 +215,8 @@ full() {
       "$FPL_PY" "$cx" --ingest --tool aiken --from "$aiken_out" \
         --exit "$aiken_rc" || true
     fi
-    rm -f "$aiken_out"
-    if [ "$aiken_rc" -ne 0 ]; then return "$aiken_rc"; fi
+    if [ "$aiken_rc" -ne 0 ]; then rm -f "$aiken_out"; return "$aiken_rc"; fi
+    trap 'rm -f "$aiken_out"' EXIT
     # `check` typechecks and runs tests; `build` is what actually produces the
     # on-chain artifact, and it can fail where check passes. A validator that
     # will not build is not done.
@@ -233,9 +233,14 @@ full() {
     # .fluxpoint-budget.json stays first so the more specific declaration is
     # the one named when a repo has set a headroom target.
     if need_gate plutus-budget.py .fluxpoint-budget.json aiken.toml; then
-      "$FPL_PY" "$FPL_GATE" --check ${FPL_PROTOCOL_PARAMS:+--params "$FPL_PROTOCOL_PARAMS"}
+      budget_args=()
+      # Opt-in measured metrics pin Aiken v1.1.23 through aiken_units.py.
+      # Feed the current real check output to the protocol budget too.
+      if [ -f .fluxpoint-metrics.json ]; then budget_args+=(--aiken-output "$aiken_out"); fi
+      "$FPL_PY" "$FPL_GATE" --check "${budget_args[@]}" ${FPL_PROTOCOL_PARAMS:+--params "$FPL_PROTOCOL_PARAMS"}
     fi
   fi
+    rm -f "${aiken_out:-}"
   # Provers run in --full, not only per-file. A gate that decides "done"
   # without invoking the prover is not a gate.
   if [ -n "$(git ls-files -- '*.dfy' 2>/dev/null)" ]; then
@@ -381,9 +386,9 @@ full() {
   # Seam ratchet. The mutation score below asks whether the tests can fail;
   # this asks whether they reach the code at all — a mock of a module you own
   # walls it off and asserts a contract nothing verifies, and a mutant behind
-  # that wall reports the same green either way. Dormant until armed with
-  # --baseline.
-  if need_gate seam-guard.py .fluxpoint-proof-baseline.json; then
+  # that wall reports the same green either way. A recordings manifest also
+  # checks provider fixture shapes against captures, without a count baseline.
+  if need_gate seam-guard.py .fluxpoint-proof-baseline.json .fluxpoint-recordings.json; then
     "$FPL_PY" "$FPL_GATE" --check
   fi
   # Counterexample ledger. A prover's shrunk failing input is the most
@@ -401,6 +406,10 @@ full() {
   # plutus.json and check it in CI without building there. Dormant until
   # a corpus is declared in .fluxpoint-blueprint.json.
   if need_gate blueprint-guard.py .fluxpoint-blueprint.json plutus.json; then
+    "$FPL_PY" "$FPL_GATE" --check
+  fi
+  # Exact deterministic metrics provide graded scores and hold improvements.
+  if need_gate metric-guard.py .fluxpoint-metrics.json .fluxpoint-metrics-baseline.json; then
     "$FPL_PY" "$FPL_GATE" --check
   fi
   # Mutation score. Every check above asks whether the tests pass; this asks

@@ -38,6 +38,11 @@ Workflow tool requires.
    `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> -o .claude/workflows/<name>.graph.js`
    The output is generated code. Never hand-edit it; edit the IR and
    recompile, or the spec and the executor start lying to each other.
+   Repeat preflight on the exact file before invoking Workflow:
+   `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> --check --check-script .claude/workflows/<name>.graph.js`.
+   Both checks enforce the Workflow limit of 524,288 UTF-8 bytes and print
+   headroom; below 16 KiB is a warning. `--max-script-bytes` overrides the
+   limit only when the selected launcher supports the new limit.
 4. Load whatever state the graph refuses to start without.
    Record the launch reading, fresh at every launch including a resume:
    ```
@@ -55,7 +60,8 @@ Workflow tool requires.
    runtime's choice, and it has been observed cut from the default branch
    rather than the campaign's, where a file an earlier node committed is
    simply absent and nothing inside says so.
-   If any node declares `verify: prove:<gate>`, stamp the launch; the
+   If any node declares `verify: prove:<gate>` or a repair `repeat.until`,
+   stamp the launch; the
    compiled graph refuses to start without it:
    ```
    bash "$ROOT/scripts/py.sh" attest.py --stamp
@@ -132,7 +138,20 @@ Workflow tool requires.
 5. Set `STATUS: RUNNING`. Invoke the Workflow tool (Claude Code) with
    `{scriptPath: ".claude/workflows/<name>.graph.js", args: {...}}`.
    Pass args as a real JSON object, not a stringified one. Watch with
-   `/workflows`; never poll with sleep.
+   `/workflows`; never poll with sleep. As soon as the tool returns its run id,
+   start the observer with the Bash tool's `run_in_background: true`:
+   ```
+   bash "$ROOT/scripts/py.sh" watchdog.py --run <runId> --root <project-root> --base <args._base.sha>
+   ```
+   Do this for every launch and resume, so a stall or failure wakes the
+   orchestrator through the background task's completion. Exit 1 names the
+   affected agents and adds inbox items; a killed agent also gets a resume
+   note with its checkout state and commits since launch. Exit 2 means the
+   internal journal/transcript format could not be read: inspect it and
+   report the missing observation. Exit 0 means no agents remain live and
+   the journal has been quiet for 15 minutes. Hand-written Workflow scripts
+   use this same command. `--stall-min` defaults to 40; `--once` performs one
+   inspection (exit 3 while the run is still pending).
 6. On completion, record the run — evidence is a build artifact, not
    something you remember to write:
    ```

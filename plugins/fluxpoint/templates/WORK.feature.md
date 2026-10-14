@@ -27,21 +27,77 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
   "version": 1,
   "name": "feature-campaign",
   "campaign": "Council-designed, loop-implemented, independently gated feature slice",
-  "budget": { "maxNodes": 20, "verifyFloorTokens": 50000, "cacheTtl": "1h", "maxEstimatedTokens": 300000 },
-  "defaults": { "effort": "medium" },
-  "requiredArgs": ["goal"],
-  "argDefaults": { "constraints": "none beyond WORK.md" },
+  "budget": {
+    "maxNodes": 100,
+    "verifyFloorTokens": 50000,
+    "cacheTtl": "1h",
+    "maxEstimatedTokens": 1350000
+  },
+  "defaults": {
+    "effort": "medium"
+  },
+  "requiredArgs": [
+    "goal"
+  ],
+  "argDefaults": {
+    "constraints": "none beyond WORK.md"
+  },
   "roles": {
-    "architect": { "effort": "medium" },
-    "builder": { "effort": "high" },
-    "proof": { "agentType": "proof-auditor", "effort": "high" },
-    "red-team": { "agentType": "red-team-reviewer", "effort": "high" }
+    "architect": {
+      "effort": "medium"
+    },
+    "builder": {
+      "effort": "high"
+    },
+    "proof": {
+      "agentType": "proof-auditor",
+      "effort": "high"
+    },
+    "red-team": {
+      "agentType": "red-team-reviewer",
+      "effort": "high"
+    }
   },
   "lists": {
     "angles": [
-      { "key": "smallest-diff", "brief": "the minimum slice that ships observable value" },
-      { "key": "risk-first", "brief": "neutralize the scariest failure mode before anything else" },
-      { "key": "contract-first", "brief": "pin the tests and interfaces before any implementation" }
+      {
+        "key": "smallest-diff",
+        "brief": "the minimum slice that ships observable value"
+      },
+      {
+        "key": "risk-first",
+        "brief": "neutralize the scariest failure mode before anything else"
+      },
+      {
+        "key": "contract-first",
+        "brief": "pin the tests and interfaces before any implementation"
+      }
+    ],
+    "red-team-lenses": [
+      {
+        "key": "authority",
+        "brief": "authority and identity boundaries"
+      },
+      {
+        "key": "value",
+        "brief": "value, arithmetic and conservation"
+      },
+      {
+        "key": "state",
+        "brief": "state and provenance, replay and partial writes"
+      },
+      {
+        "key": "input",
+        "brief": "input decoding and execution boundaries"
+      },
+      {
+        "key": "operations",
+        "brief": "operations, infrastructure and resource exhaustion"
+      },
+      {
+        "key": "composition",
+        "brief": "composition across all changed components and shared resources"
+      }
     ]
   },
   "nodes": [
@@ -59,7 +115,7 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
       "id": "choose",
       "phase": "Council",
       "after": "design",
-      "prompt": "Judge these candidate designs side by side for the goal \"{{A.goal}}\" on TDD-ability, blast radius, fit with the Definition of Done in WORK.md, and honesty of their risks. Candidates: {{prev}}. Return a DecisionV1: the question you actually settled, every candidate with who argued it and the strongest objection to it — including the one you chose — the choice, and why it beat the others. Say plainly whether this overturns what the campaign assumed going in, and name the node that freezes it. Barrier justified: judging requires all candidates at once.",
+      "prompt": "Judge these candidate designs side by side for the goal \"{{A.goal}}\" on TDD-ability, blast radius, fit with the Definition of Done in WORK.md, and honesty of their risks. Candidates: {{prev}}. Return a DecisionV1: the question you actually settled, every candidate with who argued it and the strongest objection to it \u2014 including the one you chose \u2014 the choice, and why it beat the others. Say plainly whether this overturns what the campaign assumed going in, and name the node that freezes it. Barrier justified: judging requires all candidates at once.",
       "contract": "DecisionV1",
       "decides": "implementation-approach",
       "effort": "high",
@@ -72,8 +128,10 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
       "role": "builder",
       "after": "choose",
       "mutates": true,
-      "honors": ["implementation-approach"],
-      "prompt": "Implement exactly this design as one loop slice: {{prev}}. The frozen decision that binds this work is {{decisions.implementation-approach}} — if the implementation cannot honor it, stop and say so rather than quietly choosing differently. Goal: \"{{A.goal}}\". Constraints: {{A.constraints}}. Work TDD strictly per WORK_PROMPT.md: failing test first, minimum code to green, scripts/harness.sh --changed <file> after each edit. Create and commit on a branch named claude/graph-<short-slug-of-goal>, test and code together. Run scripts/harness.sh --full and report its real exit code; never weaken the harness or delete tests to reach green. Evidence entries are command + observed result.",
+      "honors": [
+        "implementation-approach"
+      ],
+      "prompt": "Implement exactly this design as one loop slice: {{prev}}. The frozen decision that binds this work is {{decisions.implementation-approach}} \u2014 if the implementation cannot honor it, stop and say so rather than quietly choosing differently. Goal: \"{{A.goal}}\". Constraints: {{A.constraints}}. Work TDD strictly per WORK_PROMPT.md: failing test first, minimum code to green, scripts/harness.sh --changed <file> after each edit. Create and commit on a branch named claude/graph-<short-slug-of-goal>, test and code together. Run scripts/harness.sh --full and report its real exit code; never weaken the harness or delete tests to reach green. Evidence entries are command + observed result.",
       "contract": "SliceV1",
       "verify": "schema-only",
       "onRed": "halt"
@@ -84,7 +142,7 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
       "after": "build",
       "independent": true,
       "verifies": "build",
-      "prompt": "Independently verify the branch named in this slice: {{prev}}. Check it out into a fresh worktree (git worktree add), run scripts/harness.sh --full YOURSELF, and return the real integer exit code, the exact command, and the last ~20 lines. Do not trust any prior claim about whether it passed — run it and report what you observe.",
+      "prompt": "Independently verify the branch named in this slice: {{prev}}. Check it out into a fresh worktree (git worktree add), run scripts/harness.sh --full YOURSELF, and return the real integer exit code, the exact command, and the last ~20 lines. Do not trust any prior claim about whether it passed \u2014 run it and report what you observe.",
       "contract": "HarnessCheckV1",
       "haltWhen": "exit != 0",
       "haltReason": "independent harness re-run disagrees with the implementer; the graph never argues with the harness",
@@ -103,16 +161,55 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
       "onRed": "halt"
     },
     {
-      "id": "red-team",
+      "id": "red-team-lenses",
       "phase": "Gate",
       "role": "red-team",
       "after": "proof-audit",
-      "prompt": "Red-team the diff of the branch implemented in this campaign against the default branch. Apply your full adversarial checklist. The proof-auditor's verdict on the same branch, for context and never as a substitute for your own reading: {{prev}}",
+      "prompt": "Review only this adversarial lens: {{item.brief}}. Pin the campaign branch and default-branch base to exact commits before attacking, measure changed files/additions/deletions with git, and report top-level coverage for your actual lens id {{item.key}}, attackers 1 and sampled explicitly. Apply your full checklist within that lens and independent skeptical reproduction. The composition lens attacks sequences across components. Keep findings executable and include minimal-case artifact paths. Put missing work and unresolved claims in review.blockers. Prior proof verdict: {{prev}}. Return RedTeamV1. A lens may BLOCK with findings for independent refutation; never claim complete coverage for work you sampled.",
+      "contract": "RedTeamV1",
+      "verify": "schema-only",
+      "onRed": "halt",
+      "foreach": "red-team-lenses",
+      "independent": true,
+      "verifies": "build",
+      "isolation": "worktree"
+    },
+    {
+      "id": "red-team-distinct",
+      "phase": "Gate",
+      "reduce": {
+        "from": "red-team-lenses",
+        "over": "findings",
+        "dedupeBy": [
+          "finding",
+          "exploit_path"
+        ]
+      }
+    },
+    {
+      "id": "red-team-refute",
+      "phase": "Gate",
+      "after": "red-team-distinct",
+      "prompt": "Read these distinct executable claims: {{prev}}. Return them without dropping unresolved claims in findings so three independent refuters can test reproduction, reachability and scope. Preserve exact snapshot, minimal-case paths and valid controls in each exploit_path. Return BLOCK while claims remain; this is an intermediate collection, not the final gate.",
+      "contract": "RedTeamV1",
+      "verify": "panel:3",
+      "verifyOver": "findings",
+      "expectItems": 12,
+      "onRed": "halt"
+    },
+    {
+      "id": "red-team",
+      "phase": "Gate",
+      "role": "red-team",
+      "after": "red-team-refute",
+      "prompt": "Bind the final adversarial verdict after three independent refuters per claim. Surviving or unverified claims: {{prev}}. The compiler supplies raw coverage and blockers for every lens. Require every one of the six lenses (authority, value, state, input, operations, composition), exact matching repository base/head identities and measured diff counts; report completed attacker count and sampled truthfully. Inspect missing work, unresolved claims, dead or unverified refuters, inconsistent snapshots and coverage blockers; any of those means BLOCK even when findings are empty. Do not reintroduce refuted claims without contradictory executable evidence. Independently sample defended cases and check composition for false negatives, delegating the skeptic. Return RedTeamV1 with top-level coverage and a final snapshot recheck. SHIP only after the whole review is complete.",
       "contract": "RedTeamV1",
       "verify": "schema-only",
       "haltWhen": "verdict == 'BLOCK'",
       "haltReason": "red-team blocked the diff; a BLOCK verdict is harness-red and the campaign does not ship over it",
-      "onRed": "halt"
+      "onRed": "halt",
+      "independent": true,
+      "verifies": "red-team-lenses"
     }
   ]
 }
@@ -134,10 +231,13 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
   the Evidence row still says which of the three it was. The node runs its
   ratchets in a worktree of its own because the compiled graph brackets
   every verdict with a tree sentinel.
-- `red-team`: `VERDICT: BLOCK` is harness-red, and `haltWhen` makes that
-  structural. A verdict this node collects but nothing reads is the exact
-  smell `graph-auditor` hunts — and being the terminal node is what makes
-  it dangerous, because falling through lands on `summary('COMPLETE')`.
+- `red-team-lenses` runs the five boundary surfaces plus composition in
+  parallel. `red-team-distinct` deduplicates findings, `red-team-refute`
+  sends each claim to three independent refuters, and the separate
+  `red-team` gate consumes surviving/unverified claims and the compiler's
+  raw lens coverage/blocker context. Missing work cannot become SHIP just
+  because findings were empty or refuted. Every SHIP carries exact ranges,
+  diff counts, completed attacker/lens counts and sampled status.
 - Terminal: merge happens outside the graph, per WORK.md Merge policy,
   with the harness as a required CI check.
 
@@ -146,8 +246,8 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
   gate never passes by default.
 - Dead council seats drop and log; the campaign proceeds if at least one
   design survives.
-- Budget: 20 planned agent calls, verification floor 50k tokens, and a
-  cost ceiling of 300k estimated tokens over the compiler's estimate
+- Budget: up to 100 agent calls, verification floor 50k tokens, and a
+  cost ceiling of 1.35M estimated tokens over the compiler's estimate
   (~222k under the declared 1-hour prompt-cache TTL, prompt text included;
   `{{prev}}`, `{{decisions.*}}` and the launch `{{A.goal}}` are named as
   unpriced; the one effort transition into a key the run has not warmed,

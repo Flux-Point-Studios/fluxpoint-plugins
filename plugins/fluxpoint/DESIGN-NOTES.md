@@ -1,5 +1,28 @@
 # fluxpoint — design notes
 
+## Definition of Done boundary (decision #105)
+
+Keep the shared Definition of Done at the project's declared engineering and
+merge boundary. Do not introduce a universal `merged-unverified` state or
+infer field success from a green pre-merge suite. The plugin serves libraries,
+on-chain scripts and hosted applications; it has no shared deployment target,
+telemetry source, rollout authority or safe rollback action. A generic state
+without those observations would claim a lifecycle it cannot verify.
+
+Projects that need field verification declare a separate deployment campaign
+with their own attested check, observation window and rollback criteria.
+Record deployment and observed outcomes there, and leave that campaign open
+until its own Definition of Done passes or its rollback is recorded. A merge
+campaign's completion certifies only its stated scope. A feature flag's owner,
+kill-switch or ramp purpose, expiry and retirement check belong to that
+project's deployment specification. Generic deterministic metrics can ratchet
+flag debt when the project declares an exact count; the plugin does not infer
+which flags are safe to retire.
+
+Reconsider this boundary when a concrete integration supplies deployment
+identity, reproducible field checks and a measured rollback workflow that
+cannot already be expressed as an attested campaign.
+
 These notes record what the v0.1 smoke test proved, the redesign it
 pointed to, and how that redesign landed. Not bound by prior conventions —
 the goal was the best design, not symmetry with what came before.
@@ -157,8 +180,25 @@ finding most worth having. A finer-grained score — node death rate, panel
 kill rate, confirmed findings per run — would lower those counts, and is
 the next thing to build if the first sweep comes back flat and ambiguous.
 
-Still not done, and not doable from a repository: running it. It needs a
-session that launches campaigns and a bill someone approved.
+Still not done: running it needs an authenticated campaign runner with access
+to the requested models and usage metering.
+
+Review on 2026-10-14: issue #67 remains open. The attached cloud environment
+reports current observations with no configured secrets, runtime variables,
+capabilities or outbound identities. Claude Code 2.1.300 was installed locally
+to run the real plugin validator; `claude auth status` reports `loggedIn: false`
+and `authMethod: none`. The Codex CLI is present, but does not establish access to the requested Claude model
+and effort grid or its billing meter. No held-out model runs or actual bill
+were produced, so no role default was changed and no measured curve is claimed.
+
+The deterministic metric ratchet added for #101 supplies exact graded counts
+and can now measure real pinned Aiken unit-test costs (#102). It does not by
+itself show that an effort choice improves coding quality. A useful calibration
+still needs campaign-specific held-out tasks, the unchanged full correctness
+harness, per-run task scores, and actual token/cost observations across the
+architect, builder and red-team effort/model grid. The existing sweep planner,
+train/test split and scorer prepare those runs; the unavailable authenticated
+runner and usage meter are the concrete blocker to completing #67 here.
 
 ## What the smoke test established
 

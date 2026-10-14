@@ -116,3 +116,21 @@ drive the hook scripts with payloads in both shapes: `hooks-test.sh` and
 the string-shaped shell response, and `loop-runner-test.sh` runs the outer
 loop against a fake `claude` and a fake `codex`. `scripts/harness.sh --full`
 runs all of them.
+
+
+### Windows hook startup under load
+
+Python launchers cache a probed absolute interpreter against `PATH` in the
+user's cache (`$XDG_CACHE_HOME/fluxpoint/python`, or
+`$HOME/.cache/fluxpoint/python`). WindowsApps execution aliases are skipped.
+A cache hit starts only the target Python process; the secret guard avoids
+`dirname` and `cygpath` subprocesses and has a 60-second startup allowance.
+Setting `FPL_PY` explicitly bypasses auto-detection. Remove the cache file to
+force a new probe if an interpreter installation changes at the same path.
+
+These changes reduce exposure to the MSYS2 suspended-child startup race
+reported in #124. They do not guarantee that a runtime killing Bash also
+terminates every native child. That guarantee requires Windows runtime
+process-tree termination. Native Windows/Git Bash load and forced-timeout
+verification remains required; Linux regression tests establish cache and
+launch-count behavior only.

@@ -163,5 +163,48 @@ check "loop.sh: an unknown AGENT_CLI is refused before anything runs" 2 $?
 [ -f "$ROOT/x.args" ] && bad "loop.sh: nothing ran for the unknown driver" "a CLI ran" \
   || ok "loop.sh: nothing ran for the unknown driver" "nothing ran"
 
+# --- 5. declared metrics stop on plateau and report why -----------------
+cat >"$fakebin/claude" <<'EOF'
+#!/usr/bin/env bash
+"$FPL_PY" - <<'PYAGENT'
+import os
+from pathlib import Path
+p = Path('iteration')
+i = int(p.read_text()) if p.exists() else 0
+values = os.environ['FAKE_SERIES'].split(',')
+Path('value').write_text(values[min(i, len(values)-1)])
+p.write_text(str(i + 1))
+PYAGENT
+EOF
+chmod +x "$fakebin/claude"
+metricrepo() {
+  looprepo
+  printf 'STATUS: ACTIVE\n' >WORK.md
+  printf '10' >value
+  printf '.claude/\n' >.gitignore
+  "$FPL_PY" - "$FPL_PY" <<'PYMETRIC' >.fluxpoint-metrics.json
+import json, sys
+print(json.dumps({'metrics': [{'name': 'cost', 'direction': 'down',
+    'command': [sys.argv[1], '-c', 'print(open("value").read())']}]}))
+PYMETRIC
+  git add -A; git commit -qm metrics
+}
+metricrepo
+FPL_PY="$FPL_PY" FPL_PLUGIN_ROOT="$PLUGIN" FAKE_SERIES=10,10,10,10 \
+  PATH="$fakebin:$PATH" MAX_ITER=8 bash "$PLUGIN/templates/loop.sh" >"$ROOT/flat.log" 2>&1
+check "flat metric stops after plateau window" 3 "$(cat iteration)"
+grep -q '"kind": "plateau"' .claude/fluxpoint/inbox.jsonl
+check "plateau reason is recorded in inbox" 0 $?
+metricrepo
+FPL_PY="$FPL_PY" FPL_PLUGIN_ROOT="$PLUGIN" FAKE_SERIES=9,8,7,6,5 \
+  PATH="$fakebin:$PATH" MAX_ITER=5 bash "$PLUGIN/templates/loop.sh" >"$ROOT/improving.log" 2>&1
+check "improving metric continues to iteration budget" 5 "$(cat iteration)"
+grep -q '"kind": "budget-exhausted"' .claude/fluxpoint/inbox.jsonl
+check "improving metric reports budget, not plateau" 0 $?
+metricrepo
+FPL_PY="$FPL_PY" FPL_PLUGIN_ROOT="$PLUGIN" FAKE_SERIES=9,99,8,7,6 \
+  PATH="$fakebin:$PATH" MAX_ITER=5 bash "$PLUGIN/templates/loop.sh" >"$ROOT/noisy.log" 2>&1
+check "one worse iteration does not trigger a plateau" 5 "$(cat iteration)"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

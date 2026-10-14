@@ -44,6 +44,7 @@ The JSON packet has these fields:
 | `requirements` | Checkable requirements linked to decisions and checks |
 | `checks` | Commands run without a shell from the repository root |
 | `challenges` | Material objections and their resolutions |
+| `harnessInputs` | Optional list of additional repository files executed checks depend on, such as conftests and configs |
 
 A decision contains `id`, `status` (`defaulted`, `user-confirmed`, or
 `blocked` while drafting), `dependsOn` (decision ids), `record` (the existing
@@ -74,6 +75,22 @@ A check contains `id`, `kind`, `argv`, `scope`, `assumptions` and
 `proof` and `runtime`. `{python}` is replaced by the interpreter running the
 gate; other arguments are literal. Pipes and shell expansion are not implicit.
 Use a repository-owned adapter when a command needs multiple operations.
+
+A prose value may consist entirely of `<repo-relative path>#<RFC 6901 pointer>`,
+for example `docs/archive.json#/checks/settlement/scope`. The file must contain
+JSON and the pointer must resolve to nonempty text. Object keys use `~1` for
+`/` and `~0` for `~`; array indices are supported. Absolute paths, traversal,
+symlinks outside the repository, missing targets, non-string targets and cycles
+are errors. A target that is another complete reference (optionally prefixed
+`See: `) resolves recursively. A reference mentioned inside a prose sentence
+remains that sentence; write a complete reference to bind archived text.
+
+References are supported in goals, assets, scope/exclusion lists, requirement
+statements/counterexamples, check scope/assumptions, challenge claims/resolutions,
+decision questions/rationales/evidence/objections and cost descriptions/evidence.
+Command arguments and identifier lists are literal. Compiled node context
+contains the resolved text and preserves a scalar's original reference beside
+it (`scopeRef` for a check scope). A bare check-scope path emits a warning.
 
 ```json
 {
@@ -111,8 +128,37 @@ captures intent, that an asserted measurement was made, or that a command
 actually proves the claim. The grill pass and independent verification own
 those judgments; raw check execution is never promoted to universal proof.
 
-The lock binds named obligation statements and hashes the packet and optional proof baseline with Git's LF line
-endings; CRLF conversion between platforms preserves the lock.
+The lock binds named obligation statements and hashes the packet, optional proof
+baseline and every referenced JSON file (`references: {path: sha256}`) with Git's
+LF line endings; CRLF conversion between platforms preserves the lock. Changing
+an archive, including a transitively referenced archive, invalidates the lock.
 Keep both tracked before isolated graph execution. A justified revision changes
 the packet/baseline and re-runs `--lock`; review the diff. A worktree whose
 packet differs from the graph's embedded packet must not certify that graph.
+
+`--lock` also records `harness: {path: sha256}` beside the specification identity.
+It includes existing repository files named in `argv`/`witness`, including
+`file::node` selectors and `--option=file`, plus every `harnessInputs` file.
+Explicit inputs must exist inside the repository when freezing the harness.
+Deleting a frozen input does not alter the specification identity; its next run
+record names the missing file with a null hash. Add imported helpers, fixtures
+and configs explicitly; the plugin does not infer a language's dependency graph.
+The harness map stays outside the compared identity, so editing check code
+changes neither the graph's IR nor its compiled script and does not stale its
+specification. It remains reviewed code, with its own recorded identity.
+
+After reviewing and committing a harness fix, run its declared gate through
+`attest.py --run <name>`, then run
+`specification.py --lock-harness --gate <name>` (with `--spec` or `--graph` for a
+sibling packet). This operation requires an attested exit 0 for the current
+gate command at HEAD. It rewrites only the harness map and prints every changed
+path. A changed packet, archive or proof baseline still requires a full spec
+review and `--lock`. Attestation is evidence of a local execution at a commit,
+not a sandbox or a guarantee that a dirty tree did not change after that run.
+
+`record-run.py` hashes the harness in the tree it records from and writes its
+aggregate SHA-256, per-file hashes and every path differing from the lock into
+the run artifact; its Evidence row names the digest and changed paths. Missing
+locked files are recorded with a null hash. These describe the tree at recording
+time; record from the executed tree before further edits. The Stop gate also
+names edited check files from declared packets' harness maps as trust-base edits.

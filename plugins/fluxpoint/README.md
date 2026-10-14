@@ -36,7 +36,7 @@ does.
     `proof-guard.py` (escape hatches), `spec-guard.py` (statements),
     `cex.py` (counterexample ledger for Aiken, Dafny, Kani, Apalache and
     fast-check, plus the off-session seed sweep),
-    `mutation-guard.py` (mutation score), `seam-guard.py` (module mocks),
+    `mutation-guard.py` (mutation score), `seam-guard.py` (module/Python/HTTP doubles and provider recordings),
     `guard-guard.py` (named guards and the tests that hold them down),
     `pair-guard.py` (relations: co-change, parity, differential, bite and
     `--scan`), `plutus-budget.py` (on-chain size and execution units),
@@ -96,7 +96,29 @@ gate stays dormant in repos that lack it.
 
 **Spec side:** `WORK.md` — goal, `MODE`, Definition of Done, Plan (loop
 slices), Campaign (the graph IR), Constraints, Merge policy, and one
-Evidence table both modes append to.
+Evidence table both modes append to. Stop-gate verdicts are stored locally
+in `.claude/fluxpoint/evidence.jsonl` and shown at SessionStart, so a final
+stop leaves tracked files clean.
+
+The Stop gate can use a shorter repo-defined contract when `--full` cannot
+fit its hook budget; CI should still run the full suite.
+An unchanged passing tree reuses its verdict for the same harness invocation.
+If the harness changes source while running, the gate requires a fresh run on
+the stable result before recording PASS.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `FPL_HARNESS_ARGS` | `--full` | Harness arguments; process environment, then repo `.claude/settings.local.json`, then `.claude/settings.json` `env`. |
+| `FPL_GATE_TIMEOUT` | 540 | Harness seconds, capped at 570 within the 600-second hook ceiling. |
+| `FPL_MAX_BLOCKS` | 3 | Consecutive blocked stops before a checkpoint yield. |
+| `FPL_GATE_EVIDENCE` | `local` | Ignored JSONL verdicts; `work` opts into tracked work-file rows with an uncommitted-write notice; `off` skips recording. |
+
+The hygiene scan reads added lines and untracked source. The hedge `for now`
+is checked in comments, so Python loop variables named `now` do not match.
+`.fluxpoint-hygiene-allow` holds one Python regex per line for justified source
+lines (for example `skip\(f?"UNVERIFIED:`); blank lines and `#` comments are
+ignored. Both that policy and `.fluxpoint-hygiene-ignore` belong to the trust
+base and cannot disable the gate's code-change detection.
 
 ## Invariants worth naming
 
@@ -117,11 +139,15 @@ Evidence table both modes append to.
   source written through the Bash tool. Dirtiness is measured against the
   commit the session started from, so committing work mid-session
   is not a way to stop being judged; the hygiene scan uses the same
-  baseline. It falls back to HEAD when that commit is not an ancestor of
+  baseline. A checkout rebases the session baseline to imported history,
+  while unverified commits authored in this checkout remain judged even
+  after detaching away and back. The reflog anchor resets only on PASS.
+  It falls back to HEAD when the
+  baseline commit is not an ancestor of
   the current one (a rebase or branch switch), because a gate that fires
   spuriously gets switched off.
 - The files that decide what green means — the harness, the proof and pair
-  baselines, the gates and budget manifests, `package.json`, `Makefile` —
+  baselines, the gates, budget and metric manifests/baselines, `package.json`, `Makefile` —
   are named in the green notice when this session changed any of them.
   A verdict is only as trustworthy as the contract that produced it.
 - A gate's exit code is minted by a hook; no agent types it. Declare
@@ -363,6 +389,38 @@ baseline rather than indicting the repo; a false positive would train
 people to ignore the ratchet. The ratchet remains a floor: a
 theorem that lost a conjunct, or a `fail` test that trips an earlier guard
 than the one it is named for, still needs the semantic pass.
+
+Provider fixtures can be held to captured response shapes with
+`.fluxpoint-recordings.json` and `seam-guard.py --conform`; the manifest is
+checked inside the scaffolded `--full` even without a count baseline. See
+[provider recordings](references/recordings.md) for provenance, conformance,
+provider counters and the independent review needed for derived values.
+
+## Calibrating predicted gains
+
+For a slice targeting a declared deterministic metric, record its prediction
+before implementation and its measurement after the harness passes:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" slice-metric.py --start \
+  --slice index-lookup --role implementer --metric latency.ms --predicted-delta 20
+# Implement the slice, then run its harness.
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" slice-metric.py --end --slice index-lookup
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" metrics.py
+```
+
+A predicted delta is a positive improvement in the metric's own units.
+Both endpoints use metric-guard's repeated deterministic measurement. An
+unchanged metric definition is required. Predictions cannot be replaced;
+completion can be replayed without changing the recorded result.
+
+`metrics.py` and `/fluxpoint:status` show mean measured/predicted improvement
+per role, with a per-metric breakdown and sample counts. Above 1x means gains
+exceeded predictions; below 1x means they fell short; negative values record
+regressions. Each slice contributes one unitless ratio, so bytes and
+milliseconds are never added together. Pending slices are reported separately.
+Artifacts stay local in `.claude/fluxpoint/slices/`. Use `--campaign <name>`
+at start to include a slice in the corresponding `metrics.py --campaign` view.
 
 ## Migrating from the split plugins
 

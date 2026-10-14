@@ -4,31 +4,10 @@
 # machines without jq installed.
 
 
-# Interpreter name differs by platform: `python3` on Linux/macOS, `python` on a
-# standard Windows install. Resolve by running each candidate, because a
-# name on PATH is not evidence of an interpreter.
-if [ -z "${FPL_PY:-}" ]; then
-  # Probe each candidate by RUNNING it, rather than asking whether the name
-  # exists. Windows ships a `python3` App Execution Alias that is on PATH by
-  # default on a machine with no python3 at all: it satisfies `command -v`,
-  # then prints "Python was not found" and exits 49 for every argument.
-  for _fpl_cand in python3 python; do
-    if command -v "$_fpl_cand" >/dev/null 2>&1 &&
-       "$_fpl_cand" -c "import sys" >/dev/null 2>&1; then
-      FPL_PY="$_fpl_cand"
-      break
-    fi
-  done
-  unset _fpl_cand
-  if [ -z "${FPL_PY:-}" ]; then
-    echo "fluxpoint: no working python interpreter on PATH" >&2
-    exit 127
-  fi
-fi
-# Force UTF-8 on every embedded interpreter's stdio. Without it Windows writes
-# cp1252, so a header like "## Plan --" emitted with an em-dash comes back as
-# 0x97 and every consumer that greps for the UTF-8 bytes silently misses it.
-export PYTHONIOENCODING=utf-8
+# Shared, cached resolution also used by the Python command launcher.
+_fpl_lib_dir="${BASH_SOURCE[0]%/*}"
+. "$_fpl_lib_dir/python-env.sh"
+unset _fpl_lib_dir
 
 # $PWD, not CLAUDE_PROJECT_DIR. Every hook calls fpl_cd_project first, which has already
 # resolved the repo — the payload's own cwd, climbed to the git toplevel — so the working
@@ -377,15 +356,7 @@ fpl_base_file() {
 # scan with findings nobody introduced. A gate that cries wolf gets turned
 # off, which is a worse outcome than the bypass it was closing.
 fpl_base_ref() {
-  local base
-  base="$(cat "$(fpl_base_file "$1")" 2>/dev/null)"
-  if [ -n "$base" ] \
-     && git rev-parse --verify -q "${base}^{commit}" >/dev/null 2>&1 \
-     && git merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
-    printf '%s' "$base"
-    return 0
-  fi
-  printf 'HEAD'
+  "$FPL_PY" "${BASH_SOURCE[0]%/*}/session-baseline.py" "$(fpl_base_file "$1")"
 }
 
 # fpl_set_base <session_id> [ref] — record a baseline. Written at
@@ -400,6 +371,10 @@ fpl_set_base() {
   git rev-parse --verify -q HEAD >/dev/null 2>&1 || return 0
   mkdir -p "$sd" 2>/dev/null || return 0
   git rev-parse "${2:-HEAD}" 2>/dev/null >"$f"
+  git rev-parse HEAD 2>/dev/null >"$f.head"
+  # Keep this anchor until the next PASS. An imported checkout can move the
+  # diff baseline, but must not erase which commits this session authored.
+  git reflog show --format=%H HEAD 2>/dev/null | wc -l | tr -d ' ' >"$f.reflog-count"
 }
 
 # fpl_code_dirty — succeeds when the tree carries code the DoD gate should
@@ -415,7 +390,7 @@ fpl_code_dirty() {
       [ -n "$f" ] || continue
       _fpl_skip_path "$f" && continue
       return 0
-    done < <(git diff "$base" --name-only --diff-filter=ACMR 2>/dev/null)
+    done < <(git diff "$base" --name-only --diff-filter=ACMRD 2>/dev/null)
   fi
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -428,13 +403,19 @@ fpl_code_dirty() {
 # The files whose contents decide what "green" means. A verdict is only as
 # trustworthy as the contract that produced it, and every one of these can
 # turn a red run green without touching a line of the code under test.
-FPL_TRUST_BASE="scripts/harness.sh
+FPL_TRUST_BASE="${FPL_TRUST_BASE:-}
+scripts/harness.sh
+.claude/settings.json
+.claude/settings.local.json
+.fluxpoint-hygiene-allow
 .fluxpoint-hygiene-ignore
 .fluxpoint-proof-baseline.json
 .fluxpoint-pairs.json
 .fluxpoint-gates.json
 .fluxpoint-budget.json
 .fluxpoint-cex.jsonl
+.fluxpoint-metrics.json
+.fluxpoint-metrics-baseline.json
 package.json
 Makefile"
 
@@ -447,7 +428,7 @@ Makefile"
 # harness to exit 0, and then commits it, would otherwise show a clean tree.
 fpl_trust_base_modified() {
   local f base="${FPL_DIFF_BASE:-HEAD}" hit
-  printf '%s\n' "$FPL_TRUST_BASE" | while IFS= read -r f; do
+  { printf '%s\n' "$FPL_TRUST_BASE"; fpl_packet_trust_paths; } | sort -u | while IFS= read -r f; do
     [ -n "$f" ] || continue
     hit=""
     if git rev-parse --verify -q HEAD >/dev/null 2>&1; then
@@ -456,6 +437,53 @@ fpl_trust_base_modified() {
     [ -n "$hit" ] || hit="$(git ls-files --others --exclude-standard -- "$f" 2>/dev/null)"
     [ -n "$hit" ] && printf '%s\n' "$hit"
   done
+}
+
+# Locked packets can name repo-defined harness checks in addition to the
+# fixed trust base. Read every declared packet, including campaign packets.
+fpl_packet_trust_paths() {
+  "$FPL_PY" - "${BASH_SOURCE[0]%/*}" <<'FPLPY' 2>/dev/null
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import specification
+root = pathlib.Path.cwd()
+for packet in specification.declared_packets(root):
+    try:
+        lock = specification.packet_paths(root, packet)[1]
+        data = json.loads(lock.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("harness", {}), dict):
+            continue
+        for path in data.get("harness", {}):
+            try:
+                print(specification.in_repo(path, "locked harness input").as_posix())
+            except (ValueError, TypeError):
+                continue
+    except (OSError, ValueError, TypeError):
+        continue
+FPLPY
+}
+
+# Resolve a repo's gate contract after fpl_cd_project. Explicit process env
+# wins, then local settings, shared settings, and the documented default.
+fpl_harness_args() {
+  if [ "${FPL_HARNESS_ARGS+x}" = x ]; then
+    printf '%s' "$FPL_HARNESS_ARGS"
+    return
+  fi
+  "$FPL_PY" - <<'FPLPY'
+import json
+for path in (".claude/settings.local.json", ".claude/settings.json"):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh).get("env", {}).get("FPL_HARNESS_ARGS")
+        if isinstance(value, str):
+            print(value)
+            break
+    except (OSError, ValueError, AttributeError):
+        continue
+else:
+    print("--full")
+FPLPY
 }
 
 # fpl_harness_modified — kept as the narrow question ("is the harness itself
@@ -504,42 +532,23 @@ _fpl_hygiene_ignored() {
 }
 
 fpl_scan_hygiene() {
-  # The last group are proof holes: a checker exits 0 on an assumed lemma
-  # exactly as it does on a proved one. Only unambiguous markers live here
-  # — `assume` and `todo` are too common in prose for a scan that cannot
-  # strip comments; proof-guard.py ratchets those with comment stripping.
-  local pat='TODO|FIXME|\bXXX\b|for now|\.unwrap\(\)|\.(skip|only)\(|\bxit\(|#\[ignore\]'
-  pat="$pat"'|\bsorry\b|\bAdmitted\b|\{:axiom\}|\{:verify false\}|verifier::external_body|--skip-tests|--no-verify'
-  local catch='catch[[:space:]]*(\([^)]*\))?[[:space:]]*\{[[:space:]]*\}'
   local f added base="${FPL_DIFF_BASE:-HEAD}"
+  local filter="${BASH_SOURCE[0]%/*}/hygiene-filter.py"
   if git rev-parse --verify -q HEAD >/dev/null 2>&1; then
-    while IFS= read -r f; do
+    while IFS= read -r -d '' f; do
       [ -n "$f" ] || continue
       _fpl_skip_path "$f" && continue
-      added="$(git diff "$base" -U0 --no-color -- "$f" | grep -E '^\+[^+]' || true)"
+      case "$f" in .fluxpoint-hygiene-ignore|.fluxpoint-hygiene-allow) continue ;; esac
+      added="$(git diff "$base" -U0 --no-color -- "$f" | sed -n '/^+++ /d; s/^+//p')"
       [ -n "$added" ] || continue
-      printf '%s\n' "$added" | grep -EI "$pat" | sed "s|^+|$f: |" || true
-      printf '%s\n' "$added" | grep -EI "$catch" | sed "s|^+|$f: |" || true
-    done < <(git diff "$base" --name-only --diff-filter=ACMR 2>/dev/null)
+      printf '%s\n' "$added" | "$FPL_PY" "$filter" "$f"
+    done < <(git diff "$base" --name-only -z --diff-filter=ACMR 2>/dev/null)
   fi
-  # Untracked files are read WHOLE, while the tracked branch above takes only
-  # added lines — so a design-tool export or a vendored sample that predates
-  # the session blocks every stop in the repo, on code nobody here wrote. That
-  # contradicts the contract three lines up: history older than the session is
-  # CI's job. .gitignore and .git/info/exclude already scope this, but a file
-  # you intend to commit LATER has no correct lever among them: gitignoring it
-  # is wrong and committing it early to silence the gate is worse. Hence a
-  # hygiene-only list, which cannot disarm the gate.
-  while IFS= read -r f; do
+  while IFS= read -r -d '' f; do
     [ -n "$f" ] && [ -f "$f" ] || continue
     _fpl_skip_path "$f" && continue
-    # The list is untracked too, so the scan reads it — and the natural comment
-    # someone writes when adding an entry names the marker being excluded
-    # ("# scratch dir, full of TODOs"). Documenting the exclusion then blocks
-    # the gate on the exclusion file. It is never scanned as its own violation.
-    [ "$f" = ".fluxpoint-hygiene-ignore" ] && continue
+    case "$f" in .fluxpoint-hygiene-ignore|.fluxpoint-hygiene-allow) continue ;; esac
     _fpl_hygiene_ignored "$f" && continue
-    grep -nEIH "$pat" "$f" || true
-    grep -nEIH "$catch" "$f" || true
-  done < <(git ls-files --others --exclude-standard 2>/dev/null)
+    "$FPL_PY" "$filter" "$f" <"$f"
+  done < <(git ls-files -z --others --exclude-standard 2>/dev/null)
 }

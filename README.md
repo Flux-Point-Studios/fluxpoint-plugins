@@ -165,8 +165,9 @@ differences.
 |---|---|---|
 | `FPL_DISABLE=1` | off | Kill switch: every hook becomes a no-op. |
 | `FPL_MAX_BLOCKS` | 3 | Consecutive Stop blocks before the gate yields with a checkpoint. |
-| `FPL_GATE_TIMEOUT` | 540 | Seconds the Stop gate gives the harness. The hook ceiling is 600. |
+| `FPL_GATE_TIMEOUT` | 540 | Seconds the Stop gate gives the harness, capped at 570 within the 600-second hook ceiling. |
 | `FPL_HARNESS_ARGS` | `--full` | The harness invocation the Stop gate runs, for repos whose full suite cannot finish inside the ceiling. |
+| `FPL_GATE_EVIDENCE` | `local` | Store gate verdicts in ignored JSONL shown at SessionStart; `work` writes tracked work-file rows with a notice; `off` skips recording. |
 | `FPL_ALLOW_MISSING_GATES=1` | off | Accept a declared gate whose script is not installed. Without it the harness is red, because a check that did not run must not read as one that passed. |
 | `FPL_COMPACT_BLOCK=0` | on | Demote the compaction gate to a warning. |
 | `FPL_DISTILL=1` | off | The Stop gate also asks for a Decisions row when code changed and nothing was written down. |

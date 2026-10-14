@@ -36,19 +36,203 @@ PROOF_RANK = {"NOT-APPLICABLE": 0, "SOUND": 1, "UNPROVEN": 2, "WEAKENED": 3}
 SEVERITY_RANK = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
 
+def red_team_coverage_issue(coverage):
+    """Validate the durable scope of a SHIP independently of schema execution."""
+    if not isinstance(coverage, dict):
+        return "SHIP has no coverage object"
+    subject = coverage.get("subject")
+    if not isinstance(subject, list) or not subject:
+        return "SHIP coverage has no repository ranges"
+    for item in subject:
+        if not isinstance(item, dict) or any(
+                not isinstance(item.get(key), str) or not item[key].strip()
+                for key in ("repository", "base", "head")):
+            return "SHIP coverage has an invalid repository/base/head"
+        if any(not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", item[key], re.IGNORECASE)
+               for key in ("base", "head")):
+            return "SHIP coverage must pin base/head to full Git object ids"
+        if any(type(item.get(key)) is not int or item[key] < 0
+               for key in ("files", "additions", "deletions")):
+            return "SHIP coverage needs nonnegative integer file and line counts"
+    if len({item["repository"] for item in subject}) != len(subject):
+        return "SHIP coverage repeats a repository"
+    if type(coverage.get("attackers")) is not int or coverage["attackers"] < 1:
+        return "SHIP coverage needs a positive attacker count"
+    lenses = coverage.get("lenses")
+    if (not isinstance(lenses, list) or not lenses
+            or any(not isinstance(lens, str) or not lens.strip() for lens in lenses)):
+        return "SHIP coverage needs named lenses"
+    if len(set(lenses)) != len(lenses):
+        return "SHIP coverage repeats a lens"
+    if type(coverage.get("sampled")) is not bool:
+        return "SHIP coverage must declare whether the review sampled"
+    return None
+
+
+def red_team_coverage_records(summary):
+    """Keep each gate's coverage beside redTeam, including foreach outputs."""
+    records = []
+    contracts = summary.get("contracts") or {}
+    for node, value in (summary.get("results") or {}).items():
+        for index, result in enumerate(value if isinstance(value, list) else [value]):
+            if not isinstance(result, dict):
+                continue
+            if contracts.get(node) == "RedTeamV1" or (
+                    contracts.get(node) is None and result.get("verdict") in ("SHIP", "BLOCK")):
+                record = {"node": node, "verdict": result.get("verdict"),
+                          "coverage": result.get("coverage")}
+                if isinstance(value, list):
+                    record["index"] = index
+                records.append(record)
+    return records
+
+
+
+def red_team_unresolved(r):
+    if "review" not in r:
+        return False
+    review = r["review"]
+    return (not isinstance(review, dict) or any(k in review and
+            (not isinstance(review[k], list) or bool(review[k]))
+            for k in ("blockers", "unverified", "deadLenses")))
+
+
 def red_team_incoherent(r):
     """Why a RedTeamV1 result cannot be taken at its verdict, or None."""
+    if r.get("verdict") not in ("SHIP", "BLOCK") or not isinstance(r.get("findings"), list):
+        return "invalid red-team verdict or findings array"
+    if any(not isinstance(f, dict) or f.get("severity") not in ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+           or any(not isinstance(f.get(k), str) for k in ("finding", "exploit_path", "minimal_fix"))
+           for f in r["findings"]):
+        return "malformed finding or unknown severity cannot be omitted"
     worst = max((SEVERITY_RANK.get((f or {}).get("severity"), 0)
                  for f in (r.get("findings") or []) if isinstance(f, dict)), default=0)
     name = next(k for k, v in SEVERITY_RANK.items() if v == worst)
     if r.get("verdict") == "SHIP" and worst >= SEVERITY_RANK["HIGH"]:
         return f"SHIP over a {name} finding"
+    if "worstSeverityRank" in r and type(r["worstSeverityRank"]) is not int:
+        return "worstSeverityRank must be an integer"
     if ("worstSeverityRank" in r or "worstSeverity" in r) and (
             r.get("worstSeverityRank") != worst
             or SEVERITY_RANK.get(r.get("worstSeverity")) != worst):
         return (f"worstSeverity {r.get('worstSeverity')}/{r.get('worstSeverityRank')} "
                 f"disagrees with its findings, whose worst is {name}")
+    if r.get("verdict") == "SHIP":
+        issue = red_team_coverage_issue(r.get("coverage"))
+        if issue:
+            return issue
+        if red_team_unresolved(r):
+            return "SHIP has unresolved coverage or exploit blockers"
     return None
+
+
+
+def red_team_review_receipts(summary):
+    """Recognize intermediate claims only after complete, source-bound refutation.
+
+    The compiler writes these receipts from actual panel returns, not from the
+    final gate agent. Legacy summaries without receipts retain every BLOCK.
+    """
+    meta = summary.get("redTeamReviews")
+    if meta is None:
+        return set(), []
+    if not isinstance(meta, dict) or any(not isinstance(meta.get(k), dict)
+                                         for k in ("terminals", "checks", "expected")):
+        return set(), ["invalid red-team stage/refutation receipts"]
+    results = summary.get("results") or {}
+    exempt, errors = set(), []
+    key = lambda f: tuple(f.get(k) for k in ("severity", "finding", "exploit_path", "minimal_fix"))
+    identity = lambda c: sorted(tuple(s[k] for k in ("repository", "base", "head", "files", "additions", "deletions")) for s in c["subject"])
+    for terminal, info in meta["terminals"].items():
+        final = results.get(terminal)
+        if not isinstance(final, dict) or final.get("verdict") != "SHIP":
+            continue
+        try:
+            if red_team_incoherent(final):
+                raise ValueError("terminal result is incoherent")
+            if not isinstance(info, dict):
+                raise ValueError("invalid terminal stage identity")
+            sources, stages = info.get("sources"), info.get("stages")
+            if (not isinstance(sources, list) or not sources or not all(isinstance(x, str) for x in sources)
+                    or len(set(sources)) != len(sources) or not isinstance(stages, list)
+                    or not all(isinstance(x, str) for x in stages) or not set(sources) <= set(stages)
+                    or terminal in stages):
+                raise ValueError("missing source/stage bindings")
+            claims, attacker_count = [], 0
+            for source in sources:
+                values, expected = results.get(source), meta["expected"].get(source)
+                if (not isinstance(values, list) or not isinstance(expected, dict)
+                        or type(expected.get("attackers")) is not int or expected["attackers"] < 1
+                        or len(values) != expected["attackers"]):
+                    raise ValueError("missing source attacker")
+                named = []
+                for r in values:
+                    if not isinstance(r, dict) or red_team_incoherent(r):
+                        raise ValueError("malformed source review")
+                    coverage = r.get("coverage")
+                    if red_team_coverage_issue(coverage) or identity(coverage) != identity(final["coverage"]):
+                        raise ValueError("source review lacks matching pinned coverage")
+                    if coverage["sampled"] and not final["coverage"]["sampled"]:
+                        raise ValueError("final review hides sampled source")
+                    if not set(coverage["lenses"]) <= set(final["coverage"]["lenses"]):
+                        raise ValueError("final review omits a source lens")
+                    if red_team_unresolved(r):
+                        raise ValueError("source has unresolved coverage")
+                    if r["verdict"] == "BLOCK" and not r["findings"]:
+                        raise ValueError("source blocked without a refutable claim")
+                    attacker_count += coverage["attackers"]
+                    named.extend(coverage["lenses"])
+                    claims.extend(r["findings"])
+                required = expected.get("lenses")
+                if not isinstance(required, list) or not set(required) <= set(named):
+                    raise ValueError("missing configured source lens")
+            if final["coverage"]["attackers"] != attacker_count:
+                raise ValueError("terminal attacker count differs from completed sources")
+            # Include intermediate collections as well as raw attackers: a new
+            # claim cannot disappear merely because the collector invented it.
+            for stage in stages:
+                if stage not in results:
+                    raise ValueError("missing intermediate review stage")
+                for row in _each(results[stage]):
+                    if "verdict" in row:
+                        if red_team_incoherent(row):
+                            raise ValueError("malformed intermediate review")
+                        if red_team_unresolved(row):
+                            raise ValueError("intermediate review has unresolved blockers")
+                        claims.extend(row["findings"])
+                    elif "severity" in row:
+                        claims.append(row)
+            checked = set()
+            for check in meta["checks"].values():
+                if not isinstance(check, dict) or not isinstance(check.get("ids"), list):
+                    raise ValueError("invalid independent-refuter binding")
+                if not set(check["ids"]) & set(sources):
+                    continue
+                if set(check["ids"]) != set(sources):
+                    raise ValueError("refuter receipt names different sources")
+                if check.get("unresolved") is not False:
+                    raise ValueError("intermediate review has unresolved blockers")
+                requested, rows = check.get("requested"), check.get("rows")
+                if type(requested) is not int or requested < 1 or not isinstance(rows, list):
+                    raise ValueError("invalid requested refuter count")
+                for row in rows:
+                    votes = row.get("votes") if isinstance(row, dict) else None
+                    if (not isinstance(votes, list) or len(votes) != requested
+                            or row.get("unverified") is not False
+                            or type(row.get("cast")) is not int or row["cast"] != requested
+                            or type(row.get("kills")) is not int or row["kills"] != requested
+                            or any(not isinstance(v, dict) or v.get("refuted") is not True
+                                   or not isinstance(v.get("reason"), str) or not v["reason"].strip() for v in votes)):
+                        raise ValueError("missing, divided or unresolved independent refuters")
+                    if row.get("severity") in ("MEDIUM", "HIGH", "CRITICAL") and requested < 3:
+                        raise ValueError("MEDIUM+ claim needs three independent refuters")
+                    checked.add(key(row))
+            if any(key(claim) not in checked for claim in claims):
+                raise ValueError("source/intermediate claim has no unanimous refutation receipt")
+            exempt.update(stages)
+        except (ValueError, TypeError, KeyError) as e:
+            errors.append(f"{terminal}: red-team refutation receipts refused: {e}")
+    return exempt, errors
 
 
 def cell(s, n=160):
@@ -144,9 +328,10 @@ def derive(summary):
     """
     results = summary.get("results") or {}
     contracts = summary.get("contracts") or {}
-    harness, verdict, blocked = None, None, False
+    exempt, receipt_errors = red_team_review_receipts(summary)
+    harness, verdict, blocked = None, ("BLOCK" if receipt_errors else None), bool(receipt_errors)
     proof, proof_surface = None, None
-    incoherent = []
+    incoherent = list(receipt_errors)
     for node, value in results.items():
         c = contracts.get(node)
         for r in _each(value):
@@ -156,7 +341,7 @@ def derive(summary):
                     # Worst exit across every harness node: one red run is
                     # the campaign's answer, whatever a later one says.
                     harness = e if harness in (None, 0) else harness
-            if c == "RedTeamV1" or (c is None and r.get("verdict") in ("SHIP", "BLOCK")):
+            if node not in exempt and (c == "RedTeamV1" or (c is None and r.get("verdict") in ("SHIP", "BLOCK"))):
                 v = r.get("verdict")
                 why = red_team_incoherent(r)
                 if why:
@@ -220,6 +405,7 @@ def main():
         print(f"record-run: ledger append failed: {e}", file=sys.stderr)
 
     import specification as _spec
+    harness_identity = None
     try:
         # The graph file's SPEC: header names the packet this campaign is
         # held to; a repository can carry one per campaign.
@@ -236,6 +422,7 @@ def main():
             _, identity = _spec.load(args.root, spec=spec_path or ran)
             if summary.get("specification") != identity:
                 raise ValueError("run specification differs from the locked packet")
+            harness_identity = _spec.harness_record(args.root, spec=spec_path or ran)
         except (OSError, ValueError, TypeError) as e:
             print(f"record-run: spec verification failed: {e}", file=sys.stderr)
             if ledger_written:
@@ -262,11 +449,17 @@ def main():
     # Derived beats declared: the flags are a fallback for a run whose
     # summary carries no such node, never an override of one that does.
     d_harness, d_verdict, blocked, d_proof, proof_surface, incoherent = derive(summary)
+    red_team_coverage = red_team_coverage_records(summary)
     for why in incoherent:
         print(f"record-run: red-team result refused at its verdict — {why}",
               file=sys.stderr)
     harness = str(d_harness) if d_harness is not None else args.harness
     red_team = d_verdict if d_verdict is not None else args.red_team
+    if d_verdict is None and red_team == "SHIP":
+        incoherent.append("SHIP flag has no recorded red-team verdict and coverage")
+        blocked, red_team = True, "BLOCK"
+        print("record-run: a SHIP flag without a coverage-bearing result cannot "
+              "establish a shippable review", file=sys.stderr)
     proof_audit = d_proof if d_proof is not None else args.proof_audit
     if blocked and outcome in ("COMPLETE", "INCOMPLETE", "UNKNOWN"):
         # A campaign does not get to report COMPLETE over a blocking
@@ -458,7 +651,9 @@ def main():
                 "nodesSkipped": skipped,
                 "findings": findings,
                 "harnessExit": harness,
+                "harness": harness_identity,
                 "redTeam": red_team,
+                "redTeamCoverage": red_team_coverage,
                 "proofAudit": proof_audit,
                 "attestation": attestation,
                 "summary": summary,
@@ -510,7 +705,7 @@ def main():
     # 2. Evidence row, appended under whichever table header the file carries.
     claim = f"graph run: {ok} node(s) OK, {dead} dead, {findings} produced item(s)"
     if incoherent:
-        claim += ("; red-team findings contradict its verdict (" + "; ".join(incoherent[:2])
+        claim += ("; red-team findings or coverage contradict its verdict (" + "; ".join(incoherent[:2])
                   + ") — filed as BLOCK")
     elif blocked:
         claim += "; red-team returned BLOCK — not shippable"
@@ -527,6 +722,19 @@ def main():
                   f"({', '.join(blocked_nodes[:3])})")
     if skipped:
         claim += f"; {skipped} SKIPPED on budget — coverage incomplete"
+    for rec in red_team_coverage:
+        cov = rec.get("coverage")
+        if not isinstance(cov, dict):
+            claim += f"; red-team {cell(rec['node'], 60)} coverage missing"
+            continue
+        ranges = cov.get("subject") or []
+        if isinstance(ranges, list) and all(isinstance(item, dict) for item in ranges):
+            files = sum(item.get("files", 0) for item in ranges if type(item.get("files")) is int)
+            claim += (f"; red-team {cell(rec['node'], 60)}: {len(ranges)} repo range(s), "
+                      f"{files} files, {cell(cov.get('attackers'), 20)} attacker(s), "
+                      f"{len(cov['lenses']) if isinstance(cov.get('lenses'), list) else 0} lens(es), "
+                      + ("SAMPLED" if cov.get("sampled") is True else
+                         "sampling unknown" if type(cov.get("sampled")) is not bool else "full declared scope"))
     seeded = summary.get("memorySeeded") or {}
     if seeded or lessons:
         total_seeded = sum(v for v in seeded.values() if isinstance(v, int))
@@ -571,6 +779,10 @@ def main():
         proof_cell = proof_audit
     proof = (f"harness exit {harness}; red-team {red_team}; proof-audit {proof_cell}; "
              f"executor {args.executor}")
+    if harness_identity:
+        proof += f"; harness sha256 {harness_identity['sha256']}"
+        if harness_identity['changedPaths']:
+            proof += "; harness differs from lock: " + ", ".join(cell(p, 500) for p in harness_identity['changedPaths'])
     if attestation:
         att = attestation["tally"]
         proof += ("; attestation " + ", ".join(
@@ -578,52 +790,58 @@ def main():
     row = f"| {ts} | {args.run_id} | {outcome} | {claim} | {proof} |"
     legacy_row = (
         f"| {ts} | {args.run_id} | {outcome} | {ok}/{dead} | {findings} "
-        f"| {harness} | {red_team} |"
+        f"| {harness}"
+        + (f"; sha256 {harness_identity['sha256']}; changed: "
+           + (", ".join(cell(p, 500) for p in harness_identity['changedPaths']) or "none")
+           if harness_identity else "")
+        + f" | {red_team} |"
     )
 
-    # 2a. Decisions, spliced under their own header when the file has one.
-    drows = decision_rows(summary, ts)
-    if drows and os.path.exists(evidence_file):
-        text = open(evidence_file, encoding="utf-8").read()
-        if DEC_HDR in text:
-            text, n = re.subn(
-                re.escape(DEC_HDR) + r"\n\|[-| ]+\|\n",
-                lambda m: m.group(0) + "\n".join(drows) + "\n", text, count=1)
-            if n:
-                open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
-                for d in drows:
-                    print(d)
-        else:
-            print(f"record-run: {len(drows)} decision(s) recorded in the run "
-                  f"artifact, but {evidence_file} has no Decisions table to append "
-                  f"to — add one so a frozen choice outlives this run",
-                  file=sys.stderr)
+    from workfile_lock import workfile_lock
+    with workfile_lock(evidence_file):
+        # 2a. Decisions, spliced under their own header when the file has one.
+        drows = decision_rows(summary, ts)
+        if drows and os.path.exists(evidence_file):
+            text = open(evidence_file, encoding="utf-8").read()
+            if DEC_HDR in text:
+                text, n = re.subn(
+                    re.escape(DEC_HDR) + r"\n\|[-| ]+\|\n",
+                    lambda m: m.group(0) + "\n".join(drows) + "\n", text, count=1)
+                if n:
+                    open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
+                    for d in drows:
+                        print(d)
+            else:
+                print(f"record-run: {len(drows)} decision(s) recorded in the run "
+                      f"artifact, but {evidence_file} has no Decisions table to append "
+                      f"to — add one so a frozen choice outlives this run",
+                      file=sys.stderr)
 
-    if os.path.exists(evidence_file):
-        text = open(evidence_file, encoding="utf-8").read()
-        hdr, new_row = (ROW_HDR, row) if ROW_HDR in text else (LEGACY_HDR, legacy_row)
-        if hdr in text:
-            text, n = re.subn(
-                re.escape(hdr) + r"\n\|[-| ]+\|\n",
-                lambda m: m.group(0) + new_row + "\n",
-                text,
-                count=1,
-            )
-            if n:
-                open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
-                row = new_row
+        if os.path.exists(evidence_file):
+            text = open(evidence_file, encoding="utf-8").read()
+            hdr, new_row = (ROW_HDR, row) if ROW_HDR in text else (LEGACY_HDR, legacy_row)
+            if hdr in text:
+                text, n = re.subn(
+                    re.escape(hdr) + r"\n\|[-| ]+\|\n",
+                    lambda m: m.group(0) + new_row + "\n",
+                    text,
+                    count=1,
+                )
+                if n:
+                    open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
+                    row = new_row
+                else:
+                    print(
+                        f"record-run: Evidence header found in {evidence_file} but no "
+                        f"separator row beneath it; artifact written, row not appended",
+                        file=sys.stderr,
+                    )
             else:
                 print(
-                    f"record-run: Evidence header found in {evidence_file} but no "
-                    f"separator row beneath it; artifact written, row not appended",
+                    f"record-run: no Evidence table header in {evidence_file}; "
+                    f"artifact written but row not appended",
                     file=sys.stderr,
                 )
-        else:
-            print(
-                f"record-run: no Evidence table header in {evidence_file}; "
-                f"artifact written but row not appended",
-                file=sys.stderr,
-            )
     print(f"record-run: {art}")
     print(row)
     return 0

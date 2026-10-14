@@ -81,7 +81,7 @@ check "and cannot execute anything (the Store alias exit)" 49 $?
 # --- and refuses honestly when nothing works ---
 
 rm -f "$BIN/python"
-PATH="$BIN" bash -c 'unset FPL_PY; . "'"$PLUGIN"'/scripts/lib.sh"' >/dev/null 2>&1
+PATH="$BIN" "$BASH" -c 'unset FPL_PY; . "'"$PLUGIN"'/scripts/lib.sh"' >/dev/null 2>&1
 check "no working interpreter exits 127, not 49" 127 $?
 
 # --- structural: no copy of the resolver has gone back to the name test ---
@@ -95,9 +95,9 @@ check "no working interpreter exits 127, not 49" 127 $?
 stale=$(cd "$REPO" && git grep -l 'then FPL_PY=pytho[n]3' -- '*.sh' | wc -l | tr -d ' ')
 check "no copy resolves the interpreter by name alone" 0 "$stale"
 
-probes=$(cd "$REPO" && git grep -l '"\$_fpl_cand" -c "import sy[s]"' -- '*.sh' | wc -l | tr -d ' ')
-[ "$probes" -ge 21 ] && ok "every resolver copy probes" "$probes copies" \
-  || bad "every resolver copy probes" "$probes copies (wanted >= 21)"
+# Runtime launchers now share a cached resolver. Counting textual copies
+# penalizes consolidation; gate-regression-test.py checks cold, warm, alias
+# fallback, WindowsApps rejection and PATH invalidation with real launches.
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

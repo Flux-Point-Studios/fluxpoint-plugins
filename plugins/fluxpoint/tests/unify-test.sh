@@ -67,9 +67,9 @@ newrepo
 legacy_work() { sed '/^SPEC: /d' "$PLUGIN/templates/WORK.md" > WORK.md; }
 legacy_work
 printf '%s' "$RESULT" | "$FPL_PY" "$PLUGIN/scripts/record-run.py" --run-id wf_u1 --harness 0 --red-team SHIP >/dev/null
-contains "unified table: row appended" "| wf_u1 | COMPLETE |" WORK.md
+contains "unified table: row appended" "| wf_u1 | BLOCKED-REDTEAM |" WORK.md
 contains "unified table: claim column" "1 node(s) OK, 1 dead, 2 produced item(s)" WORK.md
-contains "unified table: proof column" "harness exit 0; red-team SHIP" WORK.md
+contains "unified table: proof column" "harness exit 0; red-team BLOCK" WORK.md
 check "provenance artifact written" "0" "$([ -f .claude/fluxpoint/runs/wf_u1.json ] && echo 0 || echo 1)"
 
 # --- 2b. budget-skipped nodes are reported, never filed as success ---
@@ -90,7 +90,7 @@ check "skipped node: counted in artifact" "1" \
 newrepo
 legacy_work
 BLOCKED='{"campaign":"c","outcome":"COMPLETE","contracts":{"gate":"HarnessCheckV1","rt":"RedTeamV1"},
- "results":{"gate":{"exit":0},"rt":{"verdict":"BLOCK","findings":[{"severity":"HIGH"}]}},
+ "results":{"gate":{"exit":0},"rt":{"verdict":"BLOCK","findings":[{"severity":"HIGH","finding":"boundary bypass","exploit_path":"control and attack reached the boundary","minimal_fix":"enforce the boundary check"}]}},
  "provenance":[{"node":"gate","status":"OK"},{"node":"rt","status":"OK"}]}'
 printf '%s' "$BLOCKED" | "$FPL_PY" "$PLUGIN/scripts/record-run.py" --run-id wf_b1 >/dev/null
 contains "BLOCK verdict degrades the outcome" "| wf_b1 | BLOCKED-REDTEAM |" WORK.md
@@ -122,13 +122,13 @@ OLD='{"campaign":"c","outcome":"COMPLETE","results":{"rt":{"verdict":"BLOCK","fi
 printf '%s' "$OLD" | "$FPL_PY" "$PLUGIN/scripts/record-run.py" --run-id wf_b4 >/dev/null
 contains "no contracts map: falls back to result shape" "| wf_b4 | BLOCKED-REDTEAM |" WORK.md
 
-# A campaign with neither node keeps the flags as the fallback they are.
+# A SHIP flag without a coverage-bearing review cannot certify a campaign.
 newrepo
 legacy_work
 printf '%s' "$RESULT" | "$FPL_PY" "$PLUGIN/scripts/record-run.py" --run-id wf_b5 \
   --harness 0 --red-team SHIP >/dev/null
-contains "no gate node: the flag is still used" "harness exit 0; red-team SHIP" WORK.md
-contains "no gate node: outcome untouched" "| wf_b5 | COMPLETE |" WORK.md
+contains "no gate node: SHIP flag is refused" "harness exit 0; red-team BLOCK" WORK.md
+contains "no gate node: incomplete review blocks" "| wf_b5 | BLOCKED-REDTEAM |" WORK.md
 
 # --- 3. legacy 7-column GRAPH.md table still works (mid-migration repo) ---
 newrepo
@@ -155,7 +155,7 @@ mkdir -p .claude/fluxpoint; printf 'PASS 2026-01-01T00:00:00Z\n' >.claude/fluxpo
 out="$(printf '{"session_id":"s","cwd":"%s"}' "$ROOT/r" | bash "$PLUGIN/scripts/inject-state.sh")"
 printf '%s' "$out" >"$ROOT/inject.txt"
 contains "inject: harness verdict" "Last recorded harness verdict: PASS" "$ROOT/inject.txt"
-contains "inject: last graph run" "Last graph run: wf_s1 COMPLETE" "$ROOT/inject.txt"
+contains "inject: last graph run" "Last graph run: wf_s1 BLOCKED-REDTEAM" "$ROOT/inject.txt"
 contains "inject: names the state file" "WORK.md (sections that matter" "$ROOT/inject.txt"
 # The point of section-aware extraction: in the shipped 90-line template the
 # Evidence header sits at 85 and Notes at 88, so a fixed 80-line window hid

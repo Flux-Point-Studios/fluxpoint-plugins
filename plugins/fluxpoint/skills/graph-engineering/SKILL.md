@@ -482,6 +482,33 @@ to park on a person for want of a gate that fits one call.
   reviews whose coverage the dry rule decides rather than a fixed pass
   count. The prompt asks for findings; the budget floors and the dry rule
   enforce thoroughness, so the prompt never has to exhort it.
+- **Repair loop** (`templates/WORK.repair.md`): after a BLOCK, put
+  `repeat: {"until": "verdict == 'SHIP'", "maxRounds": 3,
+  "integrate": ["merge", "review"]}` on an independent checker that
+  `verifies` and consumes a `mutates` fixer. Both use the same static
+  `foreach` list with unique lowercase keys. The checker must use
+  `isolation: 'measure'`: it applies the current patch onto a fresh
+  `git archive HEAD` snapshot and independently attacks it. Passed slices
+  leave the loop; failed checks reach the next fixer as `{{lastCheck}}`.
+  The cap files remaining slices INCOMPLETE. FixCheckV1 names each failed
+  mechanism in `defectClass`; `classBy: ["defectClass"]` and
+  `reframeAfter: 2` force the next round to state the authoritative invariant
+  and adopt/refute a class rewire with a measurement, or remove the mechanism.
+  The fixer returns structured reframe evidence and the independent checker
+  reruns its measurement; a third narrow patch is REFRAME-REQUIRED before
+  integration. This is a feedback loop over
+  independent findings, rather than a retry on the fixer's own exit.
+  `{{roundDir}}` gives each item and round an absolute, versioned output
+  directory below `.claude/fluxpoint/rounds/<launch nonce>/`; use it for
+  scratch and complete patches and never overwrite older outputs. The
+  optional integration pair runs once per round over all passing patches.
+  Its merge lists top-level definitions across patches and its independent
+  measure review checks the merged tree, including composition; a failed
+  merged review reopens passing slices with that feedback. The compiler
+  prices both workers and integration at every allowed round and emits
+  tree checks and the normal runtime ceiling. Only one repair loop belongs
+  in a graph, so every round directory has one owner. `graph-run` stamps
+  `_launch` even without a prove tier and records the run normally.
 - **Pipeline of loops**: each mutating node works one loop slice
   — TDD, `--changed` green per edit, `--full` before returning. The graph
   sequences slices; it never replaces the gate.
@@ -584,12 +611,22 @@ A fixed fan-out finds what one pass happens to find. When the size of the
 work is unknown, add `repeat` to the finder:
 
 ```json
-"repeat": { "untilDryRounds": 2, "maxRounds": 4, "dedupeBy": ["file", "line", "claim"] }
+"repeat": { "untilDryRounds": 2, "maxRounds": 6, "dedupeBy": ["file", "line", "claim"],
+            "classBy": ["defectClass"], "reframeAfter": 2 }
 ```
 
 Rounds re-run until `untilDryRounds` consecutive rounds surface nothing
 new, bounded by `maxRounds`. Use `{{seen}}` in the prompt so each round is
 told what earlier rounds found and spends itself on new ground.
+
+`classBy` names fields of the `verifyOver` items and must agree with
+`memory.classBy` when both are declared. A class producing a new surviving
+variant in `reframeAfter` consecutive rounds (default 2) stops the sweep with
+`RECURRING-CLASS` provenance and `{class, rounds, keys}` records. Under
+`onRed: halt` that is the campaign outcome; otherwise the sweep stops and
+the campaign remains INCOMPLETE. Refuted and unresolved claims never count
+as survivors. Reframe the authoritative invariant instead of starting a
+third narrow patch. The shipped discovery template enables this rule.
 
 **`maxRounds` is a backstop, not a thoroughness dial.** The dry rule is
 what should end a healthy sweep; the ceiling exists for the loop that
@@ -615,7 +652,7 @@ fresh panel to reach verdicts that already exist — which is where the
 `memory` closes that loop:
 
 ```json
-"memory": { "seed": "defect-sweep", "emit": "defect-sweep" }
+"memory": { "seed": "defect-sweep", "emit": "defect-sweep", "classBy": ["defectClass"] }
 ```
 
 `emit` files every judged item as a `LessonV1` row in
@@ -749,3 +786,13 @@ Same IR, same compiled script: run its nodes as parallel subagent calls
 with the same contracts, sequencing stages yourself, then record with
 `--executor degraded-subagents`. Do not silently downgrade — the Evidence
 row says which executor ran the graph.
+
+Halt diagnostics use the same validated token renderer as prompts.
+`haltReason` supports `{{A.field}}`, `{{campaign}}`, honored decisions and
+`{{prev}}` / `{{prev.field}}`; at halt time `prev` is the result that tripped
+the condition (the first tripping result for a fan-out). Item/round tokens
+are rejected there because the halt runs after the worker scope ends.
+`--check` compiles in memory and reports UTF-8 script bytes and headroom
+against the Workflow launch limit (524,288 bytes, configurable with
+`--max-script-bytes`); below 16 KiB headroom warns. Repeat the check with
+`--check-script <compiled-file>` immediately before launch.

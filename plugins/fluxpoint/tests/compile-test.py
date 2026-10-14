@@ -600,7 +600,7 @@ for needle, why in [
     ("VERIFY_FLOOR", "budget floor present"),
     ("Attempt to REFUTE", "refuters attack, never confirm"),
     ("Default to refuted=true when uncertain", "uncertainty kills, never carries"),
-    ("kills < need", "survival is decided by the majority threshold"),
+    ("v.kills < (codeReview ? n : need)", "discovery uses majority; code refutation requires unanimity"),
     ('"Find", 3, 2)', "panel:3 passes need=2, a true majority"),
     ("PROVENANCE", "provenance recorded"),
     ("const MAX_NODES", "the ceiling exists at run time, not only at compile time"),
@@ -690,7 +690,7 @@ for name, ok in [
      and "treeCheck(\"before gate\"" in tree_js
      and "treeCheck('campaign-end'" in tree_js),
     ("tree drift is a halt, not a log line",
-     "return summary('TREE-MOVED')" in tree_js),
+     "TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED'" in tree_js),
     ("the sentinel record rides out in the summary",
      "tree: TREE" in tree_js),
     ("the sentinel is schema-forced",
@@ -1247,6 +1247,191 @@ def prove_ci_and_launch_case():
 
 
 prove_ci_and_launch_case()
+
+
+# Halt reasons are executable interpolation sites, validated before launch (#107).
+def halt_tokens_case():
+    import subprocess
+    import tempfile
+    global passed, failed
+    ir = {"version": 1, "campaign": "halt tokens", "treeGuard": False, "budget": {"maxNodes": 8},
+          "nodes": [{"id": "check", "prompt": "check {{A.target}}", "contract": "HarnessCheckV1",
+                     "haltWhen": "exit != 0", "haltReason": "red {{A.target}}: {{prev.exit}}"}]}
+    checks = [("halt reason current-result projection is accepted", not cg.validate(ir, CONTRACTS))]
+    js = cg.emit(ir, CONTRACTS)
+    checks.append(("halt reason renders args and current result", "{{" not in js[js.index("HALT at check"):]
+                   and 'tokenText((n_check || {})["exit"] ?? null)' in js))
+    for token in ["process.env.SECRET", "prev.nope", "prev.exit.deep", "item.key", "A.target + secret", "A..target", "A[target]", "campaign.nope"]:
+        bad = copy.deepcopy(ir); bad["nodes"][0]["haltReason"] = "bad {{" + token + "}}"
+        checks.append(("halt reason rejects " + token, any("haltReason" in f for f in cg.validate(bad, CONTRACTS))))
+    with tempfile.TemporaryDirectory() as tmp:
+        graph = os.path.join(tmp, "WORK.md")
+        # Non-ASCII output is measured as UTF-8 bytes, not Python characters.
+        ir["nodes"][0]["prompt"] = "é" * 1000
+        open(graph, "w", encoding="utf-8").write("```json graph-ir\n" + json.dumps(ir) + "\n```\n")
+        script = os.path.join(tmp, "launch.js")
+        cli = [sys.executable, cg.__file__, graph, "--gates-root", tmp]
+        built = subprocess.run(cli + ["-o", script], capture_output=True, text=True)
+        size = os.path.getsize(script)
+        exact = subprocess.run(cli + ["--check", "--max-script-bytes", str(size)], capture_output=True, text=True)
+        over = subprocess.run(cli + ["--check", "--max-script-bytes", str(size-1)], capture_output=True, text=True)
+        open(script, "ab").write(b"x")
+        changed = subprocess.run(cli + ["--check", "--max-script-bytes", str(size), "--check-script", script], capture_output=True, text=True)
+        checks.extend([
+            ("--check measures exact UTF-8 output and permits limit", built.returncode == exact.returncode == 0 and f"script {size:,} bytes" in exact.stdout and "headroom 0" in exact.stdout),
+            ("--check rejects one byte over launcher limit", over.returncode == 1 and "script rejected" in over.stderr),
+            ("launch preflight rechecks the actual output file", changed.returncode == 1 and "launch script rejected" in changed.stderr),
+        ])
+    for name, ok in checks:
+        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        passed, failed = passed + ok, failed + (not ok)
+
+halt_tokens_case()
+
+for scope, want_warning in [("docs/binding.json", True), ("The generation-1 settlement must remain supported.", False)]:
+    diagnostics = cg.warnings(BASE, specification={"packet": {"checks": [{"id": "scope-test", "scope": scope}]}})
+    ok = any("bare path" in w and "scope-test" in w for w in diagnostics) == want_warning
+    print(f"{'PASS' if ok else 'FAIL'}  compiler surfaces opaque scope path: {scope}")
+    passed, failed = passed + ok, failed + (not ok)
+
+
+# Execute a repair graph: dropout, feedback, immutable paths and integration (#126).
+def repair_loop_case():
+    import subprocess
+    import tempfile
+    global passed, failed
+    ir = {"version": 1, "campaign": "repair", "treeGuard": False,
+          "budget": {"maxNodes": 40, "cacheTtl": "1h"},
+          "lists": {"slices": [{"key": "a"}, {"key": "b"}]},
+          "nodes": [
+              {"id": "fix", "foreach": "slices", "mutates": True, "prompt": "fix {{item.key}} in {{roundDir}} after {{lastCheck}}", "contract": "SliceV1"},
+              {"id": "check", "foreach": "slices", "after": "fix", "independent": True, "verifies": "fix", "isolation": "measure", "prompt": "check {{prev}} from {{roundDir}}", "contract": "HarnessCheckV1", "repeat": {"until": "exit == 0", "maxRounds": 3, "integrate": ["merge", "review"]}},
+              {"id": "merge", "after": "check", "mutates": True, "prompt": "merge {{prev}} in {{roundDir}}; previous {{lastCheck}}", "contract": "SliceV1"},
+              {"id": "review", "after": "merge", "independent": True, "verifies": "merge", "isolation": "measure", "prompt": "review {{prev}} from {{roundDir}}", "contract": "HarnessCheckV1", "haltWhen": "exit != 0"},
+          ]}
+    checks = [("repair graph accepted", not cg.validate(ir, CONTRACTS)),
+              ("repair budget includes both workers and integration every round", cg.plan_node_count(ir) == 18)]
+    for name, change, needle in [
+        ("invalid round cap", lambda x: x["nodes"][1]["repeat"].update(maxRounds="forever"), "integer >= 1"),
+        ("invalid integration", lambda x: x["nodes"][1]["repeat"].update(integrate=[{}, []]), "must name"),
+        ("checker isolation", lambda x: x["nodes"][1].pop("isolation"), "fresh frozen tree"),
+        ("checker independence", lambda x: x["nodes"][1].pop("independent"), "independent checker"),
+        ("until field", lambda x: x["nodes"][1]["repeat"].update(until="missing == 0"), "not a field"),
+        ("unique output paths", lambda x: x["lists"]["slices"].append({"key": "a"}), "unique lowercase"),
+        ("unsafe path key", lambda x: x["lists"]["slices"][0].update(key="../../escape"), "unique lowercase"),
+        ("integration independent", lambda x: x["nodes"][3].pop("independent"), "integration review"),
+        ("discovery/repair ambiguity", lambda x: x["nodes"][1]["repeat"].update(untilDryRounds=1), "do not combine"),
+    ]:
+        bad = copy.deepcopy(ir); change(bad)
+        checks.append(("repair rejects " + name, any(needle in f for f in cg.validate(bad, CONTRACTS))))
+
+    def run(mode="normal", rounds=3):
+        run_ir = copy.deepcopy(ir); run_ir["nodes"][1]["repeat"]["maxRounds"] = rounds
+        js = cg.emit(run_ir, CONTRACTS).replace("export const meta", "const meta")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "result.json"); script = os.path.join(tmp, "run.mjs")
+            prefix = '''import {writeFileSync} from 'node:fs';
+const calls=[]; const mode=MODE;
+const args={_base:{sha:'base'},_launch:{root:'/campaign',nonce:'launch1'}};
+const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
+const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
+const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
+ if (label.startsWith('check:')) return {exit: mode==='cap' || (label.includes(':b:') && label.endsWith('r1')) ? 1 : 0, command:'check', tail:'finding'};
+ if (label.startsWith('review:')) return {exit: mode==='conflict' && label.endsWith('r1') ? 1 : 0, command:'review',tail:'composition failure'};
+ return {branch:'branch',diffSummary:'patch',testsAdded:[],harnessCommand:'test',harnessExit:0,evidence:['test']};};
+'''.replace("MODE", json.dumps(mode))
+            open(script, "w").write(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
+            proc = subprocess.run(["node", script], capture_output=True, text=True, timeout=20)
+            return json.load(open(out)) if os.path.exists(out) else {"error": proc.stderr}
+
+    normal = run(); cap = run("cap", 2); conflict = run("conflict")
+    calls = normal.get("calls", [])
+    checks.extend([
+        ("repair executes until every slice passes", normal.get("r", {}).get("outcome") == "COMPLETE"),
+        ("passing slice drops out of later rounds", [x["label"] for x in calls if x["label"].startswith("fix:")] == ["fix:a:r1", "fix:b:r1", "fix:b:r2"]),
+        ("failed check reaches next fix", any(x["label"] == "fix:b:r2" and '"exit":1' in x["p"] for x in calls)),
+        ("round output paths are versioned", any('/launch1/b/r2/' in x["p"] for x in calls if x["label"] == "fix:b:r2")),
+        ("fresh-tree checker receives patch artifact directory", any("git archive" in x["p"] and "/launch1/b/r2/" in x["p"] for x in calls if x["label"] == "check:b:r2")),
+        ("integration runs each round over cumulative passing items", [x["label"] for x in calls if x["label"].startswith("merge:")] == ["merge:r1", "merge:r2"]),
+        ("cap is INCOMPLETE with pending item identities", cap.get("r", {}).get("outcome") == "INCOMPLETE" and any(x.get("data", {}).get("pending") == ["a", "b"] for x in cap.get("r", {}).get("provenance", []))),
+        ("failed integration reopens passed items", any(x["label"] == "fix:a:r2" and "composition failure" in x["p"] for x in conflict.get("calls", []))),
+    ])
+    for name, ok in checks:
+        print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f" -> {normal}" if not ok else ""))
+        passed, failed = passed + ok, failed + (not ok)
+
+repair_loop_case()
+
+
+# A recurring repair mechanism needs an independently measured reframe (#125).
+def repair_reframe_case():
+    import subprocess
+    import tempfile
+    global passed, failed
+    ir = {"version": 1, "campaign": "reframe", "treeGuard": False,
+          "budget": {"maxNodes": 30, "cacheTtl": "1h"},
+          "lists": {"slices": [{"key": "parser"}]},
+          "nodes": [
+              {"id": "fix", "foreach": "slices", "mutates": True, "prompt": "fix {{item.key}}: {{lastCheck}} in {{roundDir}}", "contract": "SliceV1"},
+              {"id": "check", "foreach": "slices", "after": "fix", "independent": True, "verifies": "fix", "isolation": "measure", "prompt": "check {{prev}}", "contract": "FixCheckV1", "verifyOver": "findings", "repeat": {"until": "verdict == 'PASS'", "maxRounds": 4, "classBy": ["defectClass"], "reframeAfter": 2}},
+          ]}
+    checks = [("FixCheck repair class configuration accepted", not cg.validate(ir, CONTRACTS))]
+    for key, value in [("classBy", ["missing"]), ("reframeAfter", 1), ("reframeAfter", True)]:
+        bad = copy.deepcopy(ir); bad["nodes"][1]["repeat"][key] = value
+        checks.append(("repair rejects invalid " + key + str(value), bool(cg.validate(bad, CONTRACTS))))
+    def run(mode):
+        run_ir = copy.deepcopy(ir)
+        if mode.startswith("sentinel"):
+            run_ir["treeGuard"] = True
+        if mode.startswith("integration"):
+            run_ir["nodes"][1]["repeat"]["integrate"] = ["merge", "review"]
+            run_ir["nodes"].extend([
+                {"id": "merge", "after": "check", "mutates": True, "prompt": "merge {{prev}}", "contract": "SliceV1"},
+                {"id": "review", "after": "merge", "independent": True, "verifies": "merge", "isolation": "measure", "prompt": "review {{prev}}", "contract": "FixCheckV1", "haltWhen": "verdict != 'PASS'"},
+            ])
+        js = cg.emit(run_ir, CONTRACTS).replace("export const meta", "const meta")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out.json"); script = os.path.join(tmp, "run.mjs")
+            prefix = r'''import {writeFileSync} from 'node:fs';
+const args={_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'nonce'}},calls=[],mode=MODE;
+const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
+const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
+const reframe={classes:['decode'],invariant:'ledger admits only bounded rows',classRewire:'enforce item decoding budget at ingress',disposition:'adopt',measurement:{command:'pytest test_decode_budget',result:'all outsider rows bounded'}};
+const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
+ if(label.startsWith('tree-check:'))return (mode==='sentinel-start'&&label.includes('campaign-start'))||(mode==='sentinel-after'&&label.includes('after repair'))?null:{head:'base',porcelain:''};
+ const round=Number(label.match(/:r(\d+)$/)?.[1]||1);
+ if(label.startsWith('fix:'))return {branch:'patch',diffSummary:'patch',testsAdded:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest exit0'],...(round>=3&&['measured','unchecked','integration-measured','integration-merge-narrow'].includes(mode)?{reframe}: {})};
+ if(label.startsWith('check:')){const pass=mode==='contradictory'||mode.startsWith('integration')||round>=3&&['measured','unchecked','different'].includes(mode);
+  const defectClass=mode==='different'&&round===2?'resource':'decode';
+  return {verdict:pass?'PASS':'FAIL',findings:pass&&mode!=='contradictory'?[]:[{defectClass,finding:'bad outsider row',severity:'HIGH',invariant:'bounded rows',classRewire:'bound parser',measurement:'pytest reproduced'},...(mode==='duplicates'?[{defectClass,finding:'same mechanism another path',severity:'HIGH',invariant:'bounded',classRewire:'bound',measurement:'pytest reproduced'}]:[])],blockers:[],evidence:['pytest observed'],...(['measured','integration-measured','integration-merge-narrow'].includes(mode)&&round>=3?{reframe:{...reframe,validated:true,measurement:{command:'pytest test_independent_budget',result:'independently checked bounds'}}}: {})};}
+ if(label.startsWith('merge:'))return {branch:'integrated',diffSummary:'patch',testsAdded:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest'],...(mode==='integration-measured'&&round>=3?{reframe}: {})};
+ if(label.startsWith('review:'))return {verdict:round>=3?'PASS':'FAIL',findings:round>=3?[]:[{defectClass:'decode',finding:'composition failure',severity:'HIGH',invariant:'bounded rows',classRewire:'enforce whole budget',measurement:'pytest compose'}],blockers:[],evidence:['pytest compose'],...(mode==='integration-measured'&&round>=3?{reframe:{...reframe,validated:true}}: {})};
+ return null;};
+'''.replace("MODE", json.dumps(mode))
+            open(script, "w").write(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
+            proc = subprocess.run(["node", script], capture_output=True, text=True, timeout=20)
+            return json.load(open(out)) if os.path.exists(out) else {"error": proc.stderr}
+    narrow = run("narrow"); measured = run("measured"); unchecked = run("unchecked"); different = run("different"); duplicates = run("duplicates")
+    checks += [
+        ("third narrow patch refused before checker/integration", narrow.get("r", {}).get("outcome") == "REFRAME-REQUIRED" and not any(c["label"] == "check:parser:r3" for c in narrow.get("calls", []))),
+        ("two same-class failures force next fixer to reframe", any(c["label"] == "fix:parser:r3" and c["p"].startswith("REFRAME REQUIRED") for c in narrow.get("calls", []))),
+        ("recurring class and rounds are recorded", any(x.get("class") == "decode" and x.get("rounds") == [1, 2] for x in narrow.get("r", {}).get("recurringClasses", []))),
+        ("independently measured reframe can complete", measured.get("r", {}).get("outcome") == "COMPLETE"),
+        ("fixer's own measurement cannot stand for checker", unchecked.get("r", {}).get("outcome") == "REFRAME-REQUIRED"),
+        ("different failure class resets consecutive-round count", different.get("r", {}).get("outcome") == "COMPLETE"),
+        ("same-class duplicate findings count as one failed round", not any(c["label"] == "fix:parser:r2" and c["p"].startswith("REFRAME REQUIRED") for c in duplicates.get("calls", []))),
+    ]
+    for mode, outcome in [("integration-narrow", "REFRAME-REQUIRED"), ("integration-merge-narrow", "REFRAME-REQUIRED"), ("integration-measured", "COMPLETE"), ("contradictory", "HALTED")]:
+        result = run(mode)
+        checks.append(("integration/class gate " + mode, result.get("r", {}).get("outcome") == outcome))
+    for mode in ["sentinel-start", "sentinel-after"]:
+        result = run(mode)
+        checks.append(("failed tree sentinel stops immediately " + mode, result.get("r", {}).get("outcome") == "TREE-UNKNOWN" and (mode != "sentinel-start" or len(result.get("calls", [])) == 1)))
+    for name, ok in checks:
+        print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f" -> {narrow}" if not ok else ""))
+        passed, failed = passed + ok, failed + (not ok)
+
+repair_reframe_case()
 
 
 print(f"\n{passed} passed, {failed} failed")

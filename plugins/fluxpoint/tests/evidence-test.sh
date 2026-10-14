@@ -13,6 +13,8 @@
 # propagates it, set -e ends the run — which is precisely the case the
 # function exists to support.
 set -uo pipefail
+# This suite exercises the explicit work-file compatibility contract.
+export FPL_GATE_EVIDENCE=work
 
 if [ -z "${FPL_PY:-}" ]; then
   # Probe each candidate by RUNNING it, rather than asking whether the name

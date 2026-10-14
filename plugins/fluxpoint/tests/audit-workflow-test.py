@@ -61,6 +61,7 @@ const CALLS = [], LOGS = [], PHASES = [];
 Date.now = () => { throw new Error('Date.now is unavailable in a workflow'); };
 Math.random = () => { throw new Error('Math.random is unavailable in a workflow'); };
 const F = (severity, title) => ({severity, title,
+  defectClass: 'fixture-class', classRewire: 'derive the invariant from its system of record',
   failurePath: 'a concrete failure path for: ' + title,
   evidence: 'read WORK.md line 12 and ran the check',
   rewire: 'rewire the node so that ' + title + ' cannot happen'});
@@ -470,6 +471,42 @@ for name, ok in (
          "`LENSES`" in CMD and "`REFUTERS`" in CMD
          and re.search(r"^const LENSES = \[", SRC, re.M) and re.search(r"^const REFUTERS = \[", SRC, re.M))):
     report(name, bool(ok), "stated" if ok else "MISSING OR STALE")
+
+history = [{"mode": "multi", "counts": {"confirmed": n}, "confirmed": [
+    {"title": "variant " + str(i), "defectClass": "unbounded-reader"}]} for i, n in enumerate([3, 2])]
+stopped = run({"graph": "WORK.md", "pluginRoot": "/plugin", "history": history})
+report("a repeated class stops the next audit before spawning",
+       stopped.get("r", {}).get("plateau") and not stopped["calls"]
+       and "unbounded-reader" in stopped["r"]["why"], "class persisted across rounds")
+history[0]["confirmed"][0]["defectClass"] = "other"
+history[1]["counts"]["confirmed"] = 3
+stopped = run({"graph": "WORK.md", "pluginRoot": "/plugin", "history": history})
+report("flat confirmed counts require reframe before another audit",
+       stopped.get("r", {}).get("plateau") and not stopped["calls"], "plateau before spawn")
+history[1]["counts"]["confirmed"] = 1
+continued = run({"graph": "WORK.md", "pluginRoot": "/plugin", "history": history})
+report("falling counts of different classes continue auditing",
+       continued.get("r", {}).get("verdict") == "SOUND" and bool(continued["calls"]), "new audit ran")
+
+for invalid in ({"status": "UNVERIFIED"}, {"status": "REFUTED"}, {"unverified": True},
+                {"votes": [{"refuted": None}]}, {"defectClass": None}, {"defectClasses": [None, 1, ""]}):
+    invalid_history = [{"mode": "multi", "counts": {"confirmed": n}, "confirmed": [
+        {"title": "variant", "defectClass": "same-class", **invalid}]} for n in (3, 2)]
+    result = run({"graph": "WORK.md", "pluginRoot": "/plugin", "history": invalid_history})
+    report("unresolved or missing historical class cannot trigger recurrence: " + str(invalid),
+           not result.get("err") and not result.get("r", {}).get("plateau") and bool(result["calls"]),
+           "a fresh audit ran")
+
+retained_history = [{"mode": "multi", "counts": {"confirmed": 1, "unverified": 1},
+                     "confirmed": [{"title": "variant", "defectClass": "same-class"}],
+                     "unverified": [{"title": "unresolved finding"}], "refuted": ["old claim"],
+                     "deadLenses": ["runtime"], "lenses": ["runtime", "commands"]} for _ in range(2)]
+result = run({"graph": "WORK.md", "pluginRoot": "/plugin", "history": retained_history})
+report("plateau before another audit retains unresolved historical evidence",
+       result.get("r", {}).get("plateau") and not result["calls"]
+       and result["r"]["unverified"] == retained_history[-1]["unverified"]
+       and result["r"]["deadLenses"] == ["runtime"] and result["r"]["refuted"] == ["old claim"],
+       "no unresolved claim was erased")
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

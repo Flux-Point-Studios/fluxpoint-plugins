@@ -57,7 +57,8 @@ Three more checks ride on the same scan:
   taxonomy   `.fluxpoint-attacks.json` (from templates/attack-taxonomy.json)
              names the attack classes a repo must specify, one taxonomy
              per language: the eUTxO classes a validator answers for, the
-             builder classes the off-chain TypeScript answers for. A class
+             builder classes the off-chain TypeScript answers for, and the
+             outsider-data and resource-budget classes Python services owe. A class
              with neither a test of that name nor a waiver with a reason is
              red — route 0 of the escape routes, never specifying the
              property, gets a gate too. Each taxonomy gates only a repo
@@ -86,6 +87,7 @@ body was gutted while its signature held. The first two are the
 `proof-auditor` agent's job. The third is `mutation-guard`'s.
 """
 import argparse
+import ast
 import json
 import os
 import re
@@ -635,7 +637,7 @@ def dod_findings(root, now, recorded):
 # is reported by name: this script would have no rule for deciding whether a
 # class in it is specified, and a taxonomy nothing can be decided about
 # passes every class it holds.
-TAXONOMY_LANGUAGES = ("aiken", "typescript")
+TAXONOMY_LANGUAGES = ("aiken", "typescript", "python")
 
 
 def _near(lang):
@@ -666,16 +668,18 @@ def uncovered_note(tax):
 NAMED_BY = {
     "aiken": "no Aiken test named",
     "typescript": "no TypeScript test title or declaration names",
+    "python": "no Python pytest test function names",
 }
 DORMANT_WHY = {
     "aiken": "no Aiken file is tracked",
     "typescript": "no TypeScript test file is tracked",
+    "python": "no Python test file is tracked",
 }
 # How a tracked language and its classes are named when the manifest has no
 # taxonomy for it. TypeScript is tracked by its test files, the same signal
 # its dormancy reads, so the line says tests rather than source.
-TRACKED_AS = {"aiken": "Aiken", "typescript": "TypeScript tests"}
-CLASS_KIND = {"aiken": "eUTxO", "typescript": "off-chain builder"}
+TRACKED_AS = {"aiken": "Aiken", "typescript": "TypeScript tests", "python": "Python tests"}
+CLASS_KIND = {"aiken": "eUTxO", "typescript": "off-chain builder", "python": "hosted service"}
 # The shipped taxonomies, beside this script in the plugin. A missing
 # taxonomy is reported with what it leaves ungated, and the template is the
 # one place that list is written down.
@@ -874,6 +878,42 @@ def typescript_specified(root, files, ids):
     return hits
 
 
+def python_test_files(tracked):
+    """Conventional pytest filenames, plus Python modules in test directories."""
+    return [rel for rel in tracked if rel.endswith('.py')
+            and (os.path.basename(rel).startswith('test_') or rel.endswith('_test.py')
+                 or TS_TEST_DIR.search(rel))]
+
+
+def python_specified(root, files, ids):
+    """Class ids in real pytest function names; comments and strings cannot count."""
+    hits = {}
+    for rel in files:
+        try:
+            with open(os.path.join(root, rel), encoding='utf-8', errors='replace') as fh:
+                tree = ast.parse(fh.read(), filename=rel)
+        except (OSError, SyntaxError, ValueError):
+            continue
+        # Pytest collects module test functions and test methods on Test*
+        # classes, never a nested function or a helper merely containing an id.
+        definitions = list(tree.body)
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name.startswith('Test'):
+                definitions.extend(node.body)
+        names = [node.name for node in definitions
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and node.name.startswith('test_')]
+        fuzzed = any((isinstance(node, ast.Import)
+                      and any(alias.name.split('.')[0] == 'hypothesis' for alias in node.names))
+                     or (isinstance(node, ast.ImportFrom)
+                         and (node.module or '').split('.')[0] == 'hypothesis')
+                     for node in ast.walk(tree))
+        for cid in ids:
+            if any(cid in name for name in names):
+                hits.setdefault(cid, []).append((rel, fuzzed))
+    return hits
+
+
 def taxonomy_context(root, now, tracked=None):
     """Per language: whether the taxonomy gates anything in this repo, and
     what it reads to decide a class is specified.
@@ -891,10 +931,12 @@ def taxonomy_context(root, now, tracked=None):
         if o["tool"] == "aiken":
             aiken.setdefault(o["name"], []).append(o)
     ts_files = typescript_test_files(tracked)
+    py_files = python_test_files(tracked)
     return {
         "aiken": {"dormant": not aiken and not any(r.endswith(".ak") for r in tracked),
                   "tests": aiken},
         "typescript": {"dormant": not ts_files, "files": ts_files},
+        "python": {"dormant": not py_files, "files": py_files},
     }
 
 
@@ -908,6 +950,8 @@ def specified_in(root, tax, ctx):
     if tax["language"] == "aiken":
         tests = ctx["aiken"]["tests"]
         return {cid: tests[cid] for cid in ids if cid in tests}
+    if tax['language'] == 'python':
+        return python_specified(root, ctx['python']['files'], ids)
     return typescript_specified(root, ctx["typescript"]["files"], ids)
 
 
@@ -1062,7 +1106,12 @@ def class_findings(root, doc, ctx):
                 if not any(" via " in t["statement"] for t in where):
                     notes.append(f"attack class {lang}:{cid} is a unit test, not a property "
                                  f"over aiken/fuzz (no `via` generator in its signature)")
-            elif not any(fuzzed for _, fuzzed in where):
+            elif lang == 'python' and not any(fuzzed for _, fuzzed in where):
+                notes.append(f"attack class {lang}:{cid} is specified by an example in "
+                             f"{where[0][0]}; that file imports no hypothesis, so it covers "
+                             f"the cases the file lists. State it over a Hypothesis "
+                             f"generator to cover the range.")
+            elif lang == 'typescript' and not any(fuzzed for _, fuzzed in where):
                 notes.append(f"attack class {lang}:{cid} is specified by an example in "
                              f"{where[0][0]}; that file imports no fast-check and calls no "
                              f"`fc.`, so it covers the cases the file lists. State it over "

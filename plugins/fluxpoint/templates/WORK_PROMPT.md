@@ -22,9 +22,19 @@ explicitly parked:
    If the slice you are on turns out to need someone else — a signature,
    a third party, a timelock — mark it `- [~] <item> — blockedOn: <who,
    and what would unblock it>` and move to the next unblocked one.
+   If this slice declares a target in `.fluxpoint-metrics.json`, record the
+   prediction **before changing code** with
+   `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" slice-metric.py --start --slice <unique-id> --role <role> --metric <name> --predicted-delta <positive-improvement>`.
+   This measures the starting value through metric-guard's repeated command;
+   the prediction is in the metric's units, positive for the gain you expect.
 2. TDD, strictly: write the failing test, run it, confirm the exact
    expected failure, then write the minimum code to flip it green.
 3. Run scripts/harness.sh --full. Red output is the work list; fix it.
+   For a target-metric slice, finish with
+   `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" slice-metric.py --end --slice <same-id>`.
+   It records the ending measurement and measured/predicted gain. Do not
+   rewrite the forecast after seeing the result; changing the metric's
+   definition requires a new slice. Status reports each role's calibration.
 4. Append one row to Evidence for anything claimed — `| When (UTC) |
    Source | Outcome | Claim | Proof |`, with `Source: loop` for slices
    (graph runs fill their own rows with a runId): the command run and its

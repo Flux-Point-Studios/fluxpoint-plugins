@@ -82,8 +82,10 @@ const FINDINGS = {
           failurePath: { type: 'string', minLength: 20 },
           evidence: { type: 'string', minLength: 10 },
           rewire: { type: 'string', minLength: 10 },
+          defectClass: { type: 'string', minLength: 3 },
+          classRewire: { type: 'string', minLength: 20 },
         },
-        required: ['severity', 'title', 'failurePath', 'evidence', 'rewire'],
+        required: ['severity', 'title', 'failurePath', 'evidence', 'rewire', 'defectClass', 'classRewire'],
       },
     },
   },
@@ -303,6 +305,9 @@ function buildDistinct(raw, reduced) {
       failurePath: lead.failurePath,
       evidence: lead.evidence,
       rewire: lead.rewire,
+      defectClass: lead.defectClass,
+      defectClasses: unique(ms.map(m => m.defectClass)),
+      classRewire: lead.classRewire,
       sources: unique(ms.map(m => m.lens)),
       variants: unique(ms.filter(m => m !== lead).map(m => m.title)).filter(t => t !== lead.title),
       merged: ms.filter(m => m !== lead).map(m => ({
@@ -344,7 +349,8 @@ async function verify(d) {
 function publicFinding(d) {
   return {
     id: d.id, severity: d.severity, title: d.title, failurePath: d.failurePath,
-    rewire: d.rewire, evidence: d.evidence, sources: d.sources, settled: d.settled,
+    rewire: d.rewire, defectClass: d.defectClass, defectClasses: d.defectClasses,
+    classRewire: d.classRewire, evidence: d.evidence, sources: d.sources, settled: d.settled,
     merged: d.merged.map(m => ({ lens: m.lens, severity: m.severity, title: m.title, failurePath: m.failurePath })),
     votes: d.votes,
   }
@@ -419,6 +425,43 @@ function summarize(raw, judged, dead, verifiers, deadVerifiers) {
 
 // ------------------------------------------------------------------ body --
 
+// The caller passes its persisted rounds. Stop before buying another audit
+// when the same class survives twice or the confirmed count stops falling.
+if (A.history !== undefined && !Array.isArray(A.history)) {
+  throw new Error('graph-audit: args.history must be an array of recorded rounds')
+}
+const HISTORY = (A.history || []).filter(r => r && r.mode !== 'single')
+for (const round of HISTORY) {
+  if (!round.counts || !Number.isInteger(round.counts.confirmed) || round.counts.confirmed < 0 || !Array.isArray(round.confirmed)) {
+    throw new Error('graph-audit: recorded rounds need counts.confirmed and a confirmed list')
+  }
+}
+if (HISTORY.length >= 2) {
+  const [before, last] = HISTORY.slice(-2)
+  const classes = r => unique(r.confirmed.flatMap(f => {
+    // Historical summaries may contain unresolved rows. Only a confirmed
+    // finding can establish a surviving class; titles in legacy logs still
+    // support the count plateau, but cannot invent a class identity.
+    if (!f || typeof f !== 'object' || f.unverified ||
+        (f.status !== undefined && f.status !== 'CONFIRMED') ||
+        (Array.isArray(f.votes) && f.votes.some(v => !v || typeof v.refuted !== 'boolean'))) return []
+    const values = Array.isArray(f.defectClasses) ? f.defectClasses : [f.defectClass]
+    return values.filter(c => typeof c === 'string' && c.trim()).map(c => c.trim())
+  }))
+  const common = classes(last).filter(c => classes(before).includes(c))
+  if (common.length || (last.counts.confirmed > 0 && last.counts.confirmed >= before.counts.confirmed)) {
+    const why = `plateau: ${common.length ? common.join(', ') : 'confirmed count did not fall'}`
+    log(`verdict: REWIRE (${why})`)
+    return {mode: MODE, graph: A.graph, verdict: 'REWIRE', why, plateau: true,
+      recurringClasses: common, confirmed: last.confirmed,
+      unverified: Array.isArray(last.unverified) ? last.unverified : [],
+      refuted: Array.isArray(last.refuted) ? last.refuted : [],
+      counts: last.counts, settled: SETTLED,
+      lenses: Array.isArray(last.lenses) ? last.lenses : [],
+      deadLenses: Array.isArray(last.deadLenses) ? last.deadLenses : [], historyStop: true}
+  }
+}
+
 log(`graph-audit: ${MODE} mode over ${A.graph}, ${RUN_LENSES.length} lens(es) ` +
   `[${RUN_LENSES.map(l => l.id).join(', ')}], ${SETTLED.length} settled title(s)`)
 
@@ -435,7 +478,11 @@ RUN_LENSES.forEach((l, i) => {
   const r = lensResults[i]
   if (!r || !Array.isArray(r.findings)) { dead.push(l.id); return }
   r.findings.forEach(f => {
-    if (!f || !Object.prototype.hasOwnProperty.call(RANK, f.severity) || typeof f.title !== 'string') { malformed++; return }
+    if (!f || !Object.prototype.hasOwnProperty.call(RANK, f.severity) || typeof f.title !== 'string'
+        || typeof f.defectClass !== 'string' || f.defectClass.trim().length < 3
+        || typeof f.classRewire !== 'string' || f.classRewire.trim().length < 20) {
+      malformed++; if (!dead.includes(l.id)) dead.push(l.id); return
+    }
     raw.push({ ...f, id: `F${raw.length + 1}`, lens: l.id })
   })
 })
