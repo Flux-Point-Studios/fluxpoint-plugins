@@ -101,8 +101,10 @@ def validate(doc):
         return values
 
     if not shape(doc, ('version', 'goal', 'asset', 'scope', 'outOfScope',
-                       'decisions', 'requirements', 'checks', 'challenges'), 'spec'):
+                       'decisions', 'requirements', 'checks', 'challenges'), 'spec', ('harnessInputs',)):
         return errors
+    if 'harnessInputs' in doc and not strings(doc['harnessInputs'], nonempty=False):
+        errors.append('harnessInputs: expected a list of repository file paths')
     if type(doc.get('version')) is not int or doc['version'] != 1:
         errors.append('spec: version must be 1')
     text_fields(doc, ('goal', 'asset'), 'spec')
@@ -204,6 +206,173 @@ def unique_keys(pairs):
     return doc
 
 
+# References occupy the whole prose value. A quoted path in a sentence does
+# not replace that sentence's contract. `See:` supports an archive entry
+# whose entire content forwards to another binding string.
+TEXT_REFERENCE = re.compile(r'(?:See:[ \t]*)?([^\s#]+)#(.*)', re.S)
+TEXT_FIELDS = {'goal', 'asset', 'scope', 'outOfScope', 'statement', 'counterexample',
+               'assumptions', 'claim', 'resolution', 'question', 'rationale',
+               'evidence', 'strongest_objection', 'cost'}
+
+
+def repo_file(root, rel, what):
+    """Resolve a repository file without allowing symlink escapes."""
+    root = Path(root).resolve()
+    path = root / in_repo(rel, what)
+    if not path.resolve().is_relative_to(root):
+        raise ValueError(f'{what} {rel!r} must stay inside the repository')
+    if not path.is_file():
+        raise ValueError(f'{what} {rel!r} does not name a repository file')
+    return path
+
+
+def resolve_text(root, doc):
+    """Return (resolved packet, reference-file hashes), from one read per file."""
+    files, references = {}, {}
+
+    def resolve(value, chain=()):
+        match = TEXT_REFERENCE.fullmatch(value)
+        if not match:
+            return value
+        rel, pointer = match.groups()
+        rel = '/'.join(in_repo(rel, 'text reference').parts)
+        ref = rel + '#' + pointer
+        if ref in chain:
+            raise ValueError('text reference cycle: ' + ' -> '.join(chain + (ref,)))
+        if len(chain) >= 64:
+            raise ValueError('text reference chain exceeds 64 entries')
+        if pointer and not pointer.startswith('/'):
+            raise ValueError(f'text reference {ref!r}: expected an RFC 6901 pointer')
+        if rel not in files:
+            path = repo_file(root, rel, 'text reference')
+            snapshot = path.read_bytes().replace(b'\r\n', b'\n')
+            files[rel] = json.loads(snapshot.decode('utf-8'), object_pairs_hook=unique_keys)
+            references[rel] = hashlib.sha256(snapshot).hexdigest()
+        target = files[rel]
+        for token in pointer.split('/')[1:] if pointer else []:
+            if re.search(r'~(?:[^01]|$)', token):
+                raise ValueError(f'text reference {ref!r}: invalid RFC 6901 escape')
+            token = token.replace('~1', '/').replace('~0', '~')
+            try:
+                if isinstance(target, list) and re.fullmatch(r'0|[1-9][0-9]*', token):
+                    target = target[int(token)]
+                elif isinstance(target, dict):
+                    target = target[token]
+                else:
+                    raise KeyError(token)
+            except (KeyError, IndexError):
+                raise ValueError(f'text reference {ref!r} does not resolve') from None
+        if not isinstance(target, str) or not target.strip():
+            raise ValueError(f'text reference {ref!r} must resolve to nonempty text')
+        return resolve(target, chain + (ref,))
+
+    def walk(value, prose=False):
+        if isinstance(value, str):
+            return resolve(value) if prose else value
+        if isinstance(value, list):
+            return [walk(v, prose) for v in value]
+        if isinstance(value, dict):
+            result = {k: walk(v, k in TEXT_FIELDS) for k, v in value.items()}
+            for key, original in value.items():
+                if key in TEXT_FIELDS and isinstance(original, str) and TEXT_REFERENCE.fullmatch(original):
+                    result[key + 'Ref'] = original
+            return result
+        return value
+
+    return walk(doc), dict(sorted(references.items()))
+
+
+def harness_inputs(root, doc):
+    """Files named by literal argv/witness arguments, plus explicit dependencies."""
+    root = Path(root).resolve()
+    paths = set()
+    for check in doc['checks']:
+        for key in ('argv', 'witness'):
+            for arg in check.get(key, []):
+                # pytest node selectors and --config=path still name a file.
+                candidate = arg.split('::', 1)[0]
+                if candidate.startswith('-') and '=' in candidate:
+                    candidate = candidate.split('=', 1)[1]
+                try:
+                    if Path(candidate).is_absolute():
+                        candidate = Path(candidate).relative_to(root).as_posix()
+                    path = repo_file(root, candidate, 'check input')
+                except (OSError, ValueError):
+                    continue  # Executables, switches and code are not repository files.
+                paths.add(path.relative_to(root).as_posix())
+    for rel in doc.get('harnessInputs', []):
+        paths.add(repo_file(root, rel, 'harnessInputs').relative_to(root).as_posix())
+    return {rel: digest(root / rel) for rel in sorted(paths)}
+
+
+def harness_record(root, spec=None):
+    """Name the harness present when a run is recorded, separately from its spec."""
+    packet_file, lock_file = packet_paths(root, spec)
+    lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
+    expected = lock.get('harness', {})
+    if not isinstance(expected, dict):
+        raise ValueError('lock harness must be a map of paths to SHA-256 digests')
+    doc = json.loads(packet_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
+    current = harness_inputs(root, doc)
+    for rel in expected:
+        in_repo(rel, 'locked harness input')
+        path = Path(root) / rel
+        if path.exists():
+            repo_file(root, rel, 'locked harness input')
+        current[rel] = digest(path)
+    changed = sorted(rel for rel in set(current) | set(expected)
+                     if current.get(rel) != expected.get(rel))
+    fingerprint = hashlib.sha256(json.dumps(current, sort_keys=True,
+                                            separators=(',', ':')).encode('utf-8')).hexdigest()
+    return {'sha256': fingerprint, 'files': current, 'changedPaths': changed}
+
+
+def validate_lock_maps(lock):
+    for key in ('references', 'harness'):
+        values = lock.get(key, {})
+        if (not isinstance(values, dict)
+                or any(not isinstance(rel, str) or not isinstance(sha, str)
+                       or not re.fullmatch(r'[0-9a-f]{64}', sha)
+                       for rel, sha in values.items())):
+            raise ValueError(f'lock {key} must be a map of repository paths to SHA-256 digests')
+        for rel in values:
+            in_repo(rel, f'lock {key}')
+
+
+def relock_harness(root, doc, spec, gate):
+    """Re-freeze check code only after its declared gate passed at this HEAD."""
+    import attest
+    gates, findings = attest.load_gates(root)
+    if findings:
+        raise ValueError('; '.join(findings))
+    if not gate or gate not in gates:
+        raise ValueError('--lock-harness requires --gate naming a declared local gate')
+    head = attest.head_sha(root)
+    try:
+        rows = attest.read(root)
+    except SystemExit as e:
+        raise ValueError(str(e)) from e
+    if not head or not any(isinstance(row, dict) and row.get('gate') == gate
+                           and type(row.get('exit')) is int and row['exit'] == 0
+                           and row.get('headSha') == head
+                           and row.get('treeSha', head) == head
+                           and row.get('commandSha') == attest.sha(gates[gate])
+                           for row in rows):
+        raise ValueError(f"--lock-harness requires an attested exit 0 for gate {gate!r} at HEAD")
+    _, lock_file = packet_paths(root, spec)
+    lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
+    current = harness_inputs(root, doc)
+    previous = lock.get('harness', {})
+    changes = sorted(rel for rel in set(current) | set(previous)
+                     if current.get(rel) != previous.get(rel))
+    lock['harness'] = current
+    with lock_file.open('w', encoding='utf-8', newline='\n') as out:
+        out.write(json.dumps(lock, indent=2) + '\n')
+    for rel in changes:
+        print(f'specification: harness changed {rel}: {previous.get(rel)} -> {current.get(rel)}')
+    print(f'specification: locked harness after {gate} at {head}; {len(changes)} changed path(s)')
+
+
 # A graph file declares its packet and its contracts in its header. Only
 # lines outside fenced blocks count, so an IR string or a quoted example
 # can never redirect the compiler.
@@ -234,7 +403,8 @@ def graph_headers(path):
 def in_repo(rel, what):
     """A header path, checked: relative, inside the repository."""
     p = Path(rel)
-    if p.is_absolute() or rel.startswith(('/', '\\')) or '..' in p.parts:
+    if (p.is_absolute() or rel.startswith(('/', '\\')) or '..' in p.parts
+            or '\\' in rel or '\0' in rel or re.match(r'^[A-Za-z]:', rel)):
         raise ValueError(f'{what} {rel!r} must be a path inside the repository, '
                          'relative to its root')
     return p
@@ -315,6 +485,11 @@ def load(root, locked=True, spec=None):
     identity = {'version': 1, 'sha256': hashlib.sha256(snapshot).hexdigest(),
                 'proofBaselineSha256': digest(root / BASELINE)}
     if not errors:
+        doc, references = resolve_text(root, doc)
+        if references:
+            identity['references'] = references
+        # Validate explicit dependencies even before a harness is frozen.
+        harness_inputs(root, doc)
         ids = {oid for check in doc['checks'] for oid in check.get('obligations', [])}
         if ids:
             module = importlib.util.spec_from_file_location('spec_guard', Path(__file__).with_name('spec-guard.py'))
@@ -326,7 +501,13 @@ def load(root, locked=True, spec=None):
             identity['obligations'] = {oid: observed[oid]['statementSha'] for oid in sorted(ids & observed.keys())}
     if locked:
         lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
-        if lock != identity:
+        if not isinstance(lock, dict):
+            raise ValueError('spec lock must be an object')
+        validate_lock_maps(lock)
+        for rel in sorted(set(lock.get('references', {})) | set(identity.get('references', {}))):
+            if lock.get('references', {}).get(rel) != identity.get('references', {}).get(rel):
+                errors.append(f'a file the packet points into changed since lock: {rel}')
+        if {k: v for k, v in lock.items() if k != 'harness'} != identity:
             errors.append('spec, obligation or proof baseline changed since lock; review the change and re-lock')
     if errors:
         raise ValueError('; '.join(errors))
@@ -421,8 +602,10 @@ def main():
     parser.add_argument('--if-present', action='store_true')
     parser.add_argument('--spec', help='packet path relative to --root (default ' + SPEC + ')')
     parser.add_argument('--graph', help="a graph file whose SPEC: header names the packet")
+    parser.add_argument('--gate', help='declared gate whose attested pass permits --lock-harness')
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--lock', action='store_true')
+    action.add_argument('--lock-harness', action='store_true')
     action.add_argument('--check', action='store_true')
     action.add_argument('--run', action='store_true')
     args = parser.parse_args()
@@ -454,12 +637,22 @@ def main():
         packet_file, lock_path = packet_paths(root, spec)
         doc, identity = load(root, locked=not args.lock, spec=spec)
         name = packet_file.relative_to(root).as_posix()
+        if args.gate and not args.lock_harness:
+            raise ValueError('--gate is only for --lock-harness')
+        if args.lock_harness:
+            relock_harness(root, doc, spec, args.gate)
+            return 0
         if args.lock:
             with lock_path.open('w', encoding='utf-8', newline='\n') as lock_file:
-                lock_file.write(json.dumps(identity, indent=2) + '\n')
+                lock_file.write(json.dumps(dict(identity, harness=harness_inputs(root, doc)), indent=2) + '\n')
             print(f"specification: locked {name} {identity['sha256']}; checks have not run")
             return 0
         print(f"specification: validated {name} {identity['sha256']}", flush=True)
+        for check in doc['checks']:
+            scope = check['scope']
+            if 'scopeRef' not in check and re.fullmatch(r'[^\s#]+\.[a-zA-Z0-9]+', scope):
+                print(f"specification: warning: check {check['id']} scope is a bare path; "
+                      'use path#/pointer to bind its text', file=sys.stderr)
         if args.run:
             stack = json.loads(os.environ.get('FPL_SPEC_STACK', '[]'))
             if not strings(stack, nonempty=False) or str(root) in stack:

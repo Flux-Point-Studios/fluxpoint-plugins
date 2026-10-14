@@ -220,6 +220,7 @@ def main():
         print(f"record-run: ledger append failed: {e}", file=sys.stderr)
 
     import specification as _spec
+    harness_identity = None
     try:
         # The graph file's SPEC: header names the packet this campaign is
         # held to; a repository can carry one per campaign.
@@ -236,6 +237,7 @@ def main():
             _, identity = _spec.load(args.root, spec=spec_path or ran)
             if summary.get("specification") != identity:
                 raise ValueError("run specification differs from the locked packet")
+            harness_identity = _spec.harness_record(args.root, spec=spec_path or ran)
         except (OSError, ValueError, TypeError) as e:
             print(f"record-run: spec verification failed: {e}", file=sys.stderr)
             if ledger_written:
@@ -458,6 +460,7 @@ def main():
                 "nodesSkipped": skipped,
                 "findings": findings,
                 "harnessExit": harness,
+                "harness": harness_identity,
                 "redTeam": red_team,
                 "proofAudit": proof_audit,
                 "attestation": attestation,
@@ -571,6 +574,10 @@ def main():
         proof_cell = proof_audit
     proof = (f"harness exit {harness}; red-team {red_team}; proof-audit {proof_cell}; "
              f"executor {args.executor}")
+    if harness_identity:
+        proof += f"; harness sha256 {harness_identity['sha256']}"
+        if harness_identity['changedPaths']:
+            proof += "; harness differs from lock: " + ", ".join(cell(p, 500) for p in harness_identity['changedPaths'])
     if attestation:
         att = attestation["tally"]
         proof += ("; attestation " + ", ".join(
@@ -578,7 +585,11 @@ def main():
     row = f"| {ts} | {args.run_id} | {outcome} | {claim} | {proof} |"
     legacy_row = (
         f"| {ts} | {args.run_id} | {outcome} | {ok}/{dead} | {findings} "
-        f"| {harness} | {red_team} |"
+        f"| {harness}"
+        + (f"; sha256 {harness_identity['sha256']}; changed: "
+           + (", ".join(cell(p, 500) for p in harness_identity['changedPaths']) or "none")
+           if harness_identity else "")
+        + f" | {red_team} |"
     )
 
     # 2a. Decisions, spliced under their own header when the file has one.
