@@ -36,6 +36,50 @@ PROOF_RANK = {"NOT-APPLICABLE": 0, "SOUND": 1, "UNPROVEN": 2, "WEAKENED": 3}
 SEVERITY_RANK = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
 
+def red_team_coverage_issue(coverage):
+    """Validate the durable scope of a SHIP independently of schema execution."""
+    if not isinstance(coverage, dict):
+        return "SHIP has no coverage object"
+    subject = coverage.get("subject")
+    if not isinstance(subject, list) or not subject:
+        return "SHIP coverage has no repository ranges"
+    for item in subject:
+        if not isinstance(item, dict) or any(
+                not isinstance(item.get(key), str) or not item[key].strip()
+                for key in ("repository", "base", "head")):
+            return "SHIP coverage has an invalid repository/base/head"
+        if any(type(item.get(key)) is not int or item[key] < 0
+               for key in ("files", "additions", "deletions")):
+            return "SHIP coverage needs nonnegative integer file and line counts"
+    if type(coverage.get("attackers")) is not int or coverage["attackers"] < 1:
+        return "SHIP coverage needs a positive attacker count"
+    lenses = coverage.get("lenses")
+    if (not isinstance(lenses, list) or not lenses
+            or any(not isinstance(lens, str) or not lens.strip() for lens in lenses)):
+        return "SHIP coverage needs named lenses"
+    if type(coverage.get("sampled")) is not bool:
+        return "SHIP coverage must declare whether the review sampled"
+    return None
+
+
+def red_team_coverage_records(summary):
+    """Keep each gate's coverage beside redTeam, including foreach outputs."""
+    records = []
+    contracts = summary.get("contracts") or {}
+    for node, value in (summary.get("results") or {}).items():
+        for index, result in enumerate(value if isinstance(value, list) else [value]):
+            if not isinstance(result, dict):
+                continue
+            if contracts.get(node) == "RedTeamV1" or (
+                    contracts.get(node) is None and result.get("verdict") in ("SHIP", "BLOCK")):
+                record = {"node": node, "verdict": result.get("verdict"),
+                          "coverage": result.get("coverage")}
+                if isinstance(value, list):
+                    record["index"] = index
+                records.append(record)
+    return records
+
+
 def red_team_incoherent(r):
     """Why a RedTeamV1 result cannot be taken at its verdict, or None."""
     worst = max((SEVERITY_RANK.get((f or {}).get("severity"), 0)
@@ -48,6 +92,13 @@ def red_team_incoherent(r):
             or SEVERITY_RANK.get(r.get("worstSeverity")) != worst):
         return (f"worstSeverity {r.get('worstSeverity')}/{r.get('worstSeverityRank')} "
                 f"disagrees with its findings, whose worst is {name}")
+    if r.get("verdict") == "SHIP":
+        issue = red_team_coverage_issue(r.get("coverage"))
+        if issue:
+            return issue
+        review = r.get("review")
+        if isinstance(review, dict) and any(review.get(key) for key in ("blockers", "unverified", "deadLenses")):
+            return "SHIP has unresolved coverage or exploit blockers"
     return None
 
 
@@ -264,11 +315,17 @@ def main():
     # Derived beats declared: the flags are a fallback for a run whose
     # summary carries no such node, never an override of one that does.
     d_harness, d_verdict, blocked, d_proof, proof_surface, incoherent = derive(summary)
+    red_team_coverage = red_team_coverage_records(summary)
     for why in incoherent:
         print(f"record-run: red-team result refused at its verdict — {why}",
               file=sys.stderr)
     harness = str(d_harness) if d_harness is not None else args.harness
     red_team = d_verdict if d_verdict is not None else args.red_team
+    if d_verdict is None and red_team == "SHIP":
+        incoherent.append("SHIP flag has no recorded red-team verdict and coverage")
+        blocked, red_team = True, "BLOCK"
+        print("record-run: a SHIP flag without a coverage-bearing result cannot "
+              "establish a shippable review", file=sys.stderr)
     proof_audit = d_proof if d_proof is not None else args.proof_audit
     if blocked and outcome in ("COMPLETE", "INCOMPLETE", "UNKNOWN"):
         # A campaign does not get to report COMPLETE over a blocking
@@ -462,6 +519,7 @@ def main():
                 "harnessExit": harness,
                 "harness": harness_identity,
                 "redTeam": red_team,
+                "redTeamCoverage": red_team_coverage,
                 "proofAudit": proof_audit,
                 "attestation": attestation,
                 "summary": summary,
@@ -513,7 +571,7 @@ def main():
     # 2. Evidence row, appended under whichever table header the file carries.
     claim = f"graph run: {ok} node(s) OK, {dead} dead, {findings} produced item(s)"
     if incoherent:
-        claim += ("; red-team findings contradict its verdict (" + "; ".join(incoherent[:2])
+        claim += ("; red-team findings or coverage contradict its verdict (" + "; ".join(incoherent[:2])
                   + ") — filed as BLOCK")
     elif blocked:
         claim += "; red-team returned BLOCK — not shippable"
@@ -530,6 +588,19 @@ def main():
                   f"({', '.join(blocked_nodes[:3])})")
     if skipped:
         claim += f"; {skipped} SKIPPED on budget — coverage incomplete"
+    for rec in red_team_coverage:
+        cov = rec.get("coverage")
+        if not isinstance(cov, dict):
+            claim += f"; red-team {cell(rec['node'], 60)} coverage missing"
+            continue
+        ranges = cov.get("subject") or []
+        if isinstance(ranges, list) and all(isinstance(item, dict) for item in ranges):
+            files = sum(item.get("files", 0) for item in ranges if type(item.get("files")) is int)
+            claim += (f"; red-team {cell(rec['node'], 60)}: {len(ranges)} repo range(s), "
+                      f"{files} files, {cell(cov.get('attackers'), 20)} attacker(s), "
+                      f"{len(cov['lenses']) if isinstance(cov.get('lenses'), list) else 0} lens(es), "
+                      + ("SAMPLED" if cov.get("sampled") is True else
+                         "sampling unknown" if type(cov.get("sampled")) is not bool else "full declared scope"))
     seeded = summary.get("memorySeeded") or {}
     if seeded or lessons:
         total_seeded = sum(v for v in seeded.values() if isinstance(v, int))
