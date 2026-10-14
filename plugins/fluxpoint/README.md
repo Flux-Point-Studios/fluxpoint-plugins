@@ -391,6 +391,32 @@ checked inside the scaffolded `--full` even without a count baseline. See
 [provider recordings](references/recordings.md) for provenance, conformance,
 provider counters and the independent review needed for derived values.
 
+## Calibrating predicted gains
+
+For a slice targeting a declared deterministic metric, record its prediction
+before implementation and its measurement after the harness passes:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" slice-metric.py --start \
+  --slice index-lookup --role implementer --metric latency.ms --predicted-delta 20
+# Implement the slice, then run its harness.
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" slice-metric.py --end --slice index-lookup
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" metrics.py
+```
+
+A predicted delta is a positive improvement in the metric's own units.
+Both endpoints use metric-guard's repeated deterministic measurement. An
+unchanged metric definition is required. Predictions cannot be replaced;
+completion can be replayed without changing the recorded result.
+
+`metrics.py` and `/fluxpoint:status` show mean measured/predicted improvement
+per role, with a per-metric breakdown and sample counts. Above 1x means gains
+exceeded predictions; below 1x means they fell short; negative values record
+regressions. Each slice contributes one unitless ratio, so bytes and
+milliseconds are never added together. Pending slices are reported separately.
+Artifacts stay local in `.claude/fluxpoint/slices/`. Use `--campaign <name>`
+at start to include a slice in the corresponding `metrics.py --campaign` view.
+
 ## Migrating from the split plugins
 
 `/fluxpoint:migrate` folds `LOOP.md` and `GRAPH.md` into one `WORK.md`,
