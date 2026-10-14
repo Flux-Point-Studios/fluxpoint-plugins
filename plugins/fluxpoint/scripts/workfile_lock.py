@@ -12,7 +12,11 @@ def workfile_lock(path):
     state = (path.parent if path.parent.name == 'fluxpoint' and path.parent.parent.name == '.claude'
              else path.parent / '.claude' / 'fluxpoint')
     state.mkdir(parents=True, exist_ok=True)
-    (state / '.gitignore').write_text('*\n', encoding='utf-8')
+    try:
+        with (state / '.gitignore').open('x', encoding='utf-8') as ignore:
+            ignore.write('*\n')
+    except FileExistsError:
+        pass
     key = hashlib.sha256(os.path.normcase(str(path)).encode()).hexdigest()[:24]
     with (state / (key + '.lock')).open('a+b') as fh:
         if os.name == 'nt':

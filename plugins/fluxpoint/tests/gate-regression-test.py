@@ -92,6 +92,18 @@ class GateRegression(unittest.TestCase):
         self.hook(FPL_MAX_BLOCKS='1')
         self.assertEqual(self.count(), 3)
 
+    def test_untracked_eol_normalization_cannot_hide_rewritten_bytes_from_yield(self):
+        self.write('.gitattributes', 'src/new.py text eol=lf\n')
+        self.commit('normalized untracked path')
+        new = self.repo / 'src/new.py'
+        new.write_bytes(b'x = 1\r\n')
+        self.yielded()
+        normalized = self.git('hash-object', '--', 'src/new.py')
+        new.write_bytes(b'x = 1\n')
+        self.assertEqual(self.git('hash-object', '--', 'src/new.py'), normalized)
+        self.hook(FPL_MAX_BLOCKS='1')
+        self.assertEqual(self.count(), 3)
+
     def test_yield_reruns_new_file_inside_untracked_directory(self):
         self.write('src/pkg/a.py', 'x = 1\n')
         self.yielded()
@@ -126,6 +138,17 @@ class GateRegression(unittest.TestCase):
     def test_red_run_is_retried_without_tree_changes(self):
         self.write('src/app.py', 'BROKEN = 1\n')
         self.hook()
+        self.hook()
+        self.assertEqual(self.count(), 2)
+
+    def test_pass_cache_does_not_reuse_a_previous_commits_verdict(self):
+        self.write('src/app.py', 'x = 2\n')
+        self.hook()
+        self.hook()
+        self.assertEqual(self.count(), 1)
+        self.commit('commit the measured bytes')
+        self.hook()
+        self.assertEqual(self.count(), 2)
         self.hook()
         self.assertEqual(self.count(), 2)
 
@@ -204,6 +227,87 @@ class GateRegression(unittest.TestCase):
         out = self.hook()
         self.assertIn('src/own.py', out)
         self.assertNotIn('TODO inherited', out)
+
+    def test_detaching_away_and_back_cannot_forgive_an_own_unverified_commit(self):
+        self.write('src/app.py', 'BROKEN = 1  # TODO this session\n')
+        self.commit('own unverified slice')
+        own = self.git('rev-parse', 'HEAD')
+        self.git('checkout', '-q', '--detach', 'HEAD~1')
+        self.git('checkout', '-q', '--detach', own)
+        out = self.hook()
+        self.assertEqual(self.count(), 1)
+        self.assertEqual(json.loads(out)['decision'], 'block')
+        self.assertIn('TODO this session', out)
+
+    def test_import_and_own_commit_before_first_stop_scans_only_own_work(self):
+        self.write('src/app.py', 'x = 2  # TODO inherited\n')
+        self.commit('previous round')
+        imported = self.git('rev-parse', 'HEAD')
+        self.git('checkout', '-q', '--detach', 'HEAD~1')
+        shutil.rmtree(self.repo / '.claude/fluxpoint')
+        self.hook('inject-state.sh')
+        self.git('checkout', '-q', '--detach', imported)
+        self.write('src/own.py', 'x = 3  # TODO own slice\n')
+        self.commit('own slice after import')
+        out = self.hook()
+        self.assertEqual(self.count(), 1)
+        self.assertIn('TODO own slice', out)
+        self.assertNotIn('TODO inherited', out)
+
+    def test_reset_and_detach_to_a_commit_containing_pending_own_work_stays_armed(self):
+        self.write('src/app.py', 'BROKEN = 1\n')
+        self.commit('own pending slice')
+        own = self.git('rev-parse', 'HEAD')
+        self.git('branch', 'keep-own', own)
+        self.git('reset', '--hard', 'HEAD~1')
+        self.git('checkout', '-q', '--detach', 'keep-own')
+        self.assertEqual(json.loads(self.hook())['decision'], 'block')
+        self.assertEqual(self.count(), 1)
+
+    def test_green_harness_cannot_cache_a_source_tree_it_changed_after_checks(self):
+        self.write('scripts/harness.sh', '#!/usr/bin/env bash\n'
+                   f'echo run >>"{self.runs}"\n'
+                   'if grep -q BROKEN src/*.py; then exit 1; fi\n'
+                   'echo BROKEN >src/app.py\nexit 0\n')
+        self.write('src/app.py', 'x = 2\n')
+        first = self.hook()
+        self.assertEqual(json.loads(first)['decision'], 'block')
+        self.assertIn('tree changed while the harness was running', first)
+        self.assertFalse((self.repo / '.claude/fluxpoint/s.passed').exists())
+        self.assertEqual(json.loads(self.hook())['decision'], 'block')
+        self.assertEqual(self.count(), 2)
+
+    def test_zero_padded_timeout_cannot_disable_the_deadline(self):
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        fake = bindir / 'timeout'
+        fake.write_text('#!/usr/bin/env bash\nprintf "%s" "$1" >"' + str(self.root / 'timeout') + '"\nexit 124\n')
+        fake.chmod(0o755)
+        self.write('src/app.py', 'x = 2\n')
+        out = self.hook(FPL_GATE_TIMEOUT='00', PATH=str(bindir) + os.pathsep + self.env['PATH'])
+        self.assertEqual((self.root / 'timeout').read_text(), '540')
+        self.assertIn('Invalid FPL_GATE_TIMEOUT', out)
+
+    def test_metric_manifest_and_baseline_edits_warn_on_a_green_run(self):
+        self.write('.fluxpoint-metrics.json', json.dumps({'metrics': []}))
+        self.write('.fluxpoint-metrics-baseline.json', json.dumps({'metrics': {}}))
+        self.commit('metric policy')
+        out = self.hook()
+        self.assertIn('.fluxpoint-metrics.json', out)
+        self.assertIn('.fluxpoint-metrics-baseline.json', out)
+
+    def test_evidence_lock_preserves_an_existing_state_ignore_policy(self):
+        ignore = self.repo / '.claude/fluxpoint/.gitignore'
+        policy = '*\n!important.json\n'
+        ignore.write_text(policy)
+        self.write('src/app.py', 'x = 2\n')
+        self.hook()
+        self.assertEqual(ignore.read_text(), policy)
+        run = subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'), '--run-id', 'keep-policy'],
+                             cwd=self.repo, env=self.env, input=json.dumps({'results': {}, 'provenance': []}),
+                             text=True, capture_output=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(ignore.read_text(), policy)
 
     def test_local_evidence_keeps_committed_pass_and_checkpoint_clean(self):
         self.write('src/app.py', 'x = 2\n')

@@ -115,7 +115,7 @@ printf 'RUNNING %s\n' "$start_ts" >"$sd/last-harness"
 gate_timeout="${FPL_GATE_TIMEOUT:-540}"
 timeout_notice=""
 case "$gate_timeout" in
-  ''|*[!0-9]*|0) timeout_notice="Invalid FPL_GATE_TIMEOUT; using 540s. "; gate_timeout=540 ;;
+  ''|*[!0-9]*|0|00|000) timeout_notice="Invalid FPL_GATE_TIMEOUT; using 540s. "; gate_timeout=540 ;;
 esac
 if [ "${#gate_timeout}" -gt 3 ] || [ "$gate_timeout" -gt 570 ]; then
   timeout_notice="FPL_GATE_TIMEOUT=${gate_timeout}s exceeds the safe budget; clamped to 570s. "
@@ -210,6 +210,13 @@ dirty_n="$(printf '%s' "$status_out" | grep -c . | tr -d ' ')"
 # The tree, taken AFTER the run: this is what the harness actually measured,
 # and the Evidence row dedups on it.
 tree_sha="$(gate_tree_sha)"
+if [ "$guard_sha" = unknown ] || [ "$tree_sha" = unknown ]; then
+  findings="${findings}tree identity could not be measured; this run cannot establish a reusable PASS.${nl}"
+elif [ "$guard_sha" != "$tree_sha" ]; then
+  # A green exit before a source-generating step does not verify its output.
+  # Never bless and cache bytes that were absent when the harness started.
+  findings="${findings}tree changed while the harness was running; rerun on the stable resulting tree before claiming PASS.${nl}"
+fi
 log_sha="$("$FPL_PY" - "$hlog" <<'PY' 2>/dev/null || echo unknown
 import hashlib, sys
 try:

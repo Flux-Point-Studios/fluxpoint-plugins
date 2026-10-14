@@ -102,6 +102,9 @@ stop leaves tracked files clean.
 
 The Stop gate can use a shorter repo-defined contract when `--full` cannot
 fit its hook budget; CI should still run the full suite.
+An unchanged passing tree reuses its verdict for the same harness invocation.
+If the harness changes source while running, the gate requires a fresh run on
+the stable result before recording PASS.
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -136,13 +139,15 @@ base and cannot disable the gate's code-change detection.
   source written through the Bash tool. Dirtiness is measured against the
   commit the session started from, so committing work mid-session
   is not a way to stop being judged; the hygiene scan uses the same
-  baseline. A checkout rebases the session baseline to the imported HEAD
-  while later session commits remain judged. It falls back to HEAD when the
+  baseline. A checkout rebases the session baseline to imported history,
+  while unverified commits authored in this checkout remain judged even
+  after detaching away and back. The reflog anchor resets only on PASS.
+  It falls back to HEAD when the
   baseline commit is not an ancestor of
   the current one (a rebase or branch switch), because a gate that fires
   spuriously gets switched off.
 - The files that decide what green means — the harness, the proof and pair
-  baselines, the gates and budget manifests, `package.json`, `Makefile` —
+  baselines, the gates, budget and metric manifests/baselines, `package.json`, `Makefile` —
   are named in the green notice when this session changed any of them.
   A verdict is only as trustworthy as the contract that produced it.
 - A gate's exit code is minted by a hook; no agent types it. Declare

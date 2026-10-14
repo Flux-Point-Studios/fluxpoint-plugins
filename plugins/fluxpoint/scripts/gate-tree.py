@@ -31,7 +31,10 @@ def main():
         if os.path.islink(path):
             add(os.fsencode(os.readlink(path)))
         else:
-            add(git('hash-object', '--', path).strip())
+            # Attribute-driven clean filters and EOL normalization can map
+            # distinct working files to one Git object. Reuse needs the bytes
+            # the harness reads, including for files not yet in the index.
+            add(git('hash-object', '--no-filters', '--', path).strip())
     print(h.hexdigest())
 
 

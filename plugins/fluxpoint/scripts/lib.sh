@@ -356,29 +356,7 @@ fpl_base_file() {
 # scan with findings nobody introduced. A gate that cries wolf gets turned
 # off, which is a worse outcome than the bypass it was closing.
 fpl_base_ref() {
-  local base previous current sha action
-  previous="$(cat "$(fpl_base_file "$1").head" 2>/dev/null)"
-  current="$(git rev-parse HEAD 2>/dev/null)"
-  # Checkout imports another branch's history; ordinary commits remain this
-  # session's work. The reflog distinguishes those moves even on a fast-forward
-  # detach where the original baseline is still an ancestor.
-  if [ -n "$previous" ] && [ "$previous" != "$current" ]; then
-    while IFS=$'\t' read -r sha action; do
-      [ "$sha" = "$previous" ] && break
-      case "$action" in
-        checkout:*) fpl_set_base "$1" "$sha"; break ;;
-      esac
-    done < <(git reflog show --format='%H%x09%gs' HEAD 2>/dev/null)
-  fi
-  [ -n "$current" ] && printf '%s\n' "$current" >"$(fpl_base_file "$1").head" 2>/dev/null
-  base="$(cat "$(fpl_base_file "$1")" 2>/dev/null)"
-  if [ -n "$base" ] \
-     && git rev-parse --verify -q "${base}^{commit}" >/dev/null 2>&1 \
-     && git merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
-    printf '%s' "$base"
-    return 0
-  fi
-  printf 'HEAD'
+  "$FPL_PY" "${BASH_SOURCE[0]%/*}/session-baseline.py" "$(fpl_base_file "$1")"
 }
 
 # fpl_set_base <session_id> [ref] — record a baseline. Written at
@@ -394,6 +372,9 @@ fpl_set_base() {
   mkdir -p "$sd" 2>/dev/null || return 0
   git rev-parse "${2:-HEAD}" 2>/dev/null >"$f"
   git rev-parse HEAD 2>/dev/null >"$f.head"
+  # Keep this anchor until the next PASS. An imported checkout can move the
+  # diff baseline, but must not erase which commits this session authored.
+  git reflog show --format=%H HEAD 2>/dev/null | wc -l | tr -d ' ' >"$f.reflog-count"
 }
 
 # fpl_code_dirty — succeeds when the tree carries code the DoD gate should
@@ -433,6 +414,8 @@ scripts/harness.sh
 .fluxpoint-gates.json
 .fluxpoint-budget.json
 .fluxpoint-cex.jsonl
+.fluxpoint-metrics.json
+.fluxpoint-metrics-baseline.json
 package.json
 Makefile"
 
