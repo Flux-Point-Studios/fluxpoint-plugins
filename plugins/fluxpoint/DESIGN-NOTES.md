@@ -185,8 +185,9 @@ to the requested models and usage metering.
 
 Review on 2026-10-14: issue #67 remains open. The attached cloud environment
 reports current observations with no configured secrets, runtime variables,
-capabilities or outbound identities; `claude` is absent from PATH. The Codex
-CLI is present, but does not establish access to the requested Claude model
+capabilities or outbound identities. Claude Code 2.1.300 was installed locally
+to run the real plugin validator; `claude auth status` reports `loggedIn: false`
+and `authMethod: none`. The Codex CLI is present, but does not establish access to the requested Claude model
 and effort grid or its billing meter. No held-out model runs or actual bill
 were produced, so no role default was changed and no measured curve is claimed.
 
