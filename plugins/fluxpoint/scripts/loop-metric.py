@@ -30,8 +30,11 @@ def main():
         chosen = next((m for m in definitions if m['name'] == name), None)
         if chosen is None:
             raise ValueError(f'plateau metric {name!r} is not declared')
-        value = metric.measure(args.root, chosen)
         path = os.path.join(args.root, '.claude', 'fluxpoint', 'loop-metrics.json')
+        # Never reuse an earlier session if the initial measurement fails.
+        if args.reset and os.path.isfile(path):
+            os.unlink(path)
+        value = metric.measure(args.root, chosen)
         history = []
         if not args.reset and os.path.isfile(path):
             with open(path, encoding='utf-8') as f:

@@ -113,6 +113,7 @@ for ((i = 1; i <= MAX_ITER; i++)); do
   git commit -q -m "loop: iteration $i" || true
   if FPL_PAIR_AGAINST="${FPL_PAIR_AGAINST:-$iter_base}" bash scripts/harness.sh --full \
      && grep -q '^STATUS: DONE' WORK.md; then
+    [ -z "$loop_metric" ] || record_metric || true
     echo "loop: harness green and STATUS DONE after iteration $i"
     exit 0
   fi
