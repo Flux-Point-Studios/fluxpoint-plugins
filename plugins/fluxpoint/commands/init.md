@@ -178,19 +178,33 @@ step; do not stop at copying files.
    for, which is the surface an autonomous caller actually reaches:
    unvalidated change address, datum round-trip loss, stale protocol
    parameters, a replayable signed transaction, unbounded UTxO selection,
-   a missing script data hash, unbounded collateral. A class is specified
+   a missing script data hash, unbounded collateral, a fee below the ledger
+   minimum, a script purpose without a witness, missing collateral, and a
+   batch sharing spent inputs. Include a phase-1 ledger check: phase-2 script
+   evaluation alone cannot establish that a transaction can be submitted.
+   Validate the minimum fee against landed transaction data, including final
+   size, witnesses and tiered reference-script charges. A class is specified
    by a test whose title carries the class id, and the scan notes when
    that test uses no fast-check, because an example is weaker than a
    property over a generator.
+   The **python** taxonomy names hosted-service classes: outsider-row decode,
+   a whole read refusing over stranger rows, unbounded literals/nesting,
+   provider-read amplification, event-loop blocking, and shared-pool exhaustion.
+   A tracked `test_*.py`, `*_test.py`, or `.py` under `test/`, `tests/` or
+   `__tests__/` specifies a class with a real pytest `def test_<class-id>...`
+   or `async def test_<class-id>...` function (including methods on `Test*`
+   classes). Comments, strings and non-test helper names do not count. Files
+   importing Hypothesis are noted as properties; other matching tests are
+   examples. Review the actual generators, assertions and documented bounds.
    `spec-guard.py --check` is red for each unspecified class until the
    test exists or the taxonomy's own `waived` object gives it a reason of
    at least twenty characters. A waiver is scoped to its taxonomy, so an
    Aiken waiver never excuses a builder class. Write those tests now,
-   against this repo's real validators and its real builder, and then arm
+   against this repo's real validators, builder and hosted services, and then arm
    the ratchets so their signatures are hashed. A class that genuinely
    cannot apply is waived in the committed file, where review sees it; it
    is never left unspecified.
-   Keep both taxonomies unless the repo has a reason to drop one. When the
+   Keep all three taxonomies unless the repo has a reason to drop one. When the
    repo tracks a language whose taxonomy is missing from the manifest,
    `spec-guard.py` prints a `NO TAXONOMY` line naming the language, how
    many classes the template holds for it and the first few ids. That line
