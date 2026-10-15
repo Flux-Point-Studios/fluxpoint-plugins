@@ -454,7 +454,7 @@ irrev_case("irreversible discovery loop",
 
 irrev_js = cg.emit(copy.deepcopy(IRREV), CONTRACTS)
 for needle, why in [
-    ("throw new Error('this graph has irreversible nodes but no ledger",
+    ("which needs args._ledger",
      "an absent ledger fails loudly rather than disarming the guard"),
     ("in LEDGER", "the ledger is consulted before the effect"),
     ("REPLAYED-FROM-LEDGER", "a hit is reported, not silently skipped"),
@@ -682,7 +682,7 @@ for name, ok in [
     # It may READ one — the tree guard compares a launch reading when
     # there is one (#94) — but never refuses to start without it.
     ("a graph with no isolated nodes demands no base",
-     "no base was passed" not in plain_js),
+     'A["_base"] !== undefined' in plain_js),
     # #21: the sentinel brackets the campaign and guards every verdict-minting
     # node; drift halts rather than advancing.
     ("sentinel at start, before the verdict node, and at end",
@@ -842,7 +842,7 @@ def tree_sentinel_executed_case():
                     "  return {findings:[]}};",
                     "const parallel=async(t)=>Promise.all(t.map(f=>f()));",
                     "const pipeline=async()=>[],log=()=>{},phase=()=>{};",
-                    "const args={_base:{sha:'abc123',branch:'main'}};",
+                    "const args={_base:{sha:'abc123',branch:'main',porcelain:''}};",
                     "const budget={total:null,spent:()=>0,remaining:()=>1e9};",
                     "const workflow=0;",
                     "(async () => {",
@@ -906,7 +906,7 @@ def tree_own_writes_and_launch_case():
                     "const agent=async(p,o)=>{PROMPTS.push(String(p));",
                     "  if(String(o.label||'').includes('tree-check')) {",
                     "    const r = READINGS[Math.min(checks, READINGS.length - 1)]; checks++;",
-                    "    return {head: r[0], porcelain: r[1]} }",
+                    "    return {head: r[0], porcelain: r[1], ...(r[2] ? {root:r[2]} : {})} }",
                     "  if(String(o.label||'').includes('refute'))",
                     "    return {refuted:false, reason:'no'};",
                     "  if(String(o.label||'').includes('gate'))",
@@ -938,6 +938,11 @@ def tree_own_writes_and_launch_case():
     moved_dirt = run([["abc123", ""]], {"sha": "abc123", "porcelain": " M src/app.py"})
     resumed_dirty_state = run([["abc123", ""]], {"sha": "abc123", "porcelain": " M WORK.md"})
     no_launch = run([["abc123", ""]], None, js=plain_js)
+    wrong_root = run([["abc123", "", "/other-checkout"]], dict(base, root="/campaign"))
+    wrong_root_and_head = run([["other123", "", "/other-checkout"]], dict(base, root="/campaign"))
+    normalized_root = run([["abc123", "", "C:/WORK/Campaign/"]], dict(base, root="c:\\work\\campaign"))
+    no_root = run([["abc123", "", "/other-checkout"]], base)
+    old_shape = run([["abc123", ""]], {"sha": "abc123", "branch": "main"})
 
     def outcome(x):
         return (x.get("r") or {}).get("outcome")
@@ -965,6 +970,17 @@ def tree_own_writes_and_launch_case():
                                                    "?? .claude/worktrees/"]], base)
 
     for name, ok, got in [
+        ("different checkouts with identical HEAD/dirt are WRONG-ROOT before any node",
+         outcome(wrong_root) == "WRONG-ROOT" and wrong_root.get("gateRan") is False
+         and any("/cd" in m and "/campaign" in m and "/other-checkout" in m for m in wrong_root.get("LOGS", [])), wrong_root),
+        ("checkout identity takes precedence over different HEADs",
+         outcome(wrong_root_and_head) == "WRONG-ROOT", wrong_root_and_head),
+        ("Windows root separators, trailing slash and drive-path case normalize",
+         outcome(normalized_root) in ("COMPLETE", "INCOMPLETE"), normalized_root),
+        ("an omitted root retains existing compatibility",
+         outcome(no_root) in ("COMPLETE", "INCOMPLETE"), no_root),
+        ("an old _base without porcelain refuses before sentinel or nodes",
+         "git status --porcelain" in old_shape.get("err", ""), old_shape),
         ("the Stop hook's Evidence row is not TREE-MOVED",
          outcome(hook_row) in ("COMPLETE", "INCOMPLETE"), hook_row),
         ("  nor in a project below a monorepo's top level",
@@ -1222,14 +1238,14 @@ def prove_ci_and_launch_case():
         ("  while a CI-only manifest is a manifest",
          ci_only == {"ci"} and not ci_only.findings, (ci_only, ci_only.findings)),
         ("a prove: graph refuses to start without a launch stamp",
-         "launch stamp" in str(unstamped.get("err")), unstamped),
+         "attest.py --stamp" in str(unstamped.get("err")), unstamped),
         ("  and carries the stamp into the summary it is recorded from",
          ((stamped.get("r") or {}).get("launch") or {}).get("since") == "2026-09-23T00:00:00Z",
          stamped),
         ("a stamp without a run nonce is refused (overlapping runs, #91 review)",
-         "launch stamp" in str(no_nonce.get("err")), no_nonce),
+         "attest.py --stamp" in str(no_nonce.get("err")), no_nonce),
         ("  and so is a nonce that is not a plain token",
-         "launch stamp" in str(bad_nonce.get("err")), bad_nonce),
+         "attest.py --stamp" in str(bad_nonce.get("err")), bad_nonce),
         ("the prove node is told to bind its gate run to this run's nonce",
          "FPL_ATTEST_NONCE=${LAUNCH.nonce}" in js and "provePreamble(\"ci\") +" in js
          and "--match-head-commit" in js, "preamble"),

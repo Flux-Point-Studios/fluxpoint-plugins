@@ -62,10 +62,37 @@ is for a graph run.
    ```
    {scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/graph-audit.js",
     args: {graph: "<graph>", pluginRoot: "${CLAUDE_PLUGIN_ROOT}",
+           ir: <the exact parsed graph-ir JSON>, bindings: <actual campaign args, if known>,
            check: "<the --check summary line>", settled: ["<title>", ...],
            history: [<recorded rounds from step 3>]}}
    ```
-   with args as a real JSON object. A round runs six lenses in parallel,
+   with args as a real JSON object. Before Lenses, a `Probe` phase runs one
+   agent with `isolation: 'worktree'` per node declaring `isolation: true`,
+   `isolation: 'worktree'`, or `mutates: true`. A `measure` node uses its
+   frozen snapshot and does not get this runtime-worktree probe. Without
+   `ir`, a mechanical reader discovers all nodes and `argDefaults` first;
+   an unavailable plan blocks SOUND. `bindings` overrides `argDefaults`
+   when resolving `{{A.x}}`; unresolved inputs leave the probe incomplete.
+
+   Each probe reads the actual node prompt and tries its prescribed commands
+   only in safe, non-mutating read forms. Preserve the `git -C` target,
+   `cd` target, `$(...)`, and `&&`, `;`, `|` chaining while replacing mutating
+   subcommands with reads. These shapes can be refused by the runtime's
+   isolation hook even when they work in the launch checkout. Never run
+   fetches, ref changes, worktree creation, shared writes or deployments in
+   the name of probing. If a safe equivalent cannot retain the shape, report
+   it UNRESOLVED. An earlier short-circuit or a Git syntax error does not
+   establish whether the isolation boundary accepted the intended command.
+   Keep every original/safe command and measured response in the result.
+
+   Probe refusals join the finding reduction and get refuters with
+   `isolation: 'worktree'` too. A refuter unable to reach the same runtime
+   boundary returns `reproduced: false`, leaving that finding UNVERIFIED;
+   uncertainty never refutes a measured isolation refusal. Missing or
+   incomplete probes block SOUND. A successful probe covers prescribed
+   shapes only: an agent can later invent a compound command the hook refuses.
+
+   A round then runs six lenses in parallel,
    each a `graph-auditor` with the same scope and evidence rule:
    `commands`, `data-flow`, `verdicts`, `runtime`, `merge-deploy`, and
    `walkthrough`, which walks the executor and every node in order. A
@@ -81,12 +108,15 @@ is for a graph run.
    Tell the user the cost before launching. The rounds that shaped this
    audit, on a ten-node graph, ran 23 to 33 agents and about 2.8M to 3.1M
    subagent tokens each, where the single auditor was one agent;
+   probes add one agent per isolated node, plus a plan reader when `ir` was
+   omitted. The observed motivating probe ran eight commands in 16 seconds;
+   treat that as one observation, not a runtime guarantee.
    refutation roughly halved what reached the author. To audit other
    ground, pass `lenses`: ids from `LENSES` in the script, or
    `{id, focus}` objects.
 
    **`--quick`, one auditor.** Add `mode: "single"` to the same args. One
-   `graph-auditor` runs, with no reduce and no refutation, so every
+   `graph-auditor` runs after the same isolated probes, with no reduce and no refutation, so every
    finding comes back UNVERIFIED. It is for checks between repairs: its
    SOUND means one reader ran out of path, and it does not make a graph
    READY.
@@ -95,7 +125,11 @@ is for a graph run.
    it), run the same round by hand. Take the lenses and the refuter
    wording from `LENSES` and `REFUTERS` in
    `${CLAUDE_PLUGIN_ROOT}/workflows/graph-audit.js`. Run each lens as a
-   subagent given `${CLAUDE_PLUGIN_ROOT}/agents/graph-auditor.md` as its
+   subagent. First run the safe command probes in actual isolated worktrees;
+   a plain launch-checkout shell cannot substitute for the runtime hook.
+   If equivalent runtime isolation cannot be exercised, leave those probes
+   UNVERIFIED and the graph short of SOUND. Give each audit
+   subagent `${CLAUDE_PLUGIN_ROOT}/agents/graph-auditor.md` as its
    instructions plus its lens and the settled list, or as a separate
    inline pass when no subagent can be spawned. Merge duplicates by
    failure path without judging them, then refute every distinct finding

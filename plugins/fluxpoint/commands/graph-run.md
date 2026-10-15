@@ -32,6 +32,10 @@ Workflow tool requires.
      cleanup, including when resuming a run with cached node results.
    - `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> --check` exits 0.
      Its findings are the work list; fix the IR, never the compiler.
+     Its versioned `launch args` and `post-launch` lists are authoritative
+     for this installed compiler, even if these command instructions were
+     loaded before a plugin upgrade. Load each named producer's current
+     output; do not recover from a refusal by guessing a missing field.
    - If `.fluxpoint-gates.json` declares a gate named `preflight`, run
      `bash "$ROOT/scripts/py.sh" attest.py --root <project-root> --run preflight`
      and require exit 0 before launch or resume. Put the repo's fast graph,
@@ -74,7 +78,8 @@ Workflow tool requires.
    Record the launch reading, fresh at every launch including a resume:
    ```
    args._base = {"sha": "$(git rev-parse HEAD)", "branch": "$(git branch --show-current)",
-                 "porcelain": "$(git status --porcelain)"}
+                 "porcelain": "$(git status --porcelain)",
+                 "root": "$(git rev-parse --show-toplevel)"}
    ```
    A graph with any `isolation` node — or `mutates: true`, which implies a
    worktree — refuses to start without it. Every graph that guards its tree
@@ -82,6 +87,12 @@ Workflow tool requires.
    sentinel is a cached `agent()` call on resume, so this reading is the
    only one that sees the tree the resumed run is really on. Never reuse an
    earlier launch's `_base`.
+   A supplied `_base` without `porcelain` is refused, including when clean:
+   use the empty string. The sentinel reads its own checkout root and
+   compares it before HEAD or dirt. `WRONG-ROOT` means the session and launch
+   reading name different checkouts; move the session to the launch checkout
+   with `/cd` and launch fresh. Repeating a fresh launch in the same wrong
+   directory cannot fix it.
    Isolated nodes are handed this base in their prompts and told to assert
    it before trusting the tree they were given: a worktree's base is the
    runtime's choice, and it has been observed cut from the default branch
@@ -173,6 +184,11 @@ Workflow tool requires.
    text, recordId and date reach every mutating node as context and cannot
    override the relayed user message. Invoke with
    `{scriptPath: ".claude/workflows/<name>.graph.js", args: {...}}`.
+   If Workflow refuses `scriptPath` because the compiled script is outside
+   the session's working directory, move the session to that campaign
+   checkout with `/cd` before launching. Do not copy the script into another
+   checkout: the nodes would then run there while the launch readings still
+   described the campaign checkout.
    Pass args as a real JSON object, not a stringified one. Watch with
    `/workflows`; never poll with sleep. As soon as the tool returns its run id,
    start the observer with the Bash tool's `run_in_background: true`:
