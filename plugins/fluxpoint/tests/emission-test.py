@@ -373,6 +373,8 @@ probe("IR", "nodes", NODE_BASE,
                                      "prompt": "another", "contract": "DesignV1"}))
 probe("IR", "requiredArgs", NODE_BASE, lambda ir: ir.update(requiredArgs=["target"]))
 probe("IR", "treeGuard", NODE_BASE, lambda ir: ir.update(treeGuard=False))
+probe("IR", "authorizedBy", NODE_BASE, lambda ir: ir.update(
+    imports={"vault-params": "latest"}, authorizedBy="vault-params"))
 probe("IR", "argDefaults", NODE_BASE, lambda ir: ir.update(argDefaults={"target": "HEAD"}))
 
 # ------------------------------------------------------------ completeness
@@ -394,7 +396,7 @@ probed = {
                "maxEstimatedTokens", "cacheTtl"},
     "IR": {
         "version", "name", "campaign", "budget", "defaults", "roles", "lists",
-        "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard",
+        "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard", "authorizedBy",
     },
 }
 for level, registry in [

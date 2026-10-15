@@ -11,6 +11,16 @@ Workflow tool requires.
    The graph file is "$ARGUMENTS" if it names one, else `WORK.md`.
 2. Preflight, all deterministic — stop and report exactly what is missing
    rather than improvising around it:
+   - Run `bash "$ROOT/scripts/py.sh" unchecked-repairs.py --graph <graph> --root <project-root>`.
+     It lists every commit since the latest recorded BLOCK's reviewed head,
+     including its final `Fluxpoint-Executor` trailer. Exit 1 stops a graph
+     containing a RedTeamV1 or irreversible node; exit 2 means history or
+     records could not be read and also stops launch. A repair-only graph
+     may run to check this list. Its independent FixCheckV1 PASS must name
+     the checked SHAs in `commits`; `record-run.py` files them as `checked`.
+     Alternatively, record explicit acceptance in a DecisionV1
+     `acceptedCommits` array with `decision.py --record`. A SHA mentioned in
+     prose, a passing build, or an executor label does not discharge it.
    - `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> --check` exits 0.
      Its findings are the work list; fix the IR, never the compiler.
    - Mutating and irreversible graphs require the locked spec packet.
@@ -136,6 +146,15 @@ Workflow tool requires.
    the campaign obviously intends it, or because the user said "go" — only
    when they have named the effect.
 5. Set `STATUS: RUNNING`. Invoke the Workflow tool (Claude Code) with
+   the launch-turn rule: Workflow gives every node the launching turn's
+   latest user message, unchanged for the whole run; a compiled prompt
+   cannot extend it. Launch only when that message is this run command or
+   the operator's go for this graph. If a narrower message arrived after
+   it, ask the operator to re-issue `/fluxpoint:graph-run <graph>` before
+   invoking Workflow. A recorded ruling may be bound with IR
+   `authorizedBy: <decision-id>` and the same id in `imports`; its chosen
+   text, recordId and date reach every mutating node as context and cannot
+   override the relayed user message. Invoke with
    `{scriptPath: ".claude/workflows/<name>.graph.js", args: {...}}`.
    Pass args as a real JSON object, not a stringified one. Watch with
    `/workflows`; never poll with sleep. As soon as the tool returns its run id,
@@ -162,6 +181,12 @@ Workflow tool requires.
    packet the run is checked against); `--evidence` is the file whose
    Evidence and Decisions tables receive the rows, `--graph` by default. A
    campaign in `GRAPH.<name>.md` with a packet of its own passes both.
+   Run artifacts always go to `<root>/.claude/fluxpoint/runs`, even when
+   recording from a subdirectory; pass `--root <project-root>` explicitly.
+   `--state-dir` may only name that canonical directory. Exit 3 retains the
+   artifact but means the Evidence row was NOT appended: add the canonical
+   five-column header and separator, or pass `--evidence WORK.md`, then
+   record into the intended Evidence table before calling the run filed.
    That also appends any irreversible effect to the ledger, so the next
    run replays it instead of repeating it. Before diagnosing an empty or
    surprising result, read the run's `journal.jsonl` — it records what
@@ -179,6 +204,11 @@ Workflow tool requires.
    node onward re-runs, and any irreversible node among them replays
    from the ledger rather than firing twice. Restarting a mostly-green
    graph from zero is a finding.
+   Apply step 5's launch-turn rule to every resume too. A node that stopped
+   because its slice goes beyond the relayed user's request has an
+   authorization-context stop, not a code defect. Resume from the operator's
+   run command or go for this graph, with no invented code repair; if a
+   narrower message arrived, ask for the run command to be re-issued first.
 8. Graph green is not done. The campaign still exits through the
    loop-engineering ship pipeline — `scripts/harness.sh --full`, red-team
    `VERDICT: SHIP`, the Merge policy in WORK.md — and the Stop-hook DoD
@@ -189,3 +219,7 @@ Workflow tool requires.
    Claude Code builds lack it — degrade per the graph-engineering skill: run the compiled script's nodes as parallel subagent calls with
    the same contracts, then record with `--executor degraded-subagents` so
    the Evidence row says which executor ran the graph.
+   Direct repairs made outside a graph remain unchecked until an independent
+   repair run or explicit recorded acceptance discharges them. End each Codex
+   commit with `Fluxpoint-Executor: codex` in the final Git trailer block,
+   alongside other trailers, so preflight can identify the executor.

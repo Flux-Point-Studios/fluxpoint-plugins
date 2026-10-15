@@ -138,11 +138,11 @@ newrepo
 printf '%s' "$RESULT" | "$FPL_PY" "$PLUGIN/scripts/record-run.py" --run-id wf_l1 --graph GRAPH.md --harness 0 >/dev/null
 contains "legacy table: 7-column row appended" "| wf_l1 | COMPLETE | 1/1 | 2 | 0 |" GRAPH.md
 
-# --- 4. no Evidence table: artifact still written, warning emitted, exit 0 ---
+# --- 4. no Evidence table: artifact still written, warning emitted, exit 3 ---
 newrepo
 printf '# WORK\nno table here\n' >WORK.md
 err="$(printf '%s' "$RESULT" | "$FPL_PY" "$PLUGIN/scripts/record-run.py" --run-id wf_n1 2>&1 >/dev/null)"
-check "missing table -> still exit 0" "0" "$?"
+check "missing table -> exit 3" "3" "$?"
 check "missing table -> artifact exists" "0" "$([ -f .claude/fluxpoint/runs/wf_n1.json ] && echo 0 || echo 1)"
 case "$err" in *"no Evidence table header"*) check "missing table -> warns" "warn" "warn" ;;
   *) check "missing table -> warns" "warn" "silent" ;; esac

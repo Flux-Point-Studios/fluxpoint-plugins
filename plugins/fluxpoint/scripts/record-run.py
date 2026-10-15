@@ -360,6 +360,36 @@ def derive(summary):
     return harness, verdict, blocked, proof, proof_surface, incoherent
 
 
+def checked_commits(summary, graph):
+    """Only independently passing repair checks discharge unchecked commits."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "compile-graph.py")
+    spec = importlib.util.spec_from_file_location("repair_graph_recorder", path)
+    compiler = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(compiler)
+    try:
+        with open(graph, encoding="utf-8") as fh:
+            ir = compiler.extract_ir(fh.read())
+    except (OSError, ValueError, compiler.GraphError):
+        return []
+    checkers = {n.get("id") for n in ir.get("nodes", [])
+                if n.get("contract") == "FixCheckV1" and n.get("independent")
+                and ((n.get("repeat") or {}).get("until") == "verdict == 'PASS'"
+                     or n.get("haltWhen") == "verdict != 'PASS'")}
+    checked = set()
+    for row in summary.get("fixOrigins") or []:
+        if not isinstance(row, dict) or row.get("node") not in checkers or row.get("verdict") != "PASS":
+            continue
+        if (summary.get("contracts") or {}).get(row["node"]) != "FixCheckV1":
+            continue
+        commits = row.get("commits")
+        if (isinstance(commits, list) and commits
+                and all(isinstance(c, str) and re.fullmatch(r"[0-9a-fA-F]{7,40}", c) for c in commits)
+                and len(set(c.lower() for c in commits)) == len(commits)):
+            checked.update(c.lower() for c in commits)
+    return sorted(checked)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-id", required=True)
@@ -375,10 +405,18 @@ def main():
     ap.add_argument("--red-team", default="n/a", help="SHIP | BLOCK | n/a")
     ap.add_argument("--proof-audit", default="n/a",
                     help="SOUND | WEAKENED | UNPROVEN | NOT-APPLICABLE | n/a")
-    ap.add_argument("--executor", default="workflow", help="workflow | degraded-subagents")
-    ap.add_argument("--state-dir", default=".claude/fluxpoint/runs")
+    ap.add_argument("--executor", default="workflow", choices=("workflow", "degraded-subagents"))
+    ap.add_argument("--state-dir", default=None,
+                    help="must resolve to <root>/.claude/fluxpoint/runs")
     ap.add_argument("--root", default=".", help="repo root holding .claude/fluxpoint")
     args = ap.parse_args()
+    args.root = os.path.realpath(args.root)
+    canonical_runs = os.path.realpath(os.path.join(args.root, ".claude", "fluxpoint", "runs"))
+    if args.state_dir is not None and os.path.realpath(args.state_dir) != canonical_runs:
+        ap.error("--state-dir must resolve to " + canonical_runs)
+    args.state_dir = canonical_runs
+    if not args.run_id or args.run_id in (".", "..") or any(c in args.run_id for c in ("/", "\\")):
+        ap.error("--run-id must be a single filename component")
     evidence_file = args.evidence or args.graph
 
     raw = open(args.result, encoding="utf-8").read() if args.result else sys.stdin.read()
@@ -632,6 +670,7 @@ def main():
         print(f"record-run: attestation cross-check failed: {e}", file=sys.stderr)
 
     # 1. Durable provenance artifact.
+    checked = checked_commits(summary, args.graph)
     os.makedirs(args.state_dir, exist_ok=True)
     art = os.path.join(args.state_dir, f"{args.run_id}.json")
     with open(art, "w", encoding="utf-8", newline="\n") as fh:
@@ -645,6 +684,8 @@ def main():
                 "recordedAt": datetime.datetime.now(datetime.timezone.utc).strftime(
                     "%Y-%m-%d %H:%M:%S"),
                 "executor": args.executor,
+                "graph": os.path.relpath(os.path.realpath(args.graph), args.root).replace(os.sep, "/"),
+                "checked": checked,
                 "outcome": outcome,
                 "nodesOk": ok,
                 "nodesDead": dead,
@@ -798,6 +839,7 @@ def main():
     )
 
     from workfile_lock import workfile_lock
+    row_appended = False
     with workfile_lock(evidence_file):
         # 2a. Decisions, spliced under their own header when the file has one.
         drows = decision_rows(summary, ts)
@@ -830,21 +872,29 @@ def main():
                 if n:
                     open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
                     row = new_row
+                    row_appended = True
                 else:
                     print(
                         f"record-run: Evidence header found in {evidence_file} but no "
-                        f"separator row beneath it; artifact written, row not appended",
+                        f"separator row beneath it; artifact written, row NOT appended. "
+                        f"Add the separator beneath {ROW_HDR} or pass --evidence WORK.md",
                         file=sys.stderr,
                     )
             else:
                 print(
                     f"record-run: no Evidence table header in {evidence_file}; "
-                    f"artifact written but row not appended",
+                    f"artifact written but row NOT appended. Add {ROW_HDR} and its "
+                    f"separator, or pass --evidence WORK.md",
                     file=sys.stderr,
                 )
+        else:
+            print(f"record-run: Evidence file {evidence_file} does not exist; artifact "
+                  f"written but row NOT appended. Add {ROW_HDR} and its separator, "
+                  f"or pass --evidence WORK.md", file=sys.stderr)
     print(f"record-run: {art}")
-    print(row)
-    return 0
+    if row_appended:
+        print(row)
+    return 0 if row_appended else 3
 
 
 if __name__ == "__main__":

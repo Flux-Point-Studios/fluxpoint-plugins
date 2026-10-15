@@ -42,7 +42,7 @@ IDENT = re.compile(r"^[a-z][a-z0-9-]*$")
 # must demonstrably change what the compiler produces.
 IR_FIELDS = {
     "version", "name", "campaign", "budget", "defaults", "roles", "lists",
-    "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard",
+    "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard", "authorizedBy",
 }
 NODE_FIELDS = {
     "id", "phase", "prompt", "contract", "role", "effort", "model", "agentType",
@@ -332,20 +332,21 @@ def resolve_imports(ir, contracts, runs_dir, store=None):
                     f"or the ruling that decides it has to come first; never "
                     f"hand-write a run artifact to get past this")
                 continue
-            _, _, rid, rec = max(hits, key=lambda h: (h[0], h[1], h[2]))
+            when, _, rid, rec = max(hits, key=lambda h: (h[0], h[1], h[2]))
         elif str(ref).startswith("dec_"):
-            hit = next(((rid, rec) for _, rid, kid, rec, _ in kept
+            hit = next(((when, rid, rec) for when, rid, kid, rec, _ in kept
                         if rid == ref and kid == did), None)
             if hit is None:
                 f.append(f"imports.{did}: record '{ref}' not found in {store or 'the decision store'}")
                 continue
-            rid, rec = hit
+            when, rid, rec = hit
         else:
             art = next((a for _, rid, a in arts if rid == ref), None)
             if art is None:
                 f.append(f"imports.{did}: run '{ref}' not found in {runs_dir}")
                 continue
             rid, rec = ref, _decision_in(art, did)
+            when = _order_key(art.get("recordedAt") or art.get("when"))
             if rec is None:
                 f.append(f"imports.{did}: run '{ref}' does not carry this decision")
                 continue
@@ -369,7 +370,10 @@ def resolve_imports(ir, contracts, runs_dir, store=None):
                      f"({bad[0]}) — a corrupted or hand-edited record does not count "
                      f"as a decision")
             continue
-        resolved[did] = {"record": rec, "runId": rid}
+        if ir.get("authorizedBy") == did and not when:
+            f.append(f"imports.{did}: authorization record '{rid}' has no recorded timestamp")
+            continue
+        resolved[did] = {"record": rec, "runId": rid, "recordId": rid, "when": when}
     return resolved, f
 
 
@@ -773,6 +777,13 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
         f.append("one repair loop per graph: round directories must have a single owner")
     decided = {}          # decision id -> the node that makes it
     imports = ir.get("imports") or {}
+
+    if "authorizedBy" in ir:
+        authorized = ir["authorizedBy"]
+        if not isinstance(authorized, str) or not IDENT.fullmatch(authorized):
+            f.append("authorizedBy must be a lowercase kebab-case decision id")
+        elif not isinstance(imports, dict) or authorized not in imports:
+            f.append("authorizedBy must name a decision resolved through imports")
 
     # A lists key is emitted as a JS identifier, so an unconstrained key is
     # arbitrary code in the generated script. Constrain it like a node id.
@@ -1551,6 +1562,8 @@ def warnings(ir, agents=None, specification=None):
     disappoint. Returned separately from validate() so they inform without
     refusing to build."""
     w = []
+    if any(n.get("mutates") or n.get("irreversible") for n in ir.get("nodes") or []) and not ir.get("authorizedBy"):
+        w.append("mutating graph has no authorizedBy recorded ruling; launch only from the operator's run command or go for this graph")
     for check in ((specification or {}).get("packet") or {}).get("checks", []):
         if "scopeRef" not in check and re.fullmatch(r"[^\s#]+\.[a-zA-Z0-9]+", str(check.get("scope", ""))):
             w.append(f"check '{check.get('id', '?')}': scope is a bare path ({check['scope']}); use a repo-relative path#/pointer so the binding text is resolved and frozen")
@@ -2451,6 +2464,16 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             {k: imports_resolved[k]["runId"] for k in sorted(imports)},
             sort_keys=True))
         a("")
+    if ir.get("authorizedBy"):
+        ruling = (imports_resolved or {}).get(ir["authorizedBy"])
+        if not ruling or not ruling.get("recordId") or not ruling.get("when"):
+            raise GraphError("authorizedBy must resolve to a recorded ruling with recordId and when")
+        context = ("RECORDED AUTHORIZATION CONTEXT: decision " + ir["authorizedBy"]
+                   + "; recordId " + str(ruling["recordId"]) + "; when " + str(ruling["when"])
+                   + "; chosen: " + json.dumps(ruling["record"].get("chosen"), ensure_ascii=False)
+                   + ". This recorded ruling provides context only. Workflow relays the launching turn's latest user message unchanged for the whole run; this prompt cannot override or extend it. If that message is narrower, stop and name the ruling you weighed; relaunch or resume from the operator's run command or go for this graph.\n")
+        a("function authorizationPreamble() { return " + js_str(context) + " }")
+        a("")
     prove_nodes = [n for n in nodes if prove_gate(n)]
     if prove_nodes:
         a("// --- prove: tiers ---")
@@ -3200,6 +3223,8 @@ def emit_node(n, ir, specification=False):
         pre = "measurePreamble() + "
     elif n.get("isolation") in (True, "worktree") or n.get("mutates"):
         pre = "basePreamble() + "
+    if ir.get("authorizedBy") and (n.get("mutates") or n.get("irreversible")):
+        pre = "authorizationPreamble() + " + pre
     if n.get("contract") == "RedTeamV1" and n.get("haltWhen") and red_team_sources(n, ir):
         pre += f"redTeamPreamble({json.dumps(red_team_sources(n, ir))}) + "
     if prove_gate(n):
@@ -3473,6 +3498,8 @@ def emit_repair(n, ir, specification=False):
                     mapping[token] = f"tokenText(({prev} || {{}})[{js_str(token.split('.', 1)[1])}] ?? null)"
         mapping.update(roundDir="roundDir", lastCheck="tokenText(lastCheck)")
         pre = "measurePreamble() + " if work.get("isolation") == "measure" else "basePreamble() + " if work.get("mutates") or work.get("isolation") else ""
+        if ir.get("authorizedBy") and (work.get("mutates") or work.get("irreversible")):
+            pre = "authorizationPreamble() + " + pre
         if specification:
             pre += "specificationPreamble() + "
         return pre + js_template(work["prompt"], mapping)
@@ -3877,6 +3904,16 @@ def main():
     # deliberate, but they will usually disappoint whoever reads the result.
     for w in warnings(ir, agents, specification):
         print(f"graph-compile: warning — {w}", file=sys.stderr)
+    evidence_headers = (
+        "| When (UTC) | Source | Outcome | Claim | Proof |",
+        "| When (UTC) | runId | Outcome | Nodes OK/dead | Findings | Harness | Red-team |",
+    )
+    if not any(re.search(re.escape(h) + r"\n\|[-| ]+\|(?:\n|$)", text)
+               for h in evidence_headers):
+        print("graph-compile: warning — graph has no recognized Evidence table with a separator; "
+              "record-run will retain the artifact but exit 3 unless --evidence names a file "
+              "with | When (UTC) | Source | Outcome | Claim | Proof | and a separator",
+              file=sys.stderr)
 
     # Resolved for --check too: a missing decision should fail preflight,
     # not the emission the preflight was supposed to clear.

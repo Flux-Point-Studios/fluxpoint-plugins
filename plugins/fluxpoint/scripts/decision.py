@@ -122,6 +122,12 @@ def validate(rec, schema, choice_among_options=True):
             f.append(f"every entry of {key} must be a string")
 
     opts = rec.get("options")
+    accepted = rec.get("acceptedCommits")
+    if accepted is not None and (not isinstance(accepted, list) or not accepted
+            or any(not isinstance(c, str) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", c)
+                   for c in accepted)
+            or len({str(c).lower() for c in accepted}) != len(accepted)):
+        f.append("acceptedCommits must be a nonempty unique array of 7-40 digit Git commit IDs")
     if isinstance(opts, list):
         ospec = (props.get("options", {}).get("items", {}))
         oprops = ospec.get("properties", {})
