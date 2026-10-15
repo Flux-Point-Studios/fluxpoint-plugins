@@ -162,3 +162,55 @@ the run artifact; its Evidence row names the digest and changed paths. Missing
 locked files are recorded with a null hash. These describe the tree at recording
 time; record from the executed tree before further edits. The Stop gate also
 names edited check files from declared packets' harness maps as trust-base edits.
+
+`SliceV1.packetEdits` carries proposed specification revisions as data. Each item
+has exactly `file`, `anchor`, `op`, `text` and `reason`. `file` is repository
+relative; `anchor` is a nonempty literal in the original LF-normalized file,
+including serialized JSON quoting/escapes when applicable. `replace` replaces
+the anchor, `insertAfter` inserts immediately after it, and `append` appends at
+EOF with the unique anchor as a precondition. `text` may be empty for a deletion;
+`reason` explains the revision. An empty array explicitly proposes no revision.
+
+```json
+[
+  {
+    "file": ".fluxpoint-spec.json",
+    "anchor": "\"scope\": \"Old checked boundary\"",
+    "op": "replace",
+    "text": "\"scope\": \"New independently verified boundary\"",
+    "reason": "The check now covers both provider paths; retain the measured bounds."
+  }
+]
+```
+
+Measure the consolidated array before landing or re-locking:
+
+```sh
+python compile-graph.py GRAPH.build.md --check --packet-edits packet-edits.json
+```
+
+This reads the current packet without treating it as locked, applies proposals
+only to in-memory snapshots, resolves archived binding text from those snapshots,
+and recomputes the complete projected identity. It prints the exact emitted
+script's UTF-8 size and headroom, rejects overflow, and warns below the 16 KiB
+margin. An unlocked or stale source is labelled explicitly. The projection
+cannot emit a launch script, certify `--check-script`, or write any packet/lock.
+Normal compilation still requires the real locked packet. Review and use the
+normal specification-revision process before launching the resulting change.
+
+Anchors must occur exactly once, counting overlapping matches. Every anchor
+refers to the original snapshot, never text another edit introduced. Overlapping
+anchor spans and colliding insertions fail independently of proposal order;
+symlink aliases cannot hide a conflict. Targets are the packet, its original or
+projected referenced JSON files, and graph files declaring that same packet.
+Unrelated files, locks, paths outside the repository and graph packet redirects
+are refused. A newly referenced archive must already exist in the tree. Invalid
+projected JSON or packet structure fails rather than receiving a borrowed lock
+identity. Archived text remains fully resolved, so moving it behind a reference
+does not reduce compiled size.
+
+In a repair round, integrate every passing slice's proposals, including earlier
+passing rounds, into one immutable `packet-edits.json`. The integration checker
+compares the artifact with the returned `packetEdits` and projects it against
+every graph naming that packet. Conflicts, dropped proposals and overflow fail
+the round; low headroom raises a finding while revision is still reviewable.

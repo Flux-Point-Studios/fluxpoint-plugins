@@ -93,6 +93,47 @@
           "type": "boolean"
         }
       }
+    },
+    "packetEdits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "file",
+          "anchor",
+          "op",
+          "text",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "anchor": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "op": {
+            "enum": [
+              "replace",
+              "append",
+              "insertAfter"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        }
+      }
     }
   }
 }

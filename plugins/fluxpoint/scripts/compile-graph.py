@@ -122,7 +122,8 @@ SPEC_PREAMBLE = ("Implement and verify this locked requirement packet. Defaulted
                  "not user authorization. Do not edit the packet, lock or proof baseline to pass a check. "
                  "Do not weaken check commands or harness files; use the documented harness-only re-lock path "
                  "when wiring changes without changing requirements. "
-                 "If a requirement is wrong, return the counterexample for a spec revision.\n")
+                 "If a requirement is wrong, return the counterexample and propose anchored file edits "
+                 "as SliceV1.packetEdits for a reviewed spec revision; never apply or re-lock them.\n")
 
 
 class GraphError(Exception):
@@ -3941,11 +3942,58 @@ def emit_repeat(n, ir, prompt, phase, panel, over):
 
 
 # ---------------------------------------------------------------------- main
+def prose_pin_findings(text, ir):
+    """Compare only an argDefault explicitly restated beside its own name."""
+    # Preserve line positions while ignoring examples and historical Evidence.
+    lines, fence = [], None
+    for line in text.splitlines():
+        marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+        if fence is not None:
+            if marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence) and not marker.group(2).strip():
+                fence = None
+            lines.append('')
+        elif marker:
+            fence = marker.group(1)
+            lines.append('')
+        else:
+            lines.append(line)
+    defaults = ir.get('argDefaults') or {}
+    if not isinstance(defaults, dict):
+        return ['argDefaults must be an object before prose pins can be compared']
+    pins = {key: value for key, value in defaults.items()
+            if isinstance(value, str) and re.fullmatch(r'[0-9a-f]{7,40}', value)}
+    patterns = {}
+    for key in pins:
+        words = re.sub(r'(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', ' ', key)
+        alternatives = {re.escape(key), r'[ \t]+'.join(map(re.escape, words.split()))}
+        name = '(?:' + '|'.join(sorted(alternatives)) + ')'
+        patterns[key] = re.compile(r'(?<![\w])`?' + name + r'`?(?![\w])[ \t]*'
+                                   r'(?:(?:is|at)\b|=|:)?[ \t]*`?([0-9a-f]{7,40})(?![0-9a-f])`?', re.I)
+    findings, evidence_level = [], None
+    for number, line in enumerate(lines, 1):
+        heading = re.match(r'^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$', line)
+        if heading:
+            level, title = len(heading.group(1)), heading.group(2)
+            if evidence_level is not None and level <= evidence_level:
+                evidence_level = None
+            if title.strip().lower() == 'evidence':
+                evidence_level = level
+        if evidence_level is not None:
+            continue
+        for key, pattern in patterns.items():
+            for match in pattern.finditer(line):
+                literal, expected = match.group(1).lower(), pins[key]
+                if not (literal.startswith(expected) or expected.startswith(literal)):
+                    findings.append(f'prose line {number}: {key} pin {literal} differs from argDefault {expected}')
+    return findings
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("graph", nargs="?", default="WORK.md", help="path to WORK.md (or any file with a graph-ir block)")
     ap.add_argument("-o", "--out", help="path to write the compiled .graph.js")
     ap.add_argument("--check", action="store_true", help="validate and measure the compiled script")
+    ap.add_argument('--packet-edits', help='with --check, measure anchored packet edit proposals from a JSON array without writing files')
     ap.add_argument("--max-script-bytes", type=int, default=WORKFLOW_SCRIPT_LIMIT,
                     help="Workflow launch limit in UTF-8 bytes (default: 524288)")
     ap.add_argument("--script-headroom-bytes", type=int, default=SCRIPT_HEADROOM_MARGIN,
@@ -3961,24 +4009,38 @@ def main():
     args = ap.parse_args()
     if args.max_script_bytes < 1 or args.script_headroom_bytes < 0:
         ap.error("script limit must be positive and headroom margin nonnegative")
+    if args.packet_edits and (not args.check or args.out or args.check_script):
+        ap.error('--packet-edits requires --check and cannot emit or certify a launch script')
 
     here = os.path.dirname(os.path.abspath(__file__))
     shipped_dir = os.path.join(os.path.dirname(here), "contracts")
     sys.path.insert(0, here)
     import specification as spec_mod
 
+    projection = None
     try:
         with open(args.graph, encoding="utf-8") as fh:
             text = fh.read()
-        ir = extract_ir(text)
         # The graph file's own header says which packet and which contracts
         # it was written against. Ignoring it compiled a repo-local contract
         # set as a page of false findings, and bound one campaign's nodes to
         # whichever packet another campaign had locked last.
         header = spec_mod.headers(text)
+        if args.packet_edits:
+            with open(args.packet_edits, encoding='utf-8') as fh:
+                edits = json.load(fh, object_pairs_hook=spec_mod.unique_keys)
+            graph_rel = os.path.relpath(os.path.abspath(args.graph), os.path.abspath(args.gates_root)).replace(os.sep, '/')
+            projection = spec_mod.project(args.gates_root, edits, spec=header.get('SPEC'), graph=graph_rel)
+            text = spec_mod.file_snapshot(args.gates_root, args.graph, projection[2]).decode('utf-8')
+            projected_header = spec_mod.headers(text)
+            if (spec_mod.packet_paths(args.gates_root, projected_header.get('SPEC'))[0].resolve()
+                    != spec_mod.packet_paths(args.gates_root, header.get('SPEC'))[0].resolve()):
+                raise ValueError('packetEdits cannot redirect the graph to a different SPEC packet')
+            header = projected_header
+        ir = extract_ir(text)
         contracts, contracts_desc = resolve_contracts(
             shipped_dir, header.get("CONTRACTS"), args.contracts, args.gates_root)
-    except (OSError, GraphError, ValueError) as e:
+    except (OSError, GraphError, ValueError, TypeError) as e:
         print(f"graph-compile: {e}", file=sys.stderr)
         return 1
 
@@ -3990,13 +4052,18 @@ def main():
     agents = load_agents(args.gates_root)
     gates = load_gates(args.gates_root)
     findings = validate(ir, contracts, gates, agents)
+    if not findings:
+        findings.extend(prose_pin_findings(text, ir))
     specification = None
     spec_path = header.get("SPEC")
     if not findings and (spec_path or spec_mod.required(args.gates_root)
                          or any(n.get("mutates") or n.get("irreversible") for n in ir["nodes"])):
         try:
             packet_file, _ = spec_mod.packet_paths(args.gates_root, spec_path)
-            packet, identity = spec_mod.load(args.gates_root, spec=spec_path)
+            if projection is None:
+                packet, identity = spec_mod.load(args.gates_root, spec=spec_path)
+            else:
+                packet, identity = projection[:2]
             specification = {"packet": packet, "identity": identity,
                              "path": os.path.relpath(packet_file, args.gates_root).replace(os.sep, "/")}
             findings = validate(ir, contracts, gates, agents, specification)
@@ -4009,6 +4076,16 @@ def main():
         for f in findings:
             print(f"  - {f}", file=sys.stderr)
         return 1
+
+    if projection is not None:
+        import hashlib
+        identity_sha = hashlib.sha256(json.dumps(projection[1], sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+        print(f"graph-compile: projection only — current packet {projection[3]['sha256']}; "
+              f"projected packet {projection[1]['sha256']}; projected identity {identity_sha}; no packet or lock written")
+        try:
+            spec_mod.load(args.gates_root, spec=spec_path)
+        except (OSError, ValueError, TypeError) as exc:
+            print(f'graph-compile: projection source is unlocked or stale: {exc}; this measurement cannot launch', file=sys.stderr)
 
     planned = plan_node_count(ir)
     # Warnings inform, never block: these shapes are legal and occasionally
@@ -4054,7 +4131,7 @@ def main():
               project_prefix=git_prefix(args.gates_root))
     script_bytes = len(js.encode("utf-8"))
     headroom = args.max_script_bytes - script_bytes
-    size_line = f"script {script_bytes:,} bytes, headroom {headroom:,} of {args.max_script_bytes:,} bytes"
+    size_line = ("projected " if projection is not None else "") + f"script {script_bytes:,} bytes, headroom {headroom:,} of {args.max_script_bytes:,} bytes"
     if headroom < 0:
         print(f"graph-compile: script rejected — {size_line}; compact the packet/graph or raise --max-script-bytes only for a launcher that supports it", file=sys.stderr)
         return 1

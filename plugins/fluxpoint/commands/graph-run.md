@@ -23,6 +23,14 @@ Workflow tool requires.
      prose, a passing build, or an executor label does not discharge it.
    - `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> --check` exits 0.
      Its findings are the work list; fix the IR, never the compiler.
+   - If `.fluxpoint-gates.json` declares a gate named `preflight`, run
+     `bash "$ROOT/scripts/py.sh" attest.py --root <project-root> --run preflight`
+     and require exit 0 before launch or resume. Put the repo's fast graph,
+     pin-consistency and launch checks there so they run before builder suites.
+     The compiler also compares a SHA explicitly restated beside its
+     `argDefaults` key (such as `packetCommit is <sha>` or `packet commit at
+     <sha>`). Abbreviated prefixes agree; stale literals outside fenced blocks
+     and the historical Evidence section fail with their line numbers.
    - Mutating and irreversible graphs require the locked spec packet.
      The compiler loads it from the path the graph file's `SPEC:` header
      names (default `.fluxpoint-spec.json` at the repository root), and a

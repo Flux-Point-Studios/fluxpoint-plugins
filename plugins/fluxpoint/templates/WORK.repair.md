@@ -50,7 +50,7 @@ the repository's normal merge policy after the final gate passes.
       "role": "fixer",
       "foreach": "slices",
       "mutates": true,
-      "prompt": "Repair only {{item.brief}} from this BLOCK: {{A.findings}}. Previous independent check: {{lastCheck}} (null in round one). Assert the campaign base, then work in your isolated worktree. Write scratch and a complete patch against the launch base only in {{roundDir}}. Create this directory and never overwrite an existing artifact: write a temporary file, validate it, then rename to patch.diff. Do not execute scripts from another slice or old round. Add regression coverage for the original attack, run affected suites and scripts/harness.sh --full. Include patch.diff's absolute path and top-level definitions added in evidence; return SliceV1. Do not weaken requirements, tests or baselines.",
+      "prompt": "Repair only {{item.brief}} from this BLOCK: {{A.findings}}. Previous independent check: {{lastCheck}} (null in round one). Assert the campaign base, then work in your isolated worktree. Write scratch and a complete patch against the launch base only in {{roundDir}}. Create this directory and never overwrite an existing artifact: write a temporary file, validate it, then rename to patch.diff. Do not execute scripts from another slice or old round. Add regression coverage for the original attack, run affected suites and scripts/harness.sh --full. Include patch.diff's absolute path and top-level definitions added in evidence; return SliceV1. Do not weaken requirements, tests or baselines. Propose necessary packet or graph text revisions only in SliceV1.packetEdits: file, unique original-file anchor, replace/append/insertAfter op, text and reason. Never apply or re-lock these proposals.",
       "contract": "SliceV1",
       "onRed": "halt"
     },
@@ -85,7 +85,7 @@ the repository's normal merge policy after the final gate passes.
       "phase": "Integrate",
       "after": "check",
       "mutates": true,
-      "prompt": "Integrate all passing slices in {{prev}} onto one isolated tree from the launch base. The records name each versioned patch and round directory; apply exactly those patches, never an old canonical path. Previous integration feedback: {{lastCheck}}. List the top-level definitions each patch adds and flag duplicate primitives across slices. Resolve cross-slice conflicts with regression tests. Write a complete integrated patch to {{roundDir}}patch.diff and commit the integrated branch. Return SliceV1 with the branch, patch path, definitions and full harness evidence.",
+      "prompt": "Integrate all passing slices in {{prev}} onto one isolated tree from the launch base. The records name each versioned patch and round directory; apply exactly those patches, never an old canonical path. Previous integration feedback: {{lastCheck}}. List the top-level definitions each patch adds and flag duplicate primitives across slices. Resolve cross-slice conflicts with regression tests. Write a complete integrated patch to {{roundDir}}patch.diff and commit the integrated branch. Return SliceV1 with the branch, patch path, definitions and full harness evidence. Collect every passing slice's packetEdits verbatim into {{roundDir}}packet-edits.json as one JSON array, including proposals from earlier passing rounds. Report conflicting anchors rather than dropping a proposal. Name the absolute proposal artifact path in evidence. Return the consolidated packetEdits in SliceV1 too; never edit or re-lock the packet to land them.",
       "contract": "SliceV1",
       "onRed": "halt"
     },
@@ -97,7 +97,7 @@ the repository's normal merge policy after the final gate passes.
       "independent": true,
       "verifies": "integrate",
       "isolation": "measure",
-      "prompt": "Check the merged repair {{prev}} independently in the fresh frozen snapshot by applying {{roundDir}}patch.diff. Run full harness, original attacks and composition attacks across every passing slice. Check duplicate top-level definitions, multiplied resource bounds and cross-slice regressions. Delegate skeptical reproduction. Return FixCheckV1 with stable defectClass, invariant, classRewire and measurement for each finding; FAIL or INCOMPLETE reopens the passing slices with this feedback.",
+      "prompt": "Check the merged repair {{prev}} independently in the fresh frozen snapshot by applying {{roundDir}}patch.diff. Run full harness, original attacks and composition attacks across every passing slice. Check duplicate top-level definitions, multiplied resource bounds and cross-slice regressions. Delegate skeptical reproduction. Verify the consolidated packet-edits.json artifact named in {{prev}} equals {{prev.packetEdits}} without overwriting it. Enumerate every graph naming the same packet and run compile-graph.py <graph> --check --packet-edits <that artifact> for each one, preserving its exact UTF-8 size/headroom output. Anchor conflicts, unrelayed proposals or a projected script above 524288 bytes return FAIL. A projected headroom below 16384 bytes raises a finding for review. This is a measurement only; never write or re-lock the projected packet. Return FixCheckV1 with stable defectClass, invariant, classRewire and measurement for each finding; FAIL or INCOMPLETE reopens the passing slices with this feedback.",
       "contract": "FixCheckV1",
       "haltWhen": "verdict != 'PASS'",
       "onRed": "halt"
@@ -128,3 +128,12 @@ remove the mechanism. The independent checker reruns that measurement and
 validates the reframe. A third narrow patch, missing evidence, or a claimed
 PASS without independent reframe validation returns REFRAME-REQUIRED before
 integration. Recurring classes and their rounds remain in the run record.
+
+Packet proposals are data, independent of code patches. Every passing slice
+returns `packetEdits` (an empty array when no revision is needed). Integration
+retains all proposals and the checker projects them against every graph sharing
+the packet on every round. Projection uses unique anchors in the original
+LF-normalized files, rejects overlapping proposals, and never modifies files or
+locks. `replace` replaces its anchor, `insertAfter` inserts immediately after it,
+and `append` appends at EOF with its anchor as a precondition. Review the proposed
+text and size before the repository's normal spec-revision and re-lock process.
