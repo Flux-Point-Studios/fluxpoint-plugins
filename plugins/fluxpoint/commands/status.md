@@ -51,7 +51,9 @@ nothing.
    trend block: death and skip rates, agent calls spawned vs planned,
    sweep endings (dry rule / ceiling / budget-truncated / halted — only
    the dry rule is convergence), reduce compression, panel kill rate,
-   inbox pressure. These are the numbers to tune a campaign against;
+   inbox pressure, and repair origin counts with the fix-introduced share
+   per round and per run (finding observations, including repeated failures).
+   These are the numbers to tune a campaign against;
    quote them rather than characterizing them. A kill rate of 0% means
    the panels may be decoration; near 100% means the finders are badly
    scoped — say which reading applies. Include gain calibration per role:

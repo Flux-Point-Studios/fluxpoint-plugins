@@ -7,7 +7,8 @@
     "testsAdded",
     "harnessCommand",
     "harnessExit",
-    "evidence"
+    "evidence",
+    "sharedResources"
   ],
   "properties": {
     "branch": {
@@ -131,6 +132,38 @@
             "type": "string",
             "minLength": 1,
             "pattern": "\\S"
+          }
+        }
+      }
+    },
+    "sharedResources": {
+      "type": "array",
+      "description": "Every shared pool, executor, cache, lock or single-writer store to which this patch adds a writer or reader. Explicit [] means none. Name all affected users, including existing writers reached by a new reader.",
+      "items": {
+        "type": "object",
+        "required": [
+          "resource",
+          "writers",
+          "readers"
+        ],
+        "properties": {
+          "resource": {
+            "type": "string",
+            "minLength": 1
+          },
+          "writers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "readers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         }
       }

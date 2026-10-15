@@ -25,7 +25,9 @@
           "defectClass",
           "invariant",
           "classRewire",
-          "measurement"
+          "measurement",
+          "origin",
+          "originEvidence"
         ],
         "properties": {
           "finding": {
@@ -55,8 +57,278 @@
               "MEDIUM",
               "LOW"
             ]
+          },
+          "origin": {
+            "enum": [
+              "pre-existing",
+              "incomplete-fix",
+              "fix-introduced",
+              "cross-slice",
+              "spec-text"
+            ],
+            "description": "Classify the demonstrated harm by replay, never by code location or git log -S identifiers: base reproduction in a targeted defect class is incomplete-fix, outside targets is pre-existing; first reproduction on a round patch is fix-introduced; only an integrated patch reproduces is cross-slice; requirement/scope/argv/graph text defects are spec-text."
+          },
+          "introducedIn": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Actual first round whose complete patch reproduces the harm; required for fix-introduced, not the round in which the checker noticed it."
+          },
+          "originEvidence": {
+            "type": "object",
+            "description": "Executed control and reproduction observations tied to the supplied ORIGIN REPLAY CONTEXT. Every actual earlier patch and the current patch must be replayed on a clean launch-base archive. Missing tools, failed controls or unexecuted snapshots mean INCOMPLETE; they do not establish an origin. repair-replay.py produces this evidence.",
+            "properties": {
+              "base": {
+                "type": "object",
+                "required": [
+                  "command",
+                  "result",
+                  "controlCommand",
+                  "controlResult",
+                  "controlPassed",
+                  "reproduces",
+                  "snapshot"
+                ],
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "result": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "controlCommand": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "controlResult": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "controlPassed": {
+                    "const": true
+                  },
+                  "reproduces": {
+                    "type": "boolean"
+                  },
+                  "snapshot": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "rounds": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "command",
+                    "result",
+                    "controlCommand",
+                    "controlResult",
+                    "controlPassed",
+                    "reproduces",
+                    "item",
+                    "round",
+                    "patch"
+                  ],
+                  "properties": {
+                    "command": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "result": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "controlCommand": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "controlResult": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "controlPassed": {
+                      "const": true
+                    },
+                    "reproduces": {
+                      "type": "boolean"
+                    },
+                    "item": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "round": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "patch": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              },
+              "targetClasses": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "integrated": {
+                "type": "object",
+                "required": [
+                  "command",
+                  "result",
+                  "controlCommand",
+                  "controlResult",
+                  "controlPassed",
+                  "reproduces",
+                  "item",
+                  "round",
+                  "patch"
+                ],
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "result": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "controlCommand": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "controlResult": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "controlPassed": {
+                    "const": true
+                  },
+                  "reproduces": {
+                    "type": "boolean"
+                  },
+                  "item": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "round": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "patch": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "text": {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "path",
+                  "command",
+                  "result"
+                ],
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "requirement",
+                      "scope",
+                      "argv",
+                      "graph"
+                    ]
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "result": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "origin": {
+                  "const": "fix-introduced"
+                }
+              },
+              "required": [
+                "origin"
+              ]
+            },
+            "then": {
+              "required": [
+                "introducedIn"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "origin": {
+                  "const": "spec-text"
+                }
+              },
+              "required": [
+                "origin"
+              ]
+            },
+            "then": {
+              "properties": {
+                "originEvidence": {
+                  "required": [
+                    "text"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "origin": {
+                  "enum": [
+                    "pre-existing",
+                    "incomplete-fix",
+                    "fix-introduced",
+                    "cross-slice"
+                  ]
+                }
+              },
+              "required": [
+                "origin"
+              ]
+            },
+            "then": {
+              "properties": {
+                "originEvidence": {
+                  "required": [
+                    "base",
+                    "rounds",
+                    "targetClasses"
+                  ]
+                }
+              }
+            }
+          }
+        ]
       }
     },
     "evidence": {
@@ -127,6 +399,16 @@
         "validated": {
           "type": "boolean"
         }
+      }
+    },
+    "commits": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "Commit ids actually checked by this PASS, not merely proposed by the fixer. Omit when no commit was checked.",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-fA-F]{7,40}$"
       }
     }
   },

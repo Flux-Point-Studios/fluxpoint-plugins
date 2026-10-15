@@ -2774,6 +2774,9 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  throw new Error('repair graph requires args._launch {root, nonce} from attest.py --stamp')")
         a("const REPAIR_LAUNCH = A._launch")
         a("function repairRoundDir(key, round) { return REPAIR_LAUNCH.root.replace(/[/\\\\]$/, '') + '/.claude/fluxpoint/rounds/' + REPAIR_LAUNCH.nonce + '/' + key + '/r' + round + '/'; }")
+        a("const FIX_ORIGINS = []")
+        with open(os.path.join(os.path.dirname(__file__), "repair-origins.js"), encoding="utf-8") as helpers:
+            a(helpers.read())
     if any(judge_size(n) for n in nodes):
         a("const WINNERS = {}")
     a("const RESULTS = {}")
@@ -2823,6 +2826,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         extra += ", prove: PROVE, launch: LAUNCH"
     elif repair_loops(ir):
         extra += ", launch: REPAIR_LAUNCH"
+    if repair_loops(ir):
+        extra += ", fixOrigins: FIX_ORIGINS"
     if tree_guard:
         extra += ", tree: TREE"
     reducers = [n["id"] for n in nodes if is_reduce(n)]
@@ -3651,16 +3656,29 @@ def emit_repair(n, ir, specification=False):
     a(f"    if (!affordable(`{fixer['id']}:${{item.key}}`)) {{ abort_{var} = 'BUDGET-EXHAUSTED'; return {{ ...state, roundDir }} }}")
     a(f"    const fixed = await spawn(reframeBrief + {prompt(fixer)}, {opts(fixer, ir, fixer.get('phase', phase_name), '`' + fixer['id'] + ':${item.key}:r${round_' + var + '}`')})")
     a(f"    if (!fixed) {{ abort_{var} = DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD'; return {{ ...state, roundDir }} }}")
+    if fixer.get("contract") == "SliceV1":
+        a(f"    const resourceIssue = repairResourcesIssue(fixed)")
+        a(f"    if (resourceIssue) {{ abort_{var} = 'HALTED'; note({js_str(nid)}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: item.key, round: round_{var} }}); return {{ ...state, fixed, roundDir }} }}")
+    a(f"    const patches = [...(state.patches || []), {{ item: item.key, round: round_{var}, patch: roundDir + 'patch.diff' }}]")
+    a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: item.targetClasses || null }}")
+    a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay the reproduction and its valid control on the bare launch base and EACH listed complete patch in a fresh base archive, not cumulatively. Use repair-replay.py to obtain originEvidence. New code location or identifier age is not origin evidence. Missing replay/control means INCOMPLETE. Attack every sharedResources writer and reader supplied by the fixer, including existing writers reached by a new reader.\\n'")
+
     a(f"    if (requiredClasses.length && !validReframe_{var}(fixed.reframe, requiredClasses)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: third narrow patch refused`, {{ classes: requiredClasses }}); return {{ ...state, fixed, roundDir }} }}")
     a(f"    if (!affordable(`{nid}:${{item.key}}`)) {{ abort_{var} = 'BUDGET-EXHAUSTED'; return {{ ...state, fixed, roundDir }} }}")
-    a(f"    const checked = await spawn(reframeBrief + 'Independently validate any supplied reframe against its authoritative invariant and rerun its measurement yourself; return reframe.validated true only with your own measurement.\\n' + {prompt(n, 'fixed')}, {opts(n, ir, phase_name, '`' + nid + ':${item.key}:r${round_' + var + '}`')})")
+    a(f"    const checked = await spawn(originBrief + reframeBrief + 'Independently validate any supplied reframe against its authoritative invariant and rerun its measurement yourself; return reframe.validated true only with your own measurement.\\n' + {prompt(n, 'fixed')}, {opts(n, ir, phase_name, '`' + nid + ':${item.key}:r${round_' + var + '}`')})")
     a(f"    if (!checked) {{ abort_{var} = DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD'; return {{ ...state, fixed, roundDir }} }}")
     if n.get("contract") == "RedTeamV1":
         a(f"    if (redTeamIncoherent(checked)) {{ abort_{var} = 'HALTED'; return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
     if n.get("contract") == "FixCheckV1":
         a(f"    if (checked.verdict === 'PASS' && ((checked.findings || []).length || (checked.blockers || []).length)) {{ abort_{var} = 'HALTED'; return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
+        a("    const attribution = repairCheckOrigins(checked, originContext)")
+        a(f"    if (attribution.issue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'ORIGIN-UNPROVEN', attribution.issue, {{ item: item.key, round: round_{var} }}); return {{ ...state, fixed, roundDir, lastCheck: checked, patches }} }}")
+
+
     a(f"    const complete = checked[{js_str(field)}] {op} {lit}")
     a(f"    if (complete && requiredClasses.length && !validReframe_{var}(checked.reframe, requiredClasses, true)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: checker did not validate the class reframe`); return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
+    if n.get("contract") == "FixCheckV1":
+        a(f"    FIX_ORIGINS.push({{ node: {js_str(nid)}, item: item.key, round: round_{var}, origins: attribution.origins, verdict: checked.verdict, context: originContext, findings: checked.findings, blockers: checked.blockers, evidence: checked.evidence, check: checked, commits: checked.verdict === 'PASS' ? (checked.commits || []) : [], sharedResources: fixed.sharedResources || [] }})")
     class_fields = rep.get("classBy") or ["defectClass"]
     a(f"    const classFields = {json.dumps(class_fields)}")
     a(f"    const findings = Array.isArray(checked[{js_str(n.get('verifyOver') or 'findings')}]) ? checked[{js_str(n.get('verifyOver') or 'findings')}] : []")
@@ -3672,8 +3690,9 @@ def emit_repair(n, ir, specification=False):
     a(f"    if (recurring.length) note({js_str(nid)}, 'RECURRING-CLASS', `${{item.key}}: next round must reframe`, {{ item: item.key, classes: recurring }})")
     if rep.get("classBy"):
         a(f"    RECURRING_CLASSES.push(...recurring.map(x => ({{ ...x, node: {js_str(nid)}, item: item.key, keys: [] }})))")
-    a(f"    note({js_str(nid)}, complete ? 'OK' : 'REPAIR', `${{item.key}} round ${{round_{var}}}`, {{ item: item.key, round: round_{var}, roundDir, complete }})")
-    a("    return { ...state, fixed, roundDir, lastCheck: checked, complete, streaks, recurring: recurring.map(x => x.class) }")
+    origin_data = ", origins: attribution.origins" if n.get("contract") == "FixCheckV1" else ""
+    a(f"    note({js_str(nid)}, complete ? 'OK' : 'REPAIR', `${{item.key}} round ${{round_{var}}}`, {{ item: item.key, round: round_{var}, roundDir, complete{origin_data} }})")
+    a("    return { ...state, fixed, roundDir, lastCheck: checked, complete, streaks, recurring: recurring.map(x => x.class), patches }")
     a("  }))")
     a(f"  passed_{var}.push(...batch_{var}.filter(x => x.complete))")
     a(f"  pending_{var} = batch_{var}.filter(x => !x.complete)")
@@ -3695,11 +3714,17 @@ def emit_repair(n, ir, specification=False):
         a(f"    const merged = await spawn(reframeBrief + {prompt(merge, 'passed_' + var)}, {opts(merge, ir, merge.get('phase', phase_name), '`' + merge['id'] + ':r${round_' + var + '}`')})")
         a(f"    RESULTS[{js_str(merge['id'])}] = merged")
         a("    if (!merged) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
+        if merge.get("contract") == "SliceV1":
+            a("    const resourceIssue = repairResourcesIssue(merged)")
+            a(f"    if (resourceIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: '_integration', round: round_{var} }}); return summary('HALTED') }}")
+        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff' }}, targetClasses: passed_{var}.every(state => Array.isArray(state.item.targetClasses)) ? [...new Set(passed_{var}.flatMap(state => state.item.targetClasses))] : null }}")
+        a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay bare base and EVERY component patch separately on fresh base archives, then the complete integrated patch. Only a harm absent from base and all component patches but reproduced on the integrated patch is cross-slice. Attack the complete sharedResources writer/reader list from the integration result.\\n'")
+
         a(f"    if (requiredClasses.length && !validReframe_{var}(merged.reframe, requiredClasses)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'third narrow integration patch refused'); return summary('REFRAME-REQUIRED') }}")
         if ir.get("treeGuard", True):
             a(f"    if (!await treeCheck(`integration {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
         a(f"    if (!affordable({js_str(review['id'])})) {{ INCOMPLETE = true; return summary('BUDGET-EXHAUSTED') }}")
-        a(f"    const integrated = await spawn(reframeBrief + {prompt(review, 'merged')}, {opts(review, ir, review.get('phase', phase_name), '`' + review['id'] + ':r${round_' + var + '}`')})")
+        a(f"    const integrated = await spawn(originBrief + reframeBrief + {prompt(review, 'merged')}, {opts(review, ir, review.get('phase', phase_name), '`' + review['id'] + ':r${round_' + var + '}`')})")
         a(f"    RESULTS[{js_str(review['id'])}] = integrated")
         a("    if (!integrated) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
         if review.get("contract") == "RedTeamV1":
@@ -3708,8 +3733,15 @@ def emit_repair(n, ir, specification=False):
             a(f"    if (!await treeCheck(`after integration {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
         if review.get("contract") == "FixCheckV1":
             a("    if (integrated.verdict === 'PASS' && ((integrated.findings || []).length || (integrated.blockers || []).length)) { INCOMPLETE = true; return summary('HALTED') }")
+            a("    const attribution = repairCheckOrigins(integrated, originContext)")
+            a(f"    if (attribution.issue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'ORIGIN-UNPROVEN', attribution.issue, {{ item: '_integration', round: round_{var} }}); return summary('INCOMPLETE') }}")
+
+            a(f"    note({js_str(review['id'])}, 'ORIGIN-TALLY', 'merged-tree origin replay completed', {{ item: '_integration', round: round_{var}, origins: attribution.origins }})")
+
         a(f"    const integrationFailed = integrated[{js_str(mfield)}] {mop} {mlit}")
         a(f"    if (!integrationFailed && requiredClasses.length && !validReframe_{var}(integrated.reframe, requiredClasses, true)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'independent integration review did not validate the class reframe'); return summary('REFRAME-REQUIRED') }}")
+        if review.get("contract") == "FixCheckV1":
+            a(f"    FIX_ORIGINS.push({{ node: {js_str(review['id'])}, item: '_integration', integration: true, round: round_{var}, origins: attribution.origins, verdict: integrated.verdict, context: originContext, findings: integrated.findings, blockers: integrated.blockers, evidence: integrated.evidence, check: integrated, commits: integrated.verdict === 'PASS' ? (integrated.commits || []) : [], sharedResources: merged.sharedResources || [] }})")
         a(f"    integrationLast_{var} = integrated")
         a("    if (integrationFailed) {")
         a(f"      const classFields = {json.dumps(class_fields)}")

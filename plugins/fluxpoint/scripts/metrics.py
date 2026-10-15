@@ -393,6 +393,82 @@ def render_calibration(calibration):
     return "\n".join(lines)
 
 
+
+FIX_ORIGIN_NAMES = ("pre-existing", "incomplete-fix", "fix-introduced", "cross-slice", "spec-text")
+
+
+def fold_fix_origins(runs, campaign=None):
+    """Count observed findings per check, not unique bugs inferred from prose."""
+    reports, findings = [], []
+    for run_id, artifact in runs:
+        summary = artifact.get("summary") or {}
+        name = str(summary.get("campaign") or "<unnamed>")
+        if campaign and campaign != name or "fixOrigins" not in summary:
+            continue
+        rows = summary["fixOrigins"]
+        if not isinstance(rows, list):
+            findings.append(f"MALFORMED fixOrigins for run {run_id}: expected per-check array")
+            continue
+        total = {key: 0 for key in FIX_ORIGIN_NAMES}
+        rounds, invalid, seen = [], 0, set()
+        for index, row in enumerate(rows):
+            try:
+                if not isinstance(row, dict) or any(not isinstance(row.get(k), str) or not row[k]
+                                                   for k in ("node", "item")):
+                    raise ValueError("missing checker/item identity")
+                if type(row.get("round")) is not int or row["round"] < 1:
+                    raise ValueError("round must be a positive integer")
+                identity = (row["node"], row["item"], row["round"])
+                if identity in seen:
+                    raise ValueError("duplicate checker/item/round tally")
+                origins = row.get("origins")
+                if not isinstance(origins, dict) or set(origins) != set(FIX_ORIGIN_NAMES):
+                    raise ValueError("each origin category must be recorded explicitly")
+                if any(type(count) is not int or count < 0 for count in origins.values()):
+                    raise ValueError("origin counts must be nonnegative integers")
+                if "findings" in row:
+                    observed = {key: 0 for key in FIX_ORIGIN_NAMES}
+                    if not isinstance(row["findings"], list):
+                        raise ValueError("findings must preserve the checked observations")
+                    for finding in row["findings"]:
+                        if not isinstance(finding, dict) or finding.get("origin") not in observed:
+                            raise ValueError("finding has no known replay origin")
+                        observed[finding["origin"]] += 1
+                    if observed != origins:
+                        raise ValueError("origin tally disagrees with preserved findings")
+                seen.add(identity)
+                count = sum(origins.values())
+                rounds.append(dict(node=row["node"], item=row["item"], round=row["round"],
+                                   origins=origins, findings=count,
+                                   fixIntroducedShare=origins["fix-introduced"] / count if count else None))
+                for key, value in origins.items():
+                    total[key] += value
+            except (ValueError, TypeError) as exc:
+                invalid += 1
+                findings.append(f"MALFORMED fixOrigins {run_id}[{index}]: {exc} — excluded")
+        count = sum(total.values())
+        reports.append(dict(runId=run_id, campaign=name, origins=total, rounds=rounds,
+                            findings=count, invalidRounds=invalid,
+                            fixIntroducedShare=total["fix-introduced"] / count if count else None))
+    return reports, findings
+
+
+def render_fix_origins(reports):
+    lines = []
+    for report in reports:
+        origins = report["origins"]
+        lines.append(f"repair origins: run {report['runId']}: fix-introduced "
+                     f"{origins['fix-introduced']}/{report['findings']} "
+                     f"({pct(origins['fix-introduced'], report['findings'])}) finding observations")
+        for row in report["rounds"]:
+            lines.append(f"  {row['node']} / {row['item']} round {row['round']}: fix-introduced "
+                         f"{row['origins']['fix-introduced']}/{row['findings']} "
+                         f"({pct(row['origins']['fix-introduced'], row['findings'])}); "
+                         + ", ".join(f"{key} {row['origins'][key]}" for key in FIX_ORIGIN_NAMES))
+        if report["invalidRounds"]:
+            lines.append(f"  {report['invalidRounds']} invalid round tally/tallies excluded; overall coverage is incomplete")
+    return "\n".join(lines)
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -415,13 +491,15 @@ def main():
     slices, slice_findings = read_slices(os.path.join(args.root, SLICES_DIR))
     calibration, calibration_findings = fold_calibration(slices, args.campaign)
     findings += slice_findings + calibration_findings
+    origin_reports, origin_findings = fold_fix_origins(runs, args.campaign)
+    findings += origin_findings
     for f in findings:
         print(f"metrics: {f}", file=sys.stderr)
     if args.campaign:
         folded = {k: v for k, v in folded.items() if k == args.campaign}
 
     if args.as_json:
-        json.dump({"campaigns": folded, "gainCalibration": calibration, "findings": findings}, sys.stdout,
+        json.dump({"campaigns": folded, "gainCalibration": calibration, "fixOrigins": origin_reports, "findings": findings}, sys.stdout,
                   indent=2, sort_keys=True)
         print()
     elif not folded:
@@ -431,6 +509,8 @@ def main():
         print(render(folded))
     if not args.as_json and (calibration["roles"] or calibration["pendingSlices"]):
         print(render_calibration(calibration))
+    if not args.as_json and origin_reports:
+        print(render_fix_origins(origin_reports))
     return 0
 
 

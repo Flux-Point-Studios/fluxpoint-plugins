@@ -1332,13 +1332,13 @@ def repair_loop_case():
             out = os.path.join(tmp, "result.json"); script = os.path.join(tmp, "run.mjs")
             prefix = '''import {writeFileSync} from 'node:fs';
 const calls=[]; const mode=MODE;
-const args={_base:{sha:'base'},_launch:{root:'/campaign',nonce:'launch1'}};
+const args={_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'launch1'}};
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
  if (label.startsWith('check:')) return {exit: mode==='cap' || (label.includes(':b:') && label.endsWith('r1')) ? 1 : 0, command:'check', tail:'finding'};
  if (label.startsWith('review:')) return {exit: mode==='conflict' && label.endsWith('r1') ? 1 : 0, command:'review',tail:'composition failure'};
- return {branch:'branch',diffSummary:'patch',testsAdded:[],harnessCommand:'test',harnessExit:0,evidence:['test']};};
+ return {branch:'branch',diffSummary:'patch',testsAdded:[],sharedResources:[],harnessCommand:'test',harnessExit:0,evidence:['test']};};
 '''.replace("MODE", json.dumps(mode))
             open(script, "w").write(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
             proc = subprocess.run(["node", script], capture_output=True, text=True, timeout=20)
@@ -1397,15 +1397,19 @@ const args={_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'non
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const reframe={classes:['decode'],invariant:'ledger admits only bounded rows',classRewire:'enforce item decoding budget at ingress',disposition:'adopt',measurement:{command:'pytest test_decode_budget',result:'all outsider rows bounded'}};
+const origin=(p,defectClass)=>{const line=p.split('ORIGIN REPLAY CONTEXT: ')[1].split('\n')[0],c=JSON.parse(line);
+ const observation={command:'pytest replay',result:'failure reproduced',controlCommand:'pytest valid',controlResult:'control passed',controlPassed:true,reproduces:true};
+ return {origin:defectClass==='decode'?'incomplete-fix':'pre-existing',originEvidence:{base:{snapshot:c.base,...observation},targetClasses:['decode'],rounds:c.patches.map(x=>({...x,...observation})),...(c.integrated?{integrated:{...c.integrated,...observation}}:{})}};};
+
 const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
  if(label.startsWith('tree-check:'))return (mode==='sentinel-start'&&label.includes('campaign-start'))||(mode==='sentinel-after'&&label.includes('after repair'))?null:{head:'base',porcelain:''};
  const round=Number(label.match(/:r(\d+)$/)?.[1]||1);
- if(label.startsWith('fix:'))return {branch:'patch',diffSummary:'patch',testsAdded:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest exit0'],...(round>=3&&['measured','unchecked','integration-measured','integration-merge-narrow'].includes(mode)?{reframe}: {})};
+ if(label.startsWith('fix:'))return {branch:'patch',diffSummary:'patch',testsAdded:[],sharedResources:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest exit0'],...(round>=3&&['measured','unchecked','integration-measured','integration-merge-narrow'].includes(mode)?{reframe}: {})};
  if(label.startsWith('check:')){const pass=mode==='contradictory'||mode.startsWith('integration')||round>=3&&['measured','unchecked','different'].includes(mode);
   const defectClass=mode==='different'&&round===2?'resource':'decode';
-  return {verdict:pass?'PASS':'FAIL',findings:pass&&mode!=='contradictory'?[]:[{defectClass,finding:'bad outsider row',severity:'HIGH',invariant:'bounded rows',classRewire:'bound parser',measurement:'pytest reproduced'},...(mode==='duplicates'?[{defectClass,finding:'same mechanism another path',severity:'HIGH',invariant:'bounded',classRewire:'bound',measurement:'pytest reproduced'}]:[])],blockers:[],evidence:['pytest observed'],...(['measured','integration-measured','integration-merge-narrow'].includes(mode)&&round>=3?{reframe:{...reframe,validated:true,measurement:{command:'pytest test_independent_budget',result:'independently checked bounds'}}}: {})};}
- if(label.startsWith('merge:'))return {branch:'integrated',diffSummary:'patch',testsAdded:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest'],...(mode==='integration-measured'&&round>=3?{reframe}: {})};
- if(label.startsWith('review:'))return {verdict:round>=3?'PASS':'FAIL',findings:round>=3?[]:[{defectClass:'decode',finding:'composition failure',severity:'HIGH',invariant:'bounded rows',classRewire:'enforce whole budget',measurement:'pytest compose'}],blockers:[],evidence:['pytest compose'],...(mode==='integration-measured'&&round>=3?{reframe:{...reframe,validated:true}}: {})};
+  return {verdict:pass?'PASS':'FAIL',findings:pass&&mode!=='contradictory'?[]:[{defectClass,finding:'bad outsider row',severity:'HIGH',invariant:'bounded rows',classRewire:'bound parser',measurement:'pytest reproduced',...origin(p,defectClass)},...(mode==='duplicates'?[{defectClass,finding:'same mechanism another path',severity:'HIGH',invariant:'bounded',classRewire:'bound',measurement:'pytest reproduced',...origin(p,defectClass)}]:[])],blockers:[],evidence:['pytest observed'],...(['measured','integration-measured','integration-merge-narrow'].includes(mode)&&round>=3?{reframe:{...reframe,validated:true,measurement:{command:'pytest test_independent_budget',result:'independently checked bounds'}}}: {})};}
+ if(label.startsWith('merge:'))return {branch:'integrated',diffSummary:'patch',testsAdded:[],sharedResources:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest'],...(mode==='integration-measured'&&round>=3?{reframe}: {})};
+ if(label.startsWith('review:'))return {verdict:round>=3?'PASS':'FAIL',findings:round>=3?[]:[{defectClass:'decode',finding:'composition failure',severity:'HIGH',invariant:'bounded rows',classRewire:'enforce whole budget',measurement:'pytest compose',...origin(p,'decode')}],blockers:[],evidence:['pytest compose'],...(mode==='integration-measured'&&round>=3?{reframe:{...reframe,validated:true}}: {})};
  return null;};
 '''.replace("MODE", json.dumps(mode))
             open(script, "w").write(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
