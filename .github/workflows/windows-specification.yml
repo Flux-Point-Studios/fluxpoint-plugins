@@ -16,6 +16,7 @@ jobs:
   windows-specification:
     name: Windows specification (Python 3.9)
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,3 +29,37 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: python plugins/fluxpoint/tests/specification-test.py
+      - name: Exercise long-command process trees and run provenance
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python plugins/fluxpoint/tests/longrun-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/regex-wait-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/record-location-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/unchecked-repairs-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/authorization-context-test.py
+          exit $LASTEXITCODE
+      - name: Exercise machine-health fixtures (Linux model and Windows adapter)
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python plugins/fluxpoint/tests/box-health-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/box-health-windows-test.py
+          exit $LASTEXITCODE
+      - name: Sample actual Windows machine health (read-only)
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python plugins/fluxpoint/scripts/box-health.py --json --sample-seconds 1
+          $observed = $LASTEXITCODE
+          # A loaded shared runner can be unhealthy; collection must still work.
+          # Unreadable/unsupported coverage (2) is a verification failure.
+          if ($observed -notin @(0, 1)) { exit $observed }
+          exit 0

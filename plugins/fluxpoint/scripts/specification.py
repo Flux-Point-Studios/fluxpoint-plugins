@@ -226,7 +226,16 @@ def repo_file(root, rel, what):
     return path
 
 
-def resolve_text(root, doc):
+def file_snapshot(root, path, snapshots=None):
+    """LF-normalized bytes from a read-only projected tree or the real tree."""
+    path = Path(path)
+    key = path.resolve().relative_to(Path(root).resolve()).as_posix()
+    if snapshots is not None and key in snapshots:
+        return snapshots[key]
+    return path.read_bytes().replace(b'\r\n', b'\n')
+
+
+def resolve_text(root, doc, snapshots=None):
     """Return (resolved packet, reference-file hashes), from one read per file."""
     files, references = {}, {}
 
@@ -245,7 +254,7 @@ def resolve_text(root, doc):
             raise ValueError(f'text reference {ref!r}: expected an RFC 6901 pointer')
         if rel not in files:
             path = repo_file(root, rel, 'text reference')
-            snapshot = path.read_bytes().replace(b'\r\n', b'\n')
+            snapshot = file_snapshot(root, path, snapshots)
             files[rel] = json.loads(snapshot.decode('utf-8'), object_pairs_hook=unique_keys)
             references[rel] = hashlib.sha256(snapshot).hexdigest()
         target = files[rel]
@@ -280,6 +289,89 @@ def resolve_text(root, doc):
         return value
 
     return walk(doc), dict(sorted(references.items()))
+
+
+def project_files(root, edits):
+    """Apply anchored proposals to original snapshots, without writing any file.
+
+    Replace consumes the anchor; insertAfter inserts after it; append inserts
+    at EOF with the anchor as a precondition. All anchors refer to the original
+    file, so neither proposal order nor text introduced by a proposal can
+    silently change another proposal's target.
+    """
+    if not isinstance(edits, list):
+        raise ValueError('packetEdits must be an array of edit proposals')
+    root = Path(root).resolve()
+    groups, originals = {}, {}
+    fields = {'file', 'anchor', 'op', 'text', 'reason'}
+    for index, edit in enumerate(edits):
+        where = f'packetEdits[{index}]'
+        if (not isinstance(edit, dict) or set(edit) != fields
+                or any(not isinstance(edit.get(k), str) for k in fields)
+                or any(not edit[k].strip() for k in ('file', 'anchor', 'reason'))
+                or edit['op'] not in ('replace', 'append', 'insertAfter')):
+            raise ValueError(f'{where}: expected file, nonempty anchor, op, text and reason')
+        path = repo_file(root, edit['file'], where)
+        rel = path.resolve().relative_to(root).as_posix()
+        if rel not in originals:
+            originals[rel] = file_snapshot(root, path).decode('utf-8')
+        original = originals[rel]
+        anchor = edit['anchor'].replace('\r\n', '\n')
+        replacement = edit['text'].replace('\r\n', '\n')
+        starts = [match.start() for match in re.finditer('(?=' + re.escape(anchor) + ')', original)]
+        if len(starts) != 1:
+            raise ValueError(f'{where} {rel}: anchor occurs {len(starts)} times; exactly once required')
+        start, end = starts[0], starts[0] + len(anchor)
+        if edit['op'] == 'replace':
+            change = (start, end, replacement)
+        else:
+            position = end if edit['op'] == 'insertAfter' else len(original)
+            change = (position, position, replacement)
+        for other_start, other_end, other_change, other_index in groups.get(rel, []):
+            if (max(start, other_start) < min(end, other_end)
+                    or (change[0] == change[1] == other_change[0] == other_change[1])
+                    or (change[0] == change[1] and other_change[0] < change[0] < other_change[1])
+                    or (other_change[0] == other_change[1] and change[0] < other_change[0] < change[1])):
+                raise ValueError(f'{where} {rel}: anchor or insertion overlaps packetEdits[{other_index}]')
+        groups.setdefault(rel, []).append((start, end, change, index))
+    snapshots = {}
+    for rel, proposals in groups.items():
+        text = originals[rel]
+        for _, _, (start, end, replacement), _ in sorted(proposals, key=lambda p: p[2][:2], reverse=True):
+            text = text[:start] + replacement + text[end:]
+        snapshots[rel] = text.encode('utf-8')
+    return snapshots
+
+
+def project(root, edits, spec=None, graph=None):
+    """A measured, unlocked packet projection with freshly computed identity."""
+    root = Path(root).resolve()
+    _, source_identity = load(root, locked=False, spec=spec)
+    snapshots = project_files(root, edits)
+    packet, identity = load(root, locked=False, spec=spec, snapshots=snapshots)
+    packet_file, _ = packet_paths(root, spec)
+    allowed = {packet_file.resolve().relative_to(root).as_posix()}
+    if graph is not None:
+        allowed.add(repo_file(root, graph, 'projected graph').resolve().relative_to(root).as_posix())
+    for references in (source_identity.get('references', {}), identity.get('references', {})):
+        allowed.update(repo_file(root, rel, 'text reference').resolve().relative_to(root).as_posix()
+                       for rel in references)
+    # A consolidated round may propose prose/IR changes to several graphs
+    # naming this packet. Each graph is measured by its own compiler call.
+    for rel in set(snapshots) - allowed:
+        path = root / rel
+        original = file_snapshot(root, path).decode('utf-8')
+        declaration = headers(original).get('SPEC') if path.suffix == '.md' else None
+        if (declaration and packet_paths(root, declaration)[0].resolve() == packet_file.resolve()
+                and re.search(r'^```json[ \t]+graph-ir[ \t]*$', original, re.M)):
+            projected = snapshots[rel].decode('utf-8')
+            if packet_paths(root, headers(projected).get('SPEC'))[0].resolve() != packet_file.resolve():
+                raise ValueError(f'packetEdits cannot redirect graph {rel} to a different SPEC packet')
+            allowed.add(rel)
+    if set(snapshots) - allowed:
+        raise ValueError('packetEdits target files outside this packet, its references and graph: '
+                         + ', '.join(sorted(set(snapshots) - allowed)))
+    return packet, identity, snapshots, source_identity
 
 
 def harness_inputs(root, doc, allow_missing=False):
@@ -482,16 +574,18 @@ def required(root):
                                            work.read_text(encoding='utf-8'), re.M)))
 
 
-def load(root, locked=True, spec=None):
+def load(root, locked=True, spec=None, snapshots=None):
     root = Path(root)
     packet_file, lock_file = packet_paths(root, spec)
-    snapshot = packet_file.read_bytes().replace(b'\r\n', b'\n')
+    if locked and snapshots is not None:
+        raise ValueError('projected file snapshots cannot be treated as a locked packet')
+    snapshot = file_snapshot(root, packet_file, snapshots)
     doc = json.loads(snapshot.decode('utf-8'), object_pairs_hook=unique_keys)
     errors = validate(doc)
     identity = {'version': 1, 'sha256': hashlib.sha256(snapshot).hexdigest(),
                 'proofBaselineSha256': digest(root / BASELINE)}
     if not errors:
-        doc, references = resolve_text(root, doc)
+        doc, references = resolve_text(root, doc, snapshots)
         if references:
             identity['references'] = references
         # Validate explicit dependencies even before a harness is frozen.

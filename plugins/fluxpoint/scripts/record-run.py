@@ -360,6 +360,22 @@ def derive(summary):
     return harness, verdict, blocked, proof, proof_surface, incoherent
 
 
+def repair_receipts(summary, graph):
+    """Freeze the actual graph's independent checker descriptors at recording."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "repair_checks.py")
+    spec = importlib.util.spec_from_file_location("repair_checks_recorder", path)
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    frozen = helper.from_graph(graph)
+    commits, problems = helper.checked(summary, frozen)
+    return frozen, commits, problems
+
+
+def checked_commits(summary, graph):
+    return repair_receipts(summary, graph)[1]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-id", required=True)
@@ -375,10 +391,21 @@ def main():
     ap.add_argument("--red-team", default="n/a", help="SHIP | BLOCK | n/a")
     ap.add_argument("--proof-audit", default="n/a",
                     help="SOUND | WEAKENED | UNPROVEN | NOT-APPLICABLE | n/a")
-    ap.add_argument("--executor", default="workflow", help="workflow | degraded-subagents")
-    ap.add_argument("--state-dir", default=".claude/fluxpoint/runs")
+    ap.add_argument("--executor", default="workflow", choices=("workflow", "degraded-subagents"))
+    ap.add_argument("--state-dir", default=None,
+                    help="must resolve to <root>/.claude/fluxpoint/runs")
     ap.add_argument("--root", default=".", help="repo root holding .claude/fluxpoint")
     args = ap.parse_args()
+    args.root = os.path.realpath(args.root)
+    canonical_runs = os.path.realpath(os.path.join(args.root, ".claude", "fluxpoint", "runs"))
+    if args.state_dir is not None and os.path.realpath(args.state_dir) != canonical_runs:
+        ap.error("--state-dir must resolve to " + canonical_runs)
+    args.state_dir = canonical_runs
+    if (not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}", args.run_id or "")
+            or args.run_id.endswith('.') or args.run_id in (".", "..")
+            or args.run_id.split('.')[0].upper() in ({"CON", "PRN", "AUX", "NUL"}
+                | {"COM" + str(n) for n in range(1, 10)} | {"LPT" + str(n) for n in range(1, 10)})):
+        ap.error("--run-id must be a safe filename component without drive prefixes or streams")
     evidence_file = args.evidence or args.graph
 
     raw = open(args.result, encoding="utf-8").read() if args.result else sys.stdin.read()
@@ -632,6 +659,9 @@ def main():
         print(f"record-run: attestation cross-check failed: {e}", file=sys.stderr)
 
     # 1. Durable provenance artifact.
+    repair_checkers, checked, repair_problems = repair_receipts(summary, args.graph)
+    for issue in repair_problems:
+        print("record-run: checked commit refused — " + issue, file=sys.stderr)
     os.makedirs(args.state_dir, exist_ok=True)
     art = os.path.join(args.state_dir, f"{args.run_id}.json")
     with open(art, "w", encoding="utf-8", newline="\n") as fh:
@@ -645,6 +675,10 @@ def main():
                 "recordedAt": datetime.datetime.now(datetime.timezone.utc).strftime(
                     "%Y-%m-%d %H:%M:%S"),
                 "executor": args.executor,
+                "graph": os.path.relpath(os.path.realpath(args.graph), args.root).replace(os.sep, "/"),
+                "checked": checked,
+                "repairCheckers": repair_checkers,
+                "repairCheckProblems": repair_problems,
                 "outcome": outcome,
                 "nodesOk": ok,
                 "nodesDead": dead,
@@ -798,6 +832,7 @@ def main():
     )
 
     from workfile_lock import workfile_lock
+    row_appended = False
     with workfile_lock(evidence_file):
         # 2a. Decisions, spliced under their own header when the file has one.
         drows = decision_rows(summary, ts)
@@ -818,33 +853,25 @@ def main():
                       file=sys.stderr)
 
         if os.path.exists(evidence_file):
+            from evidence_table import append as append_evidence
             text = open(evidence_file, encoding="utf-8").read()
-            hdr, new_row = (ROW_HDR, row) if ROW_HDR in text else (LEGACY_HDR, legacy_row)
-            if hdr in text:
-                text, n = re.subn(
-                    re.escape(hdr) + r"\n\|[-| ]+\|\n",
-                    lambda m: m.group(0) + new_row + "\n",
-                    text,
-                    count=1,
-                )
-                if n:
-                    open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
-                    row = new_row
-                else:
-                    print(
-                        f"record-run: Evidence header found in {evidence_file} but no "
-                        f"separator row beneath it; artifact written, row not appended",
-                        file=sys.stderr,
-                    )
+            text, status, used_header = append_evidence(text, {ROW_HDR: row, LEGACY_HDR: legacy_row})
+            if status == "ok":
+                open(evidence_file, "w", encoding="utf-8", newline="\n").write(text)
+                row = row if used_header == ROW_HDR else legacy_row
+                row_appended = True
             else:
-                print(
-                    f"record-run: no Evidence table header in {evidence_file}; "
-                    f"artifact written but row not appended",
-                    file=sys.stderr,
-                )
+                why = "no recognized Evidence header" if status == "no-header" else "no separator beneath its Evidence header"
+                print(f"record-run: {evidence_file} has {why}; artifact written but row NOT appended. "
+                      f"Add {ROW_HDR} and a separator outside code fences, or pass --evidence WORK.md", file=sys.stderr)
+        else:
+            print(f"record-run: Evidence file {evidence_file} does not exist; artifact "
+                  f"written but row NOT appended. Add {ROW_HDR} and its separator, "
+                  f"or pass --evidence WORK.md", file=sys.stderr)
     print(f"record-run: {art}")
-    print(row)
-    return 0
+    if row_appended:
+        print(row)
+    return 0 if row_appended else 3
 
 
 if __name__ == "__main__":

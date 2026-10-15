@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -25,6 +26,20 @@ class WatchdogTests(unittest.TestCase):
         self.run.mkdir(parents=True)
         self.journal = self.run / "journal.jsonl"
         self.clock = time.time()
+        self.health = dict(exitCode=0, status='healthy', findings=[], checks={})
+        patch = mock.patch.object(watchdog.box_health, 'check_health', return_value=self.health)
+        self.health_mock = patch.start()
+        self.addCleanup(patch.stop)
+
+    def command(self):
+        # Exercise the real CLI parser without coupling journal fixtures to the
+        # host's current load/network or paying a five-second sample per case.
+        wrapper = ("import sys; sys.path.insert(0," + repr(str(SCRIPTS)) + "); "
+                   "import watchdog; watchdog.box_health.check_health=lambda **kwargs: "
+                   "dict(exitCode=0,status='healthy',findings=[],checks={}); "
+                   "sys.exit(watchdog.main())")
+        return [sys.executable, '-c', wrapper, '--projects', str(self.projects),
+                '--root', str(self.root), '--run', 'run1', '--once']
 
     def write(self, path, records, minutes=0):
         path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
@@ -99,8 +114,7 @@ class WatchdogTests(unittest.TestCase):
     def test_resolve_and_cli_unknown_or_pending(self):
         self.write(self.journal, [])
         self.assertEqual(watchdog.resolve_run("run1", self.projects), self.run.resolve())
-        command = [sys.executable, str(SCRIPTS / "watchdog.py"), "--projects", str(self.projects),
-                   "--root", str(self.root), "--run", "run1", "--once"]
+        command = self.command()
         self.assertEqual(subprocess.run(command, capture_output=True).returncode, 3)
         self.journal.write_text("{broken\n")
         self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
@@ -116,8 +130,7 @@ class WatchdogTests(unittest.TestCase):
             self.observe()
 
     def test_malformed_internal_launch_and_quota_shapes_exit_two(self):
-        command = [sys.executable, str(SCRIPTS / 'watchdog.py'), '--projects', str(self.projects),
-                   '--root', str(self.root), '--run', 'run1', '--once']
+        command = self.command()
         for args in ({'_base': []}, {'_base': {'sha': ['invalid']}}):
             self.write(self.journal, [{'args': args}])
             self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
@@ -138,6 +151,35 @@ class WatchdogTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'found 2'):
             watchdog.resolve_run('run1', self.projects)
 
+
+    def test_machine_finding_wakes_live_agents_with_operator_evidence_once(self):
+        self.write(self.journal, [{'type': 'started', 'agentId': 'a'}])
+        self.write(self.run / 'agent-a.jsonl', [{'cwd': str(self.root)}])
+        self.health.update(exitCode=1, status='unhealthy', findings=[dict(
+            code='orphan-plugin', message='bounded plugin hook outlived parent', processes=[dict(
+                pid=123, ppid=999, command='python secret-guard.py --hook', created='2026-10-14T12:00:00Z')])])
+        code, messages = self.observe()
+        self.assertEqual(code, 1)
+        self.assertIn('PID 123', messages[0])
+        items = inbox.open_items(str(self.root))
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['kind'], 'box-unhealthy')
+        for field in ('123', 'secret-guard.py', '2026-10-14T12:00:00Z'):
+            self.assertIn(field, items[0]['detail'])
+        self.observe()
+        self.assertEqual(len(inbox.read(str(self.root))), 1)
+        self.assertEqual(self.health_mock.call_count, 2)
+        self.health.update(exitCode=0, status='healthy', findings=[])
+        self.assertIsNone(self.observe()[0])  # cleanup is observed fresh, never replayed
+
+    def test_unreadable_machine_state_is_not_quiet_success(self):
+        self.write(self.journal, [], 16)
+        self.health.update(exitCode=2, status='unreadable', checks=dict(
+            processes=dict(status='unreadable', detail='process table denied')))
+        code, messages = self.observe()
+        self.assertEqual(code, 2)
+        self.assertIn('process table denied', messages[0])
+        self.assertEqual(inbox.open_items(str(self.root)), [])
 
 if __name__ == "__main__":
     unittest.main()

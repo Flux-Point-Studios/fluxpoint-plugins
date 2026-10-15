@@ -454,7 +454,7 @@ irrev_case("irreversible discovery loop",
 
 irrev_js = cg.emit(copy.deepcopy(IRREV), CONTRACTS)
 for needle, why in [
-    ("throw new Error('this graph has irreversible nodes but no ledger",
+    ("which needs args._ledger",
      "an absent ledger fails loudly rather than disarming the guard"),
     ("in LEDGER", "the ledger is consulted before the effect"),
     ("REPLAYED-FROM-LEDGER", "a hit is reported, not silently skipped"),
@@ -682,7 +682,7 @@ for name, ok in [
     # It may READ one — the tree guard compares a launch reading when
     # there is one (#94) — but never refuses to start without it.
     ("a graph with no isolated nodes demands no base",
-     "no base was passed" not in plain_js),
+     'A["_base"] !== undefined' in plain_js),
     # #21: the sentinel brackets the campaign and guards every verdict-minting
     # node; drift halts rather than advancing.
     ("sentinel at start, before the verdict node, and at end",
@@ -842,7 +842,7 @@ def tree_sentinel_executed_case():
                     "  return {findings:[]}};",
                     "const parallel=async(t)=>Promise.all(t.map(f=>f()));",
                     "const pipeline=async()=>[],log=()=>{},phase=()=>{};",
-                    "const args={_base:{sha:'abc123',branch:'main'}};",
+                    "const args={_base:{sha:'abc123',branch:'main',porcelain:''}};",
                     "const budget={total:null,spent:()=>0,remaining:()=>1e9};",
                     "const workflow=0;",
                     "(async () => {",
@@ -906,7 +906,7 @@ def tree_own_writes_and_launch_case():
                     "const agent=async(p,o)=>{PROMPTS.push(String(p));",
                     "  if(String(o.label||'').includes('tree-check')) {",
                     "    const r = READINGS[Math.min(checks, READINGS.length - 1)]; checks++;",
-                    "    return {head: r[0], porcelain: r[1]} }",
+                    "    return {head: r[0], porcelain: r[1], ...(r[2] ? {root:r[2]} : {})} }",
                     "  if(String(o.label||'').includes('refute'))",
                     "    return {refuted:false, reason:'no'};",
                     "  if(String(o.label||'').includes('gate'))",
@@ -938,6 +938,11 @@ def tree_own_writes_and_launch_case():
     moved_dirt = run([["abc123", ""]], {"sha": "abc123", "porcelain": " M src/app.py"})
     resumed_dirty_state = run([["abc123", ""]], {"sha": "abc123", "porcelain": " M WORK.md"})
     no_launch = run([["abc123", ""]], None, js=plain_js)
+    wrong_root = run([["abc123", "", "/other-checkout"]], dict(base, root="/campaign"))
+    wrong_root_and_head = run([["other123", "", "/other-checkout"]], dict(base, root="/campaign"))
+    normalized_root = run([["abc123", "", "C:/WORK/Campaign/"]], dict(base, root="c:\\work\\campaign"))
+    no_root = run([["abc123", "", "/other-checkout"]], base)
+    old_shape = run([["abc123", ""]], {"sha": "abc123", "branch": "main"})
 
     def outcome(x):
         return (x.get("r") or {}).get("outcome")
@@ -965,6 +970,17 @@ def tree_own_writes_and_launch_case():
                                                    "?? .claude/worktrees/"]], base)
 
     for name, ok, got in [
+        ("different checkouts with identical HEAD/dirt are WRONG-ROOT before any node",
+         outcome(wrong_root) == "WRONG-ROOT" and wrong_root.get("gateRan") is False
+         and any("/cd" in m and "/campaign" in m and "/other-checkout" in m for m in wrong_root.get("LOGS", [])), wrong_root),
+        ("checkout identity takes precedence over different HEADs",
+         outcome(wrong_root_and_head) == "WRONG-ROOT", wrong_root_and_head),
+        ("Windows root separators, trailing slash and drive-path case normalize",
+         outcome(normalized_root) in ("COMPLETE", "INCOMPLETE"), normalized_root),
+        ("an omitted root retains existing compatibility",
+         outcome(no_root) in ("COMPLETE", "INCOMPLETE"), no_root),
+        ("an old _base without porcelain refuses before sentinel or nodes",
+         "git status --porcelain" in old_shape.get("err", ""), old_shape),
         ("the Stop hook's Evidence row is not TREE-MOVED",
          outcome(hook_row) in ("COMPLETE", "INCOMPLETE"), hook_row),
         ("  nor in a project below a monorepo's top level",
@@ -1222,14 +1238,14 @@ def prove_ci_and_launch_case():
         ("  while a CI-only manifest is a manifest",
          ci_only == {"ci"} and not ci_only.findings, (ci_only, ci_only.findings)),
         ("a prove: graph refuses to start without a launch stamp",
-         "launch stamp" in str(unstamped.get("err")), unstamped),
+         "attest.py --stamp" in str(unstamped.get("err")), unstamped),
         ("  and carries the stamp into the summary it is recorded from",
          ((stamped.get("r") or {}).get("launch") or {}).get("since") == "2026-09-23T00:00:00Z",
          stamped),
         ("a stamp without a run nonce is refused (overlapping runs, #91 review)",
-         "launch stamp" in str(no_nonce.get("err")), no_nonce),
+         "attest.py --stamp" in str(no_nonce.get("err")), no_nonce),
         ("  and so is a nonce that is not a plain token",
-         "launch stamp" in str(bad_nonce.get("err")), bad_nonce),
+         "attest.py --stamp" in str(bad_nonce.get("err")), bad_nonce),
         ("the prove node is told to bind its gate run to this run's nonce",
          "FPL_ATTEST_NONCE=${LAUNCH.nonce}" in js and "provePreamble(\"ci\") +" in js
          and "--match-head-commit" in js, "preamble"),
@@ -1332,13 +1348,13 @@ def repair_loop_case():
             out = os.path.join(tmp, "result.json"); script = os.path.join(tmp, "run.mjs")
             prefix = '''import {writeFileSync} from 'node:fs';
 const calls=[]; const mode=MODE;
-const args={_base:{sha:'base'},_launch:{root:'/campaign',nonce:'launch1'}};
+const args={_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'launch1'}};
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
  if (label.startsWith('check:')) return {exit: mode==='cap' || (label.includes(':b:') && label.endsWith('r1')) ? 1 : 0, command:'check', tail:'finding'};
  if (label.startsWith('review:')) return {exit: mode==='conflict' && label.endsWith('r1') ? 1 : 0, command:'review',tail:'composition failure'};
- return {branch:'branch',diffSummary:'patch',testsAdded:[],harnessCommand:'test',harnessExit:0,evidence:['test']};};
+ return {branch:'branch',diffSummary:'patch',testsAdded:[],sharedResources:[],harnessCommand:'test',harnessExit:0,evidence:['test']};};
 '''.replace("MODE", json.dumps(mode))
             open(script, "w").write(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
             proc = subprocess.run(["node", script], capture_output=True, text=True, timeout=20)
@@ -1370,7 +1386,7 @@ def repair_reframe_case():
     global passed, failed
     ir = {"version": 1, "campaign": "reframe", "treeGuard": False,
           "budget": {"maxNodes": 30, "cacheTtl": "1h"},
-          "lists": {"slices": [{"key": "parser"}]},
+          "lists": {"slices": [{"key": "parser", "targetClasses": ["decode"]}]},
           "nodes": [
               {"id": "fix", "foreach": "slices", "mutates": True, "prompt": "fix {{item.key}}: {{lastCheck}} in {{roundDir}}", "contract": "SliceV1"},
               {"id": "check", "foreach": "slices", "after": "fix", "independent": True, "verifies": "fix", "isolation": "measure", "prompt": "check {{prev}}", "contract": "FixCheckV1", "verifyOver": "findings", "repeat": {"until": "verdict == 'PASS'", "maxRounds": 4, "classBy": ["defectClass"], "reframeAfter": 2}},
@@ -1397,15 +1413,19 @@ const args={_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'non
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const reframe={classes:['decode'],invariant:'ledger admits only bounded rows',classRewire:'enforce item decoding budget at ingress',disposition:'adopt',measurement:{command:'pytest test_decode_budget',result:'all outsider rows bounded'}};
+const origin=(p,defectClass)=>{const line=p.split('ORIGIN REPLAY CONTEXT: ')[1].split('\n')[0],c=JSON.parse(line);
+ const observation={command:'pytest replay',result:'failure reproduced',controlCommand:'pytest valid',controlResult:'control passed',controlPassed:true,reproduces:true};
+ return {origin:defectClass==='decode'?'incomplete-fix':'pre-existing',originEvidence:{base:{snapshot:c.base,...observation},targetClasses:['decode'],rounds:c.patches.map(x=>({...x,...observation})),...(c.integrated?{integrated:{...c.integrated,...observation}}:{})}};};
+
 const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
  if(label.startsWith('tree-check:'))return (mode==='sentinel-start'&&label.includes('campaign-start'))||(mode==='sentinel-after'&&label.includes('after repair'))?null:{head:'base',porcelain:''};
  const round=Number(label.match(/:r(\d+)$/)?.[1]||1);
- if(label.startsWith('fix:'))return {branch:'patch',diffSummary:'patch',testsAdded:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest exit0'],...(round>=3&&['measured','unchecked','integration-measured','integration-merge-narrow'].includes(mode)?{reframe}: {})};
+ if(label.startsWith('fix:'))return {branch:'patch',diffSummary:'patch',testsAdded:[],sharedResources:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest exit0'],...(round>=3&&['measured','unchecked','integration-measured','integration-merge-narrow'].includes(mode)?{reframe}: {})};
  if(label.startsWith('check:')){const pass=mode==='contradictory'||mode.startsWith('integration')||round>=3&&['measured','unchecked','different'].includes(mode);
   const defectClass=mode==='different'&&round===2?'resource':'decode';
-  return {verdict:pass?'PASS':'FAIL',findings:pass&&mode!=='contradictory'?[]:[{defectClass,finding:'bad outsider row',severity:'HIGH',invariant:'bounded rows',classRewire:'bound parser',measurement:'pytest reproduced'},...(mode==='duplicates'?[{defectClass,finding:'same mechanism another path',severity:'HIGH',invariant:'bounded',classRewire:'bound',measurement:'pytest reproduced'}]:[])],blockers:[],evidence:['pytest observed'],...(['measured','integration-measured','integration-merge-narrow'].includes(mode)&&round>=3?{reframe:{...reframe,validated:true,measurement:{command:'pytest test_independent_budget',result:'independently checked bounds'}}}: {})};}
- if(label.startsWith('merge:'))return {branch:'integrated',diffSummary:'patch',testsAdded:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest'],...(mode==='integration-measured'&&round>=3?{reframe}: {})};
- if(label.startsWith('review:'))return {verdict:round>=3?'PASS':'FAIL',findings:round>=3?[]:[{defectClass:'decode',finding:'composition failure',severity:'HIGH',invariant:'bounded rows',classRewire:'enforce whole budget',measurement:'pytest compose'}],blockers:[],evidence:['pytest compose'],...(mode==='integration-measured'&&round>=3?{reframe:{...reframe,validated:true}}: {})};
+  return {verdict:pass?'PASS':'FAIL',findings:pass&&mode!=='contradictory'?[]:[{defectClass,finding:'bad outsider row',severity:'HIGH',invariant:'bounded rows',classRewire:'bound parser',measurement:'pytest reproduced',...origin(p,defectClass)},...(mode==='duplicates'?[{defectClass,finding:'same mechanism another path',severity:'HIGH',invariant:'bounded',classRewire:'bound',measurement:'pytest reproduced',...origin(p,defectClass)}]:[])],blockers:[],evidence:['pytest observed'],...(['measured','integration-measured','integration-merge-narrow'].includes(mode)&&round>=3?{reframe:{...reframe,validated:true,measurement:{command:'pytest test_independent_budget',result:'independently checked bounds'}}}: {})};}
+ if(label.startsWith('merge:'))return {branch:'integrated',diffSummary:'patch',testsAdded:[],sharedResources:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest'],...(mode==='integration-measured'&&round>=3?{reframe}: {})};
+ if(label.startsWith('review:'))return {verdict:round>=3?'PASS':'FAIL',findings:round>=3?[]:[{defectClass:'decode',finding:'composition failure',severity:'HIGH',invariant:'bounded rows',classRewire:'enforce whole budget',measurement:'pytest compose',...origin(p,'decode')}],blockers:[],evidence:['pytest compose'],...(mode==='integration-measured'&&round>=3?{reframe:{...reframe,validated:true}}: {})};
  return null;};
 '''.replace("MODE", json.dumps(mode))
             open(script, "w").write(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
@@ -1432,6 +1452,99 @@ const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
         passed, failed = passed + ok, failed + (not ok)
 
 repair_reframe_case()
+
+
+# Exact-key councils elect a candidate, never a judge's paraphrase (#144).
+def council_case():
+    import subprocess
+    import tempfile
+    global passed, failed
+    ir = {"version": 1, "campaign": "elect a real candidate", "treeGuard": False,
+          "budget": {"maxNodes": 20, "cacheTtl": "1h"},
+          "lists": {"angles": [{"key": "removal"}, {"key": "keep"}, {"key": "trim"}]},
+          "nodes": [
+              {"id": "design", "foreach": "angles", "prompt": "design {{item.key}}", "contract": "DesignV1", "onRed": "drop+log"},
+              {"id": "choose", "after": "design", "prompt": "Compare every candidate side by side: {{prev}}", "contract": "DecisionV1", "decides": "approach", "verify": "judges:3"},
+              {"id": "build", "after": "choose", "prompt": "Implement the raw design {{winner}}. Decision {{prev.chosen}}.", "contract": "DesignV1"},
+          ]}
+    raw_only = copy.deepcopy(ir); raw_only["nodes"][2]["prompt"] = "Implement {{winner}}"
+    checks = [("raw winner consumption satisfies its declared after edge", not cg.validate(raw_only, CONTRACTS)),
+              ("keyed council is valid", not cg.validate(ir, CONTRACTS)),
+              ("judge seats are priced without an extra synthesis agent", cg.plan_node_count(ir) == 7 and cg.estimate_tokens(ir, CONTRACTS)["perNode"]["choose"]["calls"] == 3)]
+    for name, mutate, needle in [
+        ("even seats", lambda x: x["nodes"][1].update(verify="judges:4"), "positive odd"),
+        ("zero seats", lambda x: x["nodes"][1].update(verify="judges:0"), "positive odd"),
+        ("missing decision", lambda x: x["nodes"][1].pop("decides"), "requires decides"),
+        ("wrong decision contract", lambda x: x["nodes"][1].update(contract="DesignV1"), "contract DecisionV1"),
+        ("duplicate candidate keys", lambda x: x["lists"]["angles"][1].update(key="trim"), "unique lowercase"),
+        ("unkeyed candidate", lambda x: x["lists"]["angles"][1].pop("key"), "unique lowercase"),
+        ("reserved none key", lambda x: x["lists"]["angles"][1].update(key="none"), "reserved"),
+        ("scalar predecessor", lambda x: x["nodes"][0].pop("foreach"), "keyed candidate"),
+        ("panel candidate predecessor", lambda x: x["nodes"][0].update(verify="panel:3", verifyOver="findings", contract="FindingsV1"), "keyed candidate"),
+        ("refuter-only field", lambda x: x["nodes"][1].update(verifyOver="options"), "cannot combine with verifyOver"),
+        ("drop policy cannot bypass election", lambda x: x["nodes"][1].update(onRed="drop+log"), "requires onRed"),
+        ("winner outside a judged edge", lambda x: x["nodes"][1].update(verify="schema-only"), "not in scope"),
+        ("winner projection", lambda x: x["nodes"][2].update(prompt="{{prev}} {{winner.plan}}"), "not projections"),
+    ]:
+        bad = copy.deepcopy(ir); mutate(bad)
+        checks.append(("council rejects " + name, any(needle in f for f in cg.validate(bad, CONTRACTS))))
+    def run(mode):
+        js = cg.emit(ir, CONTRACTS).replace("export const meta", "const meta")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out.json"); script = os.path.join(tmp, "run.mjs")
+            prefix = r'''import {writeFileSync} from 'node:fs';
+const args={},calls=[],mode=MODE;
+const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
+const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
+const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p,schema:o.schema});
+ if(label.startsWith('design:')){const key=label.split(':')[1];
+  if(mode==='dead-design'&&key==='removal'||mode==='one-design'&&key!=='trim'||mode==='no-designs')return null;
+  return {summary:'full independent candidate '+key,plan:['RAW PLAN '+key],files:[key+'.py'],risks:['measured risk for '+key],key:'forged-agent-key'};}
+ if(label.startsWith('choose:judge')){const seat=Number(label.slice(-1)),keys=o.schema.properties.winner.enum;
+  if((mode==='dead-split'||mode==='dead-majority')&&seat===3)return null;
+  let winner=mode==='split'?['removal','keep','trim'][seat-1]:mode==='dead-split'?(seat===1?'keep':'trim'):mode==='none'?'none':'trim';
+  if(mode==='prose')winner='Shape-only follow (design 3): trim';
+  const ranking=[winner,...keys.filter(k=>k!==winner)];
+  if(mode==='bad-ranking')ranking[1]=winner;
+  const strongest_objection=Object.fromEntries(keys.map(k=>[k,'A substantive independent objection to candidate '+k]));
+  if(mode==='missing-objection')delete strongest_objection.none;
+  return {winner,ranking,rationale:'This candidate preserves the measured invariant with the smallest supported change.',strongest_objection};}
+ return {summary:'builder completed the elected design',plan:['built the elected raw design'],files:[],risks:['the implementation still needs its independent gate']};};
+'''.replace("MODE", json.dumps(mode))
+            open(script, "w").write(prefix+'\n(async()=>{\n'+js+'\n})().then(r=>writeFileSync('+json.dumps(out)+',JSON.stringify({r,calls}))).catch(e=>writeFileSync('+json.dumps(out)+',JSON.stringify({error:String(e)})));')
+            proc = subprocess.run(["node", script], capture_output=True, text=True, timeout=20)
+            return json.load(open(out)) if os.path.exists(out) else {"error": proc.stderr}
+    normal=run("normal"); dead=run("dead-design")
+    checks += [
+        ("strict majority elects the exact key", normal.get("r", {}).get("results", {}).get("choose", {}).get("chosen") == "trim"),
+        ("builder gets original winning design bytes", any(c["label"] == "build" and '"plan":["RAW PLAN trim"]' in c["p"] and "RAW PLAN removal" not in c["p"] for c in normal.get("calls", []))),
+        ("producer cannot forge its candidate key", normal.get("r", {}).get("results", {}).get("design", [])[0].get("key") == "removal"),
+        ("dead design does not shift selected candidate identity", dead.get("r", {}).get("outcome") == "COMPLETE" and dead.get("r", {}).get("winners", {}).get("choose", {}).get("plan") == ["RAW PLAN trim"]),
+        ("dead candidates are absent from ballot schema", all(c["schema"]["properties"]["winner"]["enum"] == ["keep","trim","none"] for c in dead.get("calls", []) if c["label"].startswith("choose:judge"))),
+        ("no candidate falls back after every design dies", run("no-designs").get("r", {}).get("outcome") == "NO-CANDIDATES"),
+        ("two surviving votes can reach majority of three seats", run("dead-majority").get("r", {}).get("outcome") == "COMPLETE"),
+        ("one surviving design remains a choice against none", run("one-design").get("r", {}).get("outcome") == "COMPLETE"),
+        ("prose winner is excluded by every narrowed schema", all("Shape-only follow (design 3): trim" not in c["schema"]["properties"]["winner"]["enum"] for c in normal.get("calls", []) if c["label"].startswith("choose:judge"))),
+    ]
+    for mode in ["split", "dead-split", "none", "prose", "bad-ranking", "missing-objection"]:
+        result=run(mode)
+        checks.append(("council blocks without an exact-key majority: "+mode, result.get("r", {}).get("outcome") == "NO-MAJORITY" and not any(c["label"] == "build" for c in result.get("calls", []))))
+    decision=normal.get("r", {}).get("results", {}).get("choose")
+    checks.append(("tallied decision satisfies chosen-among-options validation", bool(decision) and not cg._sibling("decision").validate(decision, CONTRACTS["DecisionV1"], choice_among_options=True)))
+    with tempfile.TemporaryDirectory() as tmp:
+        broken = copy.deepcopy(decision); broken["chosen"] = "a prose choice outside the candidate keys"
+        for strict in [True, False]:
+            stored = copy.deepcopy(broken)
+            if not strict:
+                stored.pop("council")
+            open(os.path.join(tmp, "source.json"), "w").write(json.dumps({"summary": {"decisions": {"approach": stored}}}))
+            _, errors = cg.resolve_imports({"imports": {"approach": "source"}, "nodes": []}, CONTRACTS, tmp, os.path.join(tmp, "missing.jsonl"))
+            checks.append(("judged import retains exact-key rule" if strict else "legacy free-text import stays supported", bool(errors) == strict))
+    for name, ok in checks:
+        print(f"{'PASS' if ok else 'FAIL'}  {name}"+(f" -> {normal}" if not ok else ""))
+        passed, failed = passed + ok, failed + (not ok)
+
+council_case()
 
 
 print(f"\n{passed} passed, {failed} failed")

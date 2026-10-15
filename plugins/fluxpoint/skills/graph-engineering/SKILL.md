@@ -445,8 +445,10 @@ to park on a person for want of a gate that fits one call.
 - **Fan-out/verify** (`templates/WORK.md`): dimensions → finders →
   per-finding refuter panel. The default review campaign.
 - **Council → build → gate** (`templates/WORK.feature.md`): independent
-  designs from stated angles → one node judges them side by side
-  (`{{prev}}`, a justified barrier) → a mutator implements → an
+  keyed designs from stated angles → a `decides` node with `verify:
+  "judges:3"` compares them side by side (`{{prev}}`, a justified barrier)
+  → a mutator implements the elected candidate's original `{{winner}}`
+  → an
   independent node re-runs the harness → the proof-auditor judges whether
   verification got weaker (`ProofV1`, halting on WEAKENED; NOT-APPLICABLE
   when the diff carries no proof surface) → red-team closes.
@@ -796,3 +798,27 @@ are rejected there because the halt runs after the worker scope ends.
 against the Workflow launch limit (524,288 bytes, configurable with
 `--max-script-bytes`); below 16 KiB headroom warns. Repeat the check with
 `--check-script <compiled-file>` immediately before launch.
+
+A council's `judges:N` tier chooses among candidates; `panel:N` refutes
+claims. Use a positive odd seat count and `contract: "DecisionV1"` plus
+`decides`. Its predecessor must be an unverified `foreach` with unique
+lowercase candidate keys; `none` is reserved. The compiler attaches the
+source list's key to every returned object before filtering dead seats.
+It gives each judge a JudgmentV1 schema narrowed to the surviving keys plus
+`none`. Each ballot ranks every key exactly once and includes a rationale
+of at least 40 characters and a `strongest_objection` object keyed by every
+choice, each objection at least 20 characters. A prose winner, unknown key,
+malformed ranking or missing objection casts no vote.
+
+A winner needs more than half of all N seats, including dead seats in the
+denominator. A split or a majority for `none` halts as NO-MAJORITY and
+records the tally; an empty candidate set halts as NO-CANDIDATES. There is
+no first-candidate fallback. The compiler builds the DecisionV1 from the
+tally and judges' actual objections, with `chosen` equal to the winning
+key. The council decision is reversible (`frozen_by: "none"`) and compares
+no prior ruling (`overturned_prior: false`); a separate irreversible gate
+retains its normal authority requirements. `{{prev}}` carries that decision
+to its direct consumer, while `{{winner}}` carries the original elected
+candidate object, including plan, files and risks. The `decides`/`honors`
+record remains available to later nodes. Legacy schema-only decisions keep
+their existing free-text representation and import behavior.

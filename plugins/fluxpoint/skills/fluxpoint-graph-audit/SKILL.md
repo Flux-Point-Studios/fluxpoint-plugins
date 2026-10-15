@@ -22,3 +22,8 @@ nothing is listed twice.
    tool is Claude Code only and follow the command's own fallback: the same
    lenses, reduce and refutation, run as subagents or inline passes, with
    the same counts in the report.
+
+For any commit made by a Codex session without the Workflow tool, place
+`Fluxpoint-Executor: codex` in the final Git trailer block. Direct repairs
+remain unchecked until an independent repair run names their SHAs in a
+FixCheckV1 PASS or a recorded DecisionV1 explicitly accepts them.

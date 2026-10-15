@@ -17,6 +17,7 @@ import sys
 import time
 
 import inbox
+import box_health
 
 
 def rows(path):
@@ -93,7 +94,24 @@ def resume_note(root, run, agent, info, records, base):
     return str(target)
 
 
-def inspect(root, run, run_dir, stall_min=40, quiet_min=15, base=None, now=None):
+def inspect(root, run, run_dir, stall_min=40, quiet_min=15, base=None, now=None, health_check=None):
+    # This observer runs outside the replayed Workflow: every poll reads fresh
+    # machine state, so cleanup is visible on the very next invocation.
+    health = (box_health.check_health if health_check is None else health_check)()
+    if not isinstance(health, dict):
+        raise ValueError('box-health returned no readable observation')
+    health_code = health.get('exitCode')
+    if type(health_code) is not int or health_code not in (0, 1, 2):
+        raise ValueError('box-health returned an invalid observation')
+    health_messages = []
+    if health_code:
+        health_messages.append(box_health.format_report(health))
+    for finding in health.get('findings', []):
+        identity = json.dumps([finding['code'], sorted(
+            (p['pid'], p['created']) for p in finding.get('processes', []))], sort_keys=True)
+        node = finding['code'] + '-' + hashlib.sha256(identity.encode()).hexdigest()[:16]
+        detail = finding['message'] + '\n' + json.dumps(finding.get('processes', []), ensure_ascii=False)
+        inbox.add(root, 'box-unhealthy', node, run, detail)
     journal = Path(run_dir) / "journal.jsonl"
     events = rows(journal)
     states, starts = {}, {}
@@ -149,8 +167,10 @@ def inspect(root, run, run_dir, stall_min=40, quiet_min=15, base=None, now=None)
                 detail = f"silent for {minutes:.1f} min (threshold {stall_min:g}); transcript {path}"
                 inbox.add(root, "agent-stalled", agent, run, detail)
                 alerts.append(f"agent-stalled {agent}: {detail}")
-    if alerts:
-        return 1, alerts
+    if health_code == 2:
+        return 2, health_messages + alerts
+    if alerts or health_code == 1:
+        return 1, health_messages + alerts
     if not live and clock - journal.stat().st_mtime >= quiet_min * 60:
         return 0, ["no live agents; journal quiet"]
     return None, ["watching live agents" if live else "waiting for journal quiet"]
@@ -165,24 +185,38 @@ def main():
     ap.add_argument("--stall-min", type=float, default=40)
     ap.add_argument("--quiet-min", type=float, default=15)
     ap.add_argument("--interval", type=float, default=60)
+    ap.add_argument('--health-sample-seconds', type=float, default=5.)
+    ap.add_argument('--health-cpu-threshold', type=float, default=90.)
+    ap.add_argument('--health-orphan-cpu-threshold', type=float, default=90.)
+    ap.add_argument('--health-port-threshold', type=float, default=80.)
+    ap.add_argument('--health-loopback-ms', type=float, default=50.)
+    ap.add_argument('--health-plugin-timeout', type=float)
     ap.add_argument("--once", action="store_true", help="inspect once; exit 3 while pending")
     args = ap.parse_args()
     if any(not math.isfinite(value) or value <= 0 for value in (args.stall_min, args.quiet_min, args.interval)):
         ap.error("time limits must be finite and positive")
     if args.base and not __import__('re').fullmatch(r"[0-9a-fA-F]{7,64}", args.base):
         ap.error("--base must be a commit hash")
+    def health_check():
+        return box_health.check_health(sample_seconds=args.health_sample_seconds,
+            cpu_threshold=args.health_cpu_threshold, orphan_cpu_threshold=args.health_orphan_cpu_threshold,
+            port_threshold=args.health_port_threshold, loopback_ms=args.health_loopback_ms,
+            plugin_timeout=args.health_plugin_timeout)
     try:
         directory = resolve_run(args.run, args.projects)
         while True:
+            began = time.monotonic()
             code, messages = inspect(args.root, args.run, directory,
-                                     args.stall_min, args.quiet_min, args.base)
+                                     args.stall_min, args.quiet_min, args.base, health_check=health_check)
             for message in messages:
                 print(f"watchdog: {message}", flush=True)
             if code is not None:
                 return code
             if args.once:
                 return 3
-            time.sleep(args.interval)
+            # Keep the requested polling cadence when a health sample itself
+            # takes five seconds; never overlap samples or busy-wait.
+            time.sleep(max(0., args.interval-(time.monotonic()-began)))
     except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
         print(f"watchdog: {exc}", file=sys.stderr)
         return 2

@@ -70,7 +70,7 @@ const singletons = (p) => ({clusters: reduceItems(p).map(f => ({members: [f.id],
 const respond = __RESPOND__;
 const agent = async (prompt, opts = {}) => {
   CALLS.push({prompt: String(prompt), label: String(opts.label || ''), phase: opts.phase || null,
-              effort: opts.effort || null, schema: !!opts.schema});
+              effort: opts.effort || null, schema: !!opts.schema, isolation: opts.isolation || null});
   const v = respond(String(prompt), opts);
   return v === undefined ? null : v;
 };
@@ -96,7 +96,7 @@ __SCRIPT__
 """
 
 
-def run(args, respond="() => ({findings: []})"):
+def run(args, respond="(p,o) => o.label === 'probe-plan' ? {nodes:[], argDefaults:{}} : {findings: []}"):
     """Execute the workflow once. Returns {r|err, calls, logs, phases}."""
     body = re.sub(r"(?m)^export const meta", "const meta", SRC)
     with tempfile.TemporaryDirectory() as d:
@@ -120,7 +120,7 @@ def run(args, respond="() => ({findings: []})"):
     return res
 
 
-BASE = {"graph": "WORK.md", "pluginRoot": "/plug",
+BASE = {"graph": "WORK.md", "pluginRoot": "/plug", "ir": {"nodes": [], "argDefaults": {}},
         "check": "graph-compile: WORK.md ok, 10 node(s), ~900,000 estimated tokens"}
 
 
@@ -421,6 +421,122 @@ for name, a, needle in (("no graph", {"pluginRoot": "/plug"}, "args.graph"),
     res = run(a)
     report(f"{name} fails before any agent runs",
            needle in res.get("err", "") and not res["calls"], res.get("err", "NO ERROR")[:80])
+
+# ======================================== isolated command-shape probes (#142)
+PROBE_IR = {"argDefaults": {"launch": "/launch-checkout"}, "nodes": [
+    {"id": "boolean", "isolation": True, "prompt": "git -C {{A.launch}} fetch origin; git status | cat"},
+    {"id": "worktree", "isolation": "worktree", "prompt": 'test -z "$(git rev-list HEAD)" && git status'},
+    {"id": "mutator", "mutates": True, "prompt": "cd /another-worktree && git status; git log | cat"},
+    {"id": "measure", "isolation": "measure", "prompt": "git status"},
+    {"id": "plain", "prompt": "git status"},
+]}
+PROBE_OK = r"""(p,o) => {
+ if(!o.label.startsWith('probe:'))return {findings:[]};
+ const originals=JSON.parse(p.split('PRESCRIBED COMMANDS:\n')[1].split('\n\n')[0]);
+ return {completed:true,commands:originals.map(original=>({original,
+   safe:original.replace('fetch origin','status'),outcome:'ACCEPTED',evidence:'runtime accepted the reached command'})),
+   findings:[],blockers:[]};}"""
+probed = run(dict(BASE, ir=PROBE_IR), PROBE_OK)
+probes = labels(probed, "probe:")
+report("every worktree/boolean/mutator node gets its own isolated Probe before Lenses",
+       [c['label'] for c in probes] == ['probe:boolean','probe:worktree','probe:mutator']
+       and all(c['isolation'] == 'worktree' and c['phase'] == 'Probe' for c in probes)
+       and probed['calls'][0]['label'].startswith('probe:'), "three isolated probes, no measure/plain probe")
+report("safe probe keeps prescribed -C, substitution and compound shell shapes",
+       all(token in '\n'.join(c['prompt'] for c in probes)
+           for token in ['git -C /launch-checkout fetch origin; git status | cat', '$(git rev-list HEAD)',
+                         'cd /another-worktree && git status; git log | cat', 'non-mutating', 'Never fetch']),
+       "defaults expanded, shell syntax preserved, writes forbidden")
+report("accepted completed command probes contribute explicit coverage",
+       probed.get('r',{}).get('verdict') == 'SOUND' and probed['r']['counts']['probesReturned'] == 3
+       and probed['r']['counts']['probeCommands'] == 3, "3/3 probes, three measured commands")
+ONE_PROBE = {"nodes": [PROBE_IR['nodes'][0]], "argDefaults": PROBE_IR['argDefaults']}
+PROBE_REFUSED = r"""(p,o)=>{
+ if(o.label.startsWith('probe:'))return {completed:true,commands:[{original:'git -C /launch-checkout fetch origin; git status | cat',
+   safe:'git -C /launch-checkout status; git status | cat',outcome:'REFUSED',evidence:'redirects git to the shared checkout via -C'}],
+   findings:[F('HIGH','runtime isolation refuses the prescribed git shape')],blockers:[]};
+ if(o.label.startsWith('lens:'))return {findings:[]};
+ if(o.label==='reduce')return singletons(p);
+ if(o.label.startsWith('refute:'))return {refuted:false,reproduced:true,reason:'Measured the same hook refusal in this isolated worktree'};
+ return null;}"""
+refused = run(dict(BASE, ir=ONE_PROBE), PROBE_REFUSED)
+refs = labels(refused,'refute:')
+report("probe refusals become findings with isolated refuters under the same boundary",
+       refused.get('r',{}).get('counts',{}).get('confirmed') == 1 and len(refs) == 3
+       and all(c['isolation'] == 'worktree' and 'UNVERIFIED' in c['prompt'] for c in refs)
+       and refused['r']['confirmed'][0]['probeNodes'] == ['boolean'], "one confirmed refusal, three isolated refuters")
+merged_probe = run(dict(BASE, ir=ONE_PROBE), PROBE_REFUSED.replace(
+    "if(o.label.startsWith('lens:'))return {findings:[]};",
+    "if(o.label==='lens:commands')return {findings:[F('CRITICAL','normal lens raises the same isolated refusal')]};if(o.label.startsWith('lens:'))return {findings:[]};").replace(
+    "if(o.label==='reduce')return singletons(p);", "if(o.label==='reduce')return {clusters:[{members:reduceItems(p).map(f=>f.id),settled:''}]};"))
+report("reduce retains isolation when a higher severity ordinary lens leads a probe cluster",
+       merged_probe.get('r',{}).get('confirmed',[{}])[0].get('severity') == 'CRITICAL'
+       and all(c['isolation'] == 'worktree' for c in labels(merged_probe,'refute:')),
+       "probe origin survives deduplication")
+unavailable = run(dict(BASE, ir=ONE_PROBE), PROBE_REFUSED.replace('reproduced:true','reproduced:false'))
+report("inability to reproduce an isolated refusal remains UNVERIFIED, never refuted",
+       unavailable.get('r',{}).get('counts',{}).get('unverified') == 1
+       and unavailable['r']['counts']['refuted'] == 0 and unavailable['r']['verdict'] == 'REWIRE', "unavailable boundary blocks SOUND")
+for missing in ('null', '{completed:false,findings:[],commands:[],blockers:["tool unavailable"]}',
+                '{completed:true,findings:[],commands:[],blockers:[]}',
+                "{completed:true,findings:[],commands:[{original:'git status',safe:'git status',outcome:'UNRESOLVED',evidence:'chain short-circuited'}],blockers:[]}"):
+    broken = run(dict(BASE, ir=ONE_PROBE), "(p,o)=>o.label.startsWith('probe:')?" + missing + ":{findings:[]}")
+    report("missing/unexecuted probe coverage blocks SOUND: " + missing[:35],
+           broken.get('r',{}).get('verdict') == 'REWIRE' and 'boolean' in broken['r']['deadProbes'], "probe incomplete")
+discovered = run({"graph":"WORK.md","pluginRoot":"/plug"},
+                 "(p,o)=>o.label==='probe-plan'?" + json.dumps(ONE_PROBE) + ":(" + PROBE_OK + ")(p,o)")
+report("an older caller without args.ir discovers the plan instead of skipping probes",
+       len(labels(discovered,'probe-plan')) == 1 and len(labels(discovered,'probe:')) == 1
+       and discovered.get('r',{}).get('verdict') == 'SOUND', "discovery plus isolated execution")
+unknown_plan = run({"graph":"WORK.md","pluginRoot":"/plug"}, "(p,o)=>o.label==='probe-plan'?null:{findings:[]}")
+report("a missing probe plan cannot produce SOUND from clear lenses",
+       unknown_plan.get('r',{}).get('verdict') == 'REWIRE' and unknown_plan['r']['deadProbes'] == ['plan'], "plan unknown")
+
+# Probe completion is bound to the actual command, not the agent's boolean.
+def command_probe(prompt, commands, reason=None):
+    ir = {"nodes": [{"id": "shape", "isolation": True, "prompt": prompt}], "argDefaults": {}}
+    response = {"completed": True, "findings": [], "commands": commands, "blockers": []}
+    if reason:
+        response['noCommandsReason'] = reason
+    return run(dict(BASE, ir=ir), "(p,o)=>o.label.startsWith('probe:')?" + json.dumps(response) + ":{findings:[]}")
+
+def receipt(original, safe=None):
+    return dict(original=original, safe=safe if safe is not None else original,
+                outcome='ACCEPTED', evidence='runtime accepted the entire measured shell command')
+
+compound = 'git -C "$(git rev-parse --show-toplevel)" fetch origin && git -C /target status | cat'
+compound_safe = compound.replace('fetch origin', 'status')
+positive = command_probe('Run ' + compound, [receipt(compound, compound_safe)])
+report('safe read conversion retains nested substitution, both -C targets, && and pipe',
+       positive.get('r', {}).get('verdict') == 'SOUND', 'full command receipt accepted')
+for name, original, safe in [
+        ('unrelated command', 'git status', 'git status'),
+        ('dropped compound branch', compound, 'git -C "$(git rev-parse --show-toplevel)" status'),
+        ('changed -C operand', compound, compound_safe.replace('/target', '/other')),
+        ('changed substitution', compound, compound_safe.replace('--show-toplevel', '--git-dir')),
+        ('changed compound operator', compound, compound_safe.replace('&&', ';')),
+        ('mutation kept as safe', compound, compound),
+        ('hidden mutating substitution', compound, compound_safe.replace('git rev-parse --show-toplevel', 'git fetch origin')),
+        ('unsafe read flag', compound, compound_safe.replace('status |', 'diff --output=/tmp/shared |'))]:
+    bad = command_probe('Run ' + compound, [receipt(original, safe)])
+    report('probe blocks false completion: ' + name,
+           bad.get('r', {}).get('verdict') == 'REWIRE' and bad['r']['deadProbes'] == ['shape'], 'coverage rejected')
+for name, prompt, rows in [
+        ('second prescribed command omitted', '```sh\ngit status\ngit rev-parse HEAD\n```', [receipt('git status')]),
+        ('extra invented receipt', '`git status`', [receipt('git status'), receipt('git log')]),
+        ('duplicate receipt', '`git status`', [receipt('git status'), receipt('git status')]),
+        ('changed cd target', 'cd /target && git status', [receipt('cd /target && git status', 'cd /other && git status')]),
+        ('changed read-only target', 'git -C /target rev-parse HEAD', [receipt('git -C /target rev-parse HEAD', 'git -C /target rev-parse OTHER')]),
+        ('replaced prescribed read', 'git -C /target rev-parse HEAD', [receipt('git -C /target rev-parse HEAD', 'git -C /target status')]),
+        ('unsupported executable', 'Run python3 tool.py', [receipt('python3 tool.py')]),
+        ('hidden backtick mutation', 'git -C "`git fetch origin`" status', [receipt('git -C "`git fetch origin`" status')]),
+        ('redirection', 'git status > /tmp/shared', [receipt('git status > /tmp/shared')])]:
+    bad = command_probe(prompt, rows)
+    report('probe requires complete safe inventory: ' + name,
+           bad.get('r', {}).get('verdict') == 'REWIRE' and bad['r']['deadProbes'] == ['shape'], 'coverage rejected')
+no_command = command_probe('Read the target and report risks.', [], 'The prompt asks for inspection and prescribes no shell commands.')
+report('a node with no prescribed command retains explicit no-command coverage',
+       no_command.get('r', {}).get('verdict') == 'SOUND', 'concrete noCommandsReason accepted')
 
 # ======================================== meta is a pure literal
 m = re.search(r"^export const meta = (\{.*?^\})", SRC, re.S | re.M)

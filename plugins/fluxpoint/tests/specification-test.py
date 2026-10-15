@@ -618,7 +618,9 @@ time.sleep(float(sys.argv[1]))
         self.assertEqual(r.returncode, 0, r.stderr)
         text = 'STATUS: READY\nMODE: graph\nSPEC: .fluxpoint-spec.rollout.json\n\n'
         (self.root / 'GRAPH.rollout.md').write_text(
-            text + '```json graph-ir\n' + json.dumps(graph()) + '\n```\n', encoding='utf-8')
+            text + '```json graph-ir\n' + json.dumps(graph()) + '\n```\n\n'
+            '## Evidence\n\n| When (UTC) | Source | Outcome | Claim | Proof |\n'
+            '|---|---|---|---|---|\n', encoding='utf-8')
         return hashlib.sha256((self.root / '.fluxpoint-spec.rollout.json').read_bytes()).hexdigest()
 
     def test_spec_header_names_the_packet_and_its_own_lock(self):
@@ -659,6 +661,9 @@ time.sleep(float(sys.argv[1]))
                                cwd=self.root, capture_output=True, encoding='utf-8',
                                env=dict(os.environ, PYTHONIOENCODING='utf-8', FPL_MEMORY_INDEX='0'))
             self.assertEqual(r.returncode, want, r.stderr)
+        evidence = (self.root / 'GRAPH.rollout.md').read_text(encoding='utf-8')
+        self.assertIn('| rollout-ok |', evidence)
+        self.assertNotIn('| rollout-bad |', evidence)
 
     def test_runner_honors_the_state_file_spec_header(self):
         # The scaffolded harness runs `--run --if-present` with no --graph;
@@ -800,7 +805,7 @@ time.sleep(float(sys.argv[1]))
         self.assertEqual(r.returncode, 0, r.stderr)
         prelude = '''
 const prompts = [];
-const args = {_base: {sha: 'abc', branch: 'main'}};
+const args = {_base: {sha: 'abc', branch: 'main', porcelain: ''}};
 const log = () => {}, phase = () => {};
 const budget = {remaining: () => 1000000};
 const workflow = {};

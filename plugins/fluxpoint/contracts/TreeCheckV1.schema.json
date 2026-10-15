@@ -3,6 +3,7 @@
   "type": "object",
   "required": ["head", "porcelain"],
   "properties": {
+    "root": { "type": "string", "minLength": 1, "description": "git rev-parse --show-toplevel at the sentinel's actual working directory" },
     "head": { "type": "string", "minLength": 1 },
     "porcelain": { "type": "string" }
   }

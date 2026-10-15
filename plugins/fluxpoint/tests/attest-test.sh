@@ -50,6 +50,7 @@ newrepo() {
   git init -q -b main
   printf '#!/usr/bin/env bash\nexit 0\n' >scripts/harness.sh
   chmod +x scripts/harness.sh
+  printf '## Evidence\n\n| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n' >WORK.md
   git add -A; git -c user.email=t@t -c user.name=t commit -qm base
 }
 

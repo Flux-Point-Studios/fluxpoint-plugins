@@ -15,7 +15,7 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
 ## Org graph
 | Role | Zone owned | Binding | Notes |
 |---|---|---|---|
-| architect | design proposals | inline prompt | one per angle, no repo writes |
+| architect | design proposals | inline prompt | one per keyed angle, no repo writes |
 | builder | implementation | inline prompt, worktree-isolated | works one loop slice |
 | proof | verification review | `agentType: proof-auditor` | WEAKENED is harness-red; NOT-APPLICABLE when the diff carries no proof surface |
 | red-team | adversarial diff review | `agentType: red-team-reviewer` | verdict gates the merge |
@@ -115,11 +115,11 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
       "id": "choose",
       "phase": "Council",
       "after": "design",
-      "prompt": "Judge these candidate designs side by side for the goal \"{{A.goal}}\" on TDD-ability, blast radius, fit with the Definition of Done in WORK.md, and honesty of their risks. Candidates: {{prev}}. Return a DecisionV1: the question you actually settled, every candidate with who argued it and the strongest objection to it \u2014 including the one you chose \u2014 the choice, and why it beat the others. Say plainly whether this overturns what the campaign assumed going in, and name the node that freezes it. Barrier justified: judging requires all candidates at once.",
+      "prompt": "Judge these keyed candidate designs independently for the goal \"{{A.goal}}\" on TDD-ability, blast radius, fit with WORK.md and honesty of their risks. Candidates: {{prev}}. Return JudgmentV1: winner is one exact surviving key or none; ranking lists every allowed key exactly once with winner first; rationale explains why it wins; strongest_objection maps every key to its best objection, including the chosen design and none. The compiler tallies three independent seats and builds DecisionV1 only after a strict majority. Barrier justified: judging requires all candidates at once.",
       "contract": "DecisionV1",
       "decides": "implementation-approach",
       "effort": "high",
-      "verify": "schema-only",
+      "verify": "judges:3",
       "onRed": "halt"
     },
     {
@@ -131,7 +131,7 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
       "honors": [
         "implementation-approach"
       ],
-      "prompt": "Implement exactly this design as one loop slice: {{prev}}. The frozen decision that binds this work is {{decisions.implementation-approach}} \u2014 if the implementation cannot honor it, stop and say so rather than quietly choosing differently. Goal: \"{{A.goal}}\". Constraints: {{A.constraints}}. Work TDD strictly per WORK_PROMPT.md: failing test first, minimum code to green, scripts/harness.sh --changed <file> after each edit. Create and commit on a branch named claude/graph-<short-slug-of-goal>, test and code together. Run scripts/harness.sh --full and report its real exit code; never weaken the harness or delete tests to reach green. Evidence entries are command + observed result.",
+      "prompt": "Implement the winning candidate's original design as one loop slice: {{winner}}. The exact-key council decision is {{prev}}. The frozen decision that binds this work is {{decisions.implementation-approach}} \u2014 if the implementation cannot honor it, stop and say so rather than quietly choosing differently. Goal: \"{{A.goal}}\". Constraints: {{A.constraints}}. Work TDD strictly per WORK_PROMPT.md: failing test first, minimum code to green, scripts/harness.sh --changed <file> after each edit. Create and commit on a branch named claude/graph-<short-slug-of-goal>, test and code together. Run scripts/harness.sh --full and report its real exit code; never weaken the harness or delete tests to reach green. Evidence entries are command + observed result.",
       "contract": "SliceV1",
       "verify": "schema-only",
       "onRed": "halt"
@@ -216,8 +216,12 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
 ```
 
 ## Verification map
-- `design` / `choose`: schema-only. Designs are cheap and the next node
-  re-reads the repo anyway; a panel here buys nothing.
+- `design`: schema-only, with the angle key attached before dead seats are
+  filtered. `choose`: three independent JudgmentV1 seats, each restricted to
+  surviving keys plus `none`. Two of the three seats must name the same
+  candidate; a dead seat casts no vote, and no majority halts. The builder
+  receives the winning candidate's raw plan, files and risks as `{{winner}}`,
+  alongside the generated DecisionV1 record as `{{prev}}`.
 - `build`: mutates, so it is worktree-isolated and may not certify itself.
 - `gate`: the only node whose exit code the campaign trusts. It never
   wrote the code. `haltWhen: exit != 0` stops the campaign before the

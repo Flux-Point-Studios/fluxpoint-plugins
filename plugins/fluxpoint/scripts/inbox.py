@@ -40,6 +40,7 @@ KINDS = {
     "cex-ingest-failed": "prover output could not be parsed into a counterexample",
     "cex-pin-inert": "a pinned counterexample was re-found, so its test does not bite",
     "mutation-stale": "the mutation score no longer describes this tree",
+    "box-unhealthy": "machine health degraded during a Workflow; operator inspection required",
     "agent-stalled": "a live Workflow agent stopped producing transcript activity",
     "agent-killed": "a failed Workflow agent needs inspection and a resume",
 }

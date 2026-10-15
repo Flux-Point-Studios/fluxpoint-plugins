@@ -66,11 +66,11 @@ def record(results, contracts=None, *flags, summary=None):
         summary = summary if summary is not None else {'outcome': 'COMPLETE', 'contracts': contracts or {k: 'RedTeamV1' for k in results},
                    'results': results, 'provenance': []}
         p = subprocess.run([sys.executable, str(PLUGIN / 'scripts/record-run.py'), '--run-id', 'review',
-                            '--graph', str(graph), '--root', str(root), '--state-dir', str(root / 'runs'), *flags],
+                            '--graph', str(graph), '--root', str(root), *flags],
                            input=json.dumps(summary), cwd=root, text=True, capture_output=True, timeout=30)
         if p.returncode:
             raise AssertionError(p.stderr)
-        return json.loads((root / 'runs/review.json').read_text()), graph.read_text(), p.stderr
+        return json.loads((root / '.claude/fluxpoint/runs/review.json').read_text()), graph.read_text(), p.stderr
 
 
 class WorkflowTests(unittest.TestCase):

@@ -11,8 +11,39 @@ Workflow tool requires.
    The graph file is "$ARGUMENTS" if it names one, else `WORK.md`.
 2. Preflight, all deterministic — stop and report exactly what is missing
    rather than improvising around it:
+   - Run `bash "$ROOT/scripts/py.sh" unchecked-repairs.py --graph <graph> --root <project-root>`.
+     It lists every commit since the latest recorded BLOCK's reviewed head,
+     including its final `Fluxpoint-Executor` trailer. Exit 1 stops a graph
+     containing a RedTeamV1 or irreversible node; exit 2 means history or
+     records could not be read and also stops launch. A repair-only graph
+     may run to check this list. Its independent FixCheckV1 PASS must name
+     the checked SHAs in `commits`; `record-run.py` files them as `checked`.
+     Alternatively, record explicit acceptance in a DecisionV1
+     `acceptedCommits` array with `decision.py --record`. A SHA mentioned in
+     prose, a passing build, or an executor label does not discharge it.
+   - Before **every launch and resume**, run
+     `bash "$ROOT/scripts/py.sh" box-health.py` outside Workflow replay.
+     It samples machine CPU/process counters for 5 seconds, checks suspected
+     orphans, aged orphaned plugin hooks, loopback and dynamic TCP port pressure.
+     Exit 1 stops the launch and prints operator PIDs, command lines and creation
+     times. Exit 2 also stops: an unreadable or unsupported observation must be
+     reported and resolved before certifying the machine healthy. It never kills processes or changes machine config.
+     Thresholds are explicit flags; see `docs/box-health.md`. Repeat after any
+     cleanup, including when resuming a run with cached node results.
    - `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> --check` exits 0.
      Its findings are the work list; fix the IR, never the compiler.
+     Its versioned `launch args` and `post-launch` lists are authoritative
+     for this installed compiler, even if these command instructions were
+     loaded before a plugin upgrade. Load each named producer's current
+     output; do not recover from a refusal by guessing a missing field.
+   - If `.fluxpoint-gates.json` declares a gate named `preflight`, run
+     `bash "$ROOT/scripts/py.sh" attest.py --root <project-root> --run preflight`
+     and require exit 0 before launch or resume. Put the repo's fast graph,
+     pin-consistency and launch checks there so they run before builder suites.
+     The compiler also compares a SHA explicitly restated beside its
+     `argDefaults` key (such as `packetCommit is <sha>` or `packet commit at
+     <sha>`). Abbreviated prefixes agree; stale literals outside fenced blocks
+     and the historical Evidence section fail with their line numbers.
    - Mutating and irreversible graphs require the locked spec packet.
      The compiler loads it from the path the graph file's `SPEC:` header
      names (default `.fluxpoint-spec.json` at the repository root), and a
@@ -47,7 +78,8 @@ Workflow tool requires.
    Record the launch reading, fresh at every launch including a resume:
    ```
    args._base = {"sha": "$(git rev-parse HEAD)", "branch": "$(git branch --show-current)",
-                 "porcelain": "$(git status --porcelain)"}
+                 "porcelain": "$(git status --porcelain)",
+                 "root": "$(git rev-parse --show-toplevel)"}
    ```
    A graph with any `isolation` node — or `mutates: true`, which implies a
    worktree — refuses to start without it. Every graph that guards its tree
@@ -55,6 +87,16 @@ Workflow tool requires.
    sentinel is a cached `agent()` call on resume, so this reading is the
    only one that sees the tree the resumed run is really on. Never reuse an
    earlier launch's `_base`.
+   A supplied `_base` without `porcelain` is refused, including when clean:
+   use the empty string. `sha` must be a nonempty string, `branch` a string
+   when supplied (empty for detached HEAD), and optional `root` a nonempty
+   string. Numeric or boolean values are refused before agents start.
+   The sentinel reads its own checkout root and
+   compares it before HEAD or dirt. `WRONG-ROOT` means the session and launch
+   reading name different checkouts; move the session to the launch checkout
+   with `/cd` and launch fresh. Repeating a fresh launch in the same wrong
+   directory cannot fix it. Root normalization preserves the leading `//`
+   of a network checkout so it cannot match a different local root.
    Isolated nodes are handed this base in their prompts and told to assert
    it before trusting the tree they were given: a worktree's base is the
    runtime's choice, and it has been observed cut from the default branch
@@ -75,8 +117,8 @@ Workflow tool requires.
    compiled graph tells each `prove:` node to run its gate as
    `FPL_ATTEST_NONCE=<nonce> <declared command>` (and cite what
    `attest.py --last <gate> --nonce <nonce>` prints); a gate that outlives one
-   tool call runs as `attest.py --run <gate> --nonce <nonce>` in the
-   background and is collected with `attest.py --await <token>`; a
+   tool call runs as `attest.py --run <gate> --detach --nonce <nonce>` and
+   is collected with foreground `attest.py --await <token>`; a
    `prove:ci` node runs `attest.py --ci --pr <n> --wait --nonce <nonce>`
    (or `--ref <branch>`) so the forge, not the node, names the commit, and
    returns that `sha`, which whatever merges after the gate pins with
@@ -136,7 +178,21 @@ Workflow tool requires.
    the campaign obviously intends it, or because the user said "go" — only
    when they have named the effect.
 5. Set `STATUS: RUNNING`. Invoke the Workflow tool (Claude Code) with
+   the launch-turn rule: Workflow gives every node the launching turn's
+   latest user message, unchanged for the whole run; a compiled prompt
+   cannot extend it. Launch only when that message is this run command or
+   the operator's go for this graph. If a narrower message arrived after
+   it, ask the operator to re-issue `/fluxpoint:graph-run <graph>` before
+   invoking Workflow. A recorded ruling may be bound with IR
+   `authorizedBy: <decision-id>` and the same id in `imports`; its chosen
+   text, recordId and date reach every mutating node as context and cannot
+   override the relayed user message. Invoke with
    `{scriptPath: ".claude/workflows/<name>.graph.js", args: {...}}`.
+   If Workflow refuses `scriptPath` because the compiled script is outside
+   the session's working directory, move the session to that campaign
+   checkout with `/cd` before launching. Do not copy the script into another
+   checkout: the nodes would then run there while the launch readings still
+   described the campaign checkout.
    Pass args as a real JSON object, not a stringified one. Watch with
    `/workflows`; never poll with sleep. As soon as the tool returns its run id,
    start the observer with the Bash tool's `run_in_background: true`:
@@ -145,13 +201,20 @@ Workflow tool requires.
    ```
    Do this for every launch and resume, so a stall or failure wakes the
    orchestrator through the background task's completion. Exit 1 names the
-   affected agents and adds inbox items; a killed agent also gets a resume
+   affected agents or machine findings and adds inbox items (`box-unhealthy`
+   for machine findings); a killed agent also gets a resume
    note with its checkout state and commits since launch. Exit 2 means the
-   internal journal/transcript format could not be read: inspect it and
+   process/network coverage or the internal journal/transcript format could
+   not be read or is unsupported: inspect the named observation and
    report the missing observation. Exit 0 means no agents remain live and
    the journal has been quiet for 15 minutes. Hand-written Workflow scripts
    use this same command. `--stall-min` defaults to 40; `--once` performs one
-   inspection (exit 3 while the run is still pending).
+   inspection (exit 3 while the run is still pending). Every poll runs a fresh
+   5-second box-health sample, even while agents remain active, so CPU load or
+   orphan hooks do not have to wait for a transcript stall. The observer never
+   kills a process. `--health-sample-seconds`, `--health-cpu-threshold`,
+   `--health-orphan-cpu-threshold`, `--health-port-threshold` and
+   `--health-loopback-ms` configure those observations explicitly.
 6. On completion, record the run — evidence is a build artifact, not
    something you remember to write:
    ```
@@ -162,6 +225,12 @@ Workflow tool requires.
    packet the run is checked against); `--evidence` is the file whose
    Evidence and Decisions tables receive the rows, `--graph` by default. A
    campaign in `GRAPH.<name>.md` with a packet of its own passes both.
+   Run artifacts always go to `<root>/.claude/fluxpoint/runs`, even when
+   recording from a subdirectory; pass `--root <project-root>` explicitly.
+   `--state-dir` may only name that canonical directory. Exit 3 retains the
+   artifact but means the Evidence row was NOT appended: add the canonical
+   five-column header and separator, or pass `--evidence WORK.md`, then
+   record into the intended Evidence table before calling the run filed.
    That also appends any irreversible effect to the ledger, so the next
    run replays it instead of repeating it. Before diagnosing an empty or
    surprising result, read the run's `journal.jsonl` — it records what
@@ -179,6 +248,11 @@ Workflow tool requires.
    node onward re-runs, and any irreversible node among them replays
    from the ledger rather than firing twice. Restarting a mostly-green
    graph from zero is a finding.
+   Apply step 5's launch-turn rule to every resume too. A node that stopped
+   because its slice goes beyond the relayed user's request has an
+   authorization-context stop, not a code defect. Resume from the operator's
+   run command or go for this graph, with no invented code repair; if a
+   narrower message arrived, ask for the run command to be re-issued first.
 8. Graph green is not done. The campaign still exits through the
    loop-engineering ship pipeline — `scripts/harness.sh --full`, red-team
    `VERDICT: SHIP`, the Merge policy in WORK.md — and the Stop-hook DoD
@@ -189,3 +263,14 @@ Workflow tool requires.
    Claude Code builds lack it — degrade per the graph-engineering skill: run the compiled script's nodes as parallel subagent calls with
    the same contracts, then record with `--executor degraded-subagents` so
    the Evidence row says which executor ran the graph.
+   Direct repairs made outside a graph remain unchecked until an independent
+   repair run or explicit recorded acceptance discharges them. End each Codex
+   commit with `Fluxpoint-Executor: codex` in the final Git trailer block,
+   alongside other trailers, so preflight can identify the executor.
+
+For any agent node running a long undeclared command, use
+`longrun.py start --log <file> -- <command> <args>`. Await in the foreground,
+repeat after exit 3, and never end the node turn while the command runs: that
+turn end is the node's answer. A log match is readiness, not completion. Use
+`longrun.py cancel <token>` or `attest.py --cancel <token>` to stop the command
+process tree. See [long-command lifecycle](../references/longrun.md).

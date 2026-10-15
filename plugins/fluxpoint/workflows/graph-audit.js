@@ -34,6 +34,7 @@ export const meta = {
   description: 'Multi-lens semantic audit of a Graph Engineering IR: lens-scoped auditors, a reduce that merges duplicates, refuting verifiers, and per-stage counts ending SOUND or REWIRE.',
   whenToUse: 'Run by /fluxpoint:graph-audit after the compile check is clean; not a general code review.',
   phases: [
+    { title: 'Probe', detail: 'one isolated safe command-shape probe per worktree or mutating node' },
     { title: 'Lenses', detail: 'one graph-auditor per lens, same scope and evidence rule' },
     { title: 'Reduce', detail: 'merge duplicates across lenses without judging them' },
     { title: 'Verify', detail: 'refuters per finding: three lenses at HIGH and above, one below' },
@@ -117,6 +118,154 @@ const VERDICT = {
     reason: { type: 'string', minLength: 10 },
   },
   required: ['refuted', 'reason'],
+}
+const PROBE_VERDICT = {
+  type: 'object', required: ['refuted', 'reproduced', 'reason'],
+  properties: { refuted: { type: 'boolean' }, reproduced: { type: 'boolean' }, reason: { type: 'string', minLength: 10 } },
+}
+const PROBE_PLAN = {
+  type: 'object', required: ['nodes', 'argDefaults'], properties: {
+    nodes: { type: 'array', items: { type: 'object', required: ['id', 'prompt'], properties: {
+      id: { type: 'string' }, prompt: { type: 'string' }, isolation: {}, mutates: { type: 'boolean' },
+    } } }, argDefaults: { type: 'object' }, lists: { type: 'object' },
+  },
+}
+const PROBE_RESULT = {
+  type: 'object', required: ['completed', 'commands', 'findings', 'blockers'], properties: {
+    completed: { type: 'boolean' }, findings: FINDINGS.properties.findings,
+    blockers: { type: 'array', items: { type: 'string' } }, noCommandsReason: { type: 'string' },
+    commands: { type: 'array', items: { type: 'object', required: ['original', 'safe', 'outcome', 'evidence'], properties: {
+      original: { type: 'string' }, safe: { type: 'string' }, outcome: { enum: ['ACCEPTED', 'REFUSED', 'UNRESOLVED'] }, evidence: { type: 'string' },
+    } } },
+  },
+}
+
+// These checks certify a deliberately small shell grammar. An agent's claim
+// that it exercised a command is insufficient: bind every receipt to the
+// prescribed command, then verify that its safe form retained the boundary.
+function substitutionEnd(s, start) {
+  let quote = ''
+  for (let i = start; i < s.length; i++) {
+    const c = s[i]
+    if (c === '\\' && quote !== "'") { i++; continue }
+    if (quote === "'") { if (c === "'") quote = ''; continue }
+    if (c === '$' && s[i + 1] === '(') {
+      const end = substitutionEnd(s, i + 2)
+      if (end < 0) return -1
+      i = end; continue
+    }
+    if (c === '"') { quote = quote === '"' ? '' : '"'; continue }
+    if (!quote && c === "'") { quote = "'"; continue }
+    if (!quote && c === ')') return i
+    if (!quote && c === '(') return -1
+  }
+  return -1
+}
+function shellParts(s) {
+  const tokens = [], substitutions = []
+  let word = '', quote = ''
+  const flush = () => { if (word) { tokens.push({ word }); word = '' } }
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c === '\\' && quote !== "'") {
+      if (i + 1 >= s.length || s[i + 1] === '\n') return null
+      word += c + s[++i]; continue
+    }
+    if (quote === "'") { word += c; if (c === "'") quote = ''; continue }
+    if (c === '$' && s[i + 1] === '(') {
+      const end = substitutionEnd(s, i + 2)
+      if (end < 0) return null
+      substitutions.push(s.slice(i + 2, end))
+      word += s.slice(i, end + 1); i = end; continue
+    }
+    if (c === '`') return null
+    if (c === '"') { quote = quote === '"' ? '' : '"'; word += c; continue }
+    if (!quote && c === "'") { quote = "'"; word += c; continue }
+    if (quote) { word += c; continue }
+    if ('<>`&(){}'.includes(c) && !(c === '&' && s[i + 1] === '&')) return null
+    if (c === ';' || c === '|' || c === '&' || c === '\n') {
+      flush()
+      const op = (c === '|' || c === '&') && s[i + 1] === c ? c + s[++i] : c
+      tokens.push({ op }); continue
+    }
+    if (/\s/.test(c)) { flush(); continue }
+    if (!word && c === '#') return null
+    word += c
+  }
+  if (quote) return null
+  flush()
+  const parts = [], operators = []
+  let words = []
+  for (const t of tokens) {
+    if (t.word !== undefined) words.push(t.word)
+    else {
+      if (!words.length) return null
+      parts.push(words); words = []; operators.push(t.op)
+    }
+  }
+  if (!words.length) return null
+  parts.push(words)
+  return { parts, operators, substitutions }
+}
+function gitCommand(words) {
+  if (words[0] !== 'git') return null
+  let i = 1
+  while (i < words.length && words[i].startsWith('-')) {
+    if (['-C', '--git-dir', '--work-tree'].includes(words[i])) {
+      if (!words[i + 1]) return null
+      i += 2
+    } else if (/^--(?:git-dir|work-tree)=.+/.test(words[i]) || words[i] === '--no-pager') i++
+    else return null
+  }
+  return i < words.length ? { prefix: words.slice(0, i), command: words[i], args: words.slice(i + 1) } : null
+}
+function readOnlyGit(g) {
+  if (!g || g.args.some(x => /^--(?:output|ext-diff|textconv|exec|open-files-in-pager|paginate)(?:=|$)/.test(x))) return false
+  if (['status', 'rev-parse', 'log', 'diff', 'show', 'ls-files', 'rev-list', 'merge-base', 'ls-tree', 'cat-file', 'check-ignore', 'for-each-ref'].includes(g.command)) return true
+  if (g.command === 'branch') return g.args.length === 1 && g.args[0] === '--show-current'
+  if (g.command === 'worktree') return g.args[0] === 'list' && g.args.slice(1).every(x => ['--porcelain', '-z', '-v', '--verbose'].includes(x))
+  return false
+}
+function readOnlyWords(words) {
+  if (words[0] === 'git') return readOnlyGit(gitCommand(words))
+  // No interpreters, user programs, assignments, redirections or background
+  // processes: their effects cannot be established from this receipt.
+  return ['cd', 'pwd', 'test', '[', 'echo', 'printf', 'cat', 'grep', 'head', 'tail', 'wc', 'true', 'false'].includes(words[0])
+}
+function safeCommandShape(original, safe, depth = 0) {
+  if (depth > 8) return false
+  const a = shellParts(original), b = shellParts(safe)
+  if (!a || !b || JSON.stringify(a.operators) !== JSON.stringify(b.operators)
+      || a.parts.length !== b.parts.length || JSON.stringify(a.substitutions) !== JSON.stringify(b.substitutions)) return false
+  if (!b.substitutions.every(s => safeCommandShape(s, s, depth + 1))) return false
+  return a.parts.every((words, i) => {
+    const other = b.parts[i]
+    if (!readOnlyWords(other)) return false
+    if (words[0] !== 'git') return JSON.stringify(words) === JSON.stringify(other)
+    const x = gitCommand(words), y = gitCommand(other)
+    return !!x && !!y && JSON.stringify(x.prefix) === JSON.stringify(y.prefix)
+      && (!readOnlyGit(x) || JSON.stringify(words) === JSON.stringify(other))
+  })
+}
+function prescribedCommands(prompt) {
+  const commands = []
+  const add = s => { s = s.trim(); if (s) commands.push(s) }
+  const starts = /^(?:git|cd|pwd|test|\[|echo|printf|cat|grep|head|tail|wc|true|false|bash|sh|python(?:3(?:\.[0-9]+)?)?|node|npm|npx|make|curl|wget|rm|cp|mv|touch|mkdir|\.\/[^\s]+)(?:\s|$)/
+  // Keep compound lines intact. Unsupported multi-line continuations and
+  // grammar stay in the inventory and cannot obtain a passing receipt.
+  const prose = prompt.replace(/```([^\n]*)\n([\s\S]*?)```/g, (full, lang, body) => {
+    if (/^(?:bash|sh|shell|console)?\s*$/.test(lang)) body.split('\n').filter(x => x.trim() && !x.trim().startsWith('#')).forEach(add)
+    else if (/^(?:bash|sh|shell|console)\b/.test(lang)) add(body)
+    return ''
+  }).replace(/`([^`\n]+)`/g, (full, command) => { if (starts.test(command.trim())) add(command); return '' })
+  for (const line of prose.split('\n')) {
+    const text = line.trim().replace(/^(?:[-*]|\d+[.)])\s+/, '').replace(/^(?:Run|Execute|Probe)(?:\s+(?:exactly|this command))?\s*:?\s+/i, '')
+    if (starts.test(text)) add(text)
+    // Explicit instructions to execute an unfamiliar executable also need a
+    // receipt; the safe grammar will leave them incomplete until reviewed.
+    else if (/^(?:Run|Execute|Probe)\s/i.test(line.trim())) add(text)
+  }
+  return [...new Set(commands)]
 }
 
 // ---------------------------------------------------------------- inputs --
@@ -237,7 +386,8 @@ function refutePrompt(d, lens) {
     "Re-read the source yourself; the finding's evidence is a claim, not a measurement. Look for the reason it is " +
       'wrong: an edge, gate, contract or halt condition that already blocks the path, a command that does not ' +
       'behave as described, a scope it does not belong to. Do not edit any file.',
-    'Default to refuted: true when you are uncertain or cannot establish the failure path from what you read or ran. ' +
+    (d.probe ? 'For an isolated probe claim, inability to reproduce means reproduced:false and UNVERIFIED, never refuted. ' :
+      'Default to refuted: true when you are uncertain or cannot establish the failure path from what you read or ran. ') +
       'In reason, say what you read or ran and what it showed.',
   ].join('\n\n')
 }
@@ -313,6 +463,8 @@ function buildDistinct(raw, reduced) {
       merged: ms.filter(m => m !== lead).map(m => ({
         lens: m.lens, severity: m.severity, title: m.title, failurePath: m.failurePath, evidence: m.evidence,
       })),
+      probe: ms.some(m => m.probe),
+      probeNodes: unique(ms.filter(m => m.probe).map(m => m.probeNode)),
       members: g.members,
       settled: g.settled || exact,
     }
@@ -328,7 +480,12 @@ async function verify(d) {
   const lenses = high ? REFUTERS : [COMBINED]
   const need = high ? 2 : 1
   const votes = await parallel(lenses.map(l => () =>
-    agent(refutePrompt(d, l), { label: `refute:${l.id}:${d.id}`, phase: 'Verify', schema: VERDICT })))
+    agent(refutePrompt(d, l) + (d.probe ? '\n\nISOLATED PROBE FINDING: reproduce the measured shell shape in this runtime worktree, including -C targets, substitutions and chaining. Use only safe read forms. Return reproduced:false if the isolation hook, tools or safe reproduction are unavailable; inability to reproduce is UNVERIFIED, never a refutation. A refutation requires a reached comparable command accepted by this same boundary, with contrary measured evidence. Nodes: ' + d.probeNodes.join(', ') : ''),
+      { label: `refute:${l.id}:${d.id}`, phase: 'Verify', schema: d.probe ? PROBE_VERDICT : VERDICT,
+        ...(d.probe ? { isolation: 'worktree' } : {}) })))
+  if (d.probe) votes.forEach((v, i) => {
+    if (!v || v.reproduced !== true || typeof v.refuted !== 'boolean' || typeof v.reason !== 'string' || v.reason.trim().length < 10) votes[i] = null
+  })
   const cast = votes.filter(Boolean)
   const standing = cast.filter(v => v.refuted === false).length
   const dead = lenses.length - cast.length
@@ -353,6 +510,7 @@ function publicFinding(d) {
     classRewire: d.classRewire, evidence: d.evidence, sources: d.sources, settled: d.settled,
     merged: d.merged.map(m => ({ lens: m.lens, severity: m.severity, title: m.title, failurePath: m.failurePath })),
     votes: d.votes,
+    probe: d.probe, probeNodes: d.probeNodes,
   }
 }
 
@@ -371,6 +529,8 @@ function summarize(raw, judged, dead, verifiers, deadVerifiers) {
   }
   const settledMatched = judged.filter(d => d.settled)
   const counts = {
+    probes: PROBES.length, probesReturned: PROBES.length - DEAD_PROBES.filter(id => id !== 'plan').length,
+    probeCommands: PROBE_REPORTS.reduce((n, r) => n + r.commands.length, 0),
     lenses: RUN_LENSES.length,
     lensesReturned: RUN_LENSES.length - dead.length,
     raw: raw.length,
@@ -383,8 +543,9 @@ function summarize(raw, judged, dead, verifiers, deadVerifiers) {
     deadVerifiers,
     bySeverity: severityCounts,
   }
-  const sound = !confirmed.length && !unverified.length && !dead.length
+  const sound = !confirmed.length && !unverified.length && !dead.length && !DEAD_PROBES.length
   const why = []
+  if (DEAD_PROBES.length) why.push(`isolated probe coverage incomplete: ${DEAD_PROBES.join(', ')}`)
   if (dead.length) {
     why.push(MODE === 'single'
       ? 'the auditor returned nothing, so nothing was audited'
@@ -408,6 +569,7 @@ function summarize(raw, judged, dead, verifiers, deadVerifiers) {
     graph: A.graph,
     lenses: RUN_LENSES.map(l => l.id),
     deadLenses: dead,
+    probes: PROBE_REPORTS, deadProbes: DEAD_PROBES,
     settled: SETTLED,
     counts,
     confirmed: confirmed.map(publicFinding),
@@ -465,6 +627,83 @@ if (HISTORY.length >= 2) {
 log(`graph-audit: ${MODE} mode over ${A.graph}, ${RUN_LENSES.length} lens(es) ` +
   `[${RUN_LENSES.map(l => l.id).join(', ')}], ${SETTLED.length} settled title(s)`)
 
+// Workflow has no filesystem API. The command passes the parsed graph-ir;
+// older callers get an explicit discovery read instead of skipping probes.
+let probeIR = A.ir
+const DEAD_PROBES = [], PROBE_REPORTS = [], probeRaw = []
+if (probeIR === undefined) {
+  phase('Probe')
+  probeIR = await agent(`Read the exact graph-ir JSON in ${A.graph}. Return EVERY node's id, prompt, isolation, mutates and foreach fields unchanged, plus argDefaults and lists. Do not execute commands or omit non-isolated nodes; this is a mechanical probe plan, not an audit.`,
+    { label: 'probe-plan', phase: 'Probe', schema: PROBE_PLAN, effort: 'low' })
+}
+if (!probeIR || !Array.isArray(probeIR.nodes) || !probeIR.nodes.every(n => n && typeof n.id === 'string' && n.id.trim() && typeof n.prompt === 'string'
+      && (n.isolation === undefined || [true, false, 'worktree', 'measure'].includes(n.isolation))
+      && (n.mutates === undefined || typeof n.mutates === 'boolean'))
+    || new Set(probeIR.nodes.map(n => n.id)).size !== probeIR.nodes.length
+    || (probeIR.argDefaults !== undefined && (!probeIR.argDefaults || typeof probeIR.argDefaults !== 'object' || Array.isArray(probeIR.argDefaults)))) {
+  DEAD_PROBES.push('plan')
+  probeIR = { nodes: [], argDefaults: {} }
+}
+const PROBES = probeIR.nodes.filter(n => n.isolation !== 'measure' &&
+  (n.isolation === true || n.isolation === 'worktree' || n.mutates === true))
+const probeArgs = { ...(probeIR.argDefaults || {}), ...(A.bindings || {}) }
+function resolvedProbePrompt(n) {
+  return n.prompt.replace(/\{\{\s*A\.([A-Za-z0-9_-]+)\s*\}\}/g, (full, key) =>
+    Object.prototype.hasOwnProperty.call(probeArgs, key) ?
+      (typeof probeArgs[key] === 'string' ? probeArgs[key] : JSON.stringify(probeArgs[key])) : full)
+}
+function probePrompt(n) {
+  const prompt = resolvedProbePrompt(n)
+  return [
+    `Probe isolated node ${n.id} from ${A.graph}. Read its actual prompt in that file and ${A.pluginRoot}/agents/graph-auditor.md. Compare it with the resolved prompt below; a stale or mismatched plan is incomplete coverage. This agent has isolation: worktree, matching the node's runtime boundary.`,
+    'Run each command the prompt prescribes ONLY in a non-mutating safe read form. Preserve its shell shape: the same git -C target, cd target, $(...) substitution, &&, ; and | chaining. Replace mutating subcommands such as fetch, worktree add, checkout or writes with safe reads such as status, rev-parse HEAD or a genuinely non-mutating --dry-run. Never fetch, change refs, add worktrees, deploy, delete, write shared files or execute an unreviewed program. If a safe equivalent cannot preserve the shape, mark it UNRESOLVED and incomplete; do not execute the mutation.',
+    'Record original command, safe command actually sent to the tool, ACCEPTED / REFUSED / UNRESOLVED, and the exact runtime hook response or measured output. An ordinary Git syntax error, a failed prerequisite or an earlier && short-circuit is UNRESOLVED, not evidence that the runtime accepted the unexecuted shape. Resolve foreach item operands from the graph lists. Missing tools or unresolved command operands leave coverage incomplete; data-only context placeholders do not require executing future nodes. If no command is prescribed, return commands:[] and a concrete noCommandsReason.',
+    'For every hook refusal, return a finding with the command and hook text as evidence, a concrete failurePath, severity, title, rewire, defectClass and classRewire. Empty findings do not discharge incomplete command coverage. Return completed only after every prescribed safe command shape was reached. These results certify prescribed commands only: agents may later invent compound commands outside this probe.',
+    'Return exactly one command receipt for each PRESCRIBED COMMANDS entry, copying original verbatim. Preserve all compound operators, command substitutions and global Git operands in safe. Unsupported syntax or programs cannot receive complete coverage. If the inventory misses a prescribed command, report a blocker rather than claiming completion.',
+    'PRESCRIBED COMMANDS:\n' + JSON.stringify(prescribedCommands(prompt)),
+    'RESOLVED PROMPT:\n' + prompt,
+    'ARGUMENT BINDINGS:\n' + JSON.stringify(probeArgs),
+    'NODE AND LISTS:\n' + JSON.stringify({ node: n, lists: probeIR.lists || {} }),
+  ].join('\n\n')
+}
+if (PROBES.length) {
+  phase('Probe')
+  const results = await parallel(PROBES.map(n => () => agent(probePrompt(n),
+    { label: `probe:${n.id}`, phase: 'Probe', schema: PROBE_RESULT, isolation: 'worktree' })))
+  PROBES.forEach((n, i) => {
+    const r = results[i]
+    const commands = r && Array.isArray(r.commands) ? r.commands : []
+    const prescribed = prescribedCommands(resolvedProbePrompt(n))
+    const validCommands = commands.every(c => c && typeof c.original === 'string' && c.original.trim()
+      && typeof c.safe === 'string' && c.safe.trim() && ['ACCEPTED', 'REFUSED'].includes(c.outcome)
+      && typeof c.evidence === 'string' && c.evidence.trim() && safeCommandShape(c.original, c.safe))
+      && commands.length === prescribed.length
+      && prescribed.every(command => commands.filter(c => c && c.original === command).length === 1)
+    const complete = r && r.completed === true && Array.isArray(r.findings) && Array.isArray(r.blockers)
+      && !r.blockers.length && validCommands && (commands.length || typeof r.noCommandsReason === 'string' && r.noCommandsReason.trim().length >= 10)
+    if (!complete) DEAD_PROBES.push(n.id)
+    const blockers = r && Array.isArray(r.blockers) ? [...r.blockers] : ['probe returned no complete report']
+    if (!validCommands) blockers.push('command receipts do not cover the prescribed inventory with safe, matching shell shapes')
+    PROBE_REPORTS.push({ node: n.id, completed: !!complete, prescribed, commands, blockers })
+    if (r && Array.isArray(r.findings)) r.findings.forEach(f => {
+      if (!f || !Object.prototype.hasOwnProperty.call(RANK, f.severity) || typeof f.title !== 'string'
+        || f.title.trim().length < 8 || typeof f.failurePath !== 'string' || f.failurePath.trim().length < 20
+        || typeof f.evidence !== 'string' || f.evidence.trim().length < 10 || typeof f.rewire !== 'string' || f.rewire.trim().length < 10
+        || typeof f.defectClass !== 'string' || f.defectClass.trim().length < 3
+        || typeof f.classRewire !== 'string' || f.classRewire.trim().length < 20) {
+        if (!DEAD_PROBES.includes(n.id)) DEAD_PROBES.push(n.id)
+        return
+      }
+      probeRaw.push({ ...f, id: `F${probeRaw.length + 1}`, lens: `probe:${n.id}`, probe: true, probeNode: n.id })
+    })
+    // A refusal cannot disappear just because the probe omitted its finding.
+    if (commands.some(c => c?.outcome === 'REFUSED') && !(r && r.findings && r.findings.length)) {
+      if (!DEAD_PROBES.includes(n.id)) DEAD_PROBES.push(n.id)
+    }
+    if (DEAD_PROBES.includes(n.id)) PROBE_REPORTS[PROBE_REPORTS.length - 1].completed = false
+  })
+}
+
 const lensPhase = MODE === 'single' ? 'Single' : 'Lenses'
 phase(lensPhase)
 // Barrier on purpose: the reduce merges across lenses, so it needs all of them.
@@ -472,7 +711,7 @@ const lensResults = await parallel(RUN_LENSES.map(l => () =>
   agent(lensPrompt(l), { label: MODE === 'single' ? 'auditor' : `lens:${l.id}`, phase: lensPhase, schema: FINDINGS })))
 
 const dead = []
-const raw = []
+const raw = [...probeRaw]
 let malformed = 0
 RUN_LENSES.forEach((l, i) => {
   const r = lensResults[i]
