@@ -144,7 +144,7 @@ printf '# WORK\nno table here\n' >WORK.md
 err="$(printf '%s' "$RESULT" | "$FPL_PY" "$PLUGIN/scripts/record-run.py" --run-id wf_n1 2>&1 >/dev/null)"
 check "missing table -> exit 3" "3" "$?"
 check "missing table -> artifact exists" "0" "$([ -f .claude/fluxpoint/runs/wf_n1.json ] && echo 0 || echo 1)"
-case "$err" in *"no Evidence table header"*) check "missing table -> warns" "warn" "warn" ;;
+case "$err" in *"row NOT appended"*) check "missing table -> warns" "warn" "warn" ;;
   *) check "missing table -> warns" "warn" "silent" ;; esac
 
 # --- 5. SessionStart injection reflects the unified world ---
