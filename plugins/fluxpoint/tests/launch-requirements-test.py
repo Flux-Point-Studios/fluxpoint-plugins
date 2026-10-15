@@ -77,6 +77,39 @@ class LaunchRequirements(unittest.TestCase):
         fine = run(BASE, {'_base': {'sha': 'base', 'branch': '', 'porcelain': '', 'root': '/repo'}})
         self.assertNotIn('err', fine)
 
+    def test_base_fields_have_exact_types_before_any_agent_even_without_tree_guard(self):
+        ir = copy.deepcopy(BASE)
+        ir['treeGuard'] = False
+        ir['nodes'][0]['isolation'] = True
+        valid = {'sha': 'base', 'branch': '', 'porcelain': '', 'root': '/repo'}
+        for field, values in [('sha', [123, True, '', '  ']), ('branch', [123, False]),
+                              ('root', [123, False, '', '  ']), ('porcelain', [False, None])]:
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    result = run(ir, {'_base': dict(valid, **{field: value})})
+                    self.assertEqual(result['calls'], [])
+                    self.assertIn('args._base', result['err'])
+        self.assertNotIn('err', run(ir, {'_base': valid}))
+
+    def test_launch_fields_have_exact_types_and_nonce_format_before_any_agent(self):
+        ir = copy.deepcopy(BASE)
+        ir['nodes'][0]['verify'] = 'prove:harness'
+        valid = {'since': '2026-10-15T00:00:00Z', 'nonce': 'launch_123-valid'}
+        for field, values in [('nonce', [123, True, '', ' ', 'bad/nonce', 'a' * 65]),
+                              ('since', [123, True, '', '  ']), ('root', [123, False, '', '  '])]:
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    result = run(ir, {'_launch': dict(valid, **{field: value})})
+                    self.assertEqual(result['calls'], [])
+                    self.assertIn('args._launch', result['err'])
+
+    def test_root_normalization_preserves_network_checkout_identity(self):
+        different = run(BASE, {'_base': {'sha': 'base', 'branch': '', 'porcelain': '', 'root': '//repo'}})
+        self.assertIn('WRONG-ROOT', json.dumps(different))
+        self.assertNotIn('read', different['calls'])
+        same = run(BASE, {'_base': {'sha': 'base', 'branch': '', 'porcelain': '', 'root': '/repo/'}})
+        self.assertNotIn('err', same)
+
     def test_meta_header_and_refusals_share_manifest_version_and_requirements(self):
         ir = copy.deepcopy(BASE)
         ir['nodes'][0]['isolation'] = True

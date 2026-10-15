@@ -2414,19 +2414,19 @@ def launch_requirements(ir):
     args = []
     if ir.get("treeGuard", True) or any(n.get("isolation") or n.get("mutates") for n in nodes):
         required = any(n.get("isolation") or n.get("mutates") for n in nodes)
-        args.append(dict(name="_base", fields=["sha", "branch", "porcelain"],
+        args.append(dict(name="_base", fields=["sha", "branch", "porcelain"], optionalFields=["root"],
                          required=required, condition="isolated nodes" if required else "when a tree-guard launch reading is supplied",
-                         producer="git rev-parse HEAD; git branch --show-current; git status --porcelain",
-                         check="!v || typeof v !== 'object' || Array.isArray(v) || !v.sha || typeof v.porcelain !== 'string'"))
+                         producer="git rev-parse HEAD; git branch --show-current; git status --porcelain; git rev-parse --show-toplevel (optional root)",
+                         check="!v || typeof v !== 'object' || Array.isArray(v) || typeof v.sha !== 'string' || !v.sha.trim() || typeof v.porcelain !== 'string' || (v.branch !== undefined && typeof v.branch !== 'string') || (v.root !== undefined && (typeof v.root !== 'string' || !v.root.trim()))"))
     prove = any(prove_gate(n) for n in nodes)
     repair = bool(repair_loops(ir))
     if prove or repair:
         fields = (["since"] if prove else []) + ["nonce"] + (["root"] if repair else [])
-        check = "!v || typeof v !== 'object' || !/^[A-Za-z0-9_-]{1,64}$/.test(String(v.nonce || ''))"
+        check = "!v || typeof v !== 'object' || Array.isArray(v) || typeof v.nonce !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v.nonce) || (v.root !== undefined && (typeof v.root !== 'string' || !v.root.trim()))"
         if prove:
-            check += " || typeof v.since !== 'string' || !v.since"
+            check += " || typeof v.since !== 'string' || !v.since.trim()"
         if repair:
-            check += " || typeof v.root !== 'string' || !v.root"
+            check += " || typeof v.root !== 'string' || !v.root.trim()"
         args.append(dict(name="_launch", fields=fields, required=True,
                          condition="prove: or repair nodes", producer="attest.py --stamp", check=check))
     for name, needed, producer, condition in (
@@ -3137,7 +3137,10 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("const treeNorm = s => String(s || '').split('\\n').map(x => x.trim()).filter(Boolean)")
         a("  .filter(x => !treeIgnored(x)).sort().join('\\n')")
         a("function treeRoot(s) {")
-        a("  let root = String(s || '').trim().replace(/\\\\/g, '/').replace(/\\/+/g, '/')")
+        a("  let root = String(s || '').trim().replace(/\\\\/g, '/')")
+        a("  const unc = root.startsWith('//')")
+        a("  root = root.replace(/\\/+/g, '/')")
+        a("  if (unc) root = '/' + root")
         a("  if (root.length > 1) root = root.replace(/\\/+$/, '')")
         a("  return /^[A-Za-z]:/.test(root) ? root.toLowerCase() : root")
         a("}")

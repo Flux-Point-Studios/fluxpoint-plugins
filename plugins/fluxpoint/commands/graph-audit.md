@@ -84,6 +84,16 @@ is for a graph run.
    it UNRESOLVED. An earlier short-circuit or a Git syntax error does not
    establish whether the isolation boundary accepted the intended command.
    Keep every original/safe command and measured response in the result.
+   The workflow inventories shell fences, inline command snippets and command
+   lines (including `Run git ...`) from the resolved prompt. Every inventory
+   entry needs exactly one receipt with its original text; an unrelated
+   `git status` cannot discharge a prescribed compound command. It checks
+   operators, substitutions, `cd` operands and global Git targets itself.
+   Existing read commands retain their arguments; only mutating Git
+   subcommands can be replaced with approved reads. The supported grammar
+   excludes redirections, backticks, background processes and arbitrary
+   programs. These require an incomplete probe, not a passing receipt.
+   An agent that finds a command missing from the inventory reports a blocker.
 
    Probe refusals join the finding reduction and get refuters with
    `isolation: 'worktree'` too. A refuter unable to reach the same runtime

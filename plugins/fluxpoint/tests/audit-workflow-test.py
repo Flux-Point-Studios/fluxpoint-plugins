@@ -430,9 +430,12 @@ PROBE_IR = {"argDefaults": {"launch": "/launch-checkout"}, "nodes": [
     {"id": "measure", "isolation": "measure", "prompt": "git status"},
     {"id": "plain", "prompt": "git status"},
 ]}
-PROBE_OK = r"""(p,o) => o.label.startsWith('probe:') ? {completed:true,
-  commands:[{original:'git status',safe:'git status',outcome:'ACCEPTED',evidence:'runtime accepted the reached command'}],
-  findings:[],blockers:[]} : {findings:[]}"""
+PROBE_OK = r"""(p,o) => {
+ if(!o.label.startsWith('probe:'))return {findings:[]};
+ const originals=JSON.parse(p.split('PRESCRIBED COMMANDS:\n')[1].split('\n\n')[0]);
+ return {completed:true,commands:originals.map(original=>({original,
+   safe:original.replace('fetch origin','status'),outcome:'ACCEPTED',evidence:'runtime accepted the reached command'})),
+   findings:[],blockers:[]};}"""
 probed = run(dict(BASE, ir=PROBE_IR), PROBE_OK)
 probes = labels(probed, "probe:")
 report("every worktree/boolean/mutator node gets its own isolated Probe before Lenses",
@@ -449,8 +452,8 @@ report("accepted completed command probes contribute explicit coverage",
        and probed['r']['counts']['probeCommands'] == 3, "3/3 probes, three measured commands")
 ONE_PROBE = {"nodes": [PROBE_IR['nodes'][0]], "argDefaults": PROBE_IR['argDefaults']}
 PROBE_REFUSED = r"""(p,o)=>{
- if(o.label.startsWith('probe:'))return {completed:true,commands:[{original:'git -C /launch-checkout fetch origin',
-   safe:'git -C /launch-checkout status',outcome:'REFUSED',evidence:'redirects git to the shared checkout via -C'}],
+ if(o.label.startsWith('probe:'))return {completed:true,commands:[{original:'git -C /launch-checkout fetch origin; git status | cat',
+   safe:'git -C /launch-checkout status; git status | cat',outcome:'REFUSED',evidence:'redirects git to the shared checkout via -C'}],
    findings:[F('HIGH','runtime isolation refuses the prescribed git shape')],blockers:[]};
  if(o.label.startsWith('lens:'))return {findings:[]};
  if(o.label==='reduce')return singletons(p);
@@ -488,6 +491,52 @@ report("an older caller without args.ir discovers the plan instead of skipping p
 unknown_plan = run({"graph":"WORK.md","pluginRoot":"/plug"}, "(p,o)=>o.label==='probe-plan'?null:{findings:[]}")
 report("a missing probe plan cannot produce SOUND from clear lenses",
        unknown_plan.get('r',{}).get('verdict') == 'REWIRE' and unknown_plan['r']['deadProbes'] == ['plan'], "plan unknown")
+
+# Probe completion is bound to the actual command, not the agent's boolean.
+def command_probe(prompt, commands, reason=None):
+    ir = {"nodes": [{"id": "shape", "isolation": True, "prompt": prompt}], "argDefaults": {}}
+    response = {"completed": True, "findings": [], "commands": commands, "blockers": []}
+    if reason:
+        response['noCommandsReason'] = reason
+    return run(dict(BASE, ir=ir), "(p,o)=>o.label.startsWith('probe:')?" + json.dumps(response) + ":{findings:[]}")
+
+def receipt(original, safe=None):
+    return dict(original=original, safe=safe if safe is not None else original,
+                outcome='ACCEPTED', evidence='runtime accepted the entire measured shell command')
+
+compound = 'git -C "$(git rev-parse --show-toplevel)" fetch origin && git -C /target status | cat'
+compound_safe = compound.replace('fetch origin', 'status')
+positive = command_probe('Run ' + compound, [receipt(compound, compound_safe)])
+report('safe read conversion retains nested substitution, both -C targets, && and pipe',
+       positive.get('r', {}).get('verdict') == 'SOUND', 'full command receipt accepted')
+for name, original, safe in [
+        ('unrelated command', 'git status', 'git status'),
+        ('dropped compound branch', compound, 'git -C "$(git rev-parse --show-toplevel)" status'),
+        ('changed -C operand', compound, compound_safe.replace('/target', '/other')),
+        ('changed substitution', compound, compound_safe.replace('--show-toplevel', '--git-dir')),
+        ('changed compound operator', compound, compound_safe.replace('&&', ';')),
+        ('mutation kept as safe', compound, compound),
+        ('hidden mutating substitution', compound, compound_safe.replace('git rev-parse --show-toplevel', 'git fetch origin')),
+        ('unsafe read flag', compound, compound_safe.replace('status |', 'diff --output=/tmp/shared |'))]:
+    bad = command_probe('Run ' + compound, [receipt(original, safe)])
+    report('probe blocks false completion: ' + name,
+           bad.get('r', {}).get('verdict') == 'REWIRE' and bad['r']['deadProbes'] == ['shape'], 'coverage rejected')
+for name, prompt, rows in [
+        ('second prescribed command omitted', '```sh\ngit status\ngit rev-parse HEAD\n```', [receipt('git status')]),
+        ('extra invented receipt', '`git status`', [receipt('git status'), receipt('git log')]),
+        ('duplicate receipt', '`git status`', [receipt('git status'), receipt('git status')]),
+        ('changed cd target', 'cd /target && git status', [receipt('cd /target && git status', 'cd /other && git status')]),
+        ('changed read-only target', 'git -C /target rev-parse HEAD', [receipt('git -C /target rev-parse HEAD', 'git -C /target rev-parse OTHER')]),
+        ('replaced prescribed read', 'git -C /target rev-parse HEAD', [receipt('git -C /target rev-parse HEAD', 'git -C /target status')]),
+        ('unsupported executable', 'Run python3 tool.py', [receipt('python3 tool.py')]),
+        ('hidden backtick mutation', 'git -C "`git fetch origin`" status', [receipt('git -C "`git fetch origin`" status')]),
+        ('redirection', 'git status > /tmp/shared', [receipt('git status > /tmp/shared')])]:
+    bad = command_probe(prompt, rows)
+    report('probe requires complete safe inventory: ' + name,
+           bad.get('r', {}).get('verdict') == 'REWIRE' and bad['r']['deadProbes'] == ['shape'], 'coverage rejected')
+no_command = command_probe('Read the target and report risks.', [], 'The prompt asks for inspection and prescribes no shell commands.')
+report('a node with no prescribed command retains explicit no-command coverage',
+       no_command.get('r', {}).get('verdict') == 'SOUND', 'concrete noCommandsReason accepted')
 
 # ======================================== meta is a pure literal
 m = re.search(r"^export const meta = (\{.*?^\})", SRC, re.S | re.M)

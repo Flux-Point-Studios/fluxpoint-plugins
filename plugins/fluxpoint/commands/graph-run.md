@@ -88,11 +88,15 @@ Workflow tool requires.
    only one that sees the tree the resumed run is really on. Never reuse an
    earlier launch's `_base`.
    A supplied `_base` without `porcelain` is refused, including when clean:
-   use the empty string. The sentinel reads its own checkout root and
+   use the empty string. `sha` must be a nonempty string, `branch` a string
+   when supplied (empty for detached HEAD), and optional `root` a nonempty
+   string. Numeric or boolean values are refused before agents start.
+   The sentinel reads its own checkout root and
    compares it before HEAD or dirt. `WRONG-ROOT` means the session and launch
    reading name different checkouts; move the session to the launch checkout
    with `/cd` and launch fresh. Repeating a fresh launch in the same wrong
-   directory cannot fix it.
+   directory cannot fix it. Root normalization preserves the leading `//`
+   of a network checkout so it cannot match a different local root.
    Isolated nodes are handed this base in their prompts and told to assert
    it before trusting the tree they were given: a worktree's base is the
    runtime's choice, and it has been observed cut from the default branch
