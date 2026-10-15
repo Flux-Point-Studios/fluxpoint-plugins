@@ -18,6 +18,7 @@ agent never touches the number.
   attest.py --verify          cross-check a run summary on stdin against the log
   attest.py --run GATE        run a declared gate and attest its exit itself
   attest.py --await TOKEN     wait, in bounded slices, for a --run to finish
+  attest.py --cancel TOKEN    terminate a run and its command process tree
   attest.py --ci --pr N       attest the forge's own commit statuses on PR N's head
                               (or --ref BRANCH; --sha names a commit the caller chose)
   attest.py --stamp           a launch stamp ({since, nonce}) for args._launch
@@ -72,6 +73,9 @@ import re
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import background as bg
+
 GATES = ".fluxpoint-gates.json"
 ATTEST = os.path.join(".claude", "fluxpoint", "attest.jsonl")
 BACKGROUND = os.path.join(".claude", "fluxpoint", "attest-bg")
@@ -81,7 +85,7 @@ CI_FORGES = {"github"}
 IDENT = re.compile(r"^[a-z][a-z0-9-]*$")
 # One foreground tool call is killed at 600 s; --await returns before that
 # with a verdict or a "still running", never mid-kill.
-AWAIT_DEFAULT = 540
+AWAIT_DEFAULT = bg.AWAIT_DEFAULT
 
 
 def path_for(root):
@@ -865,20 +869,11 @@ def _bg_dir(root):
 
 
 def _bg_read(root, token):
-    try:
-        with open(os.path.join(_bg_dir(root), f"{token}.json"), encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return None
+    return bg.Store(root, BACKGROUND).read(token)
 
 
 def _bg_write(root, rec):
-    d = _bg_dir(root)
-    os.makedirs(d, exist_ok=True)
-    tmp = os.path.join(d, f".{rec['token']}.tmp")
-    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(rec, fh)
-    os.replace(tmp, os.path.join(d, f"{rec['token']}.json"))
+    return bg.Store(root, BACKGROUND).write(rec)
 
 
 def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
@@ -934,16 +929,24 @@ def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
         # Absolute paths: the child starts in `tree`, and a relative root
         # resolved a second time from there named a directory that does not
         # exist — the child exited on a missing manifest, silently.
-        subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__), "--root", root, "--tree", tree,
-             "--run", gate, "--token", token] + (["--nonce", nonce] if nonce else []),
-            cwd=tree, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=(os.name != "nt"))
+        try:
+            proc = bg.spawn(
+                [sys.executable, os.path.abspath(__file__), "--root", root, "--tree", tree,
+                 "--run", gate, "--token", token] + (["--nonce", nonce] if nonce else []), tree)
+            _bg_write(root, {"token": token, "pid": proc.pid})
+        except OSError as exc:
+            bg.fail(bg.Store(root, BACKGROUND), token, exc)
+            print(f"attest: could not start {gate}: {exc}", file=sys.stderr)
+            return 2
         print(f"attest: started {gate} as {token} — collect it with "
               f"attest.py --await {token}", flush=True)
         return 0
-    return _execute(root, gate, started, token, nonce, tree)
+    try:
+        return _execute(root, gate, started, token, nonce, tree)
+    except (OSError, ValueError) as exc:
+        bg.fail(bg.Store(root, BACKGROUND), token, exc)
+        print(f"attest: runner error: {exc}", file=sys.stderr)
+        return 4
 
 
 def _bash():
@@ -979,14 +982,18 @@ def _execute(root, gate, started, token, nonce="", tree=None):
     gates, problems = load_gates(root)
     deployed = any(lane['gate'] == gate for lane in getattr(gates, 'deployed', {}).values())
     pins_hashes, dependencies, pin_findings = deployed_resolution(root, tree, gate, gates) if not problems else ({}, {}, problems)
-    with open(log, "wb") as out:
-        if pin_findings:
+    store = bg.Store(root, BACKGROUND)
+    if pin_findings:
+        with open(log, "wb") as out:
             out.write(("\n".join(pin_findings) + "\nSuite not started.\n").encode("utf-8"))
-            code = 1
-        else:
-            command, cwd, _ = deployed_invocation(tree, gates, gate) if deployed else ([_bash(), '-c', raw], tree, [])
-            code = subprocess.call(command, cwd=cwd, stdin=subprocess.DEVNULL,
-                                   stdout=out, stderr=subprocess.STDOUT)
+        code = 1
+    else:
+        command, cwd, _ = deployed_invocation(tree, gates, gate) if deployed else ([_bash(), '-c', raw], tree, [])
+        code = bg.run_command(store, token, command, cwd, log)
+    if code is None:
+        bg.finish(store, token, None)
+        print(f"attest: {gate} cancelled before command launch; nothing attested", flush=True)
+        return 130
     with open(log, "rb") as fh:
         text = fh.read().decode("utf-8", "replace")
     row = {
@@ -1001,101 +1008,80 @@ def _execute(root, gate, started, token, nonce="", tree=None):
                    resolutionChecked=not pin_findings)
         if deployed:
             row['deployedLaneSha256'] = deployed_lane_sha(gates, gate)
-    append_row(root, row)
-    _bg_write(root, {"token": token, "gate": gate, "status": "DONE", "exit": code,
-                     "attestId": row["attestId"], "started": started,
-                     "finished": row["when"], "headSha": head, "log": log})
+    def publish(rec):
+        # Serialize verdict publication with cancellation. A request arriving
+        # before publication cannot mint a passing attestation, even if the
+        # command happened to exit 0 during that race.
+        if not rec.get('cancelRequested') or code != 0:
+            append_row(root, row)
+            rec['attestId'] = row['attestId']
+    completed = bg.finish(store, token, code, before_finish=publish, headSha=head, log=log)
+    if not completed.get('attestId'):
+        print(f"attest: {gate} cancelled; command exit {code}; nothing attested", flush=True)
+        return 130
     print(f"attest: {gate} exit {code} -> {row['attestId']}", flush=True)
     return code
 
 
 def _alive(pid, started=""):
-    if pid is None:
-        # Launched, not yet started: alive for as long as a start can take.
-        try:
-            t = datetime.datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=datetime.timezone.utc)
-        except (TypeError, ValueError):
-            return False
-        return (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() < 60
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    if os.name == "nt":
-        return _alive_nt(pid)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return bg.alive(pid, started)
 
 
 def _alive_nt(pid):
-    """Windows: is the process still running? OpenProcess, then its exit
-    code (STILL_ACTIVE while it runs). Answering True for every pid left a
-    crashed runner RUNNING forever and --await answering 3 to every call."""
-    try:
-        import ctypes
-        k = ctypes.windll.kernel32
-        h = k.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not h:
-            return k.GetLastError() == 5  # access denied: it exists
-        try:
-            code = ctypes.c_ulong()
-            if not k.GetExitCodeProcess(h, ctypes.byref(code)):
-                return True
-            return code.value == 259  # STILL_ACTIVE
-        finally:
-            k.CloseHandle(h)
-    except Exception:  # noqa: BLE001 - no probe: the timeout bounds the wait
-        return True
+    return bg.alive_nt(pid)
 
 
-def await_gate(root, ref, timeout):
-    """Wait for a --run to finish. 0 done, 3 still running, 4 died, 2 unknown.
-
-    Exit 0 means the verdict is known, not that the gate passed: the gate's
-    own exit is printed with the attestId to cite. A caller loops on 3 with
-    fresh foreground calls, each under the tool's cap.
-    """
+def _find_run(root, ref):
     rec = _bg_read(root, ref)
-    if rec is None and IDENT.match(ref or ""):
-        # A gate name: the newest run of it.
-        d = _bg_dir(root)
-        cands = []
-        for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-            if fn.endswith(".json"):
-                r = _bg_read(root, fn[:-5])
-                if r and r.get("gate") == ref:
-                    cands.append(r)
-        rec = max(cands, key=lambda r: str(r.get("started"))) if cands else None
+    if rec is None and IDENT.fullmatch(ref or ""):
+        candidates = []
+        directory = _bg_dir(root)
+        for filename in sorted(os.listdir(directory)) if os.path.isdir(directory) else []:
+            if filename.endswith(".json"):
+                row = _bg_read(root, filename[:-5])
+                if row and row.get("gate") == ref:
+                    candidates.append(row)
+        rec = max(candidates, key=lambda row: str(row.get("started"))) if candidates else None
+    return rec
+
+
+def await_gate(root, ref, timeout, until=None):
+    """0 known/matched, 3 running (repeat in foreground), 4 lost, 2 invalid."""
+    rec = _find_run(root, ref)
     if rec is None:
-        print(f"attest: no background run '{ref}' — start one with --run <gate>",
-              file=sys.stderr)
+        print(f"attest: no background run '{ref}' — start one with --run <gate>", file=sys.stderr)
         return 2
-    deadline = time.monotonic() + max(0, timeout)
-    while True:
-        rec = _bg_read(root, rec["token"]) or rec
-        if rec.get("status") == "DONE":
-            print(f"attest: {rec['gate']} exit {rec['exit']} -> {rec['attestId']}")
-            return 0
-        if not _alive(rec.get("pid"), rec.get("started")):
-            # The runner writes DONE and exits: between the read above and
-            # the probe it may have done both.
-            again = _bg_read(root, rec["token"]) or rec
-            if again.get("status") == "DONE":
-                print(f"attest: {again['gate']} exit {again['exit']} -> {again['attestId']}")
-                return 0
-            print(f"attest: the runner for {rec['token']} ({rec.get('gate')}) is gone "
-                  f"and left no verdict — nothing was attested; run the gate again",
-                  file=sys.stderr)
-            return 4
-        if time.monotonic() >= deadline:
-            print(f"attest: {rec.get('gate')} ({rec['token']}) still running since "
-                  f"{rec.get('started')} — call --await again")
-            return 3
-        time.sleep(min(2.0, max(0.05, deadline - time.monotonic())))
+    try:
+        status, rec, reason = bg.wait(lambda token: _bg_read(root, token), rec, timeout, until,
+                                      is_alive=lambda pid, started: _alive(pid, started))
+    except ValueError as exc:
+        print(f"attest: {exc}", file=sys.stderr)
+        return 2
+    if rec.get("status") == "DONE" and rec.get("attestId"):
+        print(f"attest: {rec['gate']} exit {rec['exit']} -> {rec['attestId']}")
+    else:
+        print(f"attest: {rec.get('gate')} ({rec['token']}) {rec.get('status')}; "
+              f"exit {rec.get('exit')}; {reason}")
+        if rec.get('attestId'):
+            print(f"attest: -> {rec['attestId']}")
+    log_tail = bg.tail(rec.get('log'))
+    if log_tail:
+        print(log_tail)
+    return status
+
+
+def cancel_gate(root, ref):
+    rec = _find_run(root, ref)
+    if rec is None:
+        print(f"attest: no background run '{ref}'", file=sys.stderr)
+        return 2
+    try:
+        rec = bg.cancel(bg.Store(root, BACKGROUND), rec['token'])
+    except (OSError, ValueError) as exc:
+        print(f"attest: cancel failed: {exc}", file=sys.stderr)
+        return 2
+    print(f"attest: {rec.get('gate')} ({rec['token']}) {rec.get('status')}; exit {rec.get('exit')}")
+    return 0
 
 
 # ------------------------------------------------------------ the forge
@@ -1460,8 +1446,9 @@ def main():
     ap.add_argument("--detach", action="store_true",
                     help="with --run: start the gate as its own background process")
     ap.add_argument("--token", help=argparse.SUPPRESS)
-    ap.add_argument("--timeout", type=int, default=AWAIT_DEFAULT,
+    ap.add_argument("--timeout", type=float, default=AWAIT_DEFAULT,
                     help="seconds --await (or --ci --wait) blocks before answering")
+    ap.add_argument("--until", help="with --await: return when a complete log line matches this regex")
     ap.add_argument("--sha", help="with --ci: the commit whose statuses decide")
     ap.add_argument("--wait", action="store_true",
                     help="with --ci: poll until every context has a verdict")
@@ -1475,6 +1462,7 @@ def main():
     g.add_argument("--verify", action="store_true")
     g.add_argument("--run", metavar="GATE")
     g.add_argument("--await", dest="await_", metavar="TOKEN")
+    g.add_argument("--cancel", metavar="TOKEN")
     g.add_argument("--ci", action="store_true")
     g.add_argument("--stamp", action="store_true",
                    help="print a launch stamp for args._launch")
@@ -1507,7 +1495,9 @@ def main():
               f"witness {r.get('witness') or 'hook'} nonce {r.get('nonce') or '-'}")
         return 0
     if a.await_:
-        return await_gate(a.root, a.await_, a.timeout)
+        return await_gate(a.root, a.await_, a.timeout, a.until)
+    if a.cancel:
+        return cancel_gate(a.root, a.cancel)
     if a.ci:
         return attest_ci(a.root, a.sha, a.wait, a.timeout, a.pr, a.ref, a.nonce)
 

@@ -102,8 +102,8 @@ Workflow tool requires.
    compiled graph tells each `prove:` node to run its gate as
    `FPL_ATTEST_NONCE=<nonce> <declared command>` (and cite what
    `attest.py --last <gate> --nonce <nonce>` prints); a gate that outlives one
-   tool call runs as `attest.py --run <gate> --nonce <nonce>` in the
-   background and is collected with `attest.py --await <token>`; a
+   tool call runs as `attest.py --run <gate> --detach --nonce <nonce>` and
+   is collected with foreground `attest.py --await <token>`; a
    `prove:ci` node runs `attest.py --ci --pr <n> --wait --nonce <nonce>`
    (or `--ref <branch>`) so the forge, not the node, names the commit, and
    returns that `sha`, which whatever merges after the gate pins with
@@ -247,3 +247,10 @@ Workflow tool requires.
    repair run or explicit recorded acceptance discharges them. End each Codex
    commit with `Fluxpoint-Executor: codex` in the final Git trailer block,
    alongside other trailers, so preflight can identify the executor.
+
+For any agent node running a long undeclared command, use
+`longrun.py start --log <file> -- <command> <args>`. Await in the foreground,
+repeat after exit 3, and never end the node turn while the command runs: that
+turn end is the node's answer. A log match is readiness, not completion. Use
+`longrun.py cancel <token>` or `attest.py --cancel <token>` to stop the command
+process tree. See [long-command lifecycle](../references/longrun.md).

@@ -118,6 +118,17 @@ UNPRICED_EXPANSIONS = ("prev", "decisions", "seen", "winner")
 # prefix-keyed, so a fan-out's workers share the text before the first of
 # these and nothing after it.
 VARYING_ROOTS = {"item", "i", "seen"}
+LONG_PREAMBLE = (
+    "LONG COMMANDS — a command that may run past 600 seconds must use the fluxpoint plugin's "
+    'scripts/py.sh longrun.py start --log <file> -- <command> <args>, or attest.py --run <gate> --detach '
+    'for a declared gate. Await it in the foreground with longrun.py await <token> or attest.py --await '
+    '<token>. Each await is bounded to 570 seconds; on exit 3 call await again in a fresh foreground tool '
+    'call. Exit 0 means completed or a requested log line matched, never proof of a passing command: '
+    'inspect its recorded exit/status and keep awaiting after a log match while it is RUNNING. Never end '
+    "your turn while the command is running: ending the turn is this node's answer, not a way to wait. "
+    'Cancel with longrun.py cancel <token> or attest.py --cancel <token>; never wrap a suite in timeout '
+    'or leave a polling/sleep process behind. Preserve the token and log path when resuming.\n\n')
+
 SPEC_PREAMBLE = ("Implement and verify this locked requirement packet. Defaulted decisions are model choices, "
                  "not user authorization. Do not edit the packet, lock or proof baseline to pass a check. "
                  "Do not weaken check commands or harness files; use the documented harness-only re-lock path "
@@ -2442,6 +2453,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a(f"const campaign = {js_str(ir['campaign'])}")
     a("// {{item...}} / {{A...}} render text as itself and structure as JSON.")
     a("function tokenText(v) { return v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v) }")
+    a("function longPreamble() { return " + js_str(LONG_PREAMBLE) + "; }")
     if specification:
         a("const SPECIFICATION = " + json.dumps(specification, ensure_ascii=True))
         a("function specificationPreamble() { return " + js_str(SPEC_PREAMBLE) + " + JSON.stringify(SPECIFICATION) + '\\n'; }")
@@ -2545,9 +2557,9 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("// Injected ahead of each prove: node's prompt. The nonce is what makes")
         a("// the witness's row this run's; a gate run without it is cited as STALE.")
         a("function provePreamble(gate) {")
-        a("  return gate === 'ci'")
+        a("  return longPreamble() + (gate === 'ci'")
         a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run the fluxpoint plugin's scripts/py.sh attest.py --ci${ROOT_ARG} --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
-        a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} in the background and collect it with attest.py --await${ROOT_ARG} <token>. Return gate '${gate}', the exit, and the attestId the witness recorded (scripts/py.sh attest.py --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`")
+        a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground attest.py --await${ROOT_ARG} <token>. Return gate '${gate}', the exit, and the attestId the witness recorded (scripts/py.sh attest.py --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
         a("}")
         a("function citation(id, gate, r) {")
         a("  if (!r || typeof r !== 'object') return `${id}: no result to prove`")
@@ -3052,7 +3064,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("async function treeCheck(point, phase) {")
         a("  // agent(), not spawn(): a guard rail must not spend the node budget")
         a("  // and must still run after the ceiling is reached.")
-        a("  const r = await agent('Run exactly two commands in the repository at "
+        a("  const r = await agent(longPreamble() + 'Run exactly two commands in the repository at "
           "the current working directory and return their output verbatim in the "
           "schema, nothing else: `git rev-parse HEAD` as head, and `git status "
           "--porcelain` as porcelain (empty string when clean). Do not fix, clean, "
@@ -3153,6 +3165,7 @@ def emit_parked(n, specification=False):
     # the block is real — most steps that feel human-only are not.
     a(f"  const advice_{var} = affordable({js_str('advice for ' + nid)})")
     a(f"    ? await spawn(")
+    a("        longPreamble() +")
     if specification:
         a("        specificationPreamble() +")
     a(f"        `A campaign step cannot be run by an agent and is about to be "
@@ -3278,6 +3291,8 @@ def emit_node(n, ir, specification=False):
         pre += f"redTeamPreamble({json.dumps(red_team_sources(n, ir))}) + "
     if prove_gate(n):
         pre += f"provePreamble({js_str(prove_gate(n))}) + "
+    else:
+        pre += "longPreamble() + "
     if specification:
         pre += "specificationPreamble() + "
     prompt = (pre + js_template(n["prompt"], mapping)) if not is_reduce(n) else None
@@ -3612,6 +3627,7 @@ def emit_repair(n, ir, specification=False):
         pre = "measurePreamble() + " if work.get("isolation") == "measure" else "basePreamble() + " if work.get("mutates") or work.get("isolation") else ""
         if ir.get("authorizedBy") and (work.get("mutates") or work.get("irreversible")):
             pre = "authorizationPreamble() + " + pre
+        pre += "longPreamble() + "
         if specification:
             pre += "specificationPreamble() + "
         return pre + js_template(work["prompt"], mapping)
