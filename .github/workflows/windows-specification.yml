@@ -28,6 +28,20 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: python plugins/fluxpoint/tests/specification-test.py
+      - name: Exercise long-command process trees and run provenance
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python plugins/fluxpoint/tests/longrun-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/regex-wait-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/record-location-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/unchecked-repairs-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/authorization-context-test.py
+          exit $LASTEXITCODE
       - name: Exercise machine-health fixtures (Linux model and Windows adapter)
         env:
           PYTHONIOENCODING: utf-8
