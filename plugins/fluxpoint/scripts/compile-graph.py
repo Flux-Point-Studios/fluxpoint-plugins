@@ -4140,12 +4140,7 @@ def main():
     # deliberate, but they will usually disappoint whoever reads the result.
     for w in warnings(ir, agents, specification):
         print(f"graph-compile: warning — {w}", file=sys.stderr)
-    evidence_headers = (
-        "| When (UTC) | Source | Outcome | Claim | Proof |",
-        "| When (UTC) | runId | Outcome | Nodes OK/dead | Findings | Harness | Red-team |",
-    )
-    if not any(re.search(re.escape(h) + r"\n\|[-| ]+\|(?:\n|$)", text)
-               for h in evidence_headers):
+    if _sibling("evidence_table").locate(text)[0] is None:
         print("graph-compile: warning — graph has no recognized Evidence table with a separator; "
               "record-run will retain the artifact but exit 3 unless --evidence names a file "
               "with | When (UTC) | Source | Outcome | Claim | Proof | and a separator",

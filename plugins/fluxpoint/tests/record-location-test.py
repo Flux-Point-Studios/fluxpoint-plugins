@@ -69,6 +69,51 @@ class RecordLocationTests(unittest.TestCase):
         self.assertIn('does not exist', p.stderr)
         self.assertTrue(self.artifact().exists())
 
+    def test_windows_drive_ads_and_unsafe_components_are_rejected(self):
+        for run_id in ('D:escape', 'run:stream', 'trailing.', 'has space', '.', '..', 'a' * 129, 'CON', 'nul.log', 'COM1.state'):
+            with self.subTest(run_id=run_id):
+                p = self.record('--run-id', run_id)
+                self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertFalse((self.root / '.claude').exists())
+
+    def test_fenced_examples_and_outside_tables_cannot_fake_evidence(self):
+        examples = [
+            '```markdown\n' + HEADER + '```\n',
+            '~~~markdown\n' + HEADER + '~~~\n',
+            '## Evidence\n| What | How | Result |\n|---|---|---|\n## Notes\n' + HEADER,
+            '## Evidence\n| What | How | Result |\n|---|---|---|\n## Notes\n```markdown\n' + HEADER + '```\n',
+        ]
+        for content in examples:
+            with self.subTest(content=content):
+                self.graph.write_text(content)
+                p = self.record()
+                self.assertEqual(p.returncode, 3, p.stderr)
+                self.assertEqual(self.graph.read_text(), content)
+                self.assertIn('row NOT appended', p.stderr)
+
+    def test_real_evidence_section_and_aligned_separator_are_used(self):
+        example = '```markdown\n' + HEADER + '```\n'
+        actual = HEADER.replace('|---|---|---|---|---|', '|:---|---:|:---:|---|---|')
+        self.graph.write_text(example + '\n## Evidence\n' + actual + '\n## Notes\n')
+        p = self.record()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        content = self.graph.read_text()
+        self.assertTrue(content.startswith(example))
+        self.assertIn('| test | COMPLETE |', content.split('## Evidence', 1)[1])
+
+    def test_compiler_uses_the_same_real_evidence_table_rule(self):
+        compiler = SCRIPT.with_name('compile-graph.py')
+        ir = {'version': 1, 'campaign': 'evidence preflight', 'treeGuard': False,
+              'budget': {'maxNodes': 2},
+              'nodes': [{'id': 'read', 'prompt': 'read only', 'contract': 'DesignV1'}]}
+        self.graph.write_text('```json graph-ir\n' + json.dumps(ir) + '\n```\n'
+                              '## Evidence\n| Wrong | Header |\n|---|---|\n'
+                              '## Example\n```markdown\n' + HEADER + '```\n')
+        p = subprocess.run([sys.executable, str(compiler), str(self.graph), '--check',
+                            '--gates-root', str(self.root)], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('no recognized Evidence table', p.stderr)
+
     def test_unknown_executor_is_refused(self):
         p = self.record('--executor', 'imagined-runtime')
         self.assertEqual(p.returncode, 2)

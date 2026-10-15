@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Real Git repair windows, checked records, and explicit operator acceptance."""
+import copy
 import importlib.util
 import json
 import os
@@ -55,6 +56,43 @@ class UncheckedRepairsTests(unittest.TestCase):
                               '| When (UTC) | Decision | Chosen | Overturned prior | Frozen by | Rationale |\n'
                               '|---|---|---|---|---|---|\n')
 
+    def repair_graph(self):
+        self.set_graph([
+            {'id': 'fix', 'mutates': True, 'foreach': 'slices', 'contract': 'SliceV1'},
+            {'id': 'check', 'after': 'fix', 'verifies': 'fix', 'independent': True,
+             'foreach': 'slices', 'isolation': 'measure', 'contract': 'FixCheckV1',
+             'repeat': {'until': "verdict == 'PASS'", 'maxRounds': 3}},
+        ])
+        content = self.graph.read_text()
+        content = content.replace('"nodes":', '"lists": {"slices": [{"key": "slice", "targetClasses": ["legacy-defect"]}]}, "nodes":', 1)
+        self.graph.write_text(content + '\n| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n')
+
+    def pass_summary(self, commits):
+        check = {'verdict': 'PASS', 'findings': [], 'blockers': [],
+                 'evidence': ['pytest regression.py: original attack rejected, valid control passed'],
+                 'commits': commits}
+        patch = {'item': 'slice', 'round': 1,
+                 'patch': str(self.root) + '/.claude/fluxpoint/rounds/launch/slice/r1/patch.diff'}
+        row = {'node': 'check', 'item': 'slice', 'round': 1,
+               'verdict': 'PASS', 'findings': [], 'blockers': [],
+               'evidence': check['evidence'], 'commits': commits, 'check': check,
+               'context': {'base': self.base, 'item': 'slice', 'round': 1,
+                           'patches': [patch], 'current': patch, 'targetClasses': ['legacy-defect']}}
+        return {'outcome': 'COMPLETE', 'contracts': {'check': 'FixCheckV1'},
+                'launch': {'root': str(self.root), 'nonce': 'launch'},
+                'tree': {'baseline': {'head': self.base}}, 'fixOrigins': [row]}
+
+    def record_repair(self, commits):
+        self.repair_graph()
+        summary = self.pass_summary(commits)
+        p = subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'),
+                            '--root', str(self.root), '--graph', str(self.graph), '--run-id', 'repair'],
+                           input=json.dumps(summary), text=True, capture_output=True,
+                           env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=20)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.set_graph([{'id': 'review', 'contract': 'RedTeamV1'}])
+        return json.loads((self.runs / 'repair.json').read_text())
+
     def run_check(self):
         return subprocess.run([sys.executable, str(SCRIPTS / 'unchecked-repairs.py'),
                                '--root', str(self.root), '--json'], text=True,
@@ -68,7 +106,7 @@ class UncheckedRepairsTests(unittest.TestCase):
         self.assertEqual([r['executor'] for r in rows], ['codex', 'unlabelled'])
 
     def test_checked_prefix_and_explicit_decision_discharge_window(self):
-        self.artifact('repair', {'checked': [self.first[:12]]})
+        self.record_repair([self.first[:12]])
         decision = module('decision')
         rec = {'question': 'Accept the remaining unchecked repair?', 'options': [
             {'option': s, 'argued_by': 'operator', 'strongest_objection': 'This alternative carries a concrete verification risk.'}
@@ -107,15 +145,75 @@ class UncheckedRepairsTests(unittest.TestCase):
         self.git('commit', '-q', '--allow-empty', '-m', 'unrelated')
         self.assertEqual(self.run_check().returncode, 2)
 
-    def test_recorder_copies_only_valid_pass_from_independent_repair_checker(self):
+    def test_recorder_copies_only_coherent_pass_from_actual_pair(self):
         recorder = module('record-run')
-        self.set_graph([{'id': 'check', 'contract': 'FixCheckV1', 'independent': True,
-                         'repeat': {'until': "verdict == 'PASS'"}}])
-        summary = {'contracts': {'check': 'FixCheckV1'}, 'fixOrigins': [
-            {'node': 'check', 'verdict': 'FAIL', 'commits': [self.first]},
-            {'node': 'check', 'verdict': 'PASS', 'commits': [self.second]},
-            {'node': 'other', 'verdict': 'PASS', 'commits': [self.first]}]}
+        self.repair_graph()
+        summary = self.pass_summary([self.second])
+        summary['outcome'] = 'HALTED'  # A later halt does not undo an exact earlier check.
         self.assertEqual(recorder.checked_commits(summary, self.graph), [self.second])
+        for mutation in ('blocker', 'finding', 'no-check', 'no-evidence', 'wrong-round', 'stale-patch', 'different-commits', 'target-override'):
+            with self.subTest(mutation=mutation):
+                bad = copy.deepcopy(summary)
+                row = bad['fixOrigins'][0]
+                if mutation == 'blocker': row['check']['blockers'] = ['not run']
+                if mutation == 'finding': row['check']['findings'] = [{'severity': 'HIGH'}]
+                if mutation == 'no-check': row.pop('check')
+                if mutation == 'no-evidence': row['check']['evidence'] = []
+                if mutation == 'wrong-round': row['round'] = 2
+                if mutation == 'stale-patch': row['context']['current']['patch'] = '/old/patch.diff'
+                if mutation == 'different-commits': row['check']['commits'] = [self.first]
+                if mutation == 'target-override': row['context']['targetClasses'] = ['new-defect']
+                self.assertEqual(recorder.checked_commits(bad, self.graph), [])
+        self.set_graph([{'id': 'check', 'contract': 'FixCheckV1', 'independent': True,
+                         'repeat': {'until': "verdict == 'PASS'", 'maxRounds': 3}}])
+        self.assertEqual(recorder.checked_commits(summary, self.graph), [])
+
+    def test_positive_artifact_requires_frozen_coherent_receipts(self):
+        self.artifact('bare', {'checked': [self.first, self.second]})
+        self.assertEqual(self.run_check().returncode, 2)
+        (self.runs / 'bare.json').unlink()
+        record = self.record_repair([self.first])
+        self.assertEqual(json.loads(self.run_check().stdout)['unchecked'][0]['commit'], self.second)
+        for mutation in ('missing-descriptors', 'self-verifier', 'extra-commit', 'contradictory-pass'):
+            with self.subTest(mutation=mutation):
+                bad = copy.deepcopy(record)
+                if mutation == 'missing-descriptors': bad.pop('repairCheckers')
+                if mutation == 'self-verifier': bad['repairCheckers']['check']['fixer']['id'] = 'check'
+                if mutation == 'extra-commit': bad['checked'].append(self.second)
+                if mutation == 'contradictory-pass': bad['summary']['fixOrigins'][0]['check']['blockers'] = ['no check ran']
+                self.artifact('repair', bad)
+                self.assertEqual(self.run_check().returncode, 2)
+        self.artifact('repair', record)
+        self.assertEqual(self.run_check().returncode, 1)  # Graph changed after recording; descriptor stays valid.
+
+    def test_foreign_review_does_not_borrow_local_tree_head(self):
+        self.artifact('foreign', {'recordedAt': '2026-10-15 14:00:00', 'redTeam': 'BLOCK',
+            'summary': {'coverage': {'subject': [{'repository': '/another/repository', 'head': self.second}]},
+                        'tree': {'baseline': {'head': self.second}}}})
+        p = self.run_check()
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertEqual([r['commit'] for r in json.loads(p.stdout)['unchecked']], [self.first, self.second])
+
+    def test_local_subject_missing_head_cannot_silently_remove_block_window(self):
+        self.artifact('bad-local', {'recordedAt': '2026-10-15 15:00:00', 'redTeam': 'BLOCK',
+            'summary': {'coverage': {'subject': [{'repository': str(self.root), 'head': None}]},
+                        'tree': {'baseline': {'head': self.second}}}})
+        self.assertEqual(self.run_check().returncode, 2)
+
+    def test_integration_checker_requires_its_real_merge_link(self):
+        helper = module('repair_checks')
+        self.repair_graph()
+        content = self.graph.read_text()
+        ir = json.loads(content.split('```json graph-ir\n')[1].split('\n```')[0])
+        ir['nodes'][1]['repeat']['integrate'] = ['merge', 'review']
+        ir['nodes'].extend([
+            {'id': 'merge', 'mutates': True, 'after': 'check'},
+            {'id': 'review', 'contract': 'FixCheckV1', 'independent': True,
+             'verifies': 'merge', 'after': 'merge', 'isolation': 'measure',
+             'haltWhen': "verdict != 'PASS'"}])
+        self.assertIn('review', helper.descriptors(ir))
+        ir['nodes'][-1]['verifies'] = 'fix'
+        self.assertNotIn('review', helper.descriptors(ir))
 
 
 if __name__ == '__main__':

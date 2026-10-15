@@ -63,9 +63,15 @@ def reviewed_head(artifact, root):
     heads = {s.get('head') for s in subjects if isinstance(s, dict)
              and same_repository(s.get('repository'), root)}
     if heads:
+        if any(not isinstance(h, str) or not SHA.fullmatch(h) for h in heads):
+            raise ValueError('local BLOCK subject has no valid reviewed commit')
         if len(heads) != 1:
             raise ValueError('BLOCK record names multiple reviewed heads for ' + str(root))
         return heads.pop()
+    if subjects:
+        # Explicit review subjects are authoritative: a local tree sentinel
+        # cannot turn a review of another repository into this one's BLOCK.
+        return None
     tree = summary.get('tree') or {}
     if isinstance(tree, dict):
         reading = tree.get('baseline') or {}
@@ -117,10 +123,12 @@ def inspect(root, ir):
             raise ValueError('ambiguous checked commit prefix: ' + value)
         checked.update(matches)
 
+    import repair_checks
     for path, art in artifacts:
-        values = art.get('checked') or []
-        if not isinstance(values, list):
-            raise ValueError(str(path) + ': checked must be an array')
+        try:
+            values = repair_checks.corroborated(art)
+        except (ValueError, TypeError, AttributeError) as e:
+            raise ValueError(str(path) + ': ' + str(e))
         for value in values:
             discharge(value)
     store = root / '.claude/fluxpoint/decisions.jsonl'
