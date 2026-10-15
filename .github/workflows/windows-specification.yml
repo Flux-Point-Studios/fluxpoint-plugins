@@ -16,6 +16,7 @@ jobs:
   windows-specification:
     name: Windows specification (Python 3.9)
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,6 +44,7 @@ jobs:
           python plugins/fluxpoint/tests/authorization-context-test.py
           exit $LASTEXITCODE
       - name: Exercise machine-health fixtures (Linux model and Windows adapter)
+        if: ${{ !cancelled() }}
         env:
           PYTHONIOENCODING: utf-8
         run: |
@@ -51,6 +53,7 @@ jobs:
           python plugins/fluxpoint/tests/box-health-windows-test.py
           exit $LASTEXITCODE
       - name: Sample actual Windows machine health (read-only)
+        if: ${{ !cancelled() }}
         env:
           PYTHONIOENCODING: utf-8
         run: |
