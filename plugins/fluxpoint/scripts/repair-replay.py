@@ -3,7 +3,9 @@
 
 Save the compiler's ORIGIN REPLAY CONTEXT as JSON, then run:
   repair-replay.py --root . --context context.json --defect-class decode \
-    --target-class decode --control 'python valid.py' --command 'python attack.py'
+    --control 'python valid.py' --command 'python attack.py'
+Target classes come only from the compiler context. Optional --target-class
+arguments assert that same set; they cannot choose a different attribution.
 The control must exit 0. The attack exits 1 when the harm reproduces, 0 when
 it is defended; every other exit, missing patch or failed control is INCOMPLETE.
 Each complete patch is applied separately to a new base archive, never composed
@@ -25,6 +27,10 @@ import background
 
 def text(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def target_classes(value):
+    return isinstance(value, list) and all(text(item) for item in value) and len(set(value)) == len(value)
 
 
 def execute(command, cwd, timeout):
@@ -72,14 +78,28 @@ def observe(archive, patch, control, command, timeout):
 
 
 def replay(root, context, defect_class, targets, control, command, timeout):
-    if not isinstance(context, dict) or not text(context.get('base')) or not isinstance(context.get('patches'), list):
+    if (not isinstance(context, dict) or not text(context.get('base'))
+            or type(context.get('round')) is not int or context['round'] < 1
+            or not isinstance(context.get('patches'), list) or not context['patches']):
         raise ValueError('context requires pinned base and actual patches array')
+    if not target_classes(context.get('targetClasses')):
+        raise ValueError('context requires explicit pinned targetClasses (use [] for no targeted classes)')
+    if targets is not None and (not target_classes(targets) or sorted(context['targetClasses']) != sorted(targets)):
+        raise ValueError('target classes differ from the compiler context')
+    targets = list(context['targetClasses'])
+    def valid_patch(patch):
+        return (isinstance(patch, dict) and type(patch.get('round')) is int
+                and 1 <= patch['round'] <= context['round']
+                and text(patch.get('item')) and text(patch.get('patch')))
+    if not all(valid_patch(patch) for patch in context['patches']):
+        raise ValueError('context contains an invalid actual patch identity')
+    current = context.get('integrated') or context.get('current')
+    if not valid_patch(current) or current['round'] != context['round']:
+        raise ValueError('context must pin the exact current round patch')
     base = subprocess.run(['git', 'rev-parse', '--verify', context['base'] + '^{commit}'], cwd=root,
                           text=True, capture_output=True, check=True).stdout.strip()
     if base != context['base']:
         raise ValueError('context base must be the resolved launch commit')
-    if 'targetClasses' in context and context['targetClasses'] is not None and sorted(context['targetClasses']) != sorted(targets):
-        raise ValueError('target classes differ from the compiler context')
     archive = subprocess.run(['git', 'archive', base], cwd=root, capture_output=True, check=True).stdout
     evidence = dict(base=dict(snapshot=base, **observe(archive, None, control, command, timeout)),
                     rounds=[], targetClasses=targets)
@@ -121,7 +141,8 @@ def main():
     ap.add_argument('--root', default='.')
     ap.add_argument('--context', required=True)
     ap.add_argument('--defect-class', required=True)
-    ap.add_argument('--target-class', action='append', default=[])
+    ap.add_argument('--target-class', action='append', default=None,
+                    help='optional assertion of the compiler-pinned target class set')
     ap.add_argument('--control', required=True)
     ap.add_argument('--command', required=True)
     ap.add_argument('--timeout', type=float, default=120)

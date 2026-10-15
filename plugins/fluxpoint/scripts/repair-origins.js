@@ -2,6 +2,16 @@
 const FIX_ORIGIN_NAMES = ['pre-existing', 'incomplete-fix', 'fix-introduced', 'cross-slice', 'spec-text']
 const repairText = v => typeof v === 'string' && v.trim().length > 0
 const repairStrings = v => Array.isArray(v) && v.every(repairText)
+const repairTargets = v => repairStrings(v) && new Set(v).size === v.length
+function repairOriginContextIssue(context) {
+  if (!context || !repairText(context.base) || !Number.isSafeInteger(context.round) || context.round < 1 || !Array.isArray(context.patches) || !context.patches.length) return 'origin replay requires the pinned base, round and actual patch history'
+  if (!repairTargets(context.targetClasses)) return 'origin replay requires explicit pinned targetClasses (use [] for no targeted classes)'
+  const patch = p => !!p && repairText(p.item) && repairText(p.patch) && Number.isSafeInteger(p.round) && p.round >= 1 && p.round <= context.round
+  if (!context.patches.every(patch) || new Set(context.patches.map(repairPatchKey)).size !== context.patches.length) return 'origin replay context has invalid or duplicate patch identities'
+  const current = context.integrated || context.current
+  if (!patch(current) || current.round !== context.round || !context.integrated && !context.patches.some(p => repairPatchKey(p) === repairPatchKey(current))) return 'origin replay context must pin the exact current round patch'
+  return null
+}
 function repairResourcesIssue(slice) {
   if (!slice || !Array.isArray(slice.sharedResources)) return 'SliceV1.sharedResources must be an explicit array (use [] for none)'
   if (slice.sharedResources.some(r => !r || !repairText(r.resource) || !repairStrings(r.writers) || !repairStrings(r.readers) || !r.writers.length && !r.readers.length)) return 'shared resource needs resource and named writers[]/readers[]'
@@ -13,6 +23,8 @@ function repairObserved(o) {
 }
 const repairPatchKey = p => JSON.stringify([p.item, p.round, p.patch])
 function repairOriginIssue(f, context) {
+  const contextIssue = repairOriginContextIssue(context)
+  if (contextIssue) return contextIssue
   if (!f || !FIX_ORIGIN_NAMES.includes(f.origin) || !['finding','defectClass','invariant','classRewire','measurement'].every(k => repairText(f[k])) || !['LOW','MEDIUM','HIGH','CRITICAL'].includes(f.severity)) return 'finding lacks a valid origin or defect/measurement fields'
   if (f.introducedIn !== undefined && (!Number.isSafeInteger(f.introducedIn) || f.introducedIn < 1 || f.introducedIn > context.round)) return 'introducedIn is outside the completed repair rounds'
   const e = f.originEvidence
@@ -21,8 +33,8 @@ function repairOriginIssue(f, context) {
     const t = e.text
     return t && ['requirement','scope','argv','graph'].includes(t.kind) && ['path','command','result'].every(k => repairText(t[k])) ? null : 'spec-text origin needs measured requirement/scope/argv/graph text evidence'
   }
-  if (!repairObserved(e.base) || e.base.snapshot !== context.base || !repairStrings(e.targetClasses)) return 'origin replay needs a valid control and reproduction on the exact launch base and declared targetClasses'
-  if (Array.isArray(context.targetClasses) && JSON.stringify([...e.targetClasses].sort()) !== JSON.stringify([...context.targetClasses].sort())) return 'origin targetClasses differ from the slice targets'
+  if (!repairObserved(e.base) || e.base.snapshot !== context.base || !repairTargets(e.targetClasses)) return 'origin replay needs a valid control and reproduction on the exact launch base and declared targetClasses'
+  if (JSON.stringify([...e.targetClasses].sort()) !== JSON.stringify([...context.targetClasses].sort())) return 'origin targetClasses differ from the slice targets'
   if (!Array.isArray(e.rounds) || e.rounds.length !== context.patches.length) return 'origin replay must cover every actual round patch'
   const seen = new Set()
   for (const row of e.rounds) {
@@ -41,7 +53,7 @@ function repairOriginIssue(f, context) {
   }
   let expected
   const first = e.rounds.filter(p => p.reproduces).sort((a,b) => a.round - b.round)[0]
-  if (e.base.reproduces) expected = e.targetClasses.includes(f.defectClass) ? 'incomplete-fix' : 'pre-existing'
+  if (e.base.reproduces) expected = context.targetClasses.includes(f.defectClass) ? 'incomplete-fix' : 'pre-existing'
   else if (first) expected = 'fix-introduced'
   else if (context.integrated) expected = 'cross-slice'
   else return 'a runtime finding needs a reproduced failure'
@@ -51,6 +63,8 @@ function repairOriginIssue(f, context) {
   return null
 }
 function repairCheckOrigins(check, context) {
+  const contextIssue = repairOriginContextIssue(context)
+  if (contextIssue) return { issue: contextIssue }
   if (!check || !['PASS','FAIL','INCOMPLETE'].includes(check.verdict) || !Array.isArray(check.findings) || !repairStrings(check.evidence) || !check.evidence.length || !repairStrings(check.blockers)) return { issue: 'invalid FixCheckV1 verdict, findings, evidence or blockers' }
   if (check.verdict === 'PASS' && (check.findings.length || check.blockers.length)) return { issue: 'PASS contradicts findings or blockers' }
   if (check.commits !== undefined && (!Array.isArray(check.commits) || !check.commits.length || check.commits.some(c => typeof c !== 'string' || !/^[0-9a-f]{7,40}$/i.test(c)) || new Set(check.commits).size !== check.commits.length)) return { issue: 'commits must name unique checked Git commit ids' }

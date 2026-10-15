@@ -426,16 +426,15 @@ def fold_fix_origins(runs, campaign=None):
                     raise ValueError("each origin category must be recorded explicitly")
                 if any(type(count) is not int or count < 0 for count in origins.values()):
                     raise ValueError("origin counts must be nonnegative integers")
-                if "findings" in row:
-                    observed = {key: 0 for key in FIX_ORIGIN_NAMES}
-                    if not isinstance(row["findings"], list):
-                        raise ValueError("findings must preserve the checked observations")
-                    for finding in row["findings"]:
-                        if not isinstance(finding, dict) or finding.get("origin") not in observed:
-                            raise ValueError("finding has no known replay origin")
-                        observed[finding["origin"]] += 1
-                    if observed != origins:
-                        raise ValueError("origin tally disagrees with preserved findings")
+                observed = {key: 0 for key in FIX_ORIGIN_NAMES}
+                if not isinstance(row.get("findings"), list):
+                    raise ValueError("findings must preserve the checked observations")
+                for finding in row["findings"]:
+                    if not isinstance(finding, dict) or finding.get("origin") not in observed:
+                        raise ValueError("finding has no known replay origin")
+                    observed[finding["origin"]] += 1
+                if observed != origins:
+                    raise ValueError("origin tally disagrees with preserved findings")
                 seen.add(identity)
                 count = sum(origins.values())
                 rounds.append(dict(node=row["node"], item=row["item"], round=row["round"],

@@ -98,12 +98,12 @@ class RealReplay(unittest.TestCase):
         return {'item': item, 'round': round_, 'patch': str(path)}
 
     def run_replay(self, context, targets=None, command=None):
-        return REPLAY.replay(str(self.root), context, 'decode', targets or [], self.control, command or self.command, 10)
+        return REPLAY.replay(str(self.root), context, 'decode', targets, self.control, command or self.command, 10)
 
     def test_first_reproducing_patch_decides_origin_and_round(self):
         r1 = self.patch('parser', 1, dict(self.state, left=True))
         r2 = self.patch('parser', 2, dict(self.state, bug=True))
-        ctx = {'base': self.base, 'round': 2, 'patches': [r1, r2], 'current': r2}
+        ctx = {'base': self.base, 'round': 2, 'patches': [r1, r2], 'current': r2, 'targetClasses': ['decode']}
         result = self.run_replay(ctx, ['decode'])
         self.assertEqual((result['origin'], result['introducedIn']), ('fix-introduced', 2))
         self.assertEqual([result['originEvidence']['base']['reproduces']] + [r['reproduces'] for r in result['originEvidence']['rounds']], [False, False, True])
@@ -115,16 +115,36 @@ class RealReplay(unittest.TestCase):
         self.git('add', 'state.json'); self.git('commit', '-qm', 'old bug')
         self.base = self.git('rev-parse', 'HEAD').strip()
         patch = self.patch('parser', 1, dict(self.state, new_fix_identifier=True))
-        ctx = {'base': self.base, 'round': 1, 'patches': [patch], 'current': patch}
+        ctx = {'base': self.base, 'round': 1, 'patches': [patch], 'current': patch, 'targetClasses': ['decode']}
         self.assertEqual(self.run_replay(ctx, ['decode'])['origin'], 'incomplete-fix')
-        self.assertEqual(self.run_replay(ctx, ['different'])['origin'], 'pre-existing')
+        self.assertEqual(self.run_replay(ctx)['origin'], 'incomplete-fix')
+        for alternate in ([], ['different']):
+            with self.assertRaisesRegex(ValueError, 'differ from the compiler context'):
+                self.run_replay(ctx, alternate)
+        untargeted = dict(ctx, targetClasses=[])
+        self.assertEqual(self.run_replay(untargeted)['origin'], 'pre-existing')
+
+    def test_missing_or_invalid_context_targets_cannot_be_selected_by_checker(self):
+        patch = self.patch('parser', 1, dict(self.state, bug=True))
+        ctx = {'base': self.base, 'round': 1, 'patches': [patch], 'current': patch}
+        for targets in (None, [], ['decode'], ['decode', 'decode'], [None], 'decode'):
+            bad = dict(ctx)
+            if targets is not None:
+                bad['targetClasses'] = targets
+            if targets == [] or targets == ['decode']:
+                continue  # Both are valid pinned declarations, covered by replay cases.
+            with self.subTest(targets=targets), self.assertRaisesRegex(ValueError, 'explicit pinned targetClasses'):
+                self.run_replay(bad, ['decode'])
+        bad = dict(ctx, targetClasses=None)
+        with self.assertRaisesRegex(ValueError, 'explicit pinned targetClasses'):
+            self.run_replay(bad, ['decode'])
 
     def test_only_integrated_harm_is_cross_slice(self):
         left = self.patch('left', 1, dict(self.state, left=True))
         right = self.patch('right', 1, dict(self.state, right=True))
         combined = self.patch('_integration', 1, dict(self.state, left=True, right=True))
         command = python_command('import json,sys; s=json.load(open("state.json")); sys.exit(1 if s["left"] and s["right"] else 0)')
-        ctx = {'base': self.base, 'round': 1, 'patches': [left, right], 'integrated': combined}
+        ctx = {'base': self.base, 'round': 1, 'patches': [left, right], 'integrated': combined, 'targetClasses': []}
         result = self.run_replay(ctx, command=command)
         self.assertEqual(result['origin'], 'cross-slice')
         self.assertTrue(result['originEvidence']['integrated']['reproduces'])
@@ -137,7 +157,7 @@ class RealReplay(unittest.TestCase):
 
     def test_failed_controls_missing_patches_and_no_current_reproduction_refuse_origin(self):
         patch = self.patch('parser', 1, dict(self.state, left=True))
-        ctx = {'base': self.base, 'round': 1, 'patches': [patch], 'current': patch}
+        ctx = {'base': self.base, 'round': 1, 'patches': [patch], 'current': patch, 'targetClasses': []}
         with self.assertRaises(ValueError):
             self.run_replay(ctx)
         with self.assertRaises(ValueError):
@@ -160,6 +180,15 @@ class RuntimeOriginGuards(unittest.TestCase):
             ir['nodes'] += [
                 {'id': 'merge', 'after': 'check', 'mutates': True, 'prompt': 'merge {{prev}}', 'contract': 'SliceV1'},
                 {'id': 'review', 'after': 'merge', 'independent': True, 'verifies': 'merge', 'isolation': 'measure', 'prompt': 'review {{prev}}', 'contract': 'FixCheckV1', 'haltWhen': "verdict != 'PASS'"}]
+        if mode == 'missing-targets':
+            ir['lists']['slices'][0].pop('targetClasses')
+        for name, value in [('null-targets', None), ('bad-targets', 'decode'), ('blank-targets', [' ']),
+                            ('duplicate-targets', ['decode', 'decode']), ('empty-targets', [])]:
+            if mode == name:
+                ir['lists']['slices'][0]['targetClasses'] = value
+        invalid_targets = mode in ('missing-targets', 'null-targets', 'bad-targets', 'blank-targets', 'duplicate-targets')
+        if invalid_targets:
+            self.assertTrue(any('targetClasses' in finding for finding in CG.validate(ir, CONTRACTS)))
         js = CG.emit(ir, CONTRACTS).replace('export const meta', 'const meta')
         prefix = r'''
 import {writeFileSync} from 'node:fs';
@@ -175,7 +204,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
   if(mode==='empty-resources')value.sharedResources=[];
   return value;}
  const c=JSON.parse(p.split('ORIGIN REPLAY CONTEXT: ')[1].split('\n')[0]);
- if(mode==='pass'||mode==='empty-resources'||mode==='missing-merge-resources'||c.integrated&&mode==='integration-pass'||!c.integrated&&mode.startsWith('integration'))return {verdict:'PASS',findings:[],blockers:[],evidence:['independent checker ran full harness'],commits:['bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb']};
+ if(mode==='pass'||mode==='empty-targets'||mode==='empty-resources'||mode==='missing-merge-resources'||c.integrated&&mode==='integration-pass'||!c.integrated&&mode.startsWith('integration'))return {verdict:'PASS',findings:[],blockers:[],evidence:['independent checker ran full harness'],commits:['bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb']};
  const e={base:{snapshot:c.base,...observation(false)},targetClasses:['decode'],rounds:c.patches.map(x=>({...x,...observation(!c.integrated)})),...(c.integrated?{integrated:{...c.integrated,...observation(true)}}:{})};
  const finding={finding:'shared writer race reproduced',severity:'HIGH',defectClass:'decode',invariant:'one writer owns the store',classRewire:'bound writer concurrency',measurement:'python attack.py reached writer collision',origin:c.integrated?'cross-slice':'fix-introduced',...(c.integrated?{}:{introducedIn:1}),originEvidence:e};
  if(mode==='missing-origin')delete finding.origin;
@@ -187,6 +216,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
  if(mode==='wrong-base')e.base.snapshot='wrong';
  if(mode==='changed-case')e.rounds[0].command='different attack';
  if(mode==='bad-control')e.base.controlPassed=false;
+ if(mode==='checker-alternate-targets'){e.targetClasses=[];e.base.reproduces=true;finding.origin='pre-existing';delete finding.introducedIn;}
  return {verdict:'FAIL',findings:[finding],blockers:[],evidence:['independent replay completed']};
 };
 '''.replace('MODE', json.dumps(mode))
@@ -225,6 +255,32 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
             self.assertFalse(any(c['label'].startswith('check:') for c in data['calls']))
         self.assertEqual(self.run_graph('empty-resources')['r']['outcome'], 'COMPLETE')
         self.assertEqual(self.run_graph('missing-merge-resources', True)['r']['outcome'], 'HALTED')
+
+    def test_caller_targets_are_required_before_mutation_and_cannot_be_reselected(self):
+        for mode in ('missing-targets', 'null-targets', 'bad-targets', 'blank-targets', 'duplicate-targets'):
+            with self.subTest(mode=mode):
+                data = self.run_graph(mode)
+                self.assertEqual(data['r']['outcome'], 'INCOMPLETE')
+                self.assertEqual(data['calls'], [])
+                self.assertEqual(data['r']['fixOrigins'], [])
+        self.assertEqual(self.run_graph('empty-targets')['r']['outcome'], 'COMPLETE')
+        data = self.run_graph('checker-alternate-targets')
+        self.assertEqual(data['r']['outcome'], 'INCOMPLETE')
+        self.assertEqual(data['r']['fixOrigins'], [])
+        self.assertTrue(any('differ from the slice targets' in p.get('detail', '') for p in data['r']['provenance']))
+
+    def test_runtime_guard_refuses_missing_context_targets_even_for_pass(self):
+        source = (SCRIPTS / 'repair-origins.js').read_text()
+        program = source + '''
+const check={verdict:'PASS',findings:[],blockers:[],evidence:['independent check completed']};
+const patch={item:'parser',round:1,patch:'patch.diff'};
+const base={base:'base',round:1,patches:[patch],current:patch};
+const bad=[base,{...base,targetClasses:null},{...base,targetClasses:'decode'},{...base,targetClasses:['decode','decode']}];
+if(bad.some(c=>!repairCheckOrigins(check,c).issue)) process.exit(1);
+if(repairCheckOrigins(check,{...base,targetClasses:[]}).issue) process.exit(2);
+'''
+        proc = subprocess.run(['node', '-e', program], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_unproved_origin_identity_rounds_and_controls_refuse_classification(self):
         for mode in ('missing-origin', 'missing-evidence', 'wrong-origin', 'future-round', 'missing-round', 'wrong-patch', 'wrong-base', 'changed-case', 'bad-control'):
@@ -287,6 +343,11 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         row['origins']['fix-introduced'] = True
         reports, findings = METRICS.fold_fix_origins([('run', {'summary': {'fixOrigins': [row]}})])
         self.assertIn('nonnegative integers', findings[0])
+        self.assertEqual(reports[0]['invalidRounds'], 1)
+        row['origins']['fix-introduced'] = 100
+        reports, findings = METRICS.fold_fix_origins([('run', {'summary': {'fixOrigins': [row]}})])
+        self.assertIn('preserve the checked observations', findings[0])
+        self.assertEqual(reports[0]['findings'], 0)
         self.assertEqual(reports[0]['invalidRounds'], 1)
 
 

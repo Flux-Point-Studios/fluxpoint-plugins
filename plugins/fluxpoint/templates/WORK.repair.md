@@ -149,6 +149,9 @@ text and size before the repository's normal spec-revision and re-lock process.
 
 Each slice declares the stable defect classes it targets in `targetClasses`; replace
 the template placeholders with the actual classes from the blocked findings.
+This caller-owned input is mandatory and pinned before any repair agent starts;
+use an explicit `[]` for a slice with no targeted runtime classes. The checker
+cannot add targets or select a different `--target-class` set to change attribution.
 The checker compares the harm on the bare base and every actual round patch,
 not the file or identifier that happens to contain it. A base failure in a
 target class is `incomplete-fix`, a base failure outside them is `pre-existing`,
@@ -162,6 +165,8 @@ INCOMPLETE; an origin label alone is refused even if schema validation skipped.
 produces structured observations. Save the compiler's `ORIGIN REPLAY CONTEXT`
 as JSON and pass it with `--context`; the attack must exit 1 for reproduced
 harm and 0 for defended, while the valid control must exit 0 on every snapshot.
+The helper reads `targetClasses` from that context. Optional `--target-class`
+arguments only assert the same pinned set; missing context targets are INCOMPLETE.
 Each full patch is applied to the bare launch base, never stacked on the prior
 round. A timed-out tool, broken control or patch that cannot apply refuses
 attribution. The checker still owns independently verifying the case and

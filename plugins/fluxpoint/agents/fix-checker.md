@@ -44,6 +44,10 @@ For every finding, classify `origin` by replay of the demonstrated harm:
   with a command/result check of that exact document.
 
 Use the supplied `ORIGIN REPLAY CONTEXT` as the identity of the experiment.
+Its explicit `targetClasses` array is pinned by the caller before repair starts;
+never infer or override it. Missing or invalid targets mean INCOMPLETE. The
+helper derives targets from this context; optional `--target-class` arguments
+must match that same set and cannot select a finding's origin.
 Replay every actual listed patch on a separate fresh archive of the launch
 base; patches are complete against that base, so never stack round patches.
 `scripts/repair-replay.py` executes the valid control and reproduction and

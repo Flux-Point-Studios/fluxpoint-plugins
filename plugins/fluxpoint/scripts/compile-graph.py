@@ -740,6 +740,13 @@ def validate_repair(n, seen, ir, contracts):
     keys = [x.get("key") if isinstance(x, dict) else None for x in items]
     if not keys or any(not isinstance(k, str) or not IDENT.fullmatch(k) for k in keys) or len(set(keys)) != len(keys):
         f.append(f"{where}: repair items require unique lowercase kebab-case keys for safe round directories")
+    origin_checks = [n] + [x for x in ir.get("nodes", []) if x.get("id") in repair_integrations(n)]
+    if any(x.get("contract") == "FixCheckV1" for x in origin_checks):
+        for item in items:
+            targets = item.get("targetClasses") if isinstance(item, dict) else None
+            if (not isinstance(targets, list) or not all(isinstance(c, str) and c.strip() for c in targets)
+                    or len(set(targets)) != len(targets)):
+                f.append(f"{where}: repair slice targetClasses must be an explicit unique array of nonblank classes (use [] for none)")
     classes = rep.get("classBy")
     if classes is not None:
         item_props = contracts.get(n.get("contract"), {}).get("properties", {}).get(n.get("verifyOver") or "findings", {}).get("items", {}).get("properties", {})
@@ -3714,7 +3721,10 @@ def emit_repair(n, ir, specification=False):
 
     a(f"// ===== repair loop {nid}: fixer + fresh-tree checker =====")
     a(f"phase({js_str(phase_name)})")
-    a(f"let pending_{var} = {list_var(n['foreach'])}.map((item, i) => ({{ item, i, lastCheck: null }}))")
+    origin_checks = [n] + [by_id[k] for k in repair_integrations(n)]
+    if any(x.get("contract") == "FixCheckV1" for x in origin_checks):
+        a(f"if ({list_var(n['foreach'])}.some(item => !item || !repairTargets(item.targetClasses))) {{ note({js_str(nid)}, 'INVALID-TARGET-CLASSES', 'repair slices require explicit pinned targetClasses arrays'); return summary('INCOMPLETE') }}")
+    a(f"let pending_{var} = {list_var(n['foreach'])}.map((item, i) => ({{ item, i, lastCheck: null, targetClasses: Array.isArray(item.targetClasses) ? [...item.targetClasses] : [] }}))")
     a(f"let passed_{var} = [], round_{var} = 0, integrationLast_{var} = null, integrationStreaks_{var} = [], integrationRecurring_{var} = []")
     a(f"const {var} = []")
     a(f"const validReframe_{var} = (r, classes, independent = false) => !!r && (!independent || r.validated === true) && Array.isArray(r.classes) && classes.every(c => r.classes.includes(c)) && ['adopt', 'refute', 'remove'].includes(r.disposition) && ['invariant', 'classRewire'].every(k => typeof r[k] === 'string' && r[k].trim()) && r.measurement && ['command', 'result'].every(k => typeof r.measurement[k] === 'string' && r.measurement[k].trim())")
@@ -3735,7 +3745,7 @@ def emit_repair(n, ir, specification=False):
         a(f"    const resourceIssue = repairResourcesIssue(fixed)")
         a(f"    if (resourceIssue) {{ abort_{var} = 'HALTED'; note({js_str(nid)}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: item.key, round: round_{var} }}); return {{ ...state, fixed, roundDir }} }}")
     a(f"    const patches = [...(state.patches || []), {{ item: item.key, round: round_{var}, patch: roundDir + 'patch.diff' }}]")
-    a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: item.targetClasses || null }}")
+    a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: [...state.targetClasses] }}")
     a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay the reproduction and its valid control on the bare launch base and EACH listed complete patch in a fresh base archive, not cumulatively. Use repair-replay.py to obtain originEvidence. New code location or identifier age is not origin evidence. Missing replay/control means INCOMPLETE. Attack every sharedResources writer and reader supplied by the fixer, including existing writers reached by a new reader.\\n'")
 
     a(f"    if (requiredClasses.length && !validReframe_{var}(fixed.reframe, requiredClasses)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: third narrow patch refused`, {{ classes: requiredClasses }}); return {{ ...state, fixed, roundDir }} }}")
@@ -3792,7 +3802,7 @@ def emit_repair(n, ir, specification=False):
         if merge.get("contract") == "SliceV1":
             a("    const resourceIssue = repairResourcesIssue(merged)")
             a(f"    if (resourceIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: '_integration', round: round_{var} }}); return summary('HALTED') }}")
-        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff' }}, targetClasses: passed_{var}.every(state => Array.isArray(state.item.targetClasses)) ? [...new Set(passed_{var}.flatMap(state => state.item.targetClasses))] : null }}")
+        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff' }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))] }}")
         a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay bare base and EVERY component patch separately on fresh base archives, then the complete integrated patch. Only a harm absent from base and all component patches but reproduced on the integrated patch is cross-slice. Attack the complete sharedResources writer/reader list from the integration result.\\n'")
 
         a(f"    if (requiredClasses.length && !validReframe_{var}(merged.reframe, requiredClasses)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'third narrow integration patch refused'); return summary('REFRAME-REQUIRED') }}")

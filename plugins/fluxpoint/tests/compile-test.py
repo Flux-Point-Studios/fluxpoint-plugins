@@ -1386,7 +1386,7 @@ def repair_reframe_case():
     global passed, failed
     ir = {"version": 1, "campaign": "reframe", "treeGuard": False,
           "budget": {"maxNodes": 30, "cacheTtl": "1h"},
-          "lists": {"slices": [{"key": "parser"}]},
+          "lists": {"slices": [{"key": "parser", "targetClasses": ["decode"]}]},
           "nodes": [
               {"id": "fix", "foreach": "slices", "mutates": True, "prompt": "fix {{item.key}}: {{lastCheck}} in {{roundDir}}", "contract": "SliceV1"},
               {"id": "check", "foreach": "slices", "after": "fix", "independent": True, "verifies": "fix", "isolation": "measure", "prompt": "check {{prev}}", "contract": "FixCheckV1", "verifyOver": "findings", "repeat": {"until": "verdict == 'PASS'", "maxRounds": 4, "classBy": ["defectClass"], "reframeAfter": 2}},
