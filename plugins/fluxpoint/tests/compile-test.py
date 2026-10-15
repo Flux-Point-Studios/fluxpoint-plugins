@@ -1434,5 +1434,98 @@ const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
 repair_reframe_case()
 
 
+# Exact-key councils elect a candidate, never a judge's paraphrase (#144).
+def council_case():
+    import subprocess
+    import tempfile
+    global passed, failed
+    ir = {"version": 1, "campaign": "elect a real candidate", "treeGuard": False,
+          "budget": {"maxNodes": 20, "cacheTtl": "1h"},
+          "lists": {"angles": [{"key": "removal"}, {"key": "keep"}, {"key": "trim"}]},
+          "nodes": [
+              {"id": "design", "foreach": "angles", "prompt": "design {{item.key}}", "contract": "DesignV1", "onRed": "drop+log"},
+              {"id": "choose", "after": "design", "prompt": "Compare every candidate side by side: {{prev}}", "contract": "DecisionV1", "decides": "approach", "verify": "judges:3"},
+              {"id": "build", "after": "choose", "prompt": "Implement the raw design {{winner}}. Decision {{prev.chosen}}.", "contract": "DesignV1"},
+          ]}
+    raw_only = copy.deepcopy(ir); raw_only["nodes"][2]["prompt"] = "Implement {{winner}}"
+    checks = [("raw winner consumption satisfies its declared after edge", not cg.validate(raw_only, CONTRACTS)),
+              ("keyed council is valid", not cg.validate(ir, CONTRACTS)),
+              ("judge seats are priced without an extra synthesis agent", cg.plan_node_count(ir) == 7 and cg.estimate_tokens(ir, CONTRACTS)["perNode"]["choose"]["calls"] == 3)]
+    for name, mutate, needle in [
+        ("even seats", lambda x: x["nodes"][1].update(verify="judges:4"), "positive odd"),
+        ("zero seats", lambda x: x["nodes"][1].update(verify="judges:0"), "positive odd"),
+        ("missing decision", lambda x: x["nodes"][1].pop("decides"), "requires decides"),
+        ("wrong decision contract", lambda x: x["nodes"][1].update(contract="DesignV1"), "contract DecisionV1"),
+        ("duplicate candidate keys", lambda x: x["lists"]["angles"][1].update(key="trim"), "unique lowercase"),
+        ("unkeyed candidate", lambda x: x["lists"]["angles"][1].pop("key"), "unique lowercase"),
+        ("reserved none key", lambda x: x["lists"]["angles"][1].update(key="none"), "reserved"),
+        ("scalar predecessor", lambda x: x["nodes"][0].pop("foreach"), "keyed candidate"),
+        ("panel candidate predecessor", lambda x: x["nodes"][0].update(verify="panel:3", verifyOver="findings", contract="FindingsV1"), "keyed candidate"),
+        ("refuter-only field", lambda x: x["nodes"][1].update(verifyOver="options"), "cannot combine with verifyOver"),
+        ("drop policy cannot bypass election", lambda x: x["nodes"][1].update(onRed="drop+log"), "requires onRed"),
+        ("winner outside a judged edge", lambda x: x["nodes"][1].update(verify="schema-only"), "not in scope"),
+        ("winner projection", lambda x: x["nodes"][2].update(prompt="{{prev}} {{winner.plan}}"), "not projections"),
+    ]:
+        bad = copy.deepcopy(ir); mutate(bad)
+        checks.append(("council rejects " + name, any(needle in f for f in cg.validate(bad, CONTRACTS))))
+    def run(mode):
+        js = cg.emit(ir, CONTRACTS).replace("export const meta", "const meta")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out.json"); script = os.path.join(tmp, "run.mjs")
+            prefix = r'''import {writeFileSync} from 'node:fs';
+const args={},calls=[],mode=MODE;
+const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
+const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
+const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p,schema:o.schema});
+ if(label.startsWith('design:')){const key=label.split(':')[1];
+  if(mode==='dead-design'&&key==='removal'||mode==='one-design'&&key!=='trim'||mode==='no-designs')return null;
+  return {summary:'full independent candidate '+key,plan:['RAW PLAN '+key],files:[key+'.py'],risks:['measured risk for '+key],key:'forged-agent-key'};}
+ if(label.startsWith('choose:judge')){const seat=Number(label.slice(-1)),keys=o.schema.properties.winner.enum;
+  if((mode==='dead-split'||mode==='dead-majority')&&seat===3)return null;
+  let winner=mode==='split'?['removal','keep','trim'][seat-1]:mode==='dead-split'?(seat===1?'keep':'trim'):mode==='none'?'none':'trim';
+  if(mode==='prose')winner='Shape-only follow (design 3): trim';
+  const ranking=[winner,...keys.filter(k=>k!==winner)];
+  if(mode==='bad-ranking')ranking[1]=winner;
+  const strongest_objection=Object.fromEntries(keys.map(k=>[k,'A substantive independent objection to candidate '+k]));
+  if(mode==='missing-objection')delete strongest_objection.none;
+  return {winner,ranking,rationale:'This candidate preserves the measured invariant with the smallest supported change.',strongest_objection};}
+ return {summary:'builder completed the elected design',plan:['built the elected raw design'],files:[],risks:['the implementation still needs its independent gate']};};
+'''.replace("MODE", json.dumps(mode))
+            open(script, "w").write(prefix+'\n(async()=>{\n'+js+'\n})().then(r=>writeFileSync('+json.dumps(out)+',JSON.stringify({r,calls}))).catch(e=>writeFileSync('+json.dumps(out)+',JSON.stringify({error:String(e)})));')
+            proc = subprocess.run(["node", script], capture_output=True, text=True, timeout=20)
+            return json.load(open(out)) if os.path.exists(out) else {"error": proc.stderr}
+    normal=run("normal"); dead=run("dead-design")
+    checks += [
+        ("strict majority elects the exact key", normal.get("r", {}).get("results", {}).get("choose", {}).get("chosen") == "trim"),
+        ("builder gets original winning design bytes", any(c["label"] == "build" and '"plan":["RAW PLAN trim"]' in c["p"] and "RAW PLAN removal" not in c["p"] for c in normal.get("calls", []))),
+        ("producer cannot forge its candidate key", normal.get("r", {}).get("results", {}).get("design", [])[0].get("key") == "removal"),
+        ("dead design does not shift selected candidate identity", dead.get("r", {}).get("outcome") == "COMPLETE" and dead.get("r", {}).get("winners", {}).get("choose", {}).get("plan") == ["RAW PLAN trim"]),
+        ("dead candidates are absent from ballot schema", all(c["schema"]["properties"]["winner"]["enum"] == ["keep","trim","none"] for c in dead.get("calls", []) if c["label"].startswith("choose:judge"))),
+        ("no candidate falls back after every design dies", run("no-designs").get("r", {}).get("outcome") == "NO-CANDIDATES"),
+        ("two surviving votes can reach majority of three seats", run("dead-majority").get("r", {}).get("outcome") == "COMPLETE"),
+        ("one surviving design remains a choice against none", run("one-design").get("r", {}).get("outcome") == "COMPLETE"),
+        ("prose winner is excluded by every narrowed schema", all("Shape-only follow (design 3): trim" not in c["schema"]["properties"]["winner"]["enum"] for c in normal.get("calls", []) if c["label"].startswith("choose:judge"))),
+    ]
+    for mode in ["split", "dead-split", "none", "prose", "bad-ranking", "missing-objection"]:
+        result=run(mode)
+        checks.append(("council blocks without an exact-key majority: "+mode, result.get("r", {}).get("outcome") == "NO-MAJORITY" and not any(c["label"] == "build" for c in result.get("calls", []))))
+    decision=normal.get("r", {}).get("results", {}).get("choose")
+    checks.append(("tallied decision satisfies chosen-among-options validation", bool(decision) and not cg._sibling("decision").validate(decision, CONTRACTS["DecisionV1"], choice_among_options=True)))
+    with tempfile.TemporaryDirectory() as tmp:
+        broken = copy.deepcopy(decision); broken["chosen"] = "a prose choice outside the candidate keys"
+        for strict in [True, False]:
+            stored = copy.deepcopy(broken)
+            if not strict:
+                stored.pop("council")
+            open(os.path.join(tmp, "source.json"), "w").write(json.dumps({"summary": {"decisions": {"approach": stored}}}))
+            _, errors = cg.resolve_imports({"imports": {"approach": "source"}, "nodes": []}, CONTRACTS, tmp, os.path.join(tmp, "missing.jsonl"))
+            checks.append(("judged import retains exact-key rule" if strict else "legacy free-text import stays supported", bool(errors) == strict))
+    for name, ok in checks:
+        print(f"{'PASS' if ok else 'FAIL'}  {name}"+(f" -> {normal}" if not ok else ""))
+        passed, failed = passed + ok, failed + (not ok)
+
+council_case()
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

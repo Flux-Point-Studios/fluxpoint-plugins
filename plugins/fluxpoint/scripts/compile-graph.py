@@ -24,7 +24,7 @@ IR_FENCE = re.compile(r"```json\s+graph-ir\s*\n(.*?)\n```", re.S)
 # 'harness' is deliberately absent: it was accepted, priced into the budget,
 # and emitted nothing. Verifying that something is green is what
 # mutates + independent already does, properly. See validate().
-TIER = re.compile(r"^(schema-only|skeptic:(\d+)|panel:(\d+)|prove:([a-z][a-z0-9-]*))$")
+TIER = re.compile(r"^(schema-only|skeptic:(\d+)|panel:(\d+)|prove:([a-z][a-z0-9-]*)|judges:(\d+))$")
 GATES = ".fluxpoint-gates.json"
 HALT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=|>=|<=|>|<)\s*(-?\d+|'[^']*')\s*$")
 # Hyphens are in the class because decision ids are kebab-case by rule, so
@@ -113,7 +113,7 @@ PROMPT_TOKENS_PER_BYTE = 1
 # Expansions whose size is only known at run time. They are named in the
 # estimate's assumptions rather than guessed, so a reader knows which part
 # of a prompt the number cannot see.
-UNPRICED_EXPANSIONS = ("prev", "decisions", "seen")
+UNPRICED_EXPANSIONS = ("prev", "decisions", "seen", "winner")
 # Tokens whose value differs between calls of ONE node. The prompt cache is
 # prefix-keyed, so a fan-out's workers share the text before the first of
 # these and nothing after it.
@@ -360,11 +360,11 @@ def resolve_imports(ir, contracts, runs_dir, store=None):
         # The schema's floors, checked the way `decision.py --record` checks
         # them: a record with every field name but `question: 1`, no options
         # or string booleans would otherwise freeze into the next campaign.
-        # Not decision.py's stricter chosen-among-options rule: a graph node
-        # was only ever held to the schema, and a decision an honest run
-        # froze ("72h, matching the timelock") must stay importable.
+        # Preserve legacy schema-only records whose chosen field is prose.
+        # Compiler-built council records advertise their strict exact-key
+        # rule, and imports must retain that rule instead of weakening it.
         bad = _sibling("decision").validate(rec, contracts.get("DecisionV1") or {},
-                                            choice_among_options=False)
+                                            choice_among_options=isinstance(rec.get("council"), dict) and rec["council"].get("kind") == "judges")
         if bad:
             f.append(f"imports.{did}: the record in '{rid}' is not a valid DecisionV1 "
                      f"({bad[0]}) — a corrupted or hand-edited record does not count "
@@ -505,6 +505,11 @@ def prove_gate(n):
     """The gate this node's tier proves against, or None."""
     m = TIER.match(str(n.get("verify", "schema-only")))
     return m.group(4) if m else None
+
+
+def judge_size(n):
+    m = TIER.match(str(n.get("verify", "schema-only")))
+    return int(m.group(5)) if m and m.group(5) else 0
 
 
 def is_reduce(n):
@@ -878,7 +883,34 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
             )
         elif not m:
             f.append(f"{where}: verify must be schema-only | skeptic:N | panel:N "
-                     f"| prove:<gate>")
+                     f"| prove:<gate> | judges:N")
+        elif m.group(5):
+            seats = int(m.group(5))
+            if seats < 1 or seats % 2 == 0:
+                f.append(f"{where}: judges:{seats} needs a positive odd number of seats for a strict majority")
+            if n.get("onRed", "halt") != "halt":
+                f.append(f"{where}: judges:N requires onRed:'halt'; a council without an elected candidate cannot continue")
+            if not n.get("decides") or c != "DecisionV1":
+                f.append(f"{where}: judges:N requires decides and contract DecisionV1")
+            for key in ("foreach", "repeat", "verifyOver", "expectItems", "mutates", "irreversible", "haltWhen", "agentType"):
+                if n.get(key):
+                    f.append(f"{where}: judges:N cannot combine with {key}; the tier itself emits independent JudgmentV1 seats")
+            if n.get("actor", "agent") != "agent":
+                f.append(f"{where}: judges:N requires an agent node")
+            role_agent = ((ir.get("roles") or {}).get(n.get("role")) or {}).get("agentType")
+            if role_agent:
+                f.append(f"{where}: judges:N cannot bind a role agentType; its seats return JudgmentV1")
+            pred = seen.get(n.get("after")) or {}
+            if not pred.get("foreach") or pred.get("repeat") or panel_size(pred) or pred.get("decides"):
+                f.append(f"{where}: judges:N must consume an earlier unverified foreach of keyed candidate objects")
+            else:
+                items = lists.get(pred["foreach"], [])
+                keys = [item.get("key") if isinstance(item, dict) else None for item in items]
+                if (not keys or any(not isinstance(key, str) or not IDENT.fullmatch(key) or key == "none" for key in keys)
+                        or len(set(keys)) != len(keys)):
+                    f.append(f"{where}: council candidates need unique lowercase kebab-case keys; 'none' is reserved")
+            if "JudgmentV1" not in contracts:
+                f.append(f"{where}: judges:N requires the JudgmentV1 contract")
         elif m.group(4):
             # prove:<gate> — the claim is checked against an execution a hook
             # recorded, not against refuters who re-read the code. It only
@@ -933,7 +965,8 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
         after = n.get("after")
         if after and after not in seen:
             f.append(f"{where}: after '{after}' is not a node defined earlier")
-        if after and not _uses_prev(n.get("prompt", "")):
+        uses_winner = bool(judge_size(seen.get(after) or {}) and "winner" in SUBST.findall(str(n.get("prompt", ""))))
+        if after and not (_uses_prev(n.get("prompt", "")) or uses_winner):
             # Nodes already run in declaration order, so an `after` whose
             # output is never consumed is a phantom edge: it reads as a
             # dependency in the spec and constrains nothing in the run.
@@ -1012,6 +1045,8 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
         bound = {"A", "campaign"}
         if n.get("after"):
             bound.add("prev")
+            if judge_size(seen.get(n["after"]) or {}):
+                bound.add("winner")
         if n.get("foreach"):
             bound.update({"item", "i"})
         if n.get("repeat") and "until" not in n["repeat"]:
@@ -1038,6 +1073,9 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                 f.append(f"{where}: haltReason contains an unsupported substitution token")
             for tok in SUBST.findall(site_text):
                 root = tok.split(".")[0].split("[")[0]
+                if root == "winner" and tok != "winner":
+                    f.append(f"{where}: {site} supports the whole {{{{winner}}}} candidate, not projections")
+                    continue
                 if site == "haltReason" and ((root == "A" and not re.fullmatch(r"A(?:\.[A-Za-z_][A-Za-z0-9_]*)*", tok)) or (root == "campaign" and tok != "campaign")):
                     f.append(f"{where}: haltReason uses unsupported path {{{{{tok}}}}}; use dotted argument fields or the scalar campaign")
                     continue
@@ -1782,6 +1820,10 @@ def plan_groups(ir):
                            "kind": "advise", "node": n, "track": track})
             continue
         key = node_key(n, ir)
+        if judge_size(n):
+            groups.append({"calls": [(nid, key)] * judge_size(n), "park": False,
+                           "kind": "work", "node": n, "items": [None] * judge_size(n), "track": track})
+            continue
         items = lists.get(n.get("foreach"), [None]) if n.get("foreach") else [None]
         fan = len(items)
         rounds = repair_rounds(n)
@@ -2188,6 +2230,7 @@ def subst_mapping(n, var=None, texts=None):
     texts = [str(n.get("prompt", ""))] if texts is None else texts
     mapping = {}
     if n.get("after"):
+        mapping["winner"] = f"JSON.stringify(WINNERS[{js_str(n['after'])}])"
         # {{prev}} carries the predecessor's contract into this prompt -- the
         # justified barrier (judging candidates side by side, reducing a set).
         # {{prev.<field>}} projects one validated field instead: bracket access
@@ -2216,10 +2259,10 @@ def subst_mapping(n, var=None, texts=None):
     return mapping
 
 
-def opts(n, ir, phase, label):
+def opts(n, ir, phase, label, schema_expr=None):
     roles = ir.get("roles") or {}
     role = roles.get(n.get("role"), {})
-    parts = [f"label: {label}", f"phase: {js_str(phase)}", f"schema: C[{js_str(n['contract'])}]"]
+    parts = [f"label: {label}", f"phase: {js_str(phase)}", f"schema: {schema_expr or 'C[' + js_str(n['contract']) + ']'}"]
     agent_type = n.get("agentType") or role.get("agentType")
     if agent_type:
         parts.append(f"agentType: {js_str(agent_type)}")
@@ -2341,6 +2384,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
                       if n.get("isolation") in (True, "worktree") or n.get("mutates")]
     used = sorted({n["contract"] for n in nodes if not is_reduce(n)}
                   | ({"VerdictV1"} if any(panel_size(n) for n in nodes) else set())
+                  | ({"JudgmentV1"} if any(judge_size(n) for n in nodes) else set())
                   # The advisor emits DecisionV1 whether or not a node
                   # declares it, so its schema has to be in scope.
                   | ({"DecisionV1"} if any(
@@ -2717,6 +2761,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  throw new Error('repair graph requires args._launch {root, nonce} from attest.py --stamp')")
         a("const REPAIR_LAUNCH = A._launch")
         a("function repairRoundDir(key, round) { return REPAIR_LAUNCH.root.replace(/[/\\\\]$/, '') + '/.claude/fluxpoint/rounds/' + REPAIR_LAUNCH.nonce + '/' + key + '/r' + round + '/'; }")
+    if any(judge_size(n) for n in nodes):
+        a("const WINNERS = {}")
     a("const RESULTS = {}")
     a("const PROVENANCE = []")
     a("const RECURRING_CLASSES = []")
@@ -2756,6 +2802,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         extra += ", blocked: [...BLOCKED], waits: WAITS, recommendations: RECOMMENDATIONS"
     if decides_any or imports:
         extra += ", decisions: DECISIONS"
+    if any(judge_size(n) for n in nodes):
+        extra += ", winners: WINNERS"
     if mem_nodes:
         extra += ", memory: MEMORY, memorySeeded: MEMORY_SEEDED"
     if prove_nodes:
@@ -3260,6 +3308,8 @@ def emit_node(n, ir, specification=False):
         a(emit_parked(n, specification))
     elif is_reduce(n):
         a(emit_reduce(n, ir))
+    elif judge_size(n):
+        a(emit_judges(n, ir, prompt, phase))
     elif n.get("repeat"):
         a(emit_repeat(n, ir, prompt, phase, panel, over))
     elif n.get("foreach"):
@@ -3320,7 +3370,7 @@ def emit_node(n, ir, specification=False):
                 a(f"  const d0_{var} = DECLINED")
             a(f"  {var} = (await parallel({lst}.map((item, i) => () =>")
             a(f"    spawn({prompt}, {opts(n, ir, phase, label)})")
-            a("  ))).filter(Boolean)")
+            a(f"  ))).map((result, i) => result ? ({{ ...result, key: {lst}[i] && typeof {lst}[i] === 'object' && {lst}[i].key !== undefined ? {lst}[i].key : String(i) }}) : null).filter(Boolean)")
             if has_ceiling:
                 a(f"  skipped_{var} = DECLINED - d0_{var}")
             a(f"  dead_{var} = {lst}.length - {var}.length"
@@ -3475,6 +3525,67 @@ def emit_node(n, ir, specification=False):
           f"`DECISION {n['decides']}: overturned the prior — ${{{var}.chosen}}`)")
     if guard:
         a("}")
+    return "\n".join(L)
+
+
+def emit_judges(n, ir, prompt, phase):
+    """Elect a surviving candidate by exact key and a strict majority of seats."""
+    nid = n["id"]
+    var = "n_" + nid.replace("-", "_")
+    seats = judge_size(n)
+    need = seats // 2 + 1
+    L = []; a = L.append
+    a(f"const candidates_{var} = RESULTS[{js_str(n['after'])}]")
+    a(f"if (!Array.isArray(candidates_{var}) || !candidates_{var}.length) {{")
+    a(f"  note({js_str(nid)}, 'NO-CANDIDATES', 'no surviving design seat returned a candidate')")
+    a("  return summary('NO-CANDIDATES')")
+    a("}")
+    a(f"const keys_{var} = candidates_{var}.map(c => c && c.key)")
+    a(f"if (keys_{var}.some(k => typeof k !== 'string' || !/^[a-z][a-z0-9-]*$/.test(k) || k === 'none') || new Set(keys_{var}).size !== keys_{var}.length) {{")
+    a(f"  note({js_str(nid)}, 'INVALID-CANDIDATES', 'surviving candidates lack unique authoritative keys')")
+    a("  return summary('INVALID-CANDIDATES')")
+    a("}")
+    a(f"const choices_{var} = [...keys_{var}, 'none']")
+    a(f"const schema_{var} = {{ ...C.JudgmentV1, properties: {{ ...C.JudgmentV1.properties,")
+    a(f"  winner: {{ ...C.JudgmentV1.properties.winner, enum: choices_{var} }},")
+    a(f"  ranking: {{ type: 'array', minItems: choices_{var}.length, maxItems: choices_{var}.length, uniqueItems: true, items: {{ type: 'string', enum: choices_{var} }} }},")
+    a(f"  strongest_objection: {{ type: 'object', required: choices_{var}, additionalProperties: false, properties: Object.fromEntries(choices_{var}.map(k => [k, {{ type: 'string', minLength: 20 }}])) }}")
+    a("} }")
+    a(f"if (!affordable({js_str('council ' + nid)})) {{ note({js_str(nid)}, 'SKIPPED', 'budget floor reached before judging'); return summary('BUDGET-EXHAUSTED') }}")
+    a(f"const d0_{var} = DECLINED")
+    label = f"`{nid}:judge${{i + 1}}`"
+    a(f"const votes_{var} = await parallel(Array.from({{ length: {seats} }}, (_, i) => () =>")
+    a(f"  spawn({prompt} + '\\n\\nCOUNCIL BALLOT: choose one exact key from ' + JSON.stringify(choices_{var}) + '. Return JudgmentV1. Rank every key, including none, exactly once with winner first. strongest_objection maps EVERY key to its strongest substantive objection, including your winner. No prose aliases, inferred ids or fallback candidates. Judge independently; you do not see other votes.', {opts(n, ir, phase, label, 'schema_' + var)})")
+    a("))")
+    a(f"if (DECLINED > d0_{var}) {{ note({js_str(nid)}, 'SKIPPED', 'judge seat declined by node ceiling'); return summary('BUDGET-EXHAUSTED') }}")
+    a(f"const valid_{var} = vote => !!vote && typeof vote === 'object' && !Array.isArray(vote) &&")
+    a("  Object.keys(vote).every(k => ['winner', 'ranking', 'rationale', 'strongest_objection'].includes(k)) &&")
+    a(f"  choices_{var}.includes(vote.winner) && Array.isArray(vote.ranking) && vote.ranking.length === choices_{var}.length &&")
+    a(f"  new Set(vote.ranking).size === choices_{var}.length && vote.ranking.every(k => choices_{var}.includes(k)) && vote.ranking[0] === vote.winner &&")
+    a("  typeof vote.rationale === 'string' && [...vote.rationale.trim()].length >= 40 &&")
+    a("  !!vote.strongest_objection && typeof vote.strongest_objection === 'object' && !Array.isArray(vote.strongest_objection) &&")
+    a(f"  Object.keys(vote.strongest_objection).length === choices_{var}.length && choices_{var}.every(k => Object.prototype.hasOwnProperty.call(vote.strongest_objection, k) && typeof vote.strongest_objection[k] === 'string' && [...vote.strongest_objection[k].trim()].length >= 20)")
+    a(f"const liveVotes_{var} = votes_{var}.map((vote, i) => ({{ vote, seat: i + 1 }})).filter(v => valid_{var}(v.vote))")
+    a(f"const tally_{var} = Object.fromEntries(choices_{var}.map(k => [k, 0]))")
+    a(f"liveVotes_{var}.forEach(v => {{ tally_{var}[v.vote.winner]++ }})")
+    a(f"const elected_{var} = keys_{var}.find(k => tally_{var}[k] >= {need})")
+    a(f"const council_{var} = {{ kind: 'judges', seats: {seats}, needed: {need}, tally: tally_{var}, valid: liveVotes_{var}.length, dead: votes_{var}.filter(v => v == null).length, invalid: votes_{var}.filter(v => v != null && !valid_{var}(v)).length }}")
+    a(f"log('council {nid}: ' + JSON.stringify(council_{var}))")
+    a(f"if (!elected_{var}) {{")
+    a(f"  note({js_str(nid)}, 'NO-MAJORITY', 'no candidate received a strict majority of all judge seats; no fallback', council_{var})")
+    a("  return summary('NO-MAJORITY')")
+    a("}")
+    a(f"const {var} = {{")
+    a(f"  question: {js_str('Which surviving candidate should determine ' + n['decides'] + '?')},")
+    a(f"  options: choices_{var}.map(k => ({{ option: k, argued_by: k === 'none' ? 'council abstention' : {js_str(n['after'])} + ':' + k, strongest_objection: liveVotes_{var}.map(v => 'Judge ' + v.seat + ': ' + v.vote.strongest_objection[k]).join('\\n') }})),")
+    a(f"  chosen: elected_{var}, rationale: liveVotes_{var}.filter(v => v.vote.winner === elected_{var}).map(v => 'Judge ' + v.seat + ': ' + v.vote.rationale).join('\\n'),")
+    a("  overturned_prior: false, frozen_by: 'none', reversible: true,")
+    a(f"  evidence: liveVotes_{var}.map(v => 'Judge ' + v.seat + ' chose ' + v.vote.winner + '; ranking ' + JSON.stringify(v.vote.ranking)),")
+    a(f"  council: {{ ...council_{var}, candidateSource: {js_str(n['after'])}, judgments: liveVotes_{var} }}")
+    a("}")
+    a(f"if (!{var}.options.some(o => o.option === {var}.chosen)) throw new Error('council decision chosen is not among options')")
+    a(f"WINNERS[{js_str(nid)}] = candidates_{var}.find(c => c.key === {var}.chosen)")
+    a(f"note({js_str(nid)}, 'OK', 'strict-majority candidate ' + {var}.chosen, council_{var})")
     return "\n".join(L)
 
 

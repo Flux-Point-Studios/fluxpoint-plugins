@@ -1,0 +1,41 @@
+{
+  "$id": "JudgmentV1",
+  "type": "object",
+  "required": [
+    "winner",
+    "ranking",
+    "rationale",
+    "strongest_objection"
+  ],
+  "properties": {
+    "winner": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Exact surviving candidate key or none. The compiler narrows the enum at runtime; prose cannot cast a vote."
+    },
+    "ranking": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Every surviving candidate key plus none, in preference order. Winner must be first."
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 40
+    },
+    "strongest_objection": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 20
+      },
+      "description": "A substantive objection keyed by every surviving candidate and none, including the chosen candidate. Runtime schema requires all keys."
+    }
+  },
+  "additionalProperties": false
+}
