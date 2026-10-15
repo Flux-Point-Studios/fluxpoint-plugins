@@ -13,11 +13,14 @@ import signal
 import subprocess
 import tempfile
 import time
+import process_tree
+import bounded_regex
 
 AWAIT_DEFAULT = 540
 AWAIT_MAX = 570
 TOKEN = re.compile(r'^[A-Za-z0-9_-]{1,80}$')
 TERMINAL = {'DONE', 'CANCELLED', 'ERROR'}
+CancellationPending = process_tree.CleanupPending
 
 
 def now():
@@ -84,6 +87,8 @@ class Store:
         with self.locked(rec['token']):
             old = self.read(rec['token']) or {}
             merged = dict(old, **rec)
+            if type(rec.get('pid')) is int and not rec.get('runnerIdentity') and (not merged.get('runnerIdentity') or merged['pid'] != old.get('pid')):
+                merged['runnerIdentity'] = process_tree.identity(merged['pid'])
             if old.get('cancelRequested'):
                 merged['cancelRequested'] = True
             self._write(merged)
@@ -170,6 +175,9 @@ def terminate_tree(pid, platform=None, grace=2.0):
         return
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
+        members = process_tree.group_members(pid)
+        if members is not None and not members:
+            return
         try:
             os.killpg(pid, 0)
         except ProcessLookupError:
@@ -178,29 +186,59 @@ def terminate_tree(pid, platform=None, grace=2.0):
     try:
         os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
-        pass
+        return
+    deadline = time.monotonic() + 3
+    while True:
+        members = process_tree.group_members(pid)
+        if members is not None and not members:
+            return
+        if time.monotonic() >= deadline:
+            raise CancellationPending('POSIX command group did not drain after KILL')
+        time.sleep(0.05)
 
 
 def run_command(store, token, command, cwd, log):
-    """Start and wait for a command; serialize launch with cancellation requests."""
+    """Own the complete process tree, including after its command leader exits."""
     os.makedirs(os.path.dirname(os.path.abspath(log)), exist_ok=True)
+    tree = None
     with open(log, 'wb') as out:
-        with store.locked(token):
-            rec = store.read(token)
-            if rec is None:
-                raise ValueError('background record disappeared before command launch')
-            if rec.get('cancelRequested'):
-                return None
-            proc = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=subprocess.STDOUT, **detached_options())
-            rec.update(commandPid=proc.pid, processGroup=proc.pid)
-            store._write(rec)
         try:
-            return proc.wait()
+            with store.locked(token):
+                rec = store.read(token)
+                if rec is None:
+                    raise ValueError('background record disappeared before command launch')
+                if rec.get('cancelRequested'):
+                    return None
+                tree = process_tree.ProcessTree(command, cwd, out)
+                rec.update(tree.metadata())
+                rec['runnerIdentity'] = process_tree.identity(os.getpid())
+                store._write(rec)
+                tree.resume()
+            last_members = None
+            stopped = False
+            while True:
+                current = store.read(token)
+                if current is None:
+                    raise ValueError('background record disappeared while the command was running')
+                if current.get('cancelRequested') and not stopped:
+                    tree.terminate()
+                    stopped = True
+                code = tree.proc.poll()
+                running = tree.running()
+                if not running and code is not None:
+                    return code
+                if not tree.job and tree.members != last_members:
+                    store.write({'token': token, 'groupMembers': tree.members})
+                    last_members = list(tree.members)
+                time.sleep(0.1)
         except BaseException:
-            terminate_tree(proc.pid)
-            proc.wait()
+            if tree:
+                tree.terminate()
+                tree.proc.wait()
             raise
+        finally:
+            if tree:
+                tree.close()
 
 
 def finish(store, token, code, before_finish=None, **fields):
@@ -233,15 +271,27 @@ def tail(path, lines=20):
         return ''
 
 
+def completion(rec):
+    try:
+        if process_tree.has_owned_tree(rec):
+            return 4, dict(rec, status='RUNNING'), 'leader completed but owned descendants are still running; cancel this tree'
+    except (OSError, ValueError) as exc:
+        return 4, dict(rec, status='RUNNING'), 'completion cleanup is unproven: ' + str(exc)
+    if rec['status'] == 'ERROR':
+        return 4, rec, 'runner error: ' + str(rec.get('error', 'unknown error'))
+    if rec['status'] == 'DONE' and type(rec.get('exit')) is not int:
+        return 4, rec, 'completion record has no command exit'
+    return 0, rec, 'completed'
+
+
 def wait(read, initial, timeout=AWAIT_DEFAULT, until=None, is_alive=alive):
     """Return (CLI status, record, reason); 0 known/matched, 3 running, 4 lost."""
     if not math.isfinite(timeout):
         raise ValueError('timeout must be finite')
-    try:
-        pattern = re.compile(until) if until is not None else None
-    except re.error as exc:
-        raise ValueError('invalid --until regex: ' + str(exc)) from exc
+    if until is not None and (not isinstance(until, str) or len(until) > bounded_regex.MAX_PATTERN):
+        raise ValueError('readiness regex must be a string of at most 65536 characters')
     deadline = time.monotonic() + min(AWAIT_MAX, max(0, timeout))
+    validated_pattern = until is None
     rec = initial
     log_offset, pending = 0, ''
     while True:
@@ -250,38 +300,41 @@ def wait(read, initial, timeout=AWAIT_DEFAULT, until=None, is_alive=alive):
             return 4, rec, 'background record disappeared or is unreadable'
         rec = current
         if rec.get('status') in TERMINAL:
-            if rec['status'] == 'ERROR':
-                return 4, rec, 'runner error: ' + str(rec.get('error', 'unknown error'))
-            if rec['status'] == 'DONE' and type(rec.get('exit')) is not int:
-                return 4, rec, 'completion record has no command exit'
-            return 0, rec, 'completed'
+            return completion(rec)
         if rec.get('status') != 'RUNNING':
             return 4, rec, 'unrecognized background status'
-        if pattern is not None and rec.get('log'):
+        if not validated_pattern:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return 3, rec, 'still running; repeat the foreground await call'
+            bounded_regex.search_lines(until, [], min(1.0, remaining))
+            validated_pattern = True
+        if until is not None and rec.get('log'):
             try:
                 with open(rec['log'], encoding='utf-8', errors='replace') as fh:
                     fh.seek(log_offset)
                     # A growing log must not keep one bounded await scanning forever.
-                    chunk = fh.read(1024 * 1024)
+                    chunk = fh.read(256 * 1024)
                     log_offset = fh.tell()
                 pending += chunk
                 parts = pending.split('\n')
                 pending = parts.pop()
-                for line in parts:
-                    if pattern.search(line):
-                        return 0, rec, 'matched log line: ' + line[-500:]
-                if len(pending) > 1024 * 1024:
+                if any(len(line) > bounded_regex.MAX_LINE for line in parts) or len(pending) > bounded_regex.MAX_LINE:
                     raise ValueError('log line exceeds 1 MiB; await without --until')
+                if parts:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return 3, rec, 'still running; repeat the foreground await call'
+                    line = bounded_regex.search_lines(until, parts, min(1.0, remaining))
+                    if line is not None:
+                        return 0, rec, 'matched log line: ' + line[-500:]
             except FileNotFoundError:
                 pass
-        if not is_alive(rec.get('pid'), rec.get('started', '')):
+        runner_matches = not rec.get('runnerIdentity') or process_tree.matches(rec.get('pid'), rec['runnerIdentity'])
+        if not runner_matches or not is_alive(rec.get('pid'), rec.get('started', '')):
             again = read(rec['token']) or rec
             if again.get('status') in TERMINAL:
-                rec = again
-                if rec['status'] != 'ERROR':
-                    if rec['status'] == 'DONE' and type(rec.get('exit')) is not int:
-                        return 4, rec, 'completion record has no command exit'
-                    return 0, rec, 'completed'
+                return completion(again)
             return 4, rec, 'runner is gone and left no verdict'
         if time.monotonic() >= deadline:
             return 3, rec, 'still running; repeat the foreground await call'
@@ -292,29 +345,45 @@ def cancel(store, token):
     rec = store.read(token)
     if rec is None:
         raise ValueError('unknown background run ' + token)
+    # Older records may have published a leader's exit while descendants
+    # remain. A terminal label alone never authorizes skipping owned cleanup.
     if rec.get('status') in TERMINAL:
-        return rec
-    # run_command holds this same lock until commandPid is published. Either
-    # cancel prevents launch or it obtains the full group's PID; never a gap.
+        try:
+            if not process_tree.has_owned_tree(rec):
+                return rec
+            store.write({'token': token, 'cancelRequested': True, 'status': 'RUNNING', 'cancellationPending': True})
+            process_tree.terminate_owned(rec)
+        except CancellationPending as exc:
+            store.write({'token': token, 'cancelRequested': True, 'status': 'RUNNING',
+                         'cancellationPending': True, 'cancelError': str(exc)})
+            raise
+        return store.write({'token': token, 'cancelRequested': True,
+                            'status': 'CANCELLED', 'cancellationPending': False, 'finished': now()})
     rec = store.write({'token': token, 'cancelRequested': True})
-    if rec.get('status') in TERMINAL:
-        return rec
-    pid = rec.get('commandPid')
-    if pid is not None:
-        terminate_tree(pid)
+    # Let the living owner terminate its tree first. It has the direct process
+    # and job handles, including descendants created since the last snapshot.
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         current = store.read(token) or rec
+        rec = current
         if current.get('status') in TERMINAL:
             return current
-        if not alive(current.get('pid'), current.get('started', '')):
+        if (current.get('runnerIdentity') and not process_tree.matches(current.get('pid'), current['runnerIdentity'])) or not alive(current.get('pid'), current.get('started', '')):
             break
         time.sleep(0.05)
-    # A runner stuck before/after launch cannot keep a cancellation pending.
+    # A missing owner still leaves a named Windows job, or identity-bound
+    # POSIX group members. Never taskkill an old command PID that may be reused.
+    try:
+        process_tree.terminate_owned(rec)
+    except CancellationPending as exc:
+        store.write({'token': token, 'status': 'RUNNING', 'cancellationPending': True, 'cancelError': str(exc)})
+        raise
     runner = rec.get('pid')
     if type(runner) is int and runner > 1 and runner != os.getpid() and alive(runner):
+        if not process_tree.matches(runner, rec.get('runnerIdentity')):
+            raise CancellationPending('runner creation identity changed; refusing PID reuse')
         if os.name == 'nt':
             terminate_tree(runner)
         else:
             os.kill(runner, signal.SIGTERM)
-    return store.write({'token': token, 'status': 'CANCELLED', 'finished': now()})
+    return store.write({'token': token, 'status': 'CANCELLED', 'cancellationPending': False, 'finished': now()})

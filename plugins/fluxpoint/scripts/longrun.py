@@ -74,6 +74,9 @@ def main():
         if log_tail:
             print(log_tail)
         return status
+    except bg.CancellationPending as exc:
+        print(f'longrun: cancellation pending: {exc}', file=sys.stderr)
+        return 4
     except (OSError, ValueError) as exc:
         print(f'longrun: {exc}', file=sys.stderr)
         return 2

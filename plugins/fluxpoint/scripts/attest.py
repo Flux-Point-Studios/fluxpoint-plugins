@@ -1077,6 +1077,9 @@ def cancel_gate(root, ref):
         return 2
     try:
         rec = bg.cancel(bg.Store(root, BACKGROUND), rec['token'])
+    except bg.CancellationPending as exc:
+        print(f"attest: cancellation pending: {exc}", file=sys.stderr)
+        return 4
     except (OSError, ValueError) as exc:
         print(f"attest: cancel failed: {exc}", file=sys.stderr)
         return 2

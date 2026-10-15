@@ -65,15 +65,38 @@ bash "$ROOT/scripts/py.sh" attest.py --cancel <token>
 Attestations retain their existing record directory and citable IDs. A log match
 never mints an attestation; only collecting the real command exit does that.
 
-Both callers use `scripts/background.py` for records, detached creation,
-command launch, waiting, liveness and cancellation. On POSIX, commands run in a
-new session/process group; cancellation sends TERM to the group and escalates
-to KILL, covering ordinary inherited children and grandchildren even if the
-command leader exits first. On Windows, detached workers and commands use
-`CREATE_NEW_PROCESS_GROUP`, and cancellation invokes
-`taskkill /T /F /PID <pid>` without a shell. Windows liveness uses pointer-sized
-Win32 handles. Cancel through these commands rather than wrapping a suite in
-`timeout`, killing a random PID, or leaving a custom polling/sleep process.
+Both callers use `scripts/background.py` and `scripts/process_tree.py` for
+records, detached creation, command ownership, waiting, liveness and cancellation.
+A command leader exiting does not complete the run while its owned descendants
+remain active. On POSIX, commands run in a new session/process group; the owner
+observes live group members, sends TERM and escalates to KILL, and verifies that
+the group drained before recording completion or cancellation. Zombies do not
+count as working descendants.
+
+On Windows, the command starts suspended with `CREATE_NEW_PROCESS_GROUP`, is
+assigned to a named Job Object, and only then resumes. All ordinary descendants
+inherit the job, so a fast-exiting leader cannot lose them. Await checks the
+job's active-process count; cancellation opens and terminates that exact job.
+`KILL_ON_JOB_CLOSE` also terminates descendants if the owning runner dies. Win32
+handles use pointer-sized types throughout. The low-level compatibility helper
+still provides `taskkill /T /F /PID` for separately managed commands; supervised
+longrun/attest trees use jobs rather than trusting a dead command PID.
+
+Records bind runner and POSIX member PIDs to process-creation identities.
+Cancellation refuses a reused or unidentifiable PID. If a POSIX owner is forcibly
+killed after all recorded members exit and an unobserved grandchild survives,
+its ownership cannot be proved from the last snapshot: cancellation explicitly
+returns 4 rather than killing an unrelated group or claiming cleanup. A live
+owner handles this normal descendant turnover directly. Treat an unproven
+owner-loss state as unresolved cleanup, not a completed verdict.
+
+Cancellation is terminal only after observed group/job drain. If cleanup cannot
+be verified within the bounded cleanup wait, the record stays RUNNING with a
+pending cancellation and the CLI returns 4. Regex evaluation runs in an isolated
+worker under the remaining await deadline, including worker startup; pathological
+backtracking times out explicitly instead of holding the awaiter past its cap.
+Cancel through these commands rather than wrapping a suite in `timeout`, killing
+a random PID, or leaving a custom polling/sleep process.
 
 The portable subtree test executes real child/grandchild cancellation on its
 host platform, including a grandchild that ignores TERM. Additional POSIX tests

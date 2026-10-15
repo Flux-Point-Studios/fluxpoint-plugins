@@ -25,6 +25,7 @@ SCRIPTS = PLUGIN / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
 import background as bg
 import longrun
+import process_tree
 
 
 class Longrun(unittest.TestCase):
@@ -67,7 +68,7 @@ class Longrun(unittest.TestCase):
             time.sleep(0.02)
         self.fail('condition did not become true')
 
-    def descendants(self, attest=False):
+    def descendants(self, attest=False, leader_exit=False):
         # The grandchild deliberately ignores TERM, exercising group escalation.
         (self.root / 'child.py').write_text('''import json,os,subprocess,sys,time
 from pathlib import Path
@@ -81,6 +82,8 @@ child = subprocess.Popen([sys.executable, 'child.py'])
 print('READY', flush=True)
 time.sleep(300)
 '''
+        if leader_exit:
+            source = source.replace('time.sleep(300)', 'sys.exit(0)')
         if attest:
             (self.root / 'gate.py').write_text(source)
             (self.root / '.fluxpoint-gates.json').write_text(json.dumps({'version': 1, 'gates': {'harness':
@@ -94,7 +97,7 @@ time.sleep(300)
             store = self.store
         self.wait_for(lambda: (self.root / 'pids.json').exists() and (self.root / 'grand-ready').exists())
         pids = json.loads((self.root / 'pids.json').read_text())
-        rec = store.read(token)
+        rec = self.wait_for(lambda: (store.read(token) or {}).get('commandPid') and store.read(token))
         self.assertEqual(rec['processGroup'], rec['commandPid'])
         if os.name != 'nt':
             self.assertEqual(pids['group'], rec['commandPid'])
@@ -192,6 +195,82 @@ sys.exit(7)
         self.assertEqual(rec['status'], 'CANCELLED')
         self.assertEqual(rec['exit'], 0)  # preserve the actual code without minting evidence
 
+    def test_early_leader_exit_does_not_finish_or_detach_its_descendants(self):
+        store, token, pids = self.descendants(leader_exit=True)
+        self.wait_for(lambda: not bg.alive(store.read(token)['commandPid']))
+        # The original command exited 0, but its real child and grandchild
+        # still belong to this live run, on POSIX and native Windows alike.
+        self.cli('longrun.py', 'await', token, '--timeout', '0', code=3)
+        self.assertEqual(store.read(token)['status'], 'RUNNING')
+        self.cli('longrun.py', 'cancel', token)
+        self.wait_for(lambda: not bg.alive(pids['child']) and not bg.alive(pids['grandchild']))
+        self.assertEqual(store.read(token)['status'], 'CANCELLED')
+        self.assertEqual(store.read(token)['exit'], 0)  # actual leader code, not a passing tree status
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX group and persisted identity regression')
+    def test_terminal_record_does_not_hide_live_owned_group(self):
+        store, token, pids = self.descendants(leader_exit=True)
+        self.wait_for(lambda: any(row['pid'] == pids['child'] for row in store.read(token).get('groupMembers', [])))
+        # Simulate a record from the earlier leaders-only implementation.
+        store.write({'token': token, 'status': 'DONE', 'exit': 0})
+        self.cli('longrun.py', 'cancel', token)
+        self.wait_for(lambda: not bg.alive(pids['child']) and not bg.alive(pids['grandchild']))
+
+    @unittest.skipUnless(os.name == 'nt', 'native Windows job ownership test')
+    def test_windows_owner_death_closes_job_and_kills_early_exit_descendants(self):
+        store, token, pids = self.descendants(leader_exit=True)
+        result = subprocess.run(['taskkill', '/F', '/PID', str(store.read(token)['pid'])],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.wait_for(lambda: not bg.alive(pids['child']) and not bg.alive(pids['grandchild']))
+        self.cli('longrun.py', 'await', token, '--timeout', '0', code=4)
+
+    def test_creation_identity_mismatch_is_not_a_live_runner(self):
+        unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])
+        try:
+            self.store.write({'token': 'reused', 'status': 'RUNNING', 'pid': unrelated.pid,
+                              'runnerIdentity': 'different-process-creation', 'started': bg.now()})
+            self.cli('longrun.py', 'await', 'reused', '--timeout', '0', code=4)
+            self.cli('longrun.py', 'cancel', 'reused', code=4)
+            self.assertTrue(bg.alive(unrelated.pid))
+        finally:
+            unrelated.terminate()
+            unrelated.wait(timeout=5)
+
+    def test_pending_drain_cannot_publish_cancelled(self):
+        token = 'drain-pending'
+        self.store.write({'token': token, 'status': 'DONE', 'exit': 0})
+        with patch.object(process_tree, 'has_owned_tree', return_value=True), patch.object(process_tree, 'terminate_owned', side_effect=process_tree.CleanupPending('still live')):
+            with self.assertRaises(process_tree.CleanupPending):
+                bg.cancel(self.store, token)
+        self.assertEqual(self.store.read(token)['status'], 'RUNNING')
+        self.assertTrue(self.store.read(token)['cancellationPending'])
+
+    def test_mocked_windows_cleanup_waits_for_observed_job_drain(self):
+        job = Mock()
+        job.active.side_effect = [2, 1, 0]
+        with patch.object(process_tree, 'WindowsJob', return_value=job), patch.object(process_tree.time, 'sleep'):
+            process_tree.terminate_owned({'treeType': 'windows-job', 'jobName': 'named-owned-job'})
+        job.terminate.assert_called_once()
+        self.assertEqual(job.active.call_count, 3)
+        job.close.assert_called_once()
+
+    def test_pathological_regex_respects_the_whole_await_deadline(self):
+        token = self.start("import time; print('a'*64 + '!', flush=True); time.sleep(300)")
+        self.wait_for(lambda: (self.root / 'run.log').exists() and (self.root / 'run.log').stat().st_size)
+        began = time.monotonic()
+        out = self.cli('longrun.py', 'await', token, '--until', '^(a+)+$', '--timeout', '.25', code=2)
+        self.assertLess(time.monotonic() - began, 2)
+        self.assertIn('regex', out)
+        self.assertIn('budget', out)
+        self.cli('longrun.py', 'await', token, '--timeout', '0', code=3)
+
+    def test_complete_overlong_line_is_rejected_before_matching(self):
+        token = self.start("import time; print('x'*(1024*1024+1), flush=True); time.sleep(300)")
+        self.wait_for(lambda: (self.root / 'run.log').exists() and (self.root / 'run.log').stat().st_size > 1024*1024)
+        out = self.cli('longrun.py', 'await', token, '--until', '^ready$', '--timeout', '5', code=2)
+        self.assertIn('line exceeds 1 MiB', out)
+
     def test_timeout_is_clamped_without_waiting_570_seconds(self):
         rec = {'token': 'test', 'status': 'RUNNING', 'pid': 123, 'started': bg.now()}
         clock = [0.0]
@@ -222,6 +301,49 @@ sys.exit(7)
         with patch.object(ctypes, 'WinDLL', return_value=kernel, create=True):
             self.assertTrue(bg.alive_nt(123))
         self.assertIs(kernel.OpenProcess.restype, wintypes.HANDLE)
+        kernel.CloseHandle.assert_called_once_with(handle)
+
+    def test_mocked_windows_launch_assigns_suspended_command_before_resume(self):
+        events = []
+        proc = Mock(pid=123)
+        job = Mock()
+        job.assign.side_effect = lambda value: events.append('assign')
+        job.resume.side_effect = lambda value: events.append('resume')
+        job.active.return_value = 2
+        def spawn(*args, **kwargs):
+            events.append('spawn')
+            self.assertEqual(kwargs['creationflags'], 0x200 | 0x4)
+            return proc
+        with patch.object(process_tree, 'WindowsJob', return_value=job), patch.object(process_tree.subprocess, 'Popen', side_effect=spawn), patch.object(process_tree, 'identity', return_value='creation'):
+            tree = process_tree.ProcessTree(['command'], str(self.root), None, platform='nt')
+            self.assertEqual(events, ['spawn', 'assign'])
+            tree.resume()
+            self.assertEqual(events, ['spawn', 'assign', 'resume'])
+            proc.poll.return_value = 0
+            self.assertTrue(tree.running())  # leader exit cannot hide job descendants
+            job.active.return_value = 0
+            self.assertFalse(tree.running())
+            tree.close()
+            job.close.assert_called_once()
+
+    def test_mocked_windows_job_has_kill_on_close_and_pointer_sized_handles(self):
+        kernel = Mock()
+        handle = 0x123456789ABC
+        kernel.CreateJobObjectW.return_value = handle
+        kernel.SetInformationJobObject.return_value = True
+        def account(job, kind, pointer, size, result):
+            pointer._obj.ActiveProcesses = 2
+            return True
+        kernel.QueryInformationJobObject.side_effect = account
+        with patch.object(ctypes, 'WinDLL', return_value=kernel, create=True):
+            job = process_tree.WindowsJob(create=True)
+            self.assertEqual(job.active(), 2)
+            self.assertIs(kernel.CreateJobObjectW.restype, ctypes.c_void_p)
+            limits = kernel.SetInformationJobObject.call_args.args[2]._obj
+            self.assertEqual(limits.BasicLimitInformation.LimitFlags, 0x2000)
+            job.terminate()
+            kernel.TerminateJobObject.assert_called_once_with(handle, 130)
+            job.close()
         kernel.CloseHandle.assert_called_once_with(handle)
 
     def test_compiler_injects_guidance_into_plain_prove_and_repair_nodes(self):
