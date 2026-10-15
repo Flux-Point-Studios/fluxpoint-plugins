@@ -102,6 +102,22 @@ class HealthTests(unittest.TestCase):
             row.update(ppid=999, command=f'python {SCRIPTS / "attest.py"} --run harness', age_seconds=10000, cpu_seconds=0.)
         self.assertEqual(self.check(data)['exitCode'], 0)
 
+    def test_orphan_python_with_hidden_command_is_unknown_not_healthy(self):
+        data = sample()
+        data['platform'] = 'win32'
+        for row in [data['before'][-1], data['after'][-1]]:
+            row.update(ppid=999, name='python.exe', command_available=False, cpu_seconds=0.,
+                       command='<command line unavailable; process name python.exe>')
+        report = self.check(data)
+        self.assertEqual(report['exitCode'], 2)
+        self.assertEqual(report['checks']['processes']['status'], 'unreadable')
+        self.assertIn('PID 20', report['checks']['processes']['detail'])
+        self.assertIn('command line unavailable', report['checks']['processes']['detail'])
+        # Opaque protected system processes are not mistaken for orphan Python hooks.
+        for row in [data['before'][-1], data['after'][-1]]:
+            row.update(name='System', ppid=0, command='<command line unavailable; process name System>')
+        self.assertEqual(self.check(data)['exitCode'], 0)
+
     def test_total_cpu_lists_five_largest_current_processes(self):
         data = sample()
         data['cpu']['busy_seconds'] = 45.

@@ -2,10 +2,10 @@
 
 Each sample runs one PowerShell process. Win32_Process CPU counters are
 cumulative 100 ns values; creation timestamps keep reused PIDs distinct.
-GetSystemTimes supplies machine-wide CPU deltas around that invocation.
+GetSystemTimes supplies CPU deltas inside the process-sampling window,
+excluding PowerShell startup and subsequent network queries.
 """
 
-import ctypes
 import datetime
 import json
 import math
@@ -32,13 +32,33 @@ function Read-Processes {
     })
 }
 try {
+    # Keep aggregate counters inside the same sampling window as CIM process
+    # counters. PowerShell startup and the later TCP queries are outside it.
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class BoxHealthCpu {
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
+    public static long[] Read() {
+        long idle, kernel, user;
+        if (!GetSystemTimes(out idle, out kernel, out user))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        return new long[] {idle, kernel, user};
+    }
+}
+'@
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $before = @(Read-Processes)
     $beforeAt = [DateTime]::UtcNow.ToString('o')
+    $cpuBefore = [BoxHealthCpu]::Read()
     $started = $clock.Elapsed.TotalSeconds
     Start-Sleep -Milliseconds __MILLISECONDS__
     $after = @(Read-Processes)
     $afterAt = [DateTime]::UtcNow.ToString('o')
+    $cpuAfter = [BoxHealthCpu]::Read()
     $elapsed = $clock.Elapsed.TotalSeconds - $started
 } catch {
     [Console]::Error.WriteLine('Windows process table unreadable: ' + $_.Exception.Message)
@@ -57,7 +77,7 @@ if (Get-Command netsh.exe -ErrorAction SilentlyContinue) {
             $connections = @(Get-NetTCPConnection -ErrorAction Stop | Select-Object LocalAddress, LocalPort)
             $ports = @{status = 'ok'; ranges = $ranges; connections = $connections; detail = ''}
         } elseif (Get-Command netstat.exe -ErrorAction SilentlyContinue) {
-            $connections = @(netstat.exe -ano -p tcp 2>&1 | ForEach-Object { [string]$_ })
+            $connections = @(netstat.exe -ano 2>&1 | ForEach-Object { [string]$_ })
             if ($LASTEXITCODE -ne 0) { throw 'netstat TCP query failed' }
             $ports = @{status = 'ok'; ranges = $ranges; netstat_output = $connections; detail = ''}
         } else {
@@ -68,25 +88,8 @@ if (Get-Command netsh.exe -ErrorAction SilentlyContinue) {
     }
 }
 @{before = $before; after = $after; before_at = $beforeAt; after_at = $afterAt;
-  elapsed = $elapsed; ports = $ports} | ConvertTo-Json -Depth 5 -Compress
+  elapsed = $elapsed; cpu_before = $cpuBefore; cpu_after = $cpuAfter; ports = $ports} | ConvertTo-Json -Depth 5 -Compress
 """
-
-
-def _system_times():
-    """Return (idle, kernel, user) seconds; Windows kernel includes idle."""
-    from ctypes import wintypes
-
-    idle, kernel, user = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
-    try:
-        function = ctypes.windll.kernel32.GetSystemTimes
-        function.argtypes = [ctypes.POINTER(wintypes.FILETIME)] * 3
-        function.restype = wintypes.BOOL
-        if not function(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
-            raise OSError("GetSystemTimes failed")
-    except (AttributeError, OSError) as exc:
-        raise ValueError("Windows CPU counters unreadable: {}".format(exc)) from exc
-    return tuple(((value.dwHighDateTime << 32) | value.dwLowDateTime) / 10000000.0
-                 for value in (idle, kernel, user))
 
 
 def _timestamp(value):
@@ -181,7 +184,7 @@ def _ports(raw):
             else:
                 for line in _lines(raw["netstat_output"]):
                     fields = line.split()
-                    if not fields or fields[0].upper() != "TCP":
+                    if not fields or fields[0].upper() not in ("TCP", "TCPV6"):
                         continue
                     if len(fields) < 4:
                         raise ValueError("invalid netstat TCP row")
@@ -219,7 +222,7 @@ def _ports(raw):
             ports = set()
             for line in _lines(raw["netstat_output"]):
                 fields = line.split()
-                if not fields or fields[0].upper() != "TCP":
+                if not fields or fields[0].upper() not in ("TCP", "TCPV6"):
                     continue
                 if len(fields) < 4:
                     raise ValueError("invalid netstat TCP row")
@@ -248,7 +251,6 @@ def sample(seconds=5.0):
     milliseconds = max(1, math.ceil(seconds * 1000))
     if milliseconds > 2147483647:
         raise ValueError("sample seconds exceeds the Windows sleep limit")
-    cpu_before = _system_times()
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -259,7 +261,6 @@ def sample(seconds=5.0):
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("Windows process table unreadable: {}".format(exc)) from exc
-    cpu_after = _system_times()
     if completed.returncode:
         detail = (completed.stderr or "PowerShell sample failed").strip()
         raise ValueError("Windows process table unreadable: {}".format(detail))
@@ -270,9 +271,14 @@ def sample(seconds=5.0):
             raise ValueError("invalid sample duration")
         before = _processes(payload["before"], payload["before_at"])
         after = _processes(payload["after"], payload["after_at"])
+        cpu_before, cpu_after = payload['cpu_before'], payload['cpu_after']
+        if not (isinstance(cpu_before, list) and isinstance(cpu_after, list)
+                and len(cpu_before) == len(cpu_after) == 3):
+            raise ValueError('aggregate CPU sample counters missing or malformed')
+        deltas = [_integer(end)-_integer(start) for start, end in zip(cpu_before, cpu_after)]
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("Windows process table unreadable: {}".format(exc)) from exc
-    idle, kernel, user = (after - before for before, after in zip(cpu_before, cpu_after))
+    idle, kernel, user = (ticks/10000000.0 for ticks in deltas)
     total = kernel + user
     if min(idle, kernel, user) < 0 or total <= 0 or idle > total:
         raise ValueError("Windows CPU counters unreadable: invalid counter delta")

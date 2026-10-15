@@ -25,6 +25,8 @@ def payload():
     return {"before": [process()], "after": [process(kernel="20000000")],
             "before_at": "2026-10-15T00:01:00.0000000Z",
             "after_at": "2026-10-15T00:01:05.0000000Z", "elapsed": 5,
+            "cpu_before": [100000000, 200000000, 50000000],
+            "cpu_after": [120000000, 260000000, 70000000],
             "ports": {"status": "ok", "range_output": ["Protocol tcp Dynamic Port Range",
                       "Start Port : 49152", "Number of Ports : 16384"],
                       "local_ports": [80, 49152, 49152, 65535]}}
@@ -33,8 +35,7 @@ def payload():
 class WindowsSampleTests(unittest.TestCase):
     def sample(self, data=None, result=None):
         result = result or subprocess.CompletedProcess([], 0, json.dumps(data or payload()), "")
-        with mock.patch.object(windows, "_system_times", side_effect=[(10, 20, 5), (12, 26, 7)]), \
-                mock.patch.object(windows.time, "monotonic", side_effect=[0, 6]), \
+        with mock.patch.object(windows.time, "monotonic", side_effect=[0, 6]), \
                 mock.patch.object(windows.subprocess, "run", return_value=result) as run:
             sampled = windows.sample()
         return sampled, run
@@ -54,6 +55,27 @@ class WindowsSampleTests(unittest.TestCase):
         self.assertEqual(sampled["cpu"], {"busy_seconds": 6, "total_seconds": 8})
         self.assertEqual(sampled["ports"]["used"], 2)
         self.assertEqual(sampled["elapsed"], 5)
+        script = command[-1]
+        self.assertLess(script.index('$cpuBefore = [BoxHealthCpu]::Read()'), script.index('Start-Sleep -Milliseconds'))
+        self.assertLess(script.index('Start-Sleep -Milliseconds'), script.index('$cpuAfter = [BoxHealthCpu]::Read()'))
+        self.assertLess(script.index('$cpuAfter = [BoxHealthCpu]::Read()'), script.index('$ports ='))
+        self.assertNotIn('netstat.exe -ano -p tcp', script)
+        self.assertIn('netstat.exe -ano', script)
+
+    def test_cpu_window_excludes_slow_startup_and_port_queries(self):
+        data = payload()
+        data['cpu_before'] = [0, 0, 0]
+        data['cpu_after'] = [10000000, 100000000, 0]  # 90% during the actual five-second sample
+        completed = subprocess.CompletedProcess([], 0, json.dumps(data), '')
+        with mock.patch.object(windows.time, 'monotonic', side_effect=[0, 60]), \
+             mock.patch.object(windows.subprocess, 'run', return_value=completed):
+            sampled = windows.sample()
+        self.assertEqual(sampled['elapsed'], 5)
+        self.assertEqual(sampled['cpu']['busy_seconds']/sampled['cpu']['total_seconds'], .9)
+        for bad in ([], [0, 0], [True, 0, 0], ['bad', 0, 0]):
+            data['cpu_before'] = bad
+            with self.subTest(counters=bad), self.assertRaisesRegex(ValueError, 'unreadable'):
+                self.sample(data)
 
     def test_pid_reuse_keeps_creation_identity(self):
         data = payload()
@@ -91,8 +113,7 @@ class WindowsSampleTests(unittest.TestCase):
                        subprocess.CompletedProcess([], 0, "invalid json", "")):
             with self.subTest(result=result), self.assertRaisesRegex(ValueError, "process table unreadable"):
                 self.sample(result=result)
-        with mock.patch.object(windows, "_system_times", return_value=(1, 2, 3)), \
-                mock.patch.object(windows.subprocess, "run", side_effect=FileNotFoundError("powershell.exe")):
+        with mock.patch.object(windows.subprocess, "run", side_effect=FileNotFoundError("powershell.exe")):
             with self.assertRaisesRegex(ValueError, "process table unreadable"):
                 windows.sample()
 
@@ -148,7 +169,7 @@ class WindowsSampleTests(unittest.TestCase):
         del raw["connections"]
         raw["netstat_output"] = ["TCP 127.0.0.1:49152 1.2.3.4:1 TIME_WAIT 0",
                                  "TCP [::1]:49152 [::1]:1 TIME_WAIT 0",
-                                 "TCP [::]:60000 [::]:0 LISTENING 100"]
+                                 "TCPv6 [::]:60000 [::]:0 LISTENING 100"]
         self.assertEqual(windows._ports(raw), parsed)
 
 

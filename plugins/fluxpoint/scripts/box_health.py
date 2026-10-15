@@ -273,6 +273,11 @@ def analyze(sample, cpu_threshold=90., orphan_cpu_threshold=90., port_threshold=
         literal_busy = bool(re.search(r'(?i)(?:-c\s+["\']?)?while\s+(?:True|1)\s*:\s*pass\b', row['command']))
         known_hook = bool(re.search(r"(?i)(?:secret-guard\.py[\"']?\s+[\"']?--hook|attest\.py[\"']?\s+[\"']?--record)", row['command']))
         suspected = adopted and (literal_busy or known_hook)
+        # An inaccessible orphan Python command cannot be classified as a
+        # bounded hook or a deliberate detached job. Its name is insufficient
+        # evidence for a healthy result, even when it is currently suspended.
+        if orphan and row.get('command_available') is False and row.get('name', '').lower().startswith('python'):
+            unreadable.append(f'PID {row["pid"]}: orphan Python command line unavailable; plugin hook age cannot be classified')
         reason = orphan or ('init-adopted bounded hook or literal busy loop; original parent identity is no longer available' if suspected else None)
         if reason and percent is not None and percent >= orphan_cpu_threshold:
             findings.append(dict(code='orphan-cpu', message=f'PID {row["pid"]} used {percent:.1f}% of a core; {reason}', processes=[evidence]))
