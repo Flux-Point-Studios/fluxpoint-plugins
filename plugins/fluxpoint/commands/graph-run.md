@@ -21,6 +21,15 @@ Workflow tool requires.
      Alternatively, record explicit acceptance in a DecisionV1
      `acceptedCommits` array with `decision.py --record`. A SHA mentioned in
      prose, a passing build, or an executor label does not discharge it.
+   - Before **every launch and resume**, run
+     `bash "$ROOT/scripts/py.sh" box-health.py` outside Workflow replay.
+     It samples machine CPU/process counters for 5 seconds, checks suspected
+     orphans, aged orphaned plugin hooks, loopback and dynamic TCP port pressure.
+     Exit 1 stops the launch and prints operator PIDs, command lines and creation
+     times. Exit 2 also stops: an unreadable or unsupported observation must be
+     reported and resolved before certifying the machine healthy. It never kills processes or changes machine config.
+     Thresholds are explicit flags; see `docs/box-health.md`. Repeat after any
+     cleanup, including when resuming a run with cached node results.
    - `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> --check` exits 0.
      Its findings are the work list; fix the IR, never the compiler.
    - If `.fluxpoint-gates.json` declares a gate named `preflight`, run
@@ -172,13 +181,20 @@ Workflow tool requires.
    ```
    Do this for every launch and resume, so a stall or failure wakes the
    orchestrator through the background task's completion. Exit 1 names the
-   affected agents and adds inbox items; a killed agent also gets a resume
+   affected agents or machine findings and adds inbox items (`box-unhealthy`
+   for machine findings); a killed agent also gets a resume
    note with its checkout state and commits since launch. Exit 2 means the
-   internal journal/transcript format could not be read: inspect it and
+   process/network coverage or the internal journal/transcript format could
+   not be read or is unsupported: inspect the named observation and
    report the missing observation. Exit 0 means no agents remain live and
    the journal has been quiet for 15 minutes. Hand-written Workflow scripts
    use this same command. `--stall-min` defaults to 40; `--once` performs one
-   inspection (exit 3 while the run is still pending).
+   inspection (exit 3 while the run is still pending). Every poll runs a fresh
+   5-second box-health sample, even while agents remain active, so CPU load or
+   orphan hooks do not have to wait for a transcript stall. The observer never
+   kills a process. `--health-sample-seconds`, `--health-cpu-threshold`,
+   `--health-orphan-cpu-threshold`, `--health-port-threshold` and
+   `--health-loopback-ms` configure those observations explicitly.
 6. On completion, record the run — evidence is a build artifact, not
    something you remember to write:
    ```
