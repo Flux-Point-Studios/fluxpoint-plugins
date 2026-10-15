@@ -14,15 +14,18 @@ with earlier round patches. stdout is JSON origin/introducedIn/originEvidence.
 import argparse
 import io
 import json
+import locale
 import math
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
-import background
+from process_tree import CleanupPending, ProcessTree
 
 
 def text(value):
@@ -34,22 +37,40 @@ def target_classes(value):
 
 
 def execute(command, cwd, timeout):
-    proc = subprocess.Popen(command, shell=True, cwd=cwd, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, **background.detached_options())
+    deadline = time.monotonic() + timeout
+    tree = ProcessTree(command, cwd, subprocess.PIPE, shell=True)
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        tree.resume()
+        stdout, _ = tree.proc.communicate(timeout=max(0, deadline - time.monotonic()))
+        # A descendant may close/redirect its pipes and outlive a successful
+        # shell. Its work remains part of this control or reproduction.
+        while tree.running():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout, output=stdout)
+            time.sleep(min(0.05, remaining))
     except BaseException:
-        # The shell can exit before its workers. Terminate its complete group
-        # and reap it before a timed-out scratch directory can disappear.
-        background.terminate_tree(proc.pid)
-        proc.communicate()
+        try:
+            tree.terminate()
+            tree.proc.communicate(timeout=5)
+            cleanup_deadline = time.monotonic() + 5
+            while tree.running():
+                if time.monotonic() >= cleanup_deadline:
+                    raise CleanupPending('replay command still has owned descendants after termination')
+                time.sleep(0.05)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CleanupPending('cannot confirm replay command tree drained: {}'.format(exc)) from exc
         raise
-    output = (stdout + stderr).strip()
-    return proc.returncode, 'exit {}{}'.format(proc.returncode, ': ' + output if output else '')
+    finally:
+        tree.close()
+    output = stdout.decode(locale.getpreferredencoding(False), errors='replace').strip()
+    return tree.proc.returncode, 'exit {}{}'.format(tree.proc.returncode, ': ' + output if output else '')
 
 
 def observe(archive, patch, control, command, timeout):
-    with tempfile.TemporaryDirectory(prefix='fluxpoint-origin-') as scratch:
+    scratch = tempfile.mkdtemp(prefix='fluxpoint-origin-')
+    cleanup = True
+    try:
         with tarfile.open(fileobj=io.BytesIO(archive)) as package:
             # Git paths cannot traverse upwards, but refuse special archive
             # entries as well so extraction never escapes the scratch tree.
@@ -75,6 +96,12 @@ def observe(archive, patch, control, command, timeout):
             raise ValueError('reproduction did not complete on {}: {}'.format(patch or 'base', result))
         return dict(command=command, result=result, controlCommand=control,
                     controlResult=control_result, controlPassed=True, reproduces=rc == 1)
+    except CleanupPending as exc:
+        cleanup = False
+        raise CleanupPending('{}; snapshot preserved at {}'.format(exc, scratch)) from exc
+    finally:
+        if cleanup:
+            shutil.rmtree(scratch)
 
 
 def replay(root, context, defect_class, targets, control, command, timeout):

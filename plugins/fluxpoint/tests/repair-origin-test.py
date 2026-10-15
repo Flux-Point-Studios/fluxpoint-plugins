@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 PLUGIN = Path(__file__).resolve().parents[1]
 SCRIPTS = PLUGIN / 'scripts'
@@ -154,6 +155,46 @@ class RealReplay(unittest.TestCase):
         command = python_command('import time; time.sleep(30)')
         with self.assertRaises(subprocess.TimeoutExpired):
             REPLAY.execute(command, self.root, 0.05)
+
+    def child_command(self, seconds):
+        child = ('import pathlib,time; pathlib.Path("child-started").write_text("ready"); '
+                 'time.sleep({}); pathlib.Path("child-finished").write_text("finished")').format(seconds)
+        leader = ('import subprocess,sys,pathlib; p=subprocess.Popen([sys.executable,"-c",{!r}], '
+                  'stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); '
+                  'pathlib.Path("child-pid").write_text(str(p.pid))').format(child)
+        return python_command(leader)
+
+    def test_success_waits_for_descendants_after_leader_and_pipes_close(self):
+        rc, result = REPLAY.execute(self.child_command(0.2), self.root, 10)
+        self.assertEqual(rc, 0, result)
+        self.assertEqual((self.root / 'child-finished').read_text(), 'finished')
+
+    def test_timeout_owns_pipe_detached_child_after_leader_exit(self):
+        # The child redirects both output streams, so communicate() alone
+        # returns while it is still sleeping. The owned tree must not pass.
+        with self.assertRaises(subprocess.TimeoutExpired):
+            REPLAY.execute(self.child_command(30), self.root, 1)
+        self.assertTrue((self.root / 'child-pid').exists())
+        self.assertFalse((self.root / 'child-finished').exists())
+        if os.name != 'nt':
+            pid = int((self.root / 'child-pid').read_text())
+            proc_stat = Path('/proc') / str(pid) / 'stat'
+            if proc_stat.exists():
+                self.assertIn(proc_stat.read_text().rsplit(')', 1)[-1].split()[0], ('Z', 'X'))
+            else:
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+
+    def test_unconfirmed_tree_cleanup_preserves_snapshot(self):
+        archive = subprocess.run(['git', '-C', str(self.root), 'archive', self.base],
+                                 capture_output=True, check=True).stdout
+        scratch = self.root / 'preserved-snapshot'
+        scratch.mkdir()
+        with patch.object(REPLAY.tempfile, 'mkdtemp', return_value=str(scratch)), \
+                patch.object(REPLAY, 'execute', side_effect=REPLAY.CleanupPending('descendant observation unavailable')):
+            with self.assertRaisesRegex(REPLAY.CleanupPending, 'snapshot preserved'):
+                REPLAY.observe(archive, None, self.control, self.command, 1)
+        self.assertTrue((scratch / 'state.json').exists())
 
     def test_failed_controls_missing_patches_and_no_current_reproduction_refuse_origin(self):
         patch = self.patch('parser', 1, dict(self.state, left=True))
