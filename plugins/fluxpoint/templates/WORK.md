@@ -45,7 +45,7 @@ for a worked council → build → independently-gated campaign.
   "version": 1,
   "name": "campaign",
   "campaign": "<one line: what this campaign proves or produces>",
-  "budget": { "maxNodes": 12, "verifyFloorTokens": 50000, "cacheTtl": "1h", "maxEstimatedTokens": 200000 },
+  "budget": { "maxNodes": 12, "verifyFloorTokens": 50000, "cacheTtl": "1h", "maxEstimatedTokens": 350000 },
   "defaults": { "effort": "medium" },
   "argDefaults": {
     "target": "the uncommitted diff: git diff HEAD, plus untracked files from git status"
@@ -73,6 +73,11 @@ for a worked council → build → independently-gated campaign.
   ]
 }
 ```
+
+The 350k estimated-token ceiling includes the locked packet and leaves
+headroom above the compiler's estimate. Re-run `--check` after replacing this
+example with the consuming repository's packet and campaign; runtime prompt
+substitutions listed as unpriced still need their own allowance.
 
 ## Constraints
 - <what must not change on the way there>

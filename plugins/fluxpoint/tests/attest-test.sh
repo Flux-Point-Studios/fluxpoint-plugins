@@ -48,9 +48,11 @@ check(){ [ "$2" = "$3" ] && ok "$1" "$3" || bad "$1" "$3 (wanted $2)"; }
 newrepo() {
   rm -rf "$ROOT/r"; mkdir -p "$ROOT/r/scripts"; cd "$ROOT/r" || exit 1
   git init -q -b main
+  git remote add origin https://github.com/fixture/repo.git
   printf '#!/usr/bin/env bash\nexit 0\n' >scripts/harness.sh
   chmod +x scripts/harness.sh
   printf '## Evidence\n\n| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n' >WORK.md
+  printf '.claude/\n' >.gitignore
   git add -A; git -c user.email=t@t -c user.name=t commit -qm base
 }
 
@@ -115,7 +117,12 @@ rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 print(rows[-1].get(sys.argv[2], "") if rows else "")
 PY
 }
-rec() { payload "$@" | "$FPL_PY" "$ATTEST" --root "$ROOT/r" --record; }
+rec() {
+  # These matcher/citation fixtures describe clean executions. Content dirt
+  # rejection is exercised separately by forge-evidence-test.py.
+  git -C "$ROOT/r" add -A
+  git -C "$ROOT/r" -c user.email=t@t -c user.name=t commit --allow-empty -qm fixture
+  payload "$@" | "$FPL_PY" "$ATTEST" --root "$ROOT/r" --record; }
 
 # --- 1. dormant without a manifest --------------------------------------
 newrepo
@@ -610,6 +617,8 @@ check "  nor does a double-quoted cd whose closing quote bash escapes" "$n" "$(r
 newrepo
 printf '#!/usr/bin/env bash\nsleep 1\nexit "${GATE_EXIT:-0}"\n' >scripts/harness.sh
 gates
+git add scripts/harness.sh .fluxpoint-gates.json
+git -c user.email=t@t -c user.name=t commit -qm 'declare clean long gate'
 tok="$("$FPL_PY" "$ATTEST" --root "$ROOT/r" --run harness --detach --nonce run-c 2>&1 | sed -n 's/.* as \(bg_[0-9a-f]*\).*/\1/p' | head -1)"
 [ -n "$tok" ] && ok "--run starts a declared gate and names its token" "$tok" \
   || bad "--run starts a declared gate and names its token" "no token"
@@ -653,25 +662,25 @@ cat >"$ROOT/bin/gh" <<'SH'
 #!/usr/bin/env bash
 # A stand-in forge: the state of every context comes from FAKE_CI.
 case "$*" in
-  *"/status"*) printf '{"state":"%s","statuses":[{"context":"harness","state":"%s"}]}' \
-                 "${FAKE_CI:-success}" "${FAKE_CI:-success}" ;;
-  *"/check-runs"*) printf '{"total_count":1,"check_runs":[{"name":"lint","status":"completed","conclusion":"success"}]}' ;;
-  *"/pulls/"*) printf '{"head":{"sha":"%s"}}' "${FAKE_HEAD:-abc1234def5678}" ;;
+  "api user"*) printf '{"login":"harness-agent"}' ;;
+  *"/statuses"*) printf '[{"id":1,"context":"harness","state":"%s","creator":{"login":"ci-bot"}}]' "${FAKE_CI:-success}" ;;
+  *"/check-runs"*) printf '{"total_count":1,"check_runs":[{"id":2,"name":"lint","status":"completed","conclusion":"success","app":{"id":42},"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}' ;;
+  *"/pulls/"*) printf '{"head":{"sha":"%s"}}' "${FAKE_HEAD:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" ;;
   *) exit 1 ;;
 esac
 SH
 chmod +x "$ROOT/bin/gh"
-printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"},"ci":{"forge":"github","contexts":["harness","lint"]}}' \
+printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"},"ci":{"forge":"github","repository":"fixture/repo","witness":{"statusCreators":["ci-bot"],"checkRunApps":[42]},"contexts":["harness","lint"]}}' \
   >"$ROOT/r/.fluxpoint-gates.json"
-PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1; rc=$?
 check "--ci over green statuses exits 0" 0 "$rc"
 check "  and mints a ci row" ci "$(field gate)"
 check "  witnessed by the forge" forge "$(field witness)"
-check "  for the sha it was asked about" abc1234 "$(field headSha)"
+check "  for the sha it was asked about" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$(field headSha)"
 SHAATT="$(field attestId)"
 cici() { # $1 = attestId, $2 = claimed sha ('' for none), $3 = run id
   ATT="$1" bound "{'results': {'merge-gate': {'gate': 'ci', 'exit': 0, 'attestId': 'ATT'$( [ -n "$2" ] && printf ", 'sha': '%s'" "$2")}}, 'contracts': {'merge-gate': 'ExecutionV1'}, 'prove': {'merge-gate': 'ci'}}" \
-    | "$FPL_PY" "$RECORD" --run-id "$3" --graph WORK.md --root "$ROOT/r" \
+    | env PATH="$ROOT/bin:$PATH" "$FPL_PY" "$RECORD" --run-id "$3" --graph WORK.md --root "$ROOT/r" \
       --state-dir "$ROOT/r/.claude/fluxpoint/runs" 2>&1
 }
 # A sha the node chose could be CI's verdict on any older green commit.
@@ -682,9 +691,9 @@ case "$out" in *"[STALE]"*"the node named itself"*)
 PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --pr 7 >/dev/null 2>&1; rc=$?
 check "--ci --pr asks the forge for the pull request's head" 0 "$rc"
 check "  and records which pull request named it" pr:7 "$(field target)"
-check "  and the commit the forge named" abc1234def5678 "$(field headSha)"
+check "  and the commit the forge named" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$(field headSha)"
 CIATT="$(field attestId)"
-out="$(cici "$CIATT" abc1234def5678 wf-ci1)"
+out="$(cici "$CIATT" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa wf-ci1)"
 case "$out" in *"[ATTESTED]"*"| COMPLETE |"*)
   ok "a prove:ci node citing the forge row is ATTESTED" "attested" ;;
   *) bad "a prove:ci node citing the forge row is ATTESTED" "${out:0:70}" ;; esac
@@ -696,16 +705,16 @@ out="$(cici "$CIATT" 0000000aaaa wf-ci3)"
 case "$out" in *TAMPERED-EXECUTION*)
   ok "  and a claimed commit the forge did not judge is TAMPERED" "caught" ;;
   *) bad "  and a claimed commit the forge did not judge is TAMPERED" "${out:0:70}" ;; esac
-FAKE_CI=failure PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+FAKE_CI=failure PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1; rc=$?
 check "a failing context is a red ci row" 1 "$rc"
 check "  recorded, not smoothed" 1 "$(field exit)"
 n="$(rows)"
-FAKE_CI=pending PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+FAKE_CI=pending PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1; rc=$?
 check "pending statuses are not a verdict (exit 3)" 3 "$rc"
 check "  and mint no row" "$n" "$(rows)"
-printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"},"ci":{"forge":"github","contexts":["harness","deploy-preview"]}}' \
+printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"},"ci":{"forge":"github","repository":"fixture/repo","witness":{"statusCreators":["ci-bot"],"checkRunApps":[42]},"contexts":["harness","deploy-preview"]}}' \
   >"$ROOT/r/.fluxpoint-gates.json"
-PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1; rc=$?
 check "a required context the forge never reported is not green" 3 "$rc"
 printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"},"ci":{"forge":"gitlab"}}' \
   >"$ROOT/r/.fluxpoint-gates.json"
@@ -793,6 +802,7 @@ MAIN_HEAD="$(git -C "$ROOT/r" rev-parse HEAD)"; WT_HEAD="$(git -C "$ROOT/wt" rev
 n="$(rows)"
 rec "cd $ROOT/wt && scripts/harness.sh --full" 0 >/dev/null
 check "the hook witnesses a cd into a linked worktree of this repository" "$((n + 1))" "$(rows)"
+MAIN_HEAD="$(git -C "$ROOT/r" rev-parse HEAD)"
 (cd "$ROOT/wt" && CLAUDE_PROJECT_DIR="$ROOT/r" "$FPL_PY" "$ATTEST" --run harness --nonce run-w >/dev/null 2>&1)
 check "a --run from a worktree lands in the project's log" run-w "$(field nonce)"
 check "  bound to the project's HEAD, as the hook binds it" "$MAIN_HEAD" "$(field headSha)"
@@ -875,21 +885,22 @@ page="$(printf '%s' "$*" | sed -n 's/.*[?&]page=\([0-9]*\).*/\1/p')"; page="${pa
 per="$(printf '%s' "$*" | sed -n 's/.*per_page=\([0-9]*\).*/\1/p')"; per="${per:-30}"
 [ -n "${FAKE_IGNORE_PAGING:-}" ] && { page=1; per=30; }
 case "$*" in
-  *"/status"*) printf '{"total_count":0,"statuses":[]}' ;;
+  "api user"*) printf '{"login":"harness-agent"}' ;;
+  *"/statuses"*) printf '[]' ;;
   *"/check-runs"*)
     start=$(( (page - 1) * per )); end=$(( start + per )); [ "$end" -gt 35 ] && end=35
     printf '{"total_count":35,"check_runs":['
     sep=''
     for i in $(seq "$start" $(( end - 1 ))); do
       c=success; [ "$i" -eq 32 ] && c=failure
-      printf '%s{"name":"matrix (%d)","status":"completed","conclusion":"%s"}' "$sep" "$i" "$c"; sep=','
+      printf '%s{"id":%d,"name":"matrix (%d)","status":"completed","conclusion":"%s","app":{"id":42},"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' "$sep" "$((i + 1))" "$i" "$c"; sep=','
     done
     printf ']}' ;;
   *) exit 1 ;;
 esac
 SH
 chmod +x "$ROOT/bin2/gh"
-printf '{"version":1,"gates":{},"ci":{"forge":"github"}}' >"$ROOT/r/.fluxpoint-gates.json"
+printf '{"version":1,"gates":{},"ci":{"forge":"github","repository":"fixture/repo","witness":{"statusCreators":["ci-bot"],"checkRunApps":[42]}}}' >"$ROOT/r/.fluxpoint-gates.json"
 "$FPL_PY" "$ATTEST" --root "$ROOT/r" --list >/dev/null 2>&1; rc=$?
 check "a manifest whose only witness is the forge is accepted" 0 "$rc"
 # ...and its prove:ci citations are still checked: a fabricated one is not
@@ -897,10 +908,10 @@ check "a manifest whose only witness is the forge is accepted" 0 "$rc"
 out="$(ATT=att_fabricated02 cici att_fabricated02 abc1234 wf-cionly)"
 case "$out" in *TAMPERED-EXECUTION*) ok "  and a prove:ci citation under it is still checked" "caught" ;;
   *) bad "  and a prove:ci citation under it is still checked" "${out:0:90}" ;; esac
-PATH="$ROOT/bin2:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+PATH="$ROOT/bin2:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1; rc=$?
 check "a failing check past the first page is a red ci row" 1 "$rc"
 n="$(rows)"
-FAKE_IGNORE_PAGING=1 PATH="$ROOT/bin2:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha abc1234 >/dev/null 2>&1; rc=$?
+FAKE_IGNORE_PAGING=1 PATH="$ROOT/bin2:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1; rc=$?
 check "  and a listing shorter than its own total is no verdict" 3 "$rc"
 check "  and mints no row" "$n" "$(rows)"
 

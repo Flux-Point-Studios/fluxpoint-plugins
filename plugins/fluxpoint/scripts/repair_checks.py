@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import re
 
+from repair_diff import manifest, sibling_issue, coverage_issue, diff_receipt_issue, checked_commits_issue, checker_evidence_issue
+
 COMMIT = re.compile(r'[0-9a-fA-F]{7,40}')
 FULL_COMMIT = re.compile(r'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})')
 KEY = re.compile(r'[a-z][a-z0-9-]*')
@@ -128,9 +130,9 @@ def receipt_issue(row, descriptor, summary):
             or not isinstance(check.get('evidence'), list) or not check['evidence']
             or not all(text(e) for e in check['evidence'])):
         return 'PASS lacks a coherent full check with empty findings/blockers and executed evidence'
-    if any(row.get(field) != check.get(field) for field in ('verdict', 'findings', 'blockers', 'evidence', 'commits')):
+    if any(row.get(field) != check.get(field) for field in ('verdict', 'findings', 'blockers', 'evidence')) or row.get('commits', []) != check.get('commits', []):
         return 'receipt disagrees with the full checker result'
-    if not commit_list(check.get('commits')):
+    if check.get('commits') and not commit_list(check['commits']):
         return 'PASS does not name unique checked commits'
     if (summary.get('contracts') or {}).get(row.get('node')) != 'FixCheckV1':
         return 'receipt contract is not FixCheckV1'
@@ -179,6 +181,28 @@ def receipt_issue(row, descriptor, summary):
         return 'receipt current patch is not the last slice patch'
     if row.get('origins') is not None and (not isinstance(row['origins'], dict) or any(type(v) is not int or v != 0 for v in row['origins'].values())):
         return 'PASS contradicts recorded defect origins'
+    try:
+        data = Path(current['patch']).read_bytes()
+        measured = manifest(data)
+    except (OSError, ValueError, UnicodeError) as exc:
+        return 'DIFF-UNPROVEN: live patch cannot be read: ' + str(exc)
+    proof = row.get('diffAttack')
+    if proof != check.get('diffAttack') or not isinstance(summary.get('repairDiffReviews'), list) or proof not in summary['repairDiffReviews']:
+        return 'DIFF-ATTACK-UNPROVEN: full checker and harness summary lack the same diff receipt'
+    if not isinstance(proof, dict) or proof.get('readNonce') != summary.get('repairReadNonce') or not isinstance(proof.get('readNonce'), str) or not re.fullmatch('[0-9a-f]{64}', proof['readNonce']):
+        return 'DIFF-ATTACK-UNPROVEN: receipt lacks its fresh launch read identity'
+    if not classes(check.get('targetClasses')) or set(check['targetClasses']) != expected_targets:
+        return 'SIBLINGS-UNPROVEN: checker target classes differ from frozen slice targets'
+    issue = (sibling_issue(check.get('siblings'), sorted(expected_targets), row.get('fixerSiblings') or [])
+             or coverage_issue(check.get('diffCoverage'), measured, row.get('sharedResources') or [], live_series=True)
+             or checker_evidence_issue(check, context, measured, row['node'], integration, summary['repairReadNonce'])
+             or diff_receipt_issue(proof, context, measured)
+             or checked_commits_issue(launch['root'], context['base'], data, check.get('commits') or []))
+    if issue:
+        return issue
+    witness = check['checkerWitness']
+    if any(snapshot.get('snapshot') == witness['snapshot'] or snapshot.get('token') == witness['token'] or snapshot.get('spawnId') == witness['spawnId'] for snapshot in proof['snapshots']):
+        return 'CHECKER-UNPROVEN: checker and diff reviewers must use distinct owned snapshots and seats'
     return None
 
 
@@ -188,7 +212,7 @@ def checked(summary, frozen):
     if not isinstance(summary, dict) or not isinstance(frozen, dict):
         return [], ['invalid repair receipt container']
     for row in summary.get('fixOrigins') or []:
-        if not isinstance(row, dict) or row.get('verdict') != 'PASS' or not row.get('commits'):
+        if not isinstance(row, dict) or row.get('verdict') != 'PASS':
             continue
         node = row.get('node')
         descriptor = frozen.get(node)
@@ -197,7 +221,7 @@ def checked(summary, frozen):
         if issue:
             problems.append(str(node) + ': ' + issue)
         else:
-            result.update(c.lower() for c in row['commits'])
+            result.update(c.lower() for c in row.get('commits') or [])
     return sorted(result), problems
 
 

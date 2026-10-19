@@ -26,7 +26,7 @@ Copy over `WORK.md`'s Campaign section to use it.
   "version": 1,
   "name": "discovery-campaign",
   "campaign": "Sweep for defects until two consecutive rounds find nothing new",
-  "budget": { "maxNodes": 126, "verifyFloorTokens": 50000, "nodeFloorTokens": 80000, "cacheTtl": "1h", "maxEstimatedTokens": 2500000 },
+  "budget": { "maxNodes": 126, "verifyFloorTokens": 50000, "nodeFloorTokens": 80000, "cacheTtl": "1h", "maxEstimatedTokens": 5000000 },
   "defaults": { "effort": "medium" },
   "requiredArgs": ["target"],
   "roles": { "hunter": { "effort": "medium" } },
@@ -123,9 +123,10 @@ Copy over `WORK.md`'s Campaign section to use it.
 `maxNodes` prices the worst case: 3 modalities x (1 finder + 2 expected
 items x 3 refuters) x 6 rounds = 126. Typical runs cost far less, because
 a converging sweep never reaches its later rounds. `maxEstimatedTokens`
-prices the same worst case in tokens, including this repository's locked
-packet; `--check` prints the current estimate and its remaining headroom.
-The estimate is a declared ceiling, not a measured bill. `cacheTtl: "1h"`
+sets a 5M ceiling on the same worst case in tokens, including this repository's
+expanded locked packet; `--check` prints the current estimate and its remaining
+headroom. Reprice against the consuming repository's packet and expected items.
+The estimate is a stated cost assumption, not a measured bill. `cacheTtl: "1h"`
 is declared because every round
 blocks the parent far longer than the default five-minute cache lives.
 

@@ -36,6 +36,10 @@ Workflow tool requires.
      for this installed compiler, even if these command instructions were
      loaded before a plugin upgrade. Load each named producer's current
      output; do not recover from a refusal by guessing a missing field.
+   - Run `bash "$ROOT/scripts/py.sh" attest.py --root <project-root> --check-ci --if-present`.
+     A configured CI witness must pin an identity the harness cannot post as;
+     exit 2 refuses the harness's own status creator, and exit 3 means identity
+     could not be established. Either stops launch. No CI declaration is dormant.
    - If `.fluxpoint-gates.json` declares a gate named `preflight`, run
      `bash "$ROOT/scripts/py.sh" attest.py --root <project-root> --run preflight`
      and require exit 0 before launch or resume. Put the repo's fast graph,
@@ -74,7 +78,25 @@ Workflow tool requires.
    Both checks enforce the Workflow limit of 524,288 UTF-8 bytes and print
    headroom; below 16 KiB is a warning. `--max-script-bytes` overrides the
    limit only when the selected launcher supports the new limit.
+   For a campaign carrying repair notes or other non-underscore args, write
+   those values to a JSON object and assemble the first launch with:
+   ```
+   bash "$ROOT/scripts/py.sh" resume.py --root <project-root> --graph <graph> --args initial-args.json
+   ```
+   This prints a Workflow object on stdout, embeds the complete note text in
+   the script, checks pinned evidence, loads launch state and verifies the
+   exact compiled file. Diagnostics go to stderr. The compiler archives the
+   source under `.claude/fluxpoint/compiled/`; retain it with the run artifacts.
+   Direct `compile-graph.py --args <file>` also embeds args, refuses underscore
+   fields and inline overrides, and counts every byte toward the script limit.
+   Recompiling an embedded script without `--args` refuses to drop its notes;
+   `--args none` explicitly discards them for a fresh launch. See
+   `references/structured-resume.md` for evidence pins and exact argument carry.
 4. Load whatever state the graph refuses to start without.
+   `resume.py` supplies these readings and a fresh 32-byte
+   `_replayLaunchNonce` automatically. Treat `_memo`, `_prefix`,
+   `_resumeFromRunId` and `_replayLaunchNonce` as script-produced provenance;
+   never manufacture a memo from model-written arguments or old verdict text.
    Record the launch reading, fresh at every launch including a resume:
    ```
    args._base = {"sha": "$(git rev-parse HEAD)", "branch": "$(git branch --show-current)",
@@ -102,7 +124,7 @@ Workflow tool requires.
    runtime's choice, and it has been observed cut from the default branch
    rather than the campaign's, where a file an earlier node committed is
    simply absent and nothing inside says so.
-   If any node declares `verify: prove:<gate>` or a repair `repeat.until`,
+   If any node declares `verify: prove:<gate>`, `cites: [<gate>, ...]`, or a repair `repeat.until`,
    stamp the launch; the
    compiled graph refuses to start without it:
    ```
@@ -235,24 +257,54 @@ Workflow tool requires.
    run replays it instead of repeating it. Before diagnosing an empty or
    surprising result, read the run's `journal.jsonl` — it records what
    each node actually returned, including cached ones.
-7. Partial failure is a targeted repair, not a restart: fix the one red
-   node (its IR prompt, its contract, or the code it touched), recompile,
-   stop the run if still live, then re-invoke with
-   `{scriptPath, resumeFromRunId}` — passing `_ledger` and `_base` again,
-   both freshly loaded. A repair that changed code the campaign's verdicts
+7. Partial failure is a targeted repair: fix the red node (its IR prompt,
+   contract or code), record the previous run, and stop it if still live.
+   Assemble the resume, changing only the named notes:
+   ```
+   bash "$ROOT/scripts/py.sh" resume.py --root <project-root> --graph <graph> \
+     --run <runId> --set repairRelay=@repair-relay.txt
+   ```
+   The helper recovers the executed script's embedded args from its verified
+   archive, cross-checks recorded `summary.inputs`, carries all other values
+   exactly and refuses drift. `--set` reads UTF-8 text without changing line
+   endings; `--set-json` supplies structured values such as `rejudge`.
+   It prints the compiler's deterministic per-node rerun plan to stderr before
+   returning the Workflow object on stdout. Read that plan before dispatch.
+   It retains the original `_launch`, refreshes `_base`, `_ledger` and
+   `_releases`, and loads replay receipts from the original journal and
+   transcripts. `_resumeArtifactSha256` pins the exact source attempt, including
+   when later resumes keep the same Workflow run ID. Initial assembly embeds
+   effective defaults too; extra unbound recorded inputs are refused. Pinned
+   evidence is rehashed at assembly and recording.
+   Do not hand-copy large args or override an embedded key inline. A legacy
+   run without embedded args/source archives needs an explicit fresh launch;
+   the helper refuses to guess its context. A repair that changed code the campaign's verdicts
    judged moves the tree, and the resume halts `TREE-MOVED` at launch: the
    cached verdicts describe the old tree, so launch fresh instead. Edits to
    the graph file, `WORK.md` and the plugin's own `.claude/fluxpoint/`,
    `.claude/workflows/` and `.claude/worktrees/` do not count; an edit to
-   tracked config such as `.claude/settings.json` does. The unchanged prefix returns from cache; only the repaired
-   node onward re-runs, and any irreversible node among them replays
-   from the ledger rather than firing twice. Restarting a mostly-green
-   graph from zero is a finding.
+   tracked config such as `.claude/settings.json` does. The compiler plan
+   determines which calls replay under the graph's declared replay rules;
+   irreversible nodes replay from the fresh ledger rather than firing twice.
    Apply step 5's launch-turn rule to every resume too. A node that stopped
    because its slice goes beyond the relayed user's request has an
    authorization-context stop, not a code defect. Resume from the operator's
    run command or go for this graph, with no invented code repair; if a
    narrower message arrived, ask for the run command to be re-issued first.
+   Before recompiling or dispatching a BLOCKING repair, write a structured
+   repair note with JSON arrays `touches: [<repo-relative planned paths>]`
+   and `changesBehaviourOf: [<production paths or module names>]`; use `[]`
+   explicitly when none. Run `specification.py --graph <graph> --touches
+   <paths>` for nonempty touches (it must exit 0; exit 4 names holding checks)
+   and `specification.py --graph <graph> --reach <paths-or-modules>` for
+   nonempty behaviour changes. Append that JSON as "locked checks that must
+   stay green untouched". An edit to a locked input or a demanded behaviour
+   contradicting a reached check needs a recorded operator ruling and packet
+   revision before dispatch. A declared path list is not permission or live
+   change evidence. The builder first probes reached checks on a minimal
+   scratch change and returns `SliceV1.packetConflict` immediately if red,
+   with check ids, failing test node ids and a counterexample plus proposed
+   `packetEdits`. A conflict only blocks; it never permits skipping a gate.
 8. Graph green is not done. The campaign still exits through the
    loop-engineering ship pipeline — `scripts/harness.sh --full`, red-team
    `VERDICT: SHIP`, the Merge policy in WORK.md — and the Stop-hook DoD

@@ -13,6 +13,7 @@ import sys
 import time
 
 import decision
+import packet_inputs
 
 SPEC = '.fluxpoint-spec.json'
 LOCK = '.fluxpoint-spec-lock.json'
@@ -104,7 +105,7 @@ def validate(doc):
                        'decisions', 'requirements', 'checks', 'challenges'), 'spec', ('harnessInputs',)):
         return errors
     if 'harnessInputs' in doc and not strings(doc['harnessInputs'], nonempty=False):
-        errors.append('harnessInputs: expected a list of repository file paths')
+        errors.append('harnessInputs: expected a list of repository file or directory paths')
     if type(doc.get('version')) is not int or doc['version'] != 1:
         errors.append('spec: version must be 1')
     text_fields(doc, ('goal', 'asset'), 'spec')
@@ -374,33 +375,64 @@ def project(root, edits, spec=None, graph=None):
     return packet, identity, snapshots, source_identity
 
 
-def harness_inputs(root, doc, allow_missing=False):
-    """Files named by literal argv/witness arguments, plus explicit dependencies."""
+def harness_inputs(root, doc, allow_missing=False, closure=True):
+    """Repository-computed test-support closure; never executes imported code."""
+    return packet_inputs.Inputs(root, doc, closure, allow_missing).hashes()
+
+
+def freeze_harness(root, doc, lock_file, references=None):
+    """A re-lock may update hashes and add paths, never remove a frozen path."""
+    previous = {}
+    if lock_file.exists():
+        old = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
+        if not isinstance(old, dict):
+            raise ValueError('spec lock must be an object')
+        validate_lock_maps(old)
+        previous = set(old.get('harness', {}))
+        if references is not None:
+            previous.update(set(old.get('references', {})) - set(references))
+    inputs = packet_inputs.Inputs(root, doc)
+    inputs.include_locked(previous)
+    return inputs.hashes()
+
+
+def input_report(root, doc, identity, spec=None, closure=False):
+    """Read-only locked set, including old locks and newly computed dependencies."""
     root = Path(root).resolve()
-    paths = set()
-    for check in doc['checks']:
-        for key in ('argv', 'witness'):
-            for arg in check.get(key, []):
-                # pytest node selectors and --config=path still name a file.
-                candidate = arg.split('::', 1)[0]
-                if candidate.startswith('-') and '=' in candidate:
-                    candidate = candidate.split('=', 1)[1]
-                try:
-                    if Path(candidate).is_absolute():
-                        candidate = Path(candidate).relative_to(root).as_posix()
-                    path = repo_file(root, candidate, 'check input')
-                except (OSError, ValueError):
-                    continue  # Executables, switches and code are not repository files.
-                paths.add(path.relative_to(root).as_posix())
-    for rel in doc.get('harnessInputs', []):
-        candidate = root / in_repo(rel, 'harnessInputs')
-        if not candidate.resolve().is_relative_to(root):
-            raise ValueError(f'harnessInputs {rel!r} must stay inside the repository')
-        if allow_missing and not candidate.exists():
-            paths.add(candidate.relative_to(root).as_posix())
-        else:
-            paths.add(repo_file(root, rel, 'harnessInputs').relative_to(root).as_posix())
-    return {rel: digest(root / rel) for rel in sorted(paths)}
+    packet, lock_file = packet_paths(root, spec)
+    lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
+    validate_lock_maps(lock)
+    inputs = packet_inputs.Inputs(root, doc, closure, allow_missing=True)
+    checks = [check['id'] for check in doc['checks']]
+    inputs.include_locked(lock.get('harness', {}))
+    for path, kind in ((packet, 'packet'), (lock_file, 'lock'),
+                       (root / BASELINE, 'baseline'), (root / '.fluxpoint-gates.json', 'gates')):
+        for cid in checks:
+            inputs.add(path, kind, cid)
+    for rel in identity.get('references', {}):
+        for cid in checks:
+            inputs.add(inputs.path(rel), 'references', cid)
+    rows = inputs.rows()
+    for row in rows:
+        row['frozen'] = (row['path'] in lock.get('harness', {})
+                         or any(r['kind'] in ('packet', 'lock', 'baseline', 'gates', 'references')
+                                for r in row['reasons']))
+    return inputs, {'version': 1, 'packet': packet.relative_to(root).as_posix(),
+                    'closure': closure, 'inputs': rows,
+                    'warnings': sorted(inputs.warnings)}
+
+
+def planned_touches(inputs, report, paths):
+    conflicts = []
+    for query in paths:
+        rel = inputs.rel(inputs.path(query))
+        held = [row for row in report['inputs']
+                if rel == '.' or row['path'] == rel or row['path'].startswith(rel.rstrip('/') + '/')]
+        if held:
+            conflicts.append({'path': rel, 'inputs': held,
+                              'checks': sorted({cid for row in held for cid in row['checks']})})
+    return {'touches': paths, 'conflicts': conflicts,
+            'scope': 'Declared paths only, not edit permission or evidence; live Stop and run recording still check drift.'}
 
 
 def harness_record(root, spec=None):
@@ -411,7 +443,9 @@ def harness_record(root, spec=None):
     if not isinstance(expected, dict):
         raise ValueError('lock harness must be a map of paths to SHA-256 digests')
     doc = json.loads(packet_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
-    current = harness_inputs(root, doc, allow_missing=True)
+    inputs = packet_inputs.Inputs(root, doc, allow_missing=True)
+    inputs.include_locked(expected)
+    current = inputs.hashes()
     for rel in expected:
         in_repo(rel, 'locked harness input')
         path = Path(root) / rel
@@ -459,7 +493,7 @@ def relock_harness(root, doc, spec, gate):
         raise ValueError(f"--lock-harness requires an attested exit 0 for gate {gate!r} at HEAD")
     _, lock_file = packet_paths(root, spec)
     lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
-    current = harness_inputs(root, doc)
+    current = freeze_harness(root, doc, lock_file)
     previous = lock.get('harness', {})
     changes = sorted(rel for rel in set(current) | set(previous)
                      if current.get(rel) != previous.get(rel))
@@ -589,7 +623,7 @@ def load(root, locked=True, spec=None, snapshots=None):
         if references:
             identity['references'] = references
         # Validate explicit dependencies even before a harness is frozen.
-        harness_inputs(root, doc, allow_missing=locked)
+        harness_inputs(root, doc, allow_missing=locked, closure=False)
         ids = {oid for check in doc['checks'] for oid in check.get('obligations', [])}
         if ids:
             module = importlib.util.spec_from_file_location('spec_guard', Path(__file__).with_name('spec-guard.py'))
@@ -703,11 +737,15 @@ def main():
     parser.add_argument('--spec', help='packet path relative to --root (default ' + SPEC + ')')
     parser.add_argument('--graph', help="a graph file whose SPEC: header names the packet")
     parser.add_argument('--gate', help='declared gate whose attested pass permits --lock-harness')
+    parser.add_argument('--closure', action='store_true', help='include computed test-support closure in --inputs')
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--lock', action='store_true')
     action.add_argument('--lock-harness', action='store_true')
     action.add_argument('--check', action='store_true')
     action.add_argument('--run', action='store_true')
+    action.add_argument('--inputs', action='store_true', help='report locked input paths and reasons as JSON')
+    action.add_argument('--touches', nargs='+', metavar='PATH', help='refuse planned edits to locked inputs (exit 4)')
+    action.add_argument('--reach', nargs='+', metavar='PATH_OR_MODULE', help='report locked checks importing these modules')
     args = parser.parse_args()
     root = Path(args.root).resolve()
     try:
@@ -739,12 +777,24 @@ def main():
         name = packet_file.relative_to(root).as_posix()
         if args.gate and not args.lock_harness:
             raise ValueError('--gate is only for --lock-harness')
+        if args.closure and not args.inputs:
+            raise ValueError('--closure is only for --inputs; --touches and --reach always include closure')
+        if args.inputs or args.touches or args.reach:
+            inputs, report = input_report(root, doc, identity, spec,
+                                          closure=args.closure or bool(args.touches or args.reach))
+            if args.touches:
+                report = planned_touches(inputs, report, args.touches)
+            elif args.reach:
+                report = inputs.reach(args.reach)
+            print(json.dumps(report, indent=2))
+            return 4 if args.touches and report['conflicts'] else 0
         if args.lock_harness:
             relock_harness(root, doc, spec, args.gate)
             return 0
         if args.lock:
+            frozen = freeze_harness(root, doc, lock_path, identity.get('references', {}))
             with lock_path.open('w', encoding='utf-8', newline='\n') as lock_file:
-                lock_file.write(json.dumps(dict(identity, harness=harness_inputs(root, doc)), indent=2) + '\n')
+                lock_file.write(json.dumps(dict(identity, harness=frozen), indent=2) + '\n')
             print(f"specification: locked {name} {identity['sha256']}; checks have not run")
             return 0
         print(f"specification: validated {name} {identity['sha256']}", flush=True)

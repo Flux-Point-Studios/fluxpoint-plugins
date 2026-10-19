@@ -102,6 +102,13 @@ supplies the target or attack focus.
    unresolved claims as blockers even when findings is empty. Recheck the
    reviewed identity before SHIP. After a fix, reproduce the original attack
    against it, rerun affected coverage and composition, and bind a new verdict.
+   A repair PASS also proves the invariant's sibling fields, accepted encodings,
+   callers, networks, roles and paths, and attacks the repair's own changed
+   behavior. Use the `WORK.repair.md` loop: its compiler reads the actual patch,
+   requires every added-hunk coverage row, and spawns separate diff attackers
+   and refuters on fresh base archives. No original-attack-only PASS discharges
+   a checked commit. This additional small-diff gate preserves the full-range
+   review before an irreversible step.
 6. Save the result with the campaign's run evidence. In a graph, keep it as a
    RedTeamV1 node result and run `scripts/record-run.py` as usual. The durable
    run artifact records each gate's coverage next to `redTeam`, and its

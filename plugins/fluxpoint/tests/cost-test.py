@@ -277,11 +277,12 @@ if shutil.which("node"):
 blind = single("do {{A.goal}} with {{A.cfg}}", requiredArgs=["goal"], argDefaults={"cfg": "c"})
 blind["nodes"].append({"id": "g", "prompt": "then {{prev}}", "contract": "DesignV1",
                        "after": "f"})
-report("a launch arg with no default and a run-time {{prev}} are named as unpriced",
+report("dynamic args, default-priced args and runtime prev expose pricing limits",
        dict(cg.unpriced_expansions(blind)) == {"{{A.goal}} (launch arg)": ["f"],
+                                               "{{A.cfg}} (priced at default)": ["f"],
                                                "{{prev}}": ["g"]},
        str(cg.unpriced_expansions(blind)))
-report("  and the compiled header names them",
+report("  and the legacy compiled header preserves its original input fingerprint",
        "// unpriced: {{A.goal}} (launch arg) in f; {{prev}} in g" in cg.emit(blind, CONTRACTS, {}),
        "header")
 with tempfile.TemporaryDirectory() as d:
@@ -291,7 +292,7 @@ with tempfile.TemporaryDirectory() as d:
     r = subprocess.run([sys.executable, os.path.join(PLUGIN, "scripts", "compile-graph.py"),
                         work, "--check", "--gates-root", d], capture_output=True, text=True)
     report("  and so does --check",
-           "unpriced: {{A.goal}} (launch arg) in f; {{prev}} in g" in r.stdout,
+           "unpriced: {{A.goal}} (launch arg) in f; {{A.cfg}} (priced at default) in f; {{prev}} in g" in r.stdout,
            r.stdout.strip()[-80:] or r.stderr.strip()[-80:])
 two = chain("medium", "medium", ttl="1h")
 two["nodes"][1]["prompt"] += " " + "z" * 2000
@@ -435,6 +436,7 @@ import glob
 import re
 REPO = os.path.dirname(os.path.dirname(PLUGIN))
 GATES = cg.load_gates(REPO)
+spec_mod = cg._sibling('specification')
 for t in sorted(glob.glob(os.path.join(PLUGIN, "templates", "WORK*.md"))):
     src = open(t, encoding="utf-8").read()
     m = cg.IR_FENCE.search(src)
@@ -445,7 +447,26 @@ for t in sorted(glob.glob(os.path.join(PLUGIN, "templates", "WORK*.md"))):
     name = os.path.basename(t)
     report(f"{name} declares cacheTtl 1h", b.get("cacheTtl") == "1h", str(b.get("cacheTtl")))
     cap = b.get("maxEstimatedTokens")
-    total = est(tir)["total"]
+    # The CLI binds the repository's locked packet before its final estimate.
+    # Keep synthetic unit cases packet-free, but price shipped campaigns with
+    # that same packet/identity/path wrapper rather than testing a lower bill.
+    bound = None
+    spec_path = spec_mod.headers(src).get('SPEC')
+    if (spec_path or spec_mod.required(REPO)
+            or any(n.get('mutates') or n.get('irreversible') for n in tir['nodes'])):
+        packet_file, _ = spec_mod.packet_paths(REPO, spec_path)
+        packet, identity = spec_mod.load(REPO, spec=spec_path)
+        bound = {'packet': packet, 'identity': identity,
+                 'path': os.path.relpath(packet_file, REPO).replace(os.sep, '/')}
+    total = cg.estimate_tokens(tir, CONTRACTS, specification=bound)["total"]
+    cli = subprocess.run([sys.executable, os.path.join(PLUGIN, 'scripts', 'compile-graph.py'),
+                          t, '--check', '--gates-root', REPO], capture_output=True,
+                         text=True, encoding='utf-8', env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+    measured = re.search(r'~([\d,]+) estimated tokens', cli.stdout)
+    report(f'{name} template estimate matches its bound-packet CLI check',
+           cli.returncode == 0 and measured is not None
+           and int(measured.group(1).replace(',', '')) == total,
+           f'{total} tokens' if cli.returncode == 0 else cli.stderr.strip())
     report(f"{name} declares a cost ceiling the estimate fits with headroom",
            isinstance(cap, int) and total <= cap <= total * 2, f"{total} <= {cap}")
     report(f"{name} carries no redundant inline effort",

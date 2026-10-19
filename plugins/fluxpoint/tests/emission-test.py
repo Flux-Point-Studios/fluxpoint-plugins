@@ -134,6 +134,22 @@ probe("node", "agentType", NODE_BASE, setnode(agentType="red-team-reviewer"))
 probe("node", "foreach", NODE_BASE, setnode(foreach="la"))
 probe("node", "after", NODE_BASE,
       setnode(after="seed", prompt="use the prior result: {{prev}}"))
+probe("node", "lane", NODE_BASE, setnode(lane="independent"))
+probe("node", "fresh", NODE_BASE, setnode(fresh=True))
+probe("node", "repository", NODE_BASE, setnode(repository="repo", branch="main"))
+probe("node", "branch", NODE_BASE, setnode(repository="repo", branch="main"))
+
+
+def replay_builder(ir, replay=False):
+    ir['nodes'][N].update(mutates=True, pushes='repo#main')
+    if replay:
+        ir['nodes'][N]['replay'] = 'inputs'
+    ir['nodes'].append({'id':'check-builder','prompt':'Check {{prev}}','after':'probe',
+                        'contract':'HarnessCheckV1','independent':True,'verifies':'probe'})
+
+
+probe("node", "pushes", NODE_BASE, replay_builder)
+probe("node", "replay", NODE_BASE, lambda ir: replay_builder(ir, replay=True))
 probe("node", "mutates", NODE_BASE, lambda ir: (
     ir["nodes"][N].update(mutates=True),
     ir["nodes"].append({"id": "gate", "phase": "G", "prompt": "verify it",
@@ -142,6 +158,7 @@ probe("node", "mutates", NODE_BASE, lambda ir: (
 ))
 probe("node", "independent", NODE_BASE, setnode(independent=True, verifies="seed"))
 probe("node", "verifies", NODE_BASE, setnode(independent=True, verifies="seed"))
+probe("node", "cites", NODE_BASE, setnode(independent=True, cites=["suite"]))
 probe("node", "verify", NODE_BASE, setnode(verify="panel:3", verifyOver="findings"))
 probe("node", "verifyOver", NODE_BASE, setnode(verify="skeptic:1", verifyOver="findings"))
 probe("node", "expectItems", NODE_BASE,
@@ -385,7 +402,7 @@ probed = {
         "foreach", "after", "mutates", "independent", "verifies", "verify",
         "verifyOver", "expectItems", "haltWhen", "haltReason", "onRed",
         "isolation", "repeat", "irreversible", "actor", "release", "wake",
-        "decides", "honors", "memory", "reduce",
+        "decides", "honors", "memory", "reduce", "cites", "lane", "fresh", "repository", "branch", "pushes", "replay",
     },
     "repeat": {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter"},
     "reduce": {"from", "over", "dedupeBy", "sortBy", "order", "topK"},

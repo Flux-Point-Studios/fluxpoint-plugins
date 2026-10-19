@@ -431,6 +431,16 @@ def main():
     except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
         print(f"record-run: ledger append failed: {e}", file=sys.stderr)
 
+    # Pin bytes are harness inputs, not a claim an agent can vouch for. Do
+    # this after the once-only ledger append, but before any run/Evidence row.
+    try:
+        import evidence_pins as _pins
+        _pins.validate_pinned_inputs(args.root, summary.get("inputs") or {},
+                                     summary.get("evidenceUnpinned") or [])
+    except (OSError, ValueError, TypeError) as e:
+        print(f"record-run: evidence pin verification failed: {e}", file=sys.stderr)
+        return 1
+
     import specification as _spec
     harness_identity = None
     try:
@@ -569,16 +579,19 @@ def main():
         # is the declared verification not happening, not a warning to print
         # beside a COMPLETE: a fabricated attestId would otherwise be filed
         # clean.
-        if afindings and outcome in ("COMPLETE", "UNKNOWN") and (summary.get("prove") or {}):
+        if afindings and outcome in ("COMPLETE", "UNKNOWN") and (summary.get("prove") or summary.get("cites") or {}):
             outcome = "INCOMPLETE"
             print("record-run: the gate manifest is refused, so no prove: citation in "
                   "this run can be checked — filing it INCOMPLETE", file=sys.stderr)
         if checks:
             tally = {"checked": len(checks)}
-            for st in ("ATTESTED", "UNATTESTED", "MISMATCH", "STALE"):
+            for st in ("ATTESTED", "UNATTESTED", "MISMATCH", "STALE", "SUPERSEDED-RED"):
                 n = sum(1 for c in checks if c["status"] == st)
                 if n:
                     tally[st.lower()] = n
+            fault_ids = {ident for check in checks for ident in check.get('faultEventIds', [])}
+            if fault_ids:
+                tally['fault_events'] = len(fault_ids)
             # Recorded separately because the two absences mean different
             # things: a claimed red with no row is expected (failures are not
             # attested), a claimed green with no row is not.
@@ -588,10 +601,10 @@ def main():
                 tally["unattested_claiming_pass"] = sg
             attestation = {"tally": tally, "checks": checks}
             for c in checks:
-                stream = sys.stderr if c["status"] == "MISMATCH" else sys.stdout
+                stream = sys.stderr if c["status"] in ("MISMATCH", "SUPERSEDED-RED") else sys.stdout
                 print(f"record-run: attest [{c['status']}] {c['node']} — {c['detail']}",
                       file=stream)
-                if c["status"] == "MISMATCH":
+                if c["status"] in ("MISMATCH", "SUPERSEDED-RED"):
                     import inbox as _ibx
                     _ibx.add(args.root, "attest-mismatch", c["node"], campaign,
                              c["detail"])
@@ -603,8 +616,12 @@ def main():
             # rather than enforced — a check that starts by failing runs gets
             # switched off, and that lesson still holds for everyone who did
             # not opt in.
+            if any(c.get('declared') and type(c.get('claimedExit')) is int and
+                   c['claimedExit'] != 0 for c in checks) and outcome in ('COMPLETE', 'UNKNOWN'):
+                outcome = 'INCOMPLETE'
+                print('record-run: a declared gate step is red — filing INCOMPLETE', file=sys.stderr)
             tampered = [c for c in checks
-                        if c["status"] == "MISMATCH" and c.get("declared")]
+                        if c["status"] in ("MISMATCH", "SUPERSEDED-RED") and c.get("declared")]
             unproven = [c for c in checks
                         if c["status"] == "UNATTESTED" and c.get("declared")]
             # A citation that matches its row but not this run — minted
@@ -657,16 +674,30 @@ def main():
                           file=sys.stderr)
     except Exception as e:  # noqa: BLE001 - a witness must never eat the record
         print(f"record-run: attestation cross-check failed: {e}", file=sys.stderr)
+        if summary.get('prove') or summary.get('cites'):
+            outcome = 'INCOMPLETE'
 
     # 1. Durable provenance artifact.
+    import replay_memo as _replay
+    replay_checked, rejudges, replay_problems = [], [], []
+    try:
+        validated = None
+        if summary.get('memoRecords') or summary.get('callRecords') or summary.get('rejudges'):
+            validated = _replay.validate_current(args.root, summary, args.run_id, graph=args.graph)
+        replay_checked = _replay.verify_replays(args.root, summary, graph=args.graph,
+                                               run_id=args.run_id, validated=validated)
+        rejudges = _replay.verify_rejudges(args.root, summary, graph=args.graph,
+                                          run_id=args.run_id, validated=validated)
+    except (ValueError, OSError, TypeError) as exc:
+        replay_problems.append(str(exc))
+        outcome = "REFUSED-REPLAY"
+        print("record-run: REPLAY-PROVENANCE — " + str(exc), file=sys.stderr)
     repair_checkers, checked, repair_problems = repair_receipts(summary, args.graph)
     for issue in repair_problems:
         print("record-run: checked commit refused — " + issue, file=sys.stderr)
     os.makedirs(args.state_dir, exist_ok=True)
     art = os.path.join(args.state_dir, f"{args.run_id}.json")
-    with open(art, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(
-            {
+    artifact_data = {
                 "runId": args.run_id,
                 "when": ts,
                 # To the second: `when` keeps the Evidence row's minute for
@@ -679,6 +710,9 @@ def main():
                 "checked": checked,
                 "repairCheckers": repair_checkers,
                 "repairCheckProblems": repair_problems,
+                "replayChecked": replay_checked,
+                "rejudges": rejudges,
+                "replayProblems": replay_problems,
                 "outcome": outcome,
                 "nodesOk": ok,
                 "nodesDead": dead,
@@ -691,10 +725,17 @@ def main():
                 "proofAudit": proof_audit,
                 "attestation": attestation,
                 "summary": summary,
-            },
-            fh,
-            indent=2,
-        )
+            }
+    try:
+        import run_artifacts as _attempts
+        art, _artifact_sha256 = _attempts.write(args.root, args.run_id, artifact_data)
+    except (OSError, ValueError) as exc:
+        print(f'record-run: immutable artifact publication failed: {exc}', file=sys.stderr)
+        return 1
+
+    if replay_problems:
+        print(f"record-run: {art}; artifact retained, Evidence row refused", file=sys.stderr)
+        return 2
 
     # 1d. Lessons, filed from the run's own summary. Written after the run
     # artifact exists on purpose: memory.py refuses provenance that points at
@@ -784,6 +825,11 @@ def main():
             parts.append(f"recall: {recall_stats['provider']}")
         claim += "; memory: " + ", ".join(parts)
     imported = summary.get("decisionsImported") or {}
+    if replay_checked:
+        claim += "; REPLAYED-MEMO " + ", ".join(r["node"] for r in replay_checked)
+    for rejudge in rejudges:
+        detail = json.dumps({k: rejudge.get(k, "") for k in ("gate", "nonce", "reason", "note")}, ensure_ascii=False)
+        claim += "; REJUDGED " + detail.replace("|", "&#124;")
     if imported:
         claim += ("; honors " + ", ".join(
             f"{d}@{imported[d]}" for d in sorted(imported)[:2]))
@@ -797,6 +843,10 @@ def main():
         if t.get("mismatch"):
             claim += (f"; {t['mismatch']} gate claim(s) CONTRADICT the attested "
                       f"execution log — the exit codes are not trustworthy")
+        if t.get('superseded-red'):
+            claim += f"; {t['superseded-red']} green gate claim(s) leave earlier red attempts unsettled"
+        if t.get('fault_events'):
+            claim += f"; {t['fault_events']} verified host crash event(s) retained"
         if t.get("stale"):
             claim += (f"; {t['stale']} gate claim(s) STALE — they cite executions "
                       f"from before this run, another commit, or another node")

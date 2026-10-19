@@ -136,6 +136,25 @@
         }
       }
     },
+    "packetConflict": {
+      "type": "object",
+      "description": "An early locked-check contradiction. This only blocks for an operator ruling; it never authorizes changing a packet, skipping checks or narrowing requirements.",
+      "required": ["checks", "nodes", "counterexample"],
+      "additionalProperties": false,
+      "properties": {
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "counterexample": {"type": "string", "minLength": 1}
+      }
+    },
     "sharedResources": {
       "type": "array",
       "description": "Every shared pool, executor, cache, lock or single-writer store to which this patch adds a writer or reader. Explicit [] means none. Name all affected users, including existing writers reached by a new reader.",
@@ -166,6 +185,120 @@
             }
           }
         }
+      }
+    },
+    "siblings": {
+      "type": "array",
+      "description": "Sibling claims on the fixer; independent executed observations on the checker. finding is a pinned targetClasses identity. NOT-APPLICABLE cites inspected snapshot file:line.",
+      "items": {
+        "type": "object",
+        "required": [
+          "finding",
+          "invariant",
+          "axis",
+          "surface",
+          "attack",
+          "control",
+          "outcome",
+          "reason"
+        ],
+        "properties": {
+          "finding": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "invariant": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "surface": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "axis": {
+            "enum": [
+              "field",
+              "encoding",
+              "caller",
+              "network",
+              "role",
+              "path"
+            ]
+          },
+          "attack": {
+            "type": "object",
+            "required": [
+              "command",
+              "result"
+            ],
+            "properties": {
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "result": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          },
+          "control": {
+            "type": "object",
+            "required": [
+              "command",
+              "result"
+            ],
+            "properties": {
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "result": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          },
+          "outcome": {
+            "enum": [
+              "DEFENDED",
+              "NOT-APPLICABLE"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "outcome"
+              ],
+              "properties": {
+                "outcome": {
+                  "const": "NOT-APPLICABLE"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "pattern": "[^\\s:]+:[0-9]+"
+                }
+              }
+            }
+          }
+        ]
       }
     }
   }

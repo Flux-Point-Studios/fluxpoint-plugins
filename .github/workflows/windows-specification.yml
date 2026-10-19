@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
@@ -52,6 +54,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python plugins/fluxpoint/tests/box-health-windows-test.py
           exit $LASTEXITCODE
+      - name: Exercise graph replay, resume, packet closure and gate evidence
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $failed = $false
+          foreach ($suite in @(
+            'graph-replay-test.py', 'replay-memo-test.py', 'resume-test.py',
+            'packet-inputs-test.py', 'fault-attempts-test.py',
+            'forge-evidence-test.py', 'forge-fault-race-test.py', 'repair-proof-test.py'
+          )) {
+            python "plugins/fluxpoint/tests/$suite"
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+          }
+          if ($failed) { exit 1 }
+          exit 0
       - name: Sample actual Windows machine health (read-only)
         if: ${{ !cancelled() }}
         env:

@@ -62,6 +62,10 @@ bash "$ROOT/scripts/py.sh" attest.py --cancel <token>
 ```
 
 `attest.py --await` and `--cancel` also accept a gate name for its newest run.
+
+Classified interpreter crashes can use the recorded, one-shot
+[`--rerun-fault` native/reference pair](fault-reruns.md). Its pair token uses
+the same await/cancel path; an ordinary later green does not erase a red.
 Attestations retain their existing record directory and citable IDs. A log match
 never mints an attestation; only collecting the real command exit does that.
 
@@ -83,6 +87,11 @@ still provides `taskkill /T /F /PID` for separately managed commands; supervised
 longrun/attest trees use jobs rather than trusting a dead command PID.
 
 Records bind runner and POSIX member PIDs to process-creation identities.
+Cancellation asks a living, creation-identity-matched runner to drain its own
+tree first, including when an older record already says DONE. The CLI never
+competes with that owner by terminating a stale member snapshot. A slow owner
+leaves cancellation pending (exit 4); repeat the bounded await/cancel call until
+the owner confirms the drain. Completion clears the pending flag.
 Cancellation refuses a reused or unidentifiable PID. If a POSIX owner is forcibly
 killed after all recorded members exit and an unobserved grandchild survives,
 its ownership cannot be proved from the last snapshot: cancellation explicitly

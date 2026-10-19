@@ -9,6 +9,7 @@ import copy
 import json
 import os
 import sys
+from repair_proof_fixture import wire as proof_fixture
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(HERE)
@@ -1183,7 +1184,7 @@ def prove_ci_and_launch_case():
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, ".fluxpoint-gates.json"), "w") as fh:
             json.dump({"version": 1, "gates": {"harness": "scripts/harness.sh"},
-                       "ci": {"forge": "github", "contexts": ["harness"]}}, fh)
+                       "ci": {"forge": "github", "repository": "fixture/repo", "contexts": ["harness"], "witness": {"statusCreators": ["ci-bot"], "checkRunApps": []}}}, fh)
         loaded = cg.load_gates(d)
         # The witness's own rules, at compile time: a manifest attest.py
         # refuses mints no rows, so a prove: node over it cannot be proved.
@@ -1191,7 +1192,7 @@ def prove_ci_and_launch_case():
             json.dump({"version": 1, "gates": {"harness": "scripts/harness.sh", "ci": "make ci"}}, fh)
         refused = cg.validate(ir, CONTRACTS, gates=cg.load_gates(d))
         with open(os.path.join(d, ".fluxpoint-gates.json"), "w") as fh:
-            json.dump({"version": 1, "gates": {}, "ci": {"forge": "github"}}, fh)
+            json.dump({"version": 1, "gates": {}, "ci": {"forge": "github", "repository": "fixture/repo", "witness": {"statusCreators": ["ci-bot"], "checkRunApps": []}}}, fh)
         ci_only = cg.load_gates(d)
     js = cg.emit(ir, CONTRACTS, {})
 
@@ -1348,7 +1349,7 @@ def repair_loop_case():
             out = os.path.join(tmp, "result.json"); script = os.path.join(tmp, "run.mjs")
             prefix = '''import {writeFileSync} from 'node:fs';
 const calls=[]; const mode=MODE;
-const args={_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'launch1'}};
+const args={_base:{sha:'base',porcelain:''},_replayLaunchNonce:'1111111111111111111111111111111111111111111111111111111111111111',_launch:{root:'/campaign',nonce:'launch1'}};
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
@@ -1385,7 +1386,7 @@ def repair_reframe_case():
     import tempfile
     global passed, failed
     ir = {"version": 1, "campaign": "reframe", "treeGuard": False,
-          "budget": {"maxNodes": 30, "cacheTtl": "1h"},
+          "budget": {"maxNodes": 1000, "cacheTtl": "1h"},
           "lists": {"slices": [{"key": "parser", "targetClasses": ["decode"]}]},
           "nodes": [
               {"id": "fix", "foreach": "slices", "mutates": True, "prompt": "fix {{item.key}}: {{lastCheck}} in {{roundDir}}", "contract": "SliceV1"},
@@ -1409,7 +1410,7 @@ def repair_reframe_case():
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "out.json"); script = os.path.join(tmp, "run.mjs")
             prefix = r'''import {writeFileSync} from 'node:fs';
-const args={_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'nonce'}},calls=[],mode=MODE;
+const args={_replayLaunchNonce:'freshlaunch',_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'nonce'}},calls=[],mode=MODE;
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const reframe={classes:['decode'],invariant:'ledger admits only bounded rows',classRewire:'enforce item decoding budget at ingress',disposition:'adopt',measurement:{command:'pytest test_decode_budget',result:'all outsider rows bounded'}};
@@ -1428,7 +1429,7 @@ const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
  if(label.startsWith('review:'))return {verdict:round>=3?'PASS':'FAIL',findings:round>=3?[]:[{defectClass:'decode',finding:'composition failure',severity:'HIGH',invariant:'bounded rows',classRewire:'enforce whole budget',measurement:'pytest compose',...origin(p,'decode')}],blockers:[],evidence:['pytest compose'],...(mode==='integration-measured'&&round>=3?{reframe:{...reframe,validated:true}}: {})};
  return null;};
 '''.replace("MODE", json.dumps(mode))
-            open(script, "w").write(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
+            open(script, "w").write(proof_fixture(prefix) + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
             proc = subprocess.run(["node", script], capture_output=True, text=True, timeout=20)
             return json.load(open(out)) if os.path.exists(out) else {"error": proc.stderr}
     narrow = run("narrow"); measured = run("measured"); unchecked = run("unchecked"); different = run("different"); duplicates = run("duplicates")

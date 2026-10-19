@@ -65,9 +65,67 @@ array (a verified sweep, a fan-out, another reduce) is rejected — consume
 `{{prev}}` whole or reduce it first.
 
 Durable coordination rides on the executor: every run has a `runId`,
-`journal.jsonl` records each node's actual return, resume replays the
-longest unchanged prefix, and `record-run.py` writes the provenance
-artifact and the Evidence row.
+`journal.jsonl` records each node's actual return, and `record-run.py`
+writes the provenance artifact and the Evidence row. The runtime replays
+an unchanged call prefix; opt-in node replay below adds independent,
+ancestor-bound reuse after that prefix ends.
+
+## Independent lanes, replay and rejudging
+
+Declare `lane: "engine"` or `lane: "publisher"` on independent chains to
+start their bodies concurrently. Nodes inside one lane retain declaration
+order. A lane-free node joins the active lanes; irreversible nodes must be
+lane-free, and their independent `prove:` guard must be an actual `after`
+ancestor. An earlier guard in a sibling lane cannot authorize an effect.
+Use `after: ["gate-engine", "gate-publisher"]` for a consumer that needs both
+results, and consume each explicitly with `{{prev.gate-engine}}` or a
+contract field such as `{{prev.gate-publisher.exit}}`. Every listed edge is
+validated. Keep a repair loop's fixer, checker and integration nodes in the
+same lane. A halted lane stops new spawns in every lane; already running
+calls finish and are recorded before the single final outcome is returned.
+
+Every mutating lane node declares `pushes: "repository#branch"`. Lanes may
+not push the same declared repository/branch. Use one consistent repository
+identity for a shared remote; aliases are not separate write destinations.
+Lanes require the tree guard. It reads before each gate, at forks and joins,
+and at campaign end. Guards after the first fork include the launcher's
+fresh `_replayLaunchNonce`, so the Workflow call-index cache cannot replay
+an old reading. In-flight calls reserve their token floors atomically.
+
+Replay is opt-in: `replay: "inputs"` on a scalar builder, and `replay:
+"tree"` on a scalar independent gate. The gate declares `repository` and
+`branch`; it receives a fresh fixed-command sentinel's exact tip, must check
+out that commit and return it as `sha`. A missing or different `sha` halts.
+A builder replays only when its branch's live reading equals the reading
+at its recorded verifying gate. No worker-reported head admits a replay.
+Every `after` ancestor must itself have replayed in this launch. A live
+ancestor forces its descendants live, including joined consumers. Loops,
+fan-outs, councils, red-team and irreversible effects use their existing
+execution paths rather than node memo replay. `fresh: true` forces a live
+call for exchange, chain, CI and clock readings.
+
+The launcher alone loads `_memo` and fingerprinted `_prefix` entries from
+completed journal calls, transcripts and the recorded compiler receipts.
+Never hand-write either map. SHA-256 keys bind the complete resolved prompt,
+options, immutable launch stamp, gate reading and ordered ancestor keys;
+record-run independently corroborates replay provenance before appending
+Evidence. `REPLAYED-MEMO runId/agentId` names the original execution.
+
+For an explicit gate-only rerun, supply public args
+`rejudge: {"gate-engine": {"nonce": "review-2", "reason": "why the prior judgment needs review", "note": "optional gate-specific context"}}`.
+Only that gate and its preceding sentinel receive the nonce and note.
+Reasons remain record metadata, and the old verdict remains recorded.
+Whole-argument prompt tokens exclude rejudge metadata and internal launcher
+state. Unknown or unreached gates refuse the launch plan.
+
+Before resuming, run `compile-graph.py --plan WORK.md --resume RUN --args
+args.json --gates-root .`. It renders the exact generated program locally
+with verified prior results, using Node.js and no agents or network reads.
+Each node is `prefix`, `memo if the live read matches`, or `live`, with its
+cause and recorded cost (unknown values are explicit). A conditional memo
+prediction is checked against a real fresh reading during the launch.
+Graphs without these declarations or rejudge args keep their existing
+serial script and runtime keys.
 
 ## The IR is the source of truth
 
@@ -407,14 +465,24 @@ command, resolved from the gate name) started in the background, and
 `attest.py --await <token>` collects it in bounded foreground slices; the
 runner mints the row itself when the command ends, including a red exit
 the hook never sees. CI's own statuses on a commit are `prove:ci`: a
-top-level `ci` section in the manifest names the forge and the contexts
-that decide, `attest.py --ci --pr <n> [--wait]` (or `--ref <branch>`) has
+top-level `ci` section in the manifest names the forge, contexts and pinned
+`witness.statusCreators` / `witness.checkRunApps` identities. The harness refuses
+a creator matching its own gh login. Every citation re-reads the forge at record
+time; the local log is only a pointer. A latest pinned success can green; a
+historical failure from any writer is red. See `references/forge-evidence.md`.
+For CI observation, `attest.py --ci --pr <n> [--wait]` (or `--ref <branch>`) has
 the forge name the commit and mints a row from its statuses (every page of
 them, held to the total the forge reports), and pending, unreported or
 partially listed contexts mint nothing. A `prove:ci` claim returns that `sha`
 and must match the row; a row for a sha the node chose (`--sha`) cannot
 back it, since CI on any older green commit would pass. Pin the merge after
 the gate to the same commit with `gh pr merge --match-head-commit <sha>`.
+Independent multi-step nodes of any object contract can declare `cites: [gate,...]`.
+The compiler adds structured `citations` to their result schema, starts the local
+lane and asks for CI reuse in bounded waits. A forge green can cancel local work;
+a completed red from either source dominates. Reuse coverage and a full
+`ci.packetSha` base are pinned only in the manifest, never in node arguments.
+Local hook/wrapper rows carry `dirty`; a dirty or legacy unbound row is refused.
 Each row names its witness — `hook`, `wrapper` or `forge`. A gate run from
 a linked worktree of the campaign branch is attested into the project's log
 and bound to the project's HEAD, whichever witness saw it: the launch stamp
@@ -737,10 +805,13 @@ job is to look everywhere. The compiler rejects `priors` without a `seed`
 
 `/fluxpoint:graph-run` compiles, runs, and records. Watch with
 `/workflows`; never poll with sleep. Repair is targeted: fix the one red
-node in the IR, recompile, then re-invoke with `resumeFromRunId` — the
-unchanged prefix of `agent()` calls returns its memoized results and only
-the repaired node onward re-runs. Never restart a mostly-green graph from
-zero. Before diagnosing an empty result, read `journal.jsonl`. There is
+node in the IR, then use `resume.py` to carry the recorded inputs, apply
+only named changes, recompile and print the per-node rerun plan. The
+runtime can replay an unchanged prefix; opted-in independent nodes can
+also replay after fresh tree and branch checks, while a live ancestor
+forces its descendants live. Start fresh when the judged tree moved or
+the old run lacks the required source provenance. Before diagnosing an
+empty result, read `journal.jsonl`. There is
 deliberately no per-node retry knob: recovery is memoized resume plus the
 once-only ledger, because an in-run retry loop is a second failure policy
 hiding inside the first.

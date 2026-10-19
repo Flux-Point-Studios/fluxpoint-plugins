@@ -358,8 +358,15 @@ step; do not stop at copying files.
    names the commit):
    ```json
    {"version": 1, "gates": {"harness": "scripts/harness.sh --full"},
-    "ci": {"forge": "github", "contexts": ["harness"]}}
+    "ci": {"forge": "github", "repository": "your-org/your-repo", "contexts": ["harness"],
+           "witness": {"statusCreators": ["dedicated-ci-bot"], "checkRunApps": []}}}
    ```
+   Pin the actual independent status creator or GitHub App IDs. Run
+   `attest.py --check-ci`: a creator matching the harness's own `gh api user`
+   login is refused with exit 2. Same-account CI needs a dedicated bot whose
+   token is absent from the agent host before any forge green can count.
+   Every forge citation re-reads the PR/ref and source verdict at record time.
+   See `references/forge-evidence.md` for safe per-step CI reuse.
    Without `contexts`, every context the forge reports must pass and at
    least one must exist.
 11. Fill in the Merge policy block, asking the user once: may green + SHIP
