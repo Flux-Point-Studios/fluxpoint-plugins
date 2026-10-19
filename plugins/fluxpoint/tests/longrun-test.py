@@ -212,9 +212,15 @@ sys.exit(7)
         store, token, pids = self.descendants(leader_exit=True)
         self.wait_for(lambda: any(row['pid'] == pids['child'] for row in store.read(token).get('groupMembers', [])))
         # Simulate a record from the earlier leaders-only implementation.
-        store.write({'token': token, 'status': 'DONE', 'exit': 0})
+        rec = store.read(token)
+        # Pin the exact race: only the child is persisted, although its
+        # TERM-ignoring grandchild is already live. The live owner knows both.
+        store.write({'token': token, 'status': 'DONE', 'exit': 0,
+                     'groupMembers': [row for row in rec['groupMembers'] if row['pid'] == pids['child']]})
         self.cli('longrun.py', 'cancel', token)
         self.wait_for(lambda: not bg.alive(pids['child']) and not bg.alive(pids['grandchild']))
+        self.assertEqual(store.read(token)['status'], 'CANCELLED')
+        self.assertFalse(store.read(token).get('cancellationPending'))
 
     @unittest.skipUnless(os.name == 'nt', 'native Windows job ownership test')
     def test_windows_owner_death_closes_job_and_kills_early_exit_descendants(self):
@@ -233,6 +239,94 @@ sys.exit(7)
             self.cli('longrun.py', 'await', 'reused', '--timeout', '0', code=4)
             self.cli('longrun.py', 'cancel', 'reused', code=4)
             self.assertTrue(bg.alive(unrelated.pid))
+        finally:
+            unrelated.terminate()
+            unrelated.wait(timeout=5)
+
+    def test_terminal_cancel_defers_to_authenticated_live_owner(self):
+        token = 'terminal-live-owner'
+        self.store.write({'token': token, 'status': 'DONE', 'exit': 0,
+                          'pid': 1234, 'runnerIdentity': 'known-owner'})
+        original_read = self.store.read
+        def owner_completes(ref):
+            rec = original_read(ref)
+            if rec.get('cancelRequested'):
+                return dict(rec, status='CANCELLED')
+            return rec
+        with patch.object(self.store, 'read', side_effect=owner_completes), \
+             patch.object(process_tree, 'matches', return_value=True), \
+             patch.object(bg, 'alive', return_value=True), \
+             patch.object(process_tree, 'has_owned_tree') as inspect_group, \
+             patch.object(process_tree, 'terminate_owned') as external_kill:
+            result = bg.cancel(self.store, token)
+        self.assertEqual(result['status'], 'CANCELLED')
+        inspect_group.assert_called_once()
+        external_kill.assert_not_called()
+
+    def test_completed_tree_is_idempotent_even_before_owner_exits(self):
+        token = 'already-drained'
+        self.store.write({'token': token, 'status': 'DONE', 'exit': 1,
+                          'pid': 1234, 'runnerIdentity': 'known-owner'})
+        with patch.object(process_tree, 'matches', return_value=True), \
+             patch.object(bg, 'alive', return_value=True), \
+             patch.object(process_tree, 'has_owned_tree', return_value=False), \
+             patch.object(process_tree, 'terminate_owned') as external_kill:
+            result = bg.cancel(self.store, token)
+        external_kill.assert_not_called()
+        self.assertEqual(result['status'], 'DONE')
+        self.assertEqual(result['exit'], 1)
+        self.assertFalse(result.get('cancelRequested'))
+
+    def test_slow_live_owner_stays_pending_without_competing_group_kill(self):
+        token = 'slow-live-owner'
+        self.store.write({'token': token, 'status': 'RUNNING',
+                          'pid': 1234, 'runnerIdentity': 'known-owner'})
+        clock = [0.0]
+        with patch.object(process_tree, 'matches', return_value=True), \
+             patch.object(bg, 'alive', return_value=True), \
+             patch.object(bg.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(bg.time, 'sleep', side_effect=lambda dt: clock.__setitem__(0, clock[0] + dt)), \
+             patch.object(process_tree, 'terminate_owned') as external_kill:
+            with self.assertRaisesRegex(process_tree.CleanupPending, 'owning runner is still draining'):
+                bg.cancel(self.store, token)
+        external_kill.assert_not_called()
+        rec = self.store.read(token)
+        self.assertEqual(rec['status'], 'RUNNING')
+        self.assertTrue(rec['cancellationPending'])
+
+    def test_drain_completing_at_wait_boundary_is_not_overwritten(self):
+        token = 'drain-at-boundary'
+        self.store.write({'token': token, 'status': 'RUNNING',
+                          'pid': 1234, 'runnerIdentity': 'known-owner'})
+        clock = [0.0]
+        def complete_at_deadline(dt):
+            clock[0] += dt
+            if clock[0] >= 3:
+                self.store.write({'token': token, 'status': 'CANCELLED',
+                                  'exit': 130, 'cancellationPending': False})
+        with patch.object(process_tree, 'matches', return_value=True), \
+             patch.object(bg, 'alive', return_value=True), \
+             patch.object(bg.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(bg.time, 'sleep', side_effect=complete_at_deadline), \
+             patch.object(process_tree, 'terminate_owned') as external_kill:
+            result = bg.cancel(self.store, token)
+        external_kill.assert_not_called()
+        self.assertEqual(result['status'], 'CANCELLED')
+        self.assertFalse(self.store.read(token)['cancellationPending'])
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX identity-bound group refusal')
+    def test_terminal_pid_reuse_does_not_kill_an_unrelated_group(self):
+        unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'], start_new_session=True)
+        try:
+            token = 'terminal-reused-group'
+            self.store.write({'token': token, 'status': 'DONE', 'exit': 0,
+                              'pid': 999999999, 'runnerIdentity': 'gone-owner',
+                              'treeType': 'posix-group', 'processGroup': unrelated.pid,
+                              'groupMembers': [{'pid': unrelated.pid, 'identity': 'different-creation'}]})
+            with self.assertRaisesRegex(process_tree.CleanupPending, 'refusing PID reuse'):
+                bg.cancel(self.store, token)
+            self.assertTrue(bg.alive(unrelated.pid))
+            self.assertTrue(self.store.read(token)['cancellationPending'])
         finally:
             unrelated.terminate()
             unrelated.wait(timeout=5)

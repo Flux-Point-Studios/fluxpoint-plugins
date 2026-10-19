@@ -87,6 +87,11 @@ still provides `taskkill /T /F /PID` for separately managed commands; supervised
 longrun/attest trees use jobs rather than trusting a dead command PID.
 
 Records bind runner and POSIX member PIDs to process-creation identities.
+Cancellation asks a living, creation-identity-matched runner to drain its own
+tree first, including when an older record already says DONE. The CLI never
+competes with that owner by terminating a stale member snapshot. A slow owner
+leaves cancellation pending (exit 4); repeat the bounded await/cancel call until
+the owner confirms the drain. Completion clears the pending flag.
 Cancellation refuses a reused or unidentifiable PID. If a POSIX owner is forcibly
 killed after all recorded members exit and an unobserved grandchild survives,
 its ownership cannot be proved from the last snapshot: cancellation explicitly

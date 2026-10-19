@@ -250,7 +250,8 @@ def finish(store, token, code, before_finish=None, **fields):
             before_finish(rec)
         rec.update(fields)
         rec.update(status='CANCELLED' if rec.get('cancelRequested') else 'DONE',
-                   exit=code, finished=now())
+                   exit=code, finished=now(), cancellationPending=False)
+        rec.pop('cancelError', None)
         store._write(rec)
     return rec
 
@@ -347,19 +348,32 @@ def cancel(store, token):
         raise ValueError('unknown background run ' + token)
     # Older records may have published a leader's exit while descendants
     # remain. A terminal label alone never authorizes skipping owned cleanup.
+    owner_live = (process_tree.matches(rec.get('pid'), rec.get('runnerIdentity'))
+                  and alive(rec.get('pid'), rec.get('started', '')))
     if rec.get('status') in TERMINAL:
         try:
             if not process_tree.has_owned_tree(rec):
                 return rec
-            store.write({'token': token, 'cancelRequested': True, 'status': 'RUNNING', 'cancellationPending': True})
-            process_tree.terminate_owned(rec)
+            if not owner_live:
+                store.write({'token': token, 'cancelRequested': True, 'status': 'RUNNING', 'cancellationPending': True})
+                process_tree.terminate_owned(rec)
+                return store.write({'token': token, 'cancelRequested': True,
+                                    'status': 'CANCELLED', 'cancellationPending': False, 'finished': now()})
         except CancellationPending as exc:
-            store.write({'token': token, 'cancelRequested': True, 'status': 'RUNNING',
-                         'cancellationPending': True, 'cancelError': str(exc)})
-            raise
-        return store.write({'token': token, 'cancelRequested': True,
-                            'status': 'CANCELLED', 'cancellationPending': False, 'finished': now()})
-    rec = store.write({'token': token, 'cancelRequested': True})
+            if not owner_live:
+                store.write({'token': token, 'cancelRequested': True, 'status': 'RUNNING',
+                             'cancellationPending': True, 'cancelError': str(exc)})
+                raise
+            # A living owner can track children born since its last snapshot.
+            # Ask it to clean up; do not independently signal an unproved group.
+    if rec.get('status') in TERMINAL:
+        # A live authenticated owner still has direct handles to descendants
+        # created since the persisted snapshot. Let it drain them; a second
+        # canceller must not race away its last recorded creation identity.
+        rec = store.write({'token': token, 'status': 'RUNNING',
+                           'cancellationPending': True, 'cancelRequested': True})
+    else:
+        rec = store.write({'token': token, 'cancelRequested': True})
     # Let the living owner terminate its tree first. It has the direct process
     # and job handles, including descendants created since the last snapshot.
     deadline = time.monotonic() + 3
@@ -371,6 +385,18 @@ def cancel(store, token):
         if (current.get('runnerIdentity') and not process_tree.matches(current.get('pid'), current['runnerIdentity'])) or not alive(current.get('pid'), current.get('started', '')):
             break
         time.sleep(0.05)
+    if (process_tree.matches(rec.get('pid'), rec.get('runnerIdentity'))
+            and alive(rec.get('pid'), rec.get('started', ''))):
+        message = 'owning runner is still draining its process tree; cancellation is pending'
+        with store.locked(token):
+            current = store.read(token) or rec
+            # The owner may have confirmed the drain at the wait boundary.
+            # Never overwrite its terminal publication with our stale read.
+            if current.get('status') in TERMINAL:
+                return current
+            current.update(status='RUNNING', cancellationPending=True, cancelError=message)
+            store._write(current)
+        raise CancellationPending(message)
     # A missing owner still leaves a named Windows job, or identity-bound
     # POSIX group members. Never taskkill an old command PID that may be reused.
     try:
