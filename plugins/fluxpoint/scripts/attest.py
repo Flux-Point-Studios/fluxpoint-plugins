@@ -77,11 +77,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import background as bg
 import forge_evidence as forge
+import fault_policy
 
 GATES = ".fluxpoint-gates.json"
 ATTEST = os.path.join(".claude", "fluxpoint", "attest.jsonl")
 BACKGROUND = os.path.join(".claude", "fluxpoint", "attest-bg")
-GATE_MANIFEST_FIELDS = {"version", "gates", "ci", "deployed"}
+GATE_MANIFEST_FIELDS = {"version", "gates", "ci", "deployed", "reference", "faults"}
 CI_FIELDS = {"forge", "repository", "contexts", "witness", "covers", "packetSha"}
 CI_FORGES = {"github"}
 IDENT = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -96,6 +97,12 @@ def path_for(root):
 
 def gates_path(root):
     return os.path.join(root, GATES)
+
+
+def _api():
+    # importlib-based test loaders need not install the module in sys.modules.
+    import types
+    return sys.modules.get(__name__) or types.SimpleNamespace(**globals())
 
 
 # `FPL_ATTEST_NONCE=<token> <gate>`: how a graph node names the run it is
@@ -335,6 +342,10 @@ def load_gates(root):
     deployed, problems = _deployed(root, doc, out)
     out.deployed = deployed
     f += problems
+    out.reference, out.faults, problems = fault_policy.policy(doc, out)
+    f += [f"{GATES}: {problem}" for problem in problems]
+    if out.faults and not _git(root, 'ls-files', '--error-unmatch', GATES):
+        f.append(f'{GATES}: crash signatures must live in a tracked manifest')
     return ({} if f else out), f
 
 
@@ -798,8 +809,12 @@ def stamp(root=None):
     import secrets
     # The project root rides along, so a node that steps into a worktree
     # can name the log it attests into (`--root`) whatever the runtime.
-    return {"since": now(), "nonce": secrets.token_hex(8),
-            "root": os.path.abspath(root or project_root("."))}
+    root = os.path.abspath(root or project_root("."))
+    launch = {"since": now(), "nonce": secrets.token_hex(8), "root": root,
+              "manifestSha256": fault_policy.manifest_sha(root)}
+    import fault_attempts
+    fault_attempts.save_launch(root, launch)
+    return launch
 
 
 def append_row(root, row):
@@ -979,7 +994,8 @@ def _bash():
     return shutil.which("bash") or "bash"
 
 
-def _execute(root, gate, started, token, nonce="", tree=None):
+def _execute(root, gate, started, token, nonce="", tree=None, control_token=None,
+             attempt=None, reference=None):
     import subprocess
     tree = tree or root
     raw = declared_command(root, gate)
@@ -988,38 +1004,66 @@ def _execute(root, gate, started, token, nonce="", tree=None):
     # commit for every witness. Where the gate actually ran is treeSha.
     head = head_sha(root)
     tree_head = head_sha(tree)
-    was_dirty = dirty(root) or dirty(tree)
+    was_dirty = dirty(root) or (dirty(tree) if not reference else False)
+    if reference:
+        tree_head = reference['treeSha']
+    manifest_hash = fault_policy.manifest_sha(root)
+    if attempt:
+        import fault_attempts
+        launch = fault_attempts.load_launch(root, nonce)
+        if not launch or manifest_hash != launch.get('manifestSha256'):
+            raise ValueError('fault rerun manifest changed since launch')
     log = os.path.join(_bg_dir(root), f"{token}.log")
     _bg_write(root, {"token": token, "gate": gate, "status": "RUNNING",
                      "pid": os.getpid(), "started": started, "headSha": head,
-                     "log": log})
+                     "log": log, "nonce": nonce, "treeSha": tree_head,
+                     "manifestSha256": manifest_hash, "attempt": attempt})
     print(f"attest: running {gate} as {token} — collect it with "
           f"attest.py --await {token}", flush=True)
     gates, problems = load_gates(root)
+    host = fault_policy.host_for(_api(), tree, gates, gate) if not problems and not reference else None
     deployed = any(lane['gate'] == gate for lane in getattr(gates, 'deployed', {}).values())
-    pins_hashes, dependencies, pin_findings = deployed_resolution(root, tree, gate, gates) if not problems else ({}, {}, problems)
+    pins_hashes, dependencies, pin_findings = deployed_resolution(root, tree, gate, gates) if not problems and not reference else ({}, {}, problems)
     store = bg.Store(root, BACKGROUND)
     if pin_findings:
         with open(log, "wb") as out:
             out.write(("\n".join(pin_findings) + "\nSuite not started.\n").encode("utf-8"))
         code = 1
     else:
-        command, cwd, _ = deployed_invocation(tree, gates, gate) if deployed else ([_bash(), '-c', raw], tree, [])
-        code = bg.run_command(store, token, command, cwd, log)
+        if reference:
+            import fault_attempts
+            raw_reference, pins_hashes = fault_attempts.reference_command(_api(), root, gates, gate, raw)
+            command, cwd = fault_policy.reference_argv(gates.reference, tree, raw_reference), tree
+        else:
+            command, cwd, _ = deployed_invocation(tree, gates, gate) if deployed else ([_bash(), '-c', raw], tree, [])
+        code = bg.run_command(store, control_token or token, command, cwd, log)
     if code is None:
         bg.finish(store, token, None)
         print(f"attest: {gate} cancelled before command launch; nothing attested", flush=True)
         return 130
     with open(log, "rb") as fh:
-        text = fh.read().decode("utf-8", "replace")
+        log_bytes = fh.read()
+    text = log_bytes.decode("utf-8", "replace")
     row = {
         "attestId": "att_" + sha(f"{started}|{norm}|{code}|{token}")[:12],
         "gate": gate, "command": norm, "commandSha": sha(norm), "exit": code,
-        "logSha256": sha(f"{text}\n---\n"), "headSha": head, "treeSha": tree_head,
+        "logSha256": hashlib.sha256(log_bytes).hexdigest(), "headSha": head, "treeSha": tree_head,
         "started": started, "when": now(), "sessionId": "", "agent": "",
-        "witness": "wrapper", "token": token, "nonce": nonce,
-        "dirty": was_dirty or dirty(root) or dirty(tree) or head_sha(tree) != tree_head or head_sha(root) != head,
+        "witness": "wrapper", "token": token, "nonce": nonce, "tree": os.path.abspath(tree),
+        "host": host, "manifestSha256": manifest_hash,
+        'dirty': was_dirty or dirty(root) or (not reference and (dirty(tree) or head_sha(tree) != tree_head)) or head_sha(root) != head,
     }
+    if attempt:
+        row['attempt'] = attempt
+    if reference:
+        import fault_attempts
+        row['referenceImage'] = gates.reference['image']
+        dependencies, pin_findings = fault_attempts.reference_resolution(text, pins_hashes)
+        row['resolutionChecked'] = not pin_findings
+    if control_token:
+        parent = store.read(control_token) or {}
+        if parent.get('cancelRequested'):
+            store.write({'token': token, 'cancelRequested': True})
     if pins_hashes or dependencies or pin_findings:
         row.update(pinsSha256=pins_hashes, dependencies=dependencies,
                    resolutionChecked=not pin_findings)
@@ -1029,11 +1073,21 @@ def _execute(root, gate, started, token, nonce="", tree=None):
         # Serialize verdict publication with cancellation. A request arriving
         # before publication cannot mint a passing attestation, even if the
         # command happened to exit 0 during that race.
+        row['cancelRequested'] = bool(rec.get('cancelRequested'))
+        # A cancellation arriving after a genuine assertion/crash exit must
+        # not relabel that completed failure as an interrupted race loser.
+        row['cancelled'] = row['cancelRequested'] and (code == 0 or code in fault_policy.CANCELLATION_EXITS)
+        import fault_attempts
+        classification = fault_policy.classify(gates, row, text, fault_attempts.load_launch(root, nonce))
+        if classification:
+            row['fault'] = classification
         if not rec.get('cancelRequested') or code != 0:
-            row['cancelled'] = bool(rec.get('cancelRequested'))
+            rec.update(fault_attempts.runner_facts(row))
             append_row(root, row)
             rec['attestId'] = row['attestId']
-    completed = bg.finish(store, token, code, before_finish=publish, headSha=head, log=log)
+    completed = bg.finish(store, token, code, before_finish=publish, headSha=head, log=log,
+                          nonce=nonce, treeSha=tree_head, manifestSha256=manifest_hash,
+                          logSha256=row['logSha256'], attempt=attempt, dirty=row['dirty'], tree=row['tree'])
     if not completed.get('attestId'):
         print(f"attest: {gate} cancelled; command exit {code}; nothing attested", flush=True)
         return 130
@@ -1268,6 +1322,7 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
                               else "carries no run nonce")
                            + f" — this run's is {nonce}; a gate run for this node passes "
                            f"FPL_ATTEST_NONCE (or --nonce) so its row names the run")}
+    fresh_forge_green = False
     if row.get("witness") in ("forge", "reuse"):
         if not row.get("target"):
             return {**base, "status": "STALE", "detail": "forge row names a commit the node named itself; use --pr or --ref"}
@@ -1290,6 +1345,7 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
             if gate != 'ci' and (row.get('packetSha') != ci.get('packetSha') or
                                   row.get('configBlobs') != facts['configBlobs']):
                 raise ValueError("reuse pointer disagrees with current pinned config blobs")
+            fresh_forge_green = claimed == 0 and facts['exit'] == 0
         except (OSError, RuntimeError, ValueError, KeyError, TypeError) as e:
             return {**base, "status": "MISMATCH", "detail": "forge re-read refused: " + str(e)}
     elif row.get('dirty') is not False:
@@ -1318,14 +1374,38 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
                 # Missing/changed coverage or an unavailable forge permits the
                 # independent local execution; it never mints a CI pass.
                 pass
+    support, event_ids = set(), []
+    if row.get('faultPair'):
+        if not root:
+            return {**base, 'status': 'MISMATCH', 'detail': 'fault pair requires retained wrapper logs for verification'}
+        try:
+            import fault_attempts
+            support.update(fault_attempts.verify_pair(_api(), root, rows, row, launch, gates))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return {**base, 'status': 'MISMATCH', 'detail': 'fault pair refused: ' + str(exc)}
+    if isinstance(launch, dict):
+        import fault_attempts
+        if root:
+            reds, receipts, event_ids = fault_attempts.unclosed_reds(_api(), root, rows, row, launch, fresh_forge_green)
+            support.update(receipts)
+        else:
+            reds = [a.get('attestId') for a in rows if a.get('gate') == gate
+                    and a.get('nonce') == launch.get('nonce')
+                    and _same_commit(a.get('treeSha') or a.get('headSha'), row.get('treeSha') or row.get('headSha'))
+                    and type(a.get('exit')) is int and a['exit'] != 0]
+        if reds and claimed == 0:
+            return {**base, 'status': 'SUPERSEDED-RED', 'faultEvents': len(event_ids), 'faultEventIds': event_ids,
+                    'detail': 'earlier red attempts remain unsettled at this tree and nonce: ' + ', '.join(str(x) for x in reds)}
+    support.add(cited)
     if used is not None:
-        if cited in used:
+        reused = next((ident for ident in support if ident in used), None)
+        if reused:
             return {**base, "status": "STALE",
-                    "detail": (f"cites {cited}, which already backs node "
-                               f"'{used[cited]}' — one execution cannot verify two "
+                    "detail": (f"cites {cited}, whose supporting execution {reused} already backs node "
+                               f"'{used[reused]}' — one execution cannot verify two "
                                f"nodes")}
-        used[cited] = node
-    return {**base, "status": "ATTESTED",
+        used.update({ident: node for ident in support})
+    return {**base, "status": "ATTESTED", 'faultEvents': len(event_ids), 'faultEventIds': event_ids,
             "detail": f"exit {claimed} attested {cited}"
                       + (f" ({row.get('witness')})" if row.get("witness") not in (None, "hook")
                          else "")}
@@ -1482,6 +1562,7 @@ def main():
     g.add_argument("--list", action="store_true")
     g.add_argument("--verify", action="store_true")
     g.add_argument("--run", metavar="GATE")
+    g.add_argument("--rerun-fault", metavar="ATTEST_ID", help="settle one classified crash with one native/reference pair")
     g.add_argument("--await", dest="await_", metavar="TOKEN")
     g.add_argument("--cancel", metavar="TOKEN")
     g.add_argument("--ci", action="store_true")
@@ -1504,6 +1585,10 @@ def main():
     if a.run:
         tree = a.tree or (None if a.token else tree_for(a.root, "."))
         return run_gate(a.root, a.run, a.detach, a.token, a.nonce, tree)
+    if a.rerun_fault:
+        import fault_attempts
+        return fault_attempts.rerun(_api(), a.root, a.rerun_fault, a.nonce,
+                                    a.detach, a.token, a.tree)
     if a.last:
         mine = [r for r in read(a.root) if r.get("gate") == a.last
                 and (not a.nonce or r.get("nonce") == a.nonce)]
@@ -1597,7 +1682,7 @@ def main():
     bad = 0
     for c in checks:
         print(f"  [{c['status']}] {c['node']}: {c['detail']}")
-        bad += c["status"] in ("MISMATCH", "STALE")
+        bad += c["status"] in ("MISMATCH", "STALE", "SUPERSEDED-RED")
     return 1 if bad else 0
 
 

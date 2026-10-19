@@ -585,10 +585,13 @@ def main():
                   "this run can be checked — filing it INCOMPLETE", file=sys.stderr)
         if checks:
             tally = {"checked": len(checks)}
-            for st in ("ATTESTED", "UNATTESTED", "MISMATCH", "STALE"):
+            for st in ("ATTESTED", "UNATTESTED", "MISMATCH", "STALE", "SUPERSEDED-RED"):
                 n = sum(1 for c in checks if c["status"] == st)
                 if n:
                     tally[st.lower()] = n
+            fault_ids = {ident for check in checks for ident in check.get('faultEventIds', [])}
+            if fault_ids:
+                tally['fault_events'] = len(fault_ids)
             # Recorded separately because the two absences mean different
             # things: a claimed red with no row is expected (failures are not
             # attested), a claimed green with no row is not.
@@ -598,10 +601,10 @@ def main():
                 tally["unattested_claiming_pass"] = sg
             attestation = {"tally": tally, "checks": checks}
             for c in checks:
-                stream = sys.stderr if c["status"] == "MISMATCH" else sys.stdout
+                stream = sys.stderr if c["status"] in ("MISMATCH", "SUPERSEDED-RED") else sys.stdout
                 print(f"record-run: attest [{c['status']}] {c['node']} — {c['detail']}",
                       file=stream)
-                if c["status"] == "MISMATCH":
+                if c["status"] in ("MISMATCH", "SUPERSEDED-RED"):
                     import inbox as _ibx
                     _ibx.add(args.root, "attest-mismatch", c["node"], campaign,
                              c["detail"])
@@ -618,7 +621,7 @@ def main():
                 outcome = 'INCOMPLETE'
                 print('record-run: a declared gate step is red — filing INCOMPLETE', file=sys.stderr)
             tampered = [c for c in checks
-                        if c["status"] == "MISMATCH" and c.get("declared")]
+                        if c["status"] in ("MISMATCH", "SUPERSEDED-RED") and c.get("declared")]
             unproven = [c for c in checks
                         if c["status"] == "UNATTESTED" and c.get("declared")]
             # A citation that matches its row but not this run — minted
@@ -834,6 +837,10 @@ def main():
         if t.get("mismatch"):
             claim += (f"; {t['mismatch']} gate claim(s) CONTRADICT the attested "
                       f"execution log — the exit codes are not trustworthy")
+        if t.get('superseded-red'):
+            claim += f"; {t['superseded-red']} green gate claim(s) leave earlier red attempts unsettled"
+        if t.get('fault_events'):
+            claim += f"; {t['fault_events']} verified host crash event(s) retained"
         if t.get("stale"):
             claim += (f"; {t['stale']} gate claim(s) STALE — they cite executions "
                       f"from before this run, another commit, or another node")

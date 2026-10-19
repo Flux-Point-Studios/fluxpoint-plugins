@@ -512,6 +512,7 @@ def load_gates(root):
         return out
     gates = doc.get("gates") if isinstance(doc, dict) else None
     out = GateSet(gates if isinstance(gates, dict) else ())
+    out.commands = gates if isinstance(gates, dict) else {}
     if isinstance(doc, dict) and isinstance(doc.get("ci"), dict):
         out.add("ci")
     try:
@@ -1747,11 +1748,17 @@ def red_team_sources(n, ir):
     return found
 
 
-def warnings(ir, agents=None, specification=None):
+def warnings(ir, agents=None, specification=None, gates=None):
     """Non-blocking findings: shapes that compile but will predictably
     disappoint. Returned separately from validate() so they inform without
     refusing to build."""
     w = []
+    for node in ir.get('nodes') or []:
+        if node.get('verify', 'schema-only') != 'schema-only' or not re.match(r'^exit\s', str(node.get('haltWhen', ''))):
+            continue
+        for name, command in getattr(gates, 'commands', {}).items():
+            if command and command in node.get('prompt', ''):
+                w.append(f"node '{node.get('id', '?')}': schema-only exit gate runs declared gate '{name}' verbatim; use verify: prove:{name} so failures and reruns are witnessed")
     if any(n.get("mutates") or n.get("irreversible") for n in ir.get("nodes") or []) and not ir.get("authorizedBy"):
         w.append("mutating graph has no authorizedBy recorded ruling; launch only from the operator's run command or go for this graph")
     for check in ((specification or {}).get("packet") or {}).get("checks", []):
@@ -2828,7 +2835,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("function provePreamble(gate) {")
         a("  return longPreamble() + (gate === 'ci'")
         a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run the fluxpoint plugin's scripts/py.sh attest.py --ci${ROOT_ARG} --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
-        a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground attest.py --await${ROOT_ARG} <token>. Return gate '${gate}', the exit, and the attestId the witness recorded (scripts/py.sh attest.py --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
+        a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground attest.py --await${ROOT_ARG} <token>. A red whose wrapper row carries fault can be settled only by attest.py --rerun-fault <attestId>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}; await its one sequential native/reference pair and cite the pair. Every other red stays red. Never rerun until green: a later pass does not erase any unsettled red at the same tree and nonce. Return gate '${gate}', the exit, and the attestId the witness recorded (scripts/py.sh attest.py --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
         a("}")
         a("const CITES = " + json.dumps({n['id']: n['cites'] for n in cited_nodes}, sort_keys=True))
         a("function citesPreamble(gates) {")
@@ -4655,7 +4662,7 @@ def main():
     planned = plan_node_count(ir)
     # Warnings inform, never block: these shapes are legal and occasionally
     # deliberate, but they will usually disappoint whoever reads the result.
-    for w in warnings(ir, agents, specification):
+    for w in warnings(ir, agents, specification, gates):
         print(f"graph-compile: warning — {w}", file=sys.stderr)
     if _sibling("evidence_table").locate(text)[0] is None:
         print("graph-compile: warning — graph has no recognized Evidence table with a separator; "

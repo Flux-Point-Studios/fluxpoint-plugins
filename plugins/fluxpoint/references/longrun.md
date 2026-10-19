@@ -62,6 +62,10 @@ bash "$ROOT/scripts/py.sh" attest.py --cancel <token>
 ```
 
 `attest.py --await` and `--cancel` also accept a gate name for its newest run.
+
+Classified interpreter crashes can use the recorded, one-shot
+[`--rerun-fault` native/reference pair](fault-reruns.md). Its pair token uses
+the same await/cancel path; an ordinary later green does not erase a red.
 Attestations retain their existing record directory and citable IDs. A log match
 never mints an attestation; only collecting the real command exit does that.
 
