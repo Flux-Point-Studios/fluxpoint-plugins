@@ -175,6 +175,9 @@ changed() {
 }
 
 full() {
+  if need_gate attest.py .fluxpoint-gates.json; then
+    "$FPL_PY" "$FPL_GATE" --check-ci --if-present
+  fi
   if need_gate specification.py .fluxpoint-spec.json .fluxpoint-spec-lock.json; then
     "$FPL_PY" "$FPL_GATE" --run --if-present
   elif [ -f WORK.md ] && grep -Eq $'^SPEC:[ \t]*[^ \t\r]' WORK.md; then

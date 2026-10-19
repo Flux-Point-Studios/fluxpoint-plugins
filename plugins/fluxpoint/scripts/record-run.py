@@ -579,7 +579,7 @@ def main():
         # is the declared verification not happening, not a warning to print
         # beside a COMPLETE: a fabricated attestId would otherwise be filed
         # clean.
-        if afindings and outcome in ("COMPLETE", "UNKNOWN") and (summary.get("prove") or {}):
+        if afindings and outcome in ("COMPLETE", "UNKNOWN") and (summary.get("prove") or summary.get("cites") or {}):
             outcome = "INCOMPLETE"
             print("record-run: the gate manifest is refused, so no prove: citation in "
                   "this run can be checked — filing it INCOMPLETE", file=sys.stderr)
@@ -613,6 +613,10 @@ def main():
             # rather than enforced — a check that starts by failing runs gets
             # switched off, and that lesson still holds for everyone who did
             # not opt in.
+            if any(c.get('declared') and type(c.get('claimedExit')) is int and
+                   c['claimedExit'] != 0 for c in checks) and outcome in ('COMPLETE', 'UNKNOWN'):
+                outcome = 'INCOMPLETE'
+                print('record-run: a declared gate step is red — filing INCOMPLETE', file=sys.stderr)
             tampered = [c for c in checks
                         if c["status"] == "MISMATCH" and c.get("declared")]
             unproven = [c for c in checks
@@ -667,6 +671,8 @@ def main():
                           file=sys.stderr)
     except Exception as e:  # noqa: BLE001 - a witness must never eat the record
         print(f"record-run: attestation cross-check failed: {e}", file=sys.stderr)
+        if summary.get('prove') or summary.get('cites'):
+            outcome = 'INCOMPLETE'
 
     # 1. Durable provenance artifact.
     import replay_memo as _replay

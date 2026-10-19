@@ -1183,7 +1183,7 @@ def prove_ci_and_launch_case():
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, ".fluxpoint-gates.json"), "w") as fh:
             json.dump({"version": 1, "gates": {"harness": "scripts/harness.sh"},
-                       "ci": {"forge": "github", "contexts": ["harness"]}}, fh)
+                       "ci": {"forge": "github", "repository": "fixture/repo", "contexts": ["harness"], "witness": {"statusCreators": ["ci-bot"], "checkRunApps": []}}}, fh)
         loaded = cg.load_gates(d)
         # The witness's own rules, at compile time: a manifest attest.py
         # refuses mints no rows, so a prove: node over it cannot be proved.
@@ -1191,7 +1191,7 @@ def prove_ci_and_launch_case():
             json.dump({"version": 1, "gates": {"harness": "scripts/harness.sh", "ci": "make ci"}}, fh)
         refused = cg.validate(ir, CONTRACTS, gates=cg.load_gates(d))
         with open(os.path.join(d, ".fluxpoint-gates.json"), "w") as fh:
-            json.dump({"version": 1, "gates": {}, "ci": {"forge": "github"}}, fh)
+            json.dump({"version": 1, "gates": {}, "ci": {"forge": "github", "repository": "fixture/repo", "witness": {"statusCreators": ["ci-bot"], "checkRunApps": []}}}, fh)
         ci_only = cg.load_gates(d)
     js = cg.emit(ir, CONTRACTS, {})
 

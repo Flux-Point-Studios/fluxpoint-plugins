@@ -464,14 +464,24 @@ command, resolved from the gate name) started in the background, and
 `attest.py --await <token>` collects it in bounded foreground slices; the
 runner mints the row itself when the command ends, including a red exit
 the hook never sees. CI's own statuses on a commit are `prove:ci`: a
-top-level `ci` section in the manifest names the forge and the contexts
-that decide, `attest.py --ci --pr <n> [--wait]` (or `--ref <branch>`) has
+top-level `ci` section in the manifest names the forge, contexts and pinned
+`witness.statusCreators` / `witness.checkRunApps` identities. The harness refuses
+a creator matching its own gh login. Every citation re-reads the forge at record
+time; the local log is only a pointer. A latest pinned success can green; a
+historical failure from any writer is red. See `references/forge-evidence.md`.
+For CI observation, `attest.py --ci --pr <n> [--wait]` (or `--ref <branch>`) has
 the forge name the commit and mints a row from its statuses (every page of
 them, held to the total the forge reports), and pending, unreported or
 partially listed contexts mint nothing. A `prove:ci` claim returns that `sha`
 and must match the row; a row for a sha the node chose (`--sha`) cannot
 back it, since CI on any older green commit would pass. Pin the merge after
 the gate to the same commit with `gh pr merge --match-head-commit <sha>`.
+Independent multi-step nodes of any object contract can declare `cites: [gate,...]`.
+The compiler adds structured `citations` to their result schema, starts the local
+lane and asks for CI reuse in bounded waits. A forge green can cancel local work;
+a completed red from either source dominates. Reuse coverage and a full
+`ci.packetSha` base are pinned only in the manifest, never in node arguments.
+Local hook/wrapper rows carry `dirty`; a dirty or legacy unbound row is refused.
 Each row names its witness — `hook`, `wrapper` or `forge`. A gate run from
 a linked worktree of the campaign branch is attested into the project's log
 and bound to the project's HEAD, whichever witness saw it: the launch stamp

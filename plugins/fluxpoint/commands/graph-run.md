@@ -36,6 +36,10 @@ Workflow tool requires.
      for this installed compiler, even if these command instructions were
      loaded before a plugin upgrade. Load each named producer's current
      output; do not recover from a refusal by guessing a missing field.
+   - Run `bash "$ROOT/scripts/py.sh" attest.py --root <project-root> --check-ci --if-present`.
+     A configured CI witness must pin an identity the harness cannot post as;
+     exit 2 refuses the harness's own status creator, and exit 3 means identity
+     could not be established. Either stops launch. No CI declaration is dormant.
    - If `.fluxpoint-gates.json` declares a gate named `preflight`, run
      `bash "$ROOT/scripts/py.sh" attest.py --root <project-root> --run preflight`
      and require exit 0 before launch or resume. Put the repo's fast graph,
@@ -120,7 +124,7 @@ Workflow tool requires.
    runtime's choice, and it has been observed cut from the default branch
    rather than the campaign's, where a file an earlier node committed is
    simply absent and nothing inside says so.
-   If any node declares `verify: prove:<gate>` or a repair `repeat.until`,
+   If any node declares `verify: prove:<gate>`, `cites: [<gate>, ...]`, or a repair `repeat.until`,
    stamp the launch; the
    compiled graph refuses to start without it:
    ```

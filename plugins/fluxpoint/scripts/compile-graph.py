@@ -49,7 +49,7 @@ NODE_FIELDS = {
     "foreach", "after", "mutates", "independent", "verifies", "verify",
     "verifyOver", "expectItems", "haltWhen", "haltReason", "onRed", "isolation",
     "repeat", "irreversible", "actor", "release", "wake", "decides", "honors",
-    "memory", "reduce", "lane", "pushes", "repository", "branch", "replay", "fresh",
+    "memory", "reduce", "lane", "pushes", "repository", "branch", "replay", "fresh", "cites",
 }
 # The two failure policies. Anything else used to fall back to a default
 # silently — a misspelled 'Halt' weakened the declared policy in the
@@ -898,6 +898,20 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
         nid = n.get("id", f"<node {i}>")
         where = f"node '{nid}'"
         f += _unknown(where, n, NODE_FIELDS)
+        if 'cites' in n:
+            cites = n['cites']
+            if (not isinstance(cites, list) or not cites or
+                    any(not isinstance(gate, str) or not IDENT.fullmatch(gate) for gate in cites) or
+                    len(set(cites)) != len(cites)):
+                f.append(f"{where}: cites must be a non-empty unique list of gate names")
+            elif not n.get('independent'):
+                f.append(f"{where}: cites requires independent:true")
+            elif gates is None or getattr(gates, 'findings', ()) or any(gate not in gates for gate in cites):
+                f.append(f"{where}: cites needs valid manifest-declared gates")
+            if ir.get('treeGuard') is False:
+                f.append(f"{where}: cites requires the tree guard for manifest witness/coverage policy")
+            if n.get('reduce') or n.get('actor', 'agent') != 'agent':
+                f.append(f"{where}: cites requires an independent agent node")
         f += _unknown(f"{where} repeat", n.get("repeat"), REPEAT_FIELDS)
         f += _unknown(f"{where} release", n.get("release"), RELEASE_FIELDS)
         f += _unknown(f"{where} wake", n.get("wake"), WAKE_FIELDS)
@@ -2429,7 +2443,10 @@ def subst_mapping(n, var=None, texts=None):
 def opts(n, ir, phase, label, schema_expr=None):
     roles = ir.get("roles") or {}
     role = roles.get(n.get("role"), {})
-    parts = [f"label: {label}", f"phase: {js_str(phase)}", f"schema: {schema_expr or 'C[' + js_str(n['contract']) + ']'}"]
+    schema = schema_expr or 'C[' + js_str(n['contract']) + ']'
+    if n.get('cites'):
+        schema = 'citationSchema(' + schema + ', ' + json.dumps(n['cites']) + ')'
+    parts = [f"label: {label}", f"phase: {js_str(phase)}", f"schema: {schema}"]
     agent_type = n.get("agentType") or role.get("agentType")
     if agent_type:
         parts.append(f"agentType: {js_str(agent_type)}")
@@ -2566,7 +2583,7 @@ def launch_requirements(ir, embedded_args=None):
                          required=required, condition="isolated nodes" if required else "when a tree-guard launch reading is supplied",
                          producer="git rev-parse HEAD; git branch --show-current; git status --porcelain; git rev-parse --show-toplevel (optional root)",
                          check="!v || typeof v !== 'object' || Array.isArray(v) || typeof v.sha !== 'string' || !v.sha.trim() || typeof v.porcelain !== 'string' || (v.branch !== undefined && typeof v.branch !== 'string') || (v.root !== undefined && (typeof v.root !== 'string' || !v.root.trim()))"))
-    prove = any(prove_gate(n) for n in nodes)
+    prove = any(prove_gate(n) or n.get("cites") for n in nodes)
     repair = bool(repair_loops(ir))
     if prove or repair:
         fields = (["since"] if prove else []) + ["nonce"] + (["root"] if repair else [])
@@ -2786,7 +2803,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("function authorizationPreamble() { return " + js_str(context) + " }")
         a("")
     prove_nodes = [n for n in nodes if prove_gate(n)]
-    if prove_nodes:
+    cited_nodes = [n for n in nodes if n.get("cites")]
+    if prove_nodes or cited_nodes:
         a("// --- prove: tiers ---")
         a("// This graph cannot check these itself: the attest log is a file and")
         a("// this sandbox has none. What it can do is refuse a result that is")
@@ -2811,6 +2829,20 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  return longPreamble() + (gate === 'ci'")
         a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run the fluxpoint plugin's scripts/py.sh attest.py --ci${ROOT_ARG} --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
         a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground attest.py --await${ROOT_ARG} <token>. Return gate '${gate}', the exit, and the attestId the witness recorded (scripts/py.sh attest.py --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
+        a("}")
+        a("const CITES = " + json.dumps({n['id']: n['cites'] for n in cited_nodes}, sort_keys=True))
+        a("function citesPreamble(gates) {")
+        a("  return `INDEPENDENT STEP CITATIONS: for gate ci use attest.py --ci with the forge target directly; no local alias exists. For each other gate of ${JSON.stringify(gates)}, start the manifest's local lane with scripts/py.sh attest.py --run <gate>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}. Concurrently poll scripts/py.sh attest.py --reuse <gate>${ROOT_ARG} --pr <PR> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), in foreground slices of at most 570 seconds. Coverage, witness pins and packet base come only from the manifest. Undecided (3) means continue/collect the local lane, never pass. A completed failure from either source is red even if the other is green. Only a green forge result may cancel the local token with attest.py --cancel${ROOT_ARG} <token>; collect/await cancellation and inspect whether the local lane already completed red. Never end your turn with a local lane running. Return your normal contract plus sha (the full judged commit) and citations: exactly one {gate, exit, attestId, sha, target} per declared step, with full judged SHA and target pr:N or ref:branch. For a local winner retain sha and target as well, so record-run checks the other source for red. Never cite a builder's local row.\\n\\n`")
+        a("}")
+        a("function citationSchema(schema, gates) {")
+        a("  return { ...schema, required: [...new Set([...(schema.required || []), 'sha', 'citations'])], properties: { ...schema.properties, sha: { ...((schema.properties || {}).sha || {}), type: 'string', pattern: '^[0-9a-f]{40}$' }, citations: { type: 'array', minItems: gates.length, maxItems: gates.length, items: { type: 'object', additionalProperties: false, required: ['gate', 'exit', 'attestId', 'sha', 'target'], properties: { gate: { type: 'string', enum: gates }, exit: { type: 'integer' }, attestId: { type: 'string', minLength: 1 }, sha: { type: 'string', pattern: '^[0-9a-f]{40}$' }, target: { type: 'string', minLength: 1 } } } } } }")
+        a("}")
+        a("function stepCitations(id, r) {")
+        a("  if (Array.isArray(r)) { for (const item of r) { const problem = stepCitations(id, item); if (problem) return problem }; return r.length ? null : `${id}: no step results` }")
+        a("  const gates = CITES[id] || []; const claims = r && r.citations")
+        a("  if (!Array.isArray(claims) || claims.length !== gates.length) return `${id}: missing step citations`")
+        a("  for (const gate of gates) { const matching = claims.filter(c => c && c.gate === gate); if (matching.length !== 1) return `${id}: step ${gate} needs one citation`; if (!/^[0-9a-f]{40}$/.test(r.sha || '') || matching[0].sha !== r.sha) return `${id}: step ${gate} did not judge the node's exact sha`; const error = citation(id, gate, matching[0]); if (error) return error; if (matching[0].exit !== 0) return `${id}: step ${gate} is red` }")
+        a("  return null")
         a("}")
         a("function citation(id, gate, r) {")
         a("  if (!r || typeof r !== 'object') return `${id}: no result to prove`")
@@ -3063,8 +3095,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         extra += ", winners: WINNERS"
     if mem_nodes:
         extra += ", memory: MEMORY, memorySeeded: MEMORY_SEEDED"
-    if prove_nodes:
-        extra += ", prove: PROVE, launch: LAUNCH"
+    if prove_nodes or cited_nodes:
+        extra += ", prove: PROVE, cites: CITES, launch: LAUNCH"
     elif repair_loops(ir):
         extra += ", launch: REPAIR_LAUNCH"
     if repair_loops(ir):
@@ -3656,6 +3688,8 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         pre = "authorizationPreamble() + " + pre
     if n.get("contract") == "RedTeamV1" and n.get("haltWhen") and red_team_sources(n, ir):
         pre += f"redTeamPreamble({json.dumps(red_team_sources(n, ir))}) + "
+    if n.get('cites'):
+        pre += f"citesPreamble({json.dumps(n['cites'])}) + "
     if prove_gate(n):
         pre += f"provePreamble({js_str(prove_gate(n))}) + "
     else:
@@ -3894,6 +3928,9 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
               f"{js_str(nid)}, {js_str(phase)}, {panel}, {need}{sink})")
             a(f"log(`{nid}: ${{{var}.length}} item(s) survived {tier}`)")
 
+    if n.get('cites'):
+        a(f"const steps_{var} = stepCitations({js_str(nid)}, {var})")
+        a(f"if (steps_{var}) {{ note({js_str(nid)}, 'UNPROVEN', steps_{var}); INCOMPLETE = true; RESULTS[{js_str(nid)}] = {var}; return summary('UNPROVEN') }}")
     pg = prove_gate(n)
     if pg:
         a(f"const cite_{var} = citation({js_str(nid)}, {js_str(pg)}, {var})")
