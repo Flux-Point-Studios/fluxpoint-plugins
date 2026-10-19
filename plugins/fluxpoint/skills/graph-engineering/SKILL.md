@@ -65,9 +65,10 @@ array (a verified sweep, a fan-out, another reduce) is rejected — consume
 `{{prev}}` whole or reduce it first.
 
 Durable coordination rides on the executor: every run has a `runId`,
-`journal.jsonl` records each node's actual return, resume replays the
-longest unchanged prefix, and `record-run.py` writes the provenance
-artifact and the Evidence row.
+`journal.jsonl` records each node's actual return, and `record-run.py`
+writes the provenance artifact and the Evidence row. The runtime replays
+an unchanged call prefix; opt-in node replay below adds independent,
+ancestor-bound reuse after that prefix ends.
 
 ## Independent lanes, replay and rejudging
 
@@ -804,10 +805,13 @@ job is to look everywhere. The compiler rejects `priors` without a `seed`
 
 `/fluxpoint:graph-run` compiles, runs, and records. Watch with
 `/workflows`; never poll with sleep. Repair is targeted: fix the one red
-node in the IR, recompile, then re-invoke with `resumeFromRunId` — the
-unchanged prefix of `agent()` calls returns its memoized results and only
-the repaired node onward re-runs. Never restart a mostly-green graph from
-zero. Before diagnosing an empty result, read `journal.jsonl`. There is
+node in the IR, then use `resume.py` to carry the recorded inputs, apply
+only named changes, recompile and print the per-node rerun plan. The
+runtime can replay an unchanged prefix; opted-in independent nodes can
+also replay after fresh tree and branch checks, while a live ancestor
+forces its descendants live. Start fresh when the judged tree moved or
+the old run lacks the required source provenance. Before diagnosing an
+empty result, read `journal.jsonl`. There is
 deliberately no per-node retry knob: recovery is memoized resume plus the
 once-only ledger, because an in-run retry loop is a second failure policy
 hiding inside the first.
