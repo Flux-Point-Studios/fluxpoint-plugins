@@ -12,10 +12,10 @@
     "plugins/fluxpoint/tests/graph-replay-test.py": "84793be771b29a7933eab2b8672db9450a0336e90e2c1d83a96836badb1db37d",
     "plugins/fluxpoint/tests/packet-inputs-test.py": "b1f86e5b5d3a4eb14e110716ff6c13c87b70f899c5400564b6ca7e0c1f00d5a0",
     "plugins/fluxpoint/tests/proof-verdict-test.py": "9e79a7c52c45c591dcb2d9d99e3973d12f783b04ffae5b776dbcd917c95c570f",
-    "plugins/fluxpoint/tests/repair-proof-test.py": "cc25ae94503624fcfcc3d4c91d7d360a84c35566fdf2d3a2aac891da502162a2",
+    "plugins/fluxpoint/tests/repair-proof-test.py": "f8ee128517a7e5a5030b33ee099bc8070bcc8de159cbb3a80e1646bbda228ffe",
     "plugins/fluxpoint/tests/repair_proof_fixture.py": "4f92f24d3c1b606e50704691479b459df6c599aea77be9064b4ec18e79d7f94d",
-    "plugins/fluxpoint/tests/replay-memo-test.py": "6510575343d789371e66ab99d77541474b478d23d356033ce4e9a2f804e53f9d",
-    "plugins/fluxpoint/tests/resume-test.py": "a963b62b178da7168eeb9d5e2670cabbf45973bf8cdce9309a9d373844f0feb6",
+    "plugins/fluxpoint/tests/replay-memo-test.py": "1959da9e7994c1f7cb0f4fc93c42d8ccce664e1ed59171e8f687b47f63ff1551",
+    "plugins/fluxpoint/tests/resume-test.py": "90e2b7d318df25fc4ddd69059ced57b2a97c8bc8f6c83e78d1318c1f4267268e",
     "plugins/fluxpoint/tests/specification-test.py": "6f2909ce134e399e3301da8f09d2bb92bda2bd5152264516bc445b1bca185d65",
     "plugins/fluxpoint/tests/unchecked-repairs-test.py": "89d85457aeac2c0acaf7be46003115166a7c02ff39bf79f8653a919219ddc589"
   }
