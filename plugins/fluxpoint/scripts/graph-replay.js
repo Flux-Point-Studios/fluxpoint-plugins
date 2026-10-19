@@ -11,7 +11,7 @@ function canonical(value) {
   return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}'
 }
 function sha256(text) {
-  const bytes = unescape(encodeURIComponent(text)), words = [], len = bytes.length
+  const bytes = encodeURIComponent(text).replace(/%([0-9A-F]{2})/g, (_, value) => String.fromCharCode(parseInt(value, 16))), words = [], len = bytes.length
   for (let i = 0; i < len; i++) words[i >> 2] = (words[i >> 2] || 0) | bytes.charCodeAt(i) << (24 - (i % 4) * 8)
   words[len >> 2] = (words[len >> 2] || 0) | 0x80 << (24 - (len % 4) * 8)
   words[((len + 8) >> 6) * 16 + 15] = len * 8
@@ -36,7 +36,7 @@ function sha256(text) {
   return h.map(v => (v >>> 0).toString(16).padStart(8,'0')).join('')
 }
 const CALL_RECORDS = [], MEMO_RECORDS = [], REJUDGES = []
-const NODE_STATE = {}, LIVE_READINGS = {}, CALL_STATE = {}
+const NODE_STATE = {}, LIVE_READINGS = {}, LIVE_READING_CALLS = {}, CALL_STATE = {}
 const REJUDGE_REACHED = new Set()
 let HALT = null, FORKED = false, RESERVED = 0, PREFIX_OPEN = true, PREFIX_INDEX = 0
 function halt(outcome) { if (!HALT) HALT = { outcome }; return null }
@@ -44,7 +44,7 @@ function replayAncestorKeys(n) { return n.after.map(id => NODE_STATE[id] && NODE
 function allAncestorsReplayed(n) { return n.after.every(id => NODE_STATE[id] && NODE_STATE[id].replayed) }
 function rejudgeText(id) {
   const row = (A.rejudge || {})[id]
-  return row ? '\nREJUDGE NONCE: ' + row.nonce + (row.note === undefined ? '' : '\nOPERATOR REJUDGE NOTE (verbatim):\n' + row.note) : ''
+  return row ? '\nREJUDGE NONCE: ' + row.nonce + '\nREJUDGE LAUNCH NONCE: ' + A._replayLaunchNonce + (row.note === undefined ? '' : '\nOPERATOR REJUDGE NOTE (verbatim):\n' + row.note) : ''
 }
 function promptArg(path) {
   // Reasons are attribution metadata, never part of a gate's reasoning input.
@@ -64,13 +64,18 @@ function validateRejudges() {
 }
 validateRejudges()
 const runtimeAgent = agent
+function auditedPrompt(prompt, options) {
+  const header = 'Fluxpoint-Call-Opts-SHA256: ' + sha256(canonical(options)) + '\n'
+  return prompt.startsWith(header) ? prompt : header + prompt
+}
 agent = async function(prompt, options) {
   if (HALT) return null
+  prompt = auditedPrompt(prompt, options)
   const previous = (A._prefix || [])[PREFIX_INDEX++]
   const prefix = !FORKED && PREFIX_OPEN && previous && previous.promptSha256 === sha256(prompt) && previous.optsSha256 === sha256(canonical(options))
   if (!prefix) PREFIX_OPEN = false
   const rec = { prompt, opts: options, result: null, mode: prefix ? 'prefix' : 'live' }
-  if (prefix) rec.source = { runId: previous.runId, agentId: previous.agentId }
+  if (prefix) rec.source = { runId: previous.runId, artifactSha256: previous.artifactSha256, agentId: previous.agentId }
   CALL_RECORDS.push(rec)
   const result = await runtimeAgent(prompt, options)
   rec.result = result === undefined ? null : result
@@ -91,19 +96,26 @@ function annotateBuilder(n, reading) {
   if (record && record.verifiedBy.includes(n.id)) {
     record.verifiedReading = readingValue(reading)
     record.verifiedByNode = n.id
+    record.verifiedReadingCallIndex = LIVE_READING_CALLS[n.id]
   }
 }
 async function replaySpawn(prompt, options, invoke) {
   if (HALT) return null
   const n = REPLAY_NODES[options.label]
-  if (!n) return reservedSpawn(prompt, options, invoke)
+  if (!n) {
+    const owner = Object.values(REPLAY_NODES).find(node => String(options.label).startsWith(node.id + ':'))
+    if (owner && owner.fresh) prompt += '\nFRESH NODE LAUNCH NONCE: ' + A._replayLaunchNonce
+    return reservedSpawn(prompt, options, invoke)
+  }
   let reading = LIVE_READINGS[n.id] || null
   const rejudge = (A.rejudge || {})[n.id]
+  let rejudgeRecord = null
   if (rejudge) {
     REJUDGE_REACHED.add(n.id)
-    REJUDGES.push({ gate: n.id, nonce: rejudge.nonce, reason: rejudge.reason,
+    rejudgeRecord = { gate: n.id, nonce: rejudge.nonce, reason: rejudge.reason, readingCallIndex: LIVE_READING_CALLS[n.id],
       ...(rejudge.note === undefined ? {} : { note: rejudge.note }), tree: readingValue(reading),
-      priorVerdict: (A._priorResults || {})[n.id] === undefined ? null : A._priorResults[n.id], sourceRunId: A._resumeFromRunId || null })
+      priorVerdict: (A._priorResults || {})[n.id] === undefined ? null : A._priorResults[n.id], sourceRunId: A._resumeFromRunId || null, sourceArtifactSha256: A._resumeArtifactSha256 || null }
+    REJUDGES.push(rejudgeRecord)
   }
   if (n.gate && reading && n.target) {
     prompt += '\nPINNED GATE TREE: repository ' + JSON.stringify(reading.repository) + ', branch ' + JSON.stringify(reading.branch) + ', commit ' + reading.tip + '. Fetch and check out exactly this commit before executing checks. Return sha equal to this commit; a different or missing sha halts the run.'
@@ -111,11 +123,14 @@ async function replaySpawn(prompt, options, invoke) {
   }
   prompt += rejudgeText(n.id)
   if (n.fresh) prompt += '\nFRESH NODE LAUNCH NONCE: ' + A._replayLaunchNonce
+  prompt = auditedPrompt(prompt, options)
   const payload = { campaign, compiler: REPLAY_COMPILER, launch: A._launch,
     id: n.id, prompt, opts: options, tree: n.gate ? readingValue(reading) : null, ancestors: replayAncestorKeys(n) }
   const key = sha256(canonical(payload))
   const entry = (A._memo || {})[key]
-  let eligible = n.replay && !n.fresh && !n.irreversible && !n.redTeam && !rejudge && allAncestorsReplayed(n)
+  const prefixEntry = (A._prefix || [])[PREFIX_INDEX]
+  const nativePrefix = !FORKED && PREFIX_OPEN && prefixEntry && prefixEntry.promptSha256 === sha256(prompt) && prefixEntry.optsSha256 === sha256(canonical(options))
+  let eligible = !nativePrefix && n.replay && !n.fresh && !n.irreversible && !n.redTeam && !rejudge && allAncestorsReplayed(n)
   if (eligible && n.mutates) {
     eligible = n.verifiedBy.length > 0 && entry && entry.verifiedReading && n.target
     if (eligible) {
@@ -126,15 +141,17 @@ async function replaySpawn(prompt, options, invoke) {
   }
   if (eligible && entry && entry.prompt === prompt && canonical(entry.payload) === canonical(payload) && entry.result !== null && entry.result !== undefined) {
     NODE_STATE[n.id] = { key, replayed: true }
-    MEMO_RECORDS.push({ node: n.id, key, payload, prompt, result: entry.result, mode: 'memo', source: { runId: entry.runId, agentId: entry.agentId }, verifies: n.verifies, verifiedBy: n.verifiedBy, reading: readingValue(reading), replay: n.replay, fresh: n.fresh, irreversible: n.irreversible, contract: n.contract, ...(n.mutates ? { verifiedReading: entry.verifiedReading, verifiedByNode: entry.verifiedByNode } : {}) })
+    MEMO_RECORDS.push({ node: n.id, key, payload, prompt, result: entry.result, mode: 'memo', source: { runId: entry.runId, artifactSha256: entry.artifactSha256, agentId: entry.agentId }, verifies: n.verifies, verifiedBy: n.verifiedBy, reading: readingValue(reading), readingCallIndex: LIVE_READING_CALLS[n.id], replay: n.replay, fresh: n.fresh, irreversible: n.irreversible, contract: n.contract, ...(n.mutates ? { verifiedReading: entry.verifiedReading, verifiedByNode: entry.verifiedByNode } : {}) })
     note(n.id, 'REPLAYED-MEMO', entry.runId + '/' + entry.agentId, { key, head: entry.verifiedReading ? entry.verifiedReading.tip : reading && reading.tip })
     return entry.result
   }
   const result = await reservedSpawn(prompt, options, invoke)
   const call = CALL_STATE[options.label]
+  if (rejudgeRecord) rejudgeRecord.gateCallIndex = call ? CALL_RECORDS.indexOf(call) : null
   const mode = call && call.mode === 'prefix' ? 'prefix' : 'live'
   NODE_STATE[n.id] = { key, replayed: mode === 'prefix' }
-  const rec = { node: n.id, key, payload, prompt, result: result === undefined ? null : result, mode, callIndex: call ? CALL_RECORDS.indexOf(call) : null, verifies: n.verifies, verifiedBy: n.verifiedBy, replay: n.replay, fresh: n.fresh, irreversible: n.irreversible, contract: n.contract }
+  const rec = { node: n.id, key, payload, prompt, result: result === undefined ? null : result, mode, callIndex: call ? CALL_RECORDS.indexOf(call) : null, verifies: n.verifies, verifiedBy: n.verifiedBy, replay: n.replay, fresh: n.fresh, irreversible: n.irreversible, contract: n.contract, target: n.target }
+  if (reading) { rec.reading = readingValue(reading); rec.readingCallIndex = LIVE_READING_CALLS[n.id] }
   if (call && call.source) rec.source = call.source
   MEMO_RECORDS.push(rec)
   if (n.gate && reading && n.target && result && (typeof result.sha !== 'string' || result.sha.toLowerCase() !== reading.tip.toLowerCase())) {

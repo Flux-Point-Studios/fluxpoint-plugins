@@ -277,11 +277,12 @@ if shutil.which("node"):
 blind = single("do {{A.goal}} with {{A.cfg}}", requiredArgs=["goal"], argDefaults={"cfg": "c"})
 blind["nodes"].append({"id": "g", "prompt": "then {{prev}}", "contract": "DesignV1",
                        "after": "f"})
-report("a launch arg with no default and a run-time {{prev}} are named as unpriced",
+report("dynamic args, default-priced args and runtime prev expose pricing limits",
        dict(cg.unpriced_expansions(blind)) == {"{{A.goal}} (launch arg)": ["f"],
+                                               "{{A.cfg}} (priced at default)": ["f"],
                                                "{{prev}}": ["g"]},
        str(cg.unpriced_expansions(blind)))
-report("  and the compiled header names them",
+report("  and the legacy compiled header preserves its original input fingerprint",
        "// unpriced: {{A.goal}} (launch arg) in f; {{prev}} in g" in cg.emit(blind, CONTRACTS, {}),
        "header")
 with tempfile.TemporaryDirectory() as d:
@@ -291,7 +292,7 @@ with tempfile.TemporaryDirectory() as d:
     r = subprocess.run([sys.executable, os.path.join(PLUGIN, "scripts", "compile-graph.py"),
                         work, "--check", "--gates-root", d], capture_output=True, text=True)
     report("  and so does --check",
-           "unpriced: {{A.goal}} (launch arg) in f; {{prev}} in g" in r.stdout,
+           "unpriced: {{A.goal}} (launch arg) in f; {{A.cfg}} (priced at default) in f; {{prev}} in g" in r.stdout,
            r.stdout.strip()[-80:] or r.stderr.strip()[-80:])
 two = chain("medium", "medium", ttl="1h")
 two["nodes"][1]["prompt"] += " " + "z" * 2000

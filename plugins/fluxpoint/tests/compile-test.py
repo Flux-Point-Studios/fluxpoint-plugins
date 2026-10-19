@@ -1348,7 +1348,7 @@ def repair_loop_case():
             out = os.path.join(tmp, "result.json"); script = os.path.join(tmp, "run.mjs")
             prefix = '''import {writeFileSync} from 'node:fs';
 const calls=[]; const mode=MODE;
-const args={_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'launch1'}};
+const args={_replayLaunchNonce:'freshlaunch',_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'launch1'}};
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
@@ -1409,7 +1409,7 @@ def repair_reframe_case():
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "out.json"); script = os.path.join(tmp, "run.mjs")
             prefix = r'''import {writeFileSync} from 'node:fs';
-const args={_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'nonce'}},calls=[],mode=MODE;
+const args={_replayLaunchNonce:'freshlaunch',_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'nonce'}},calls=[],mode=MODE;
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const reframe={classes:['decode'],invariant:'ledger admits only bounded rows',classRewire:'enforce item decoding budget at ingress',disposition:'adopt',measurement:{command:'pytest test_decode_budget',result:'all outsider rows bounded'}};

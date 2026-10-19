@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
@@ -15,7 +16,7 @@ spec = importlib.util.spec_from_file_location('scheduler_compiler', SCRIPTS / 'c
 c = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(c)
 CONTRACTS = c.load_contracts(str(SCRIPTS.parent / 'contracts'))
-CONTRACTS['TestV1'] = {'type':'object', 'properties': {'outcome':{'type':'string'}, 'exit':{'type':'integer'}, 'sha':{'type':'string'}}}
+CONTRACTS['TestV1'] = {'type':'object', 'properties': {'outcome':{'type':'string'}, 'exit':{'type':'integer'}, 'sha':{'type':'string'}, 'packetConflict':{'type':'object'}}}
 BASE = {'_base': {'sha':'a'*40, 'branch':'main', 'root':'/repo', 'porcelain':''}, '_launch': {'nonce':'original','root':'/repo'}, '_replayLaunchNonce':'fresh'}
 
 
@@ -58,8 +59,8 @@ fn(input.args,agent,{total:1000000,remaining:()=>remainingTokens,spent:()=>0},fn
 
 class GraphReplay(unittest.TestCase):
     def memo_args(self, result):
-        memo={r['key']:dict(r,runId='source-run',agentId='agent-'+r['node']) for r in result['memoRecords'] if r['result'] is not None}
-        return {'_memo':memo,'_resumeFromRunId':'source-run','_replayLaunchNonce':'new-fresh'}
+        memo={r['key']:dict(r,runId='source-run',artifactSha256='f'*64,agentId='agent-'+r['node']) for r in result['memoRecords'] if r['result'] is not None}
+        return {'_memo':memo,'_resumeFromRunId':'source-run','_resumeArtifactSha256':'f'*64,'_replayLaunchNonce':'new-fresh'}
 
     def replay_graph(self):
         return graph([node('a',lane='one',mutates=True,pushes='repo-a#main',replay='inputs',prompt='Repair {{A.repairA}}'),
@@ -94,9 +95,54 @@ class GraphReplay(unittest.TestCase):
         self.assertIn('end:a',out['events'])
         self.assertNotIn('start:a-next',out['events']); self.assertNotIn('start:b-next',out['events']); self.assertNotIn('start:joined',out['events'])
 
+    def test_shared_halt_does_not_rewrite_literal_prompt_code(self):
+        ir=graph([node('a',lane='one',prompt="Explain the literal return summary('HALTED') without editing it.")])
+        out=execute(ir)
+        primary=next(call for call in out['rawCalls'] if call['opts']['label']=='a')
+        self.assertIn("return summary('HALTED')",primary['prompt'])
+
+    def test_nullable_conflict_halt_distinguishes_missing_and_present(self):
+        ir=graph([node('a',lane='one',haltWhen='packetConflict != null')])
+        self.assertEqual(c.validate(ir,CONTRACTS),[])
+        self.assertEqual(execute(ir)['result']['outcome'],'COMPLETE')
+        self.assertEqual(execute(ir,body="result.packetConflict={checks:['locked']};")['result']['outcome'],'HALTED')
+        ir['nodes'][0]['haltWhen']='packetConflict >= null'
+        self.assertTrue(any('only == or !=' in x for x in c.validate(ir,CONTRACTS)))
+
+    def test_slice_packet_conflict_automatically_halts_scalar_and_fanout(self):
+        for fanout in (False,True):
+            with self.subTest(fanout=fanout):
+                first=node('a',lane='one',contract='SliceV1')
+                if fanout: first['foreach']='items'
+                ir=graph([first,node('a-next',lane='one',after='a',prompt='Continue {{prev}}')])
+                ir['lists']={'items':[{'key':'x'},{'key':'y'}]}
+                out=execute(ir,body="result.packetConflict=null;")
+                self.assertEqual(out['result']['outcome'],'HALTED')
+                self.assertNotIn('start:a-next',out['events'])
+
     def test_shared_branch_mutators_cannot_run_in_different_lanes(self):
         ir=graph([node('a',lane='one',mutates=True,pushes='repo-a#main'),node('b',lane='two',mutates=True,pushes='repo-a#main')])
         self.assertTrue(any('both push' in x for x in c.validate(ir,CONTRACTS)))
+
+    def test_verifier_never_runs_concurrently_with_its_producer(self):
+        ir=graph([node('a',lane='one',mutates=True,pushes='repo-a#main'),node('check',lane='two',independent=True,verifies='a')])
+        self.assertTrue(any('after ancestor' in x for x in c.validate(ir,CONTRACTS)))
+        ir['nodes'][1].update(after='a',prompt='Check {{prev}}')
+        self.assertEqual(c.validate(ir,CONTRACTS),[])
+        out=execute(ir)
+        self.assertGreater(out['events'].index('start:check'),out['events'].index('end:a'))
+
+    def test_shared_push_identity_normalizes_windows_and_common_origins(self):
+        for left,right in [('C:/Repo','c:\\repo'),('/repo','/repo/.git'),('https://github.com/Owner/Project.git','git@github.com:owner/project')]:
+            self.assertEqual(c.push_identity({'repository':left,'branch':'main'}),c.push_identity({'repository':right,'branch':'main'}))
+        with tempfile.TemporaryDirectory() as tmp:
+            targets=[]
+            for name in ('one','two'):
+                path=Path(tmp)/name; path.mkdir()
+                subprocess.run(['git','init','-q',str(path)],check=True)
+                subprocess.run(['git','-C',str(path),'remote','add','origin','https://example.invalid/org/shared.git'],check=True)
+                targets.append({'repository':str(path),'branch':'main'})
+            self.assertEqual(c.push_identity(targets[0]),c.push_identity(targets[1]))
 
     def test_irreversible_guard_must_be_actual_ancestor(self):
         ir=self.lanes(); ir['nodes'][3]['haltWhen']='exit != 0'; ir['requiredArgs']=['confirm']; ir['nodes'].append(node('effect',irreversible=True,after='b-gate',prompt='Use {{prev}}'))
@@ -128,6 +174,44 @@ class GraphReplay(unittest.TestCase):
         replayed=[r['node'] for r in second['result']['memoRecords'] if r['mode']=='memo']
         self.assertEqual(replayed,['b'])
         self.assertTrue(next(r for r in second['result']['memoRecords'] if r['node']=='b')['reading'])
+
+    def test_call_options_and_reading_indices_bind_exact_raw_receipts(self):
+        ir=self.replay_graph(); ir['argDefaults']={'repairA':'old','repairB':'old'}
+        body="if(opts.label.startsWith('b')) result.sha='c'.repeat(40);"
+        first=execute(ir,body=body)['result']
+        second=execute(ir,args=self.memo_args(first),body=body)['result']
+        for call in second['callRecords']:
+            expected=hashlib.sha256(json.dumps(call['opts'],sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+            self.assertTrue(call['prompt'].startswith('Fluxpoint-Call-Opts-SHA256: '+expected+'\n'))
+        for receipt in second['memoRecords']:
+            if receipt['mode']=='memo':
+                sentinel=second['callRecords'][receipt['readingCallIndex']]
+                self.assertTrue(sentinel['opts']['label'].startswith('tree-check:'))
+                self.assertEqual(sentinel['result']['tip'],receipt['reading']['tip'])
+                self.assertEqual(receipt['source']['artifactSha256'],'f'*64)
+
+    def test_native_prefix_before_fork_keeps_original_call_slots(self):
+        ir=self.replay_graph(); ir['argDefaults']={'repairA':'old','repairB':'old'}
+        for n in ir['nodes']: n.pop('lane')
+        body="if(opts.label.startsWith('b')) result.sha='c'.repeat(40);"
+        first=execute(ir,body=body)['result']; args=self.memo_args(first)
+        def digest(value): return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+        args['_prefix']=[dict(promptSha256=hashlib.sha256(row['prompt'].encode()).hexdigest(),optsSha256=digest(row['opts']),resultSha256=digest(row['result']),runId='source-run',artifactSha256='f'*64,agentId='prefix-'+str(i)) for i,row in enumerate(first['callRecords'])]
+        out=execute(ir,args=args,body=body)
+        self.assertNotIn('start:tree-check:replay a',out['events'])
+        a=next(row for row in out['result']['memoRecords'] if row['node']=='a')
+        self.assertEqual(a['mode'],'prefix')
+
+    def test_fresh_fanout_calls_never_replay_from_runtime_prefix(self):
+        ir=graph([node('quotes',fresh=True,foreach='assets',prompt='Read live {{item}}')]); ir['lists']={'assets':['a','b']}
+        first=execute(ir)['result']
+        def digest(value): return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+        prefix=[dict(promptSha256=hashlib.sha256(row['prompt'].encode()).hexdigest(),optsSha256=digest(row['opts']),resultSha256=digest(row['result']),runId='source-run',artifactSha256='f'*64,agentId='p'+str(i)) for i,row in enumerate(first['callRecords'])]
+        second=execute(ir,args={'_prefix':prefix,'_replayLaunchNonce':'another-fresh','_resumeFromRunId':'source-run'})['result']
+        workers=[row for row in second['callRecords'] if row['opts']['label'].startswith('quotes:')]
+        self.assertEqual(len(workers),2)
+        for row in workers:
+            self.assertEqual(row['mode'],'live'); self.assertIn('FRESH NODE LAUNCH NONCE: another-fresh',row['prompt'])
 
     def test_gate_replay_needs_replayed_ancestor_and_current_tip(self):
         ir=self.replay_graph(); ir['argDefaults']={'repairA':'old','repairB':'old'}
@@ -178,6 +262,8 @@ class GraphReplay(unittest.TestCase):
         original=subprocess.run(['git','show','c848f07:plugins/fluxpoint/scripts/compile-graph.py'],text=True,capture_output=True,check=True).stdout
         scope={'__name__':'baseline','__file__':str(SCRIPTS/'compile-graph.py')}; exec(compile(original,'baseline','exec'),scope)
         ir=graph([node('a'),node('b',after='a',prompt='Use {{prev}}')])
+        self.assertEqual(c.emit(ir,CONTRACTS),scope['emit'](ir,CONTRACTS))
+        ir['argDefaults']={'configuration':'default'}; ir['nodes'][0]['prompt']='Read {{A.configuration}}'
         self.assertEqual(c.emit(ir,CONTRACTS),scope['emit'](ir,CONTRACTS))
 
 if __name__=='__main__': unittest.main()

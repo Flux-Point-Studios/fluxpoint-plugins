@@ -26,7 +26,7 @@ IR_FENCE = re.compile(r"```json\s+graph-ir\s*\n(.*?)\n```", re.S)
 # mutates + independent already does, properly. See validate().
 TIER = re.compile(r"^(schema-only|skeptic:(\d+)|panel:(\d+)|prove:([a-z][a-z0-9-]*)|judges:(\d+))$")
 GATES = ".fluxpoint-gates.json"
-HALT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=|>=|<=|>|<)\s*(-?\d+|'[^']*')\s*$")
+HALT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=|>=|<=|>|<)\s*(-?\d+|'[^']*'|null)\s*$")
 # Hyphens are in the class because decision ids are kebab-case by rule, so
 # {{decisions.vault-window}} has to be a token the substituter can see. An
 # unrecognised root is a compile error either way, so widening this cannot
@@ -632,10 +632,67 @@ def valid_branch_target(target):
         return False
     repo, branch = target.get("repository"), target.get("branch")
     return (isinstance(repo, str) and bool(repo.strip()) and not repo.startswith('-')
-            and not any(ord(c) < 32 for c in repo) and isinstance(branch, str)
+            and not any(ord(c) < 32 or c in '$`%"' for c in repo) and isinstance(branch, str)
             and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch))
             and not any(part in ('', '.', '..') or part.endswith('.lock') for part in branch.split('/'))
-            and '..' not in branch and not branch.endswith('.'))
+            and '..' not in branch and not branch.endswith('.') and not branch.startswith('refs/'))
+
+
+def push_identity(target):
+    """A ref is shared across worktrees, path aliases and clones of an origin.
+
+    Only local Git configuration is read; compilation never contacts a remote.
+    Unavailable checkouts retain a conservative normalized declaration identity.
+    """
+    import posixpath
+    import subprocess
+    from urllib.parse import urlsplit, unquote
+    repo = target['repository']
+    if os.path.isdir(repo):
+        try:
+            origin = subprocess.run(['git', '-C', repo, 'config', '--get', 'remote.origin.url'],
+                                    capture_output=True, text=True, timeout=5)
+            if origin.returncode == 0 and origin.stdout.strip():
+                value = origin.stdout.strip()
+                if not re.match(r'^[A-Za-z][A-Za-z0-9+.-]*://|^[^/@]+@[^/:]+:', value) and not os.path.isabs(value):
+                    value = os.path.join(repo, value)
+                repo = value
+            else:
+                common = subprocess.run(['git', '-C', repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                                        capture_output=True, text=True, timeout=5)
+                repo = common.stdout.strip() if common.returncode == 0 else os.path.realpath(repo)
+        except (OSError, subprocess.SubprocessError):
+            repo = os.path.realpath(repo)
+    if '://' in repo:
+        url = urlsplit(repo)
+        if url.scheme == 'file':
+            repo = unquote(url.path)
+        else:
+            host = (url.hostname or '').lower()
+            path = unquote(url.path).strip('/')
+            if host in ('github.com', 'gitlab.com', 'bitbucket.org'):
+                path = path.lower()
+            path = path.removesuffix('.git')
+            port = url.port
+            if (url.scheme, port) in (('http', 80), ('https', 443), ('ssh', 22)):
+                port = None
+            return ('remote:' + host + (':' + str(port) if port else '') + '/' + path, target['branch'])
+    scp = re.fullmatch(r'[^/@]+@([^/:]+):(.+)', repo)
+    if scp:
+        host, path = scp.groups()
+        path = path.strip('/')
+        if host.lower() in ('github.com', 'gitlab.com', 'bitbucket.org'):
+            path = path.lower()
+        path = path.removesuffix('.git')
+        return ('remote:' + host.lower() + '/' + path, target['branch'])
+    repo = repo.replace('\\', '/')
+    repo = posixpath.normpath(repo)
+    if re.match(r'^[A-Za-z]:', repo) or repo.startswith('//'):
+        repo = repo.lower()
+    else:
+        repo = os.path.realpath(repo).replace('\\', '/')
+    repo = repo.removesuffix('/.git')
+    return ('path:' + repo, target['branch'])
 
 
 def _validate_reduce(n, where, seen, contracts):
@@ -941,7 +998,11 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
                 f.append(f"{where}: pushes requires mutates:true and 'repository#branch' with safe names")
             elif n.get('lane'):
                 target = branch_target(n)
-                key = (os.path.normcase(os.path.normpath(target['repository'])), target['branch'])
+                try:
+                    key = push_identity(target)
+                except ValueError:
+                    f.append(f"{where}: pushes repository has an invalid remote URL")
+                    key = (str(target['repository']), target['branch'])
                 previous = pushes_lanes.setdefault(key, n['lane'])
                 if previous != n['lane']:
                     f.append(f"{where}: lanes '{previous}' and '{n['lane']}' both push {n['pushes']}; keep shared-ref writes in one lane")
@@ -1119,6 +1180,8 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
         if n.get("haltWhen"):
             if not HALT.match(str(n["haltWhen"])):
                 f.append(f"{where}: haltWhen must be '<field> <op> <literal>' (e.g. 'exit != 0')")
+            elif HALT.match(str(n['haltWhen'])).group(3) == 'null' and HALT.match(str(n['haltWhen'])).group(2) not in ('==', '!='):
+                f.append(f"{where}: null halt comparisons support only == or !=")
             elif panel_size(n):
                 # After a panel the node's value is verified items, not its own
                 # contract, so the named field is not there to test. Accepting
@@ -1686,6 +1749,8 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
                 f.append(f"{where}: cannot verify itself")
             if not n.get("independent"):
                 f.append(f"{where}: verifies '{n['verifies']}' but is not marked independent:true")
+            if lane_graph and n['verifies'] not in ancestors(n, by_id):
+                f.append(f"{where}: a lane verifier must declare its producer as an after ancestor; verifies alone does not order concurrent lanes")
         seen[nid] = n
 
     for loop in repair_nodes:
@@ -2483,6 +2548,8 @@ def halt_parts(n):
     """
     m = HALT.match(str(n["haltWhen"]))
     field, op, lit = m.group(1), m.group(2), m.group(3)
+    if lit == 'null':
+        return field, op, 'null'
     op = {"==": "===", "!=": "!=="}.get(op, op)
     lit = json.dumps(int(lit)) if re.fullmatch(r"-?\d+", lit) else json.dumps(lit[1:-1])
     return field, op, lit
@@ -2670,6 +2737,11 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     needs_panel = any(panel_size(n) for n in nodes)
 
     est = estimate_tokens(ir, contracts, specification, embedded_args)
+    if not modern and embedded_args is None:
+        # CLI preflight reports default-priced argument blind spots, while
+        # legacy source bytes (and therefore runtime keys) stay unchanged.
+        est = dict(est, unpriced=[(label, ids) for label, ids in est['unpriced']
+                                  if not label.endswith('(priced at default)')])
     launch = launch_requirements(ir, embedded_args)
     version = compiler_version()
     L = []
@@ -3384,7 +3456,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         if modern:
             a("  const gateId = point.startsWith('before ') ? point.slice(7) : null")
             a("  target = target || (gateId && REPLAY_NODES[gateId] && REPLAY_NODES[gateId].target) || null")
-            a("  const unique = FORKED || forceLive || !!target || !!(gateId && REPLAY_NODES[gateId] && REPLAY_NODES[gateId].fresh)")
+            a("  const unique = FORKED || forceLive || !!target || !!(gateId && (A.rejudge || {})[gateId]) || !!(gateId && REPLAY_NODES[gateId] && REPLAY_NODES[gateId].fresh)")
             a("  const extra = (unique ? '\\nLIVE TREE READING NONCE: ' + A._replayLaunchNonce + ' point ' + point : '') + (gateId ? rejudgeText(gateId) : '')")
             a("  const branchPrompt = target ? '\\nAlso run exactly: git -C ' + JSON.stringify(target.repository) + ' ls-remote origin ' + JSON.stringify('refs/heads/' + target.branch) + '. Return the sole full hexadecimal commit in tip, and the exact declared repository and branch as repository and branch. No matches or multiple matches means tip must be empty. Never use a worker-reported sha.' : ''")
             a("  const treeSchema = target ? { ...C.TreeCheckV1, required: [...new Set([...(C.TreeCheckV1.required || []), 'root','repository','branch','tip'])], properties: { ...C.TreeCheckV1.properties, repository: { type: 'string' }, branch: { type: 'string' }, tip: { type: 'string' } } } : C.TreeCheckV1")
@@ -3405,8 +3477,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             a("    if (r.repository !== target.repository || r.branch !== target.branch || typeof r.tip !== 'string' || !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(r.tip.trim())) { TREE.unknown = true; note('tree-check', 'TREE-UNKNOWN', point + ': branch reading missing or mismatched'); return false }")
             a("    Object.assign(rec, { repository: target.repository, branch: target.branch, tip: r.tip.trim().toLowerCase() })")
             a("  } else Object.assign(rec, { repository: rec.root, branch: null, tip: rec.head })")
-            a("  if (gateId) LIVE_READINGS[gateId] = readingValue(rec)")
-            a("  if (point.startsWith('replay ')) LIVE_READINGS[point.slice(7)] = readingValue(rec)")
+            a("  const readingId = gateId || (point.startsWith('replay ') ? point.slice(7) : null)")
+            a("  if (readingId) { LIVE_READINGS[readingId] = readingValue(rec); LIVE_READING_CALLS[readingId] = CALL_RECORDS.indexOf(CALL_STATE['tree-check:' + point]) }")
         a("  TREE.checks.push(rec)")
         a("  if (!TREE.baseline) { TREE.baseline = rec; return true }")
         a("  if (rec.head === TREE.baseline.head && rec.porcelain === TREE.baseline.porcelain) return true")
@@ -3501,14 +3573,13 @@ def emit_scheduled(ir, specification=False):
     lines = []
     tree_guard = ir.get('treeGuard', True)
     def body(n, join=False):
-        out = []
+        # Bind the legacy early-return name lexically. Rewriting generated
+        # JavaScript text would also rewrite a user's literal prompt prose.
+        out = ['const summary = halt']
         if tree_guard and (join or n.get('independent') or prove_gate(n)):
             point = 'before ' + n['id']
             out.append(f"if (!await treeCheck({js_str(point)}, {js_str(n.get('phase', 'Run'))}, null, {'true' if join else 'false'})) return halt(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
         code = emit_repair(n, ir, specification, replay_runtime=True) if n in repair_loops(ir) else emit_node(n, ir, specification=specification, replay_runtime=True)
-        # Every old local early return becomes a shared halt. The coordinator
-        # waits for all in-flight lanes and produces exactly one final summary.
-        code = re.sub(r"return summary\(([^\n]*?)\)", r"return halt(\1)", code)
         out.append(code)
         return '\n'.join(out)
     fork_seen = False
@@ -3750,6 +3821,8 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         on_red = n.get("onRed", "drop+log")
         has_ceiling = (ir.get("budget") or {}).get("maxNodes") is not None
         a(f"let {var} = []")
+        if n.get('contract') == 'SliceV1':
+            a(f"let packetConflict_{var} = null")
         a(f"let dead_{var} = 0")
         if has_ceiling:
             a(f"let skipped_{var} = 0")
@@ -3779,6 +3852,8 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
             a(f"    (item, _o, i) => spawn({prompt}, {opts(n, ir, phase, label)}),")
             a("    async (prev, item, i) => {")
             a(dead_branch)
+            if n.get('contract') == 'SliceV1':
+                a(f"      if (Object.prototype.hasOwnProperty.call(prev, 'packetConflict')) {{ packetConflict_{var} = prev; return [] }}")
             a(f"      const produced = prev[{js_str(over)}] || []")
             a(f"      note({js_str(nid)}, 'OK', `${{item.key || i}}: ${{produced.length}} item(s)`, "
               f"{{ produced: produced.length }})")
@@ -3825,6 +3900,8 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
                 a("    return summary('BUDGET-EXHAUSTED')")
                 a("  }")
         a("}")
+        if n.get('contract') == 'SliceV1':
+            a(f"if (packetConflict_{var} || {var}.some(r => r && Object.prototype.hasOwnProperty.call(r, 'packetConflict'))) {{ RESULTS[{js_str(nid)}] = packetConflict_{var} || {var}; note({js_str(nid)}, 'PACKET-CONFLICT', 'locked-check conflict requires a recorded operator ruling'); return summary('HALTED') }}")
         if red_team_checked(n):
             a(emit_red_team_check(n, var, many=True))
         if n.get("haltWhen"):
@@ -3885,6 +3962,8 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
                 a("  return summary('BUDGET-EXHAUSTED')")
             a("}")
             a(f"const {raw} = ok_{var} ? await spawn({prompt}, {opts(n, ir, phase, label)}) : null")
+        if n.get('contract') == 'SliceV1':
+            a(f"if ({raw} && Object.prototype.hasOwnProperty.call({raw}, 'packetConflict')) {{ RESULTS[{js_str(nid)}] = {raw}; note({js_str(nid)}, 'PACKET-CONFLICT', 'locked-check conflict requires a recorded operator ruling'); return summary('HALTED') }}")
         # A node restored from the ledger already carries its provenance.
         if n.get("irreversible"):
             a(f"if (!replayed_{var}) {{")
@@ -4466,7 +4545,7 @@ def archive_compiled(root, args, source):
     return target
 
 
-def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, projects=None, imports_resolved=None):
+def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, projects=None, imports_resolved=None, artifact_sha256=None):
     """Render with verified prior results, but never contact a model or forge.
 
     Branch readings are hypothetical matches. That is why a memo row is
@@ -4474,17 +4553,18 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     """
     import subprocess
     helper = _sibling('replay_memo')
-    source = helper.artifact(root, run_id)['summary']
+    source_artifact, source_sha = _sibling('run_artifacts').read(root, run_id, artifact_sha256=artifact_sha256)
+    source = source_artifact['summary']
     launch = source.get('launch')
     if not isinstance(launch, dict):
         raise ValueError('resume source has no immutable launch stamp')
-    replay = helper.build_memo(root, run_id, launch, compiler_version(), projects=projects)
+    replay = helper.build_memo(root, run_id, launch, compiler_version(), projects=projects, artifact_sha256=source_sha)
     def git(*argv):
         return subprocess.check_output(['git', '-C', root, *argv], text=True, stderr=subprocess.PIPE).strip()
     base = dict(root=git('rev-parse', '--show-toplevel'), sha=git('rev-parse', 'HEAD'),
                 branch=git('branch', '--show-current'), porcelain=subprocess.check_output(['git', '-C', root, 'status', '--porcelain'], text=True))
     runtime_args = dict(replay, _base=base, _launch=launch, _replayLaunchNonce='plan-hypothetical-live-reading',
-                        _resumeFromRunId=run_id, _priorResults=source.get('results') or {}, _ledger={}, _releases={})
+                        _resumeFromRunId=run_id, _resumeArtifactSha256=source_sha, _priorResults=source.get('results') or {}, _ledger={}, _releases={})
     if source.get('ledger'):
         runtime_args['_ledger'] = {r['key']: r for r in source['ledger'] if isinstance(r, dict) and 'key' in r}
     readings = [r.get('verifiedReading') for r in replay.get('_memo', {}).values()]
@@ -4550,6 +4630,7 @@ def main():
     ap.add_argument("--check", action="store_true", help="validate and measure the compiled script")
     ap.add_argument('--plan', action='store_true', help='render a deterministic rerun plan using verified prior results, without agents')
     ap.add_argument('--resume', help='source Workflow run id for --plan')
+    ap.add_argument('--resume-artifact-sha256', help='exact immutable source attempt for --plan (Workflow resumes retain their run id)')
     ap.add_argument('--projects', help='runtime projects directory for journal/transcript provenance')
     ap.add_argument('--packet-edits', help='with --check, measure anchored packet edit proposals from a JSON array without writing files')
     ap.add_argument("--max-script-bytes", type=int, default=WORKFLOW_SCRIPT_LIMIT,
@@ -4682,7 +4763,7 @@ def main():
     if args.plan:
         try:
             rows = rerun_plan(ir, contracts, embedded_args, args.gates_root, args.resume,
-                              specification, args.projects, resolved)
+                              specification, args.projects, resolved, args.resume_artifact_sha256)
         except (OSError, ValueError, TypeError) as exc:
             print('graph-compile: resume plan refused: ' + str(exc), file=sys.stderr)
             return 1
