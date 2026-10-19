@@ -659,6 +659,15 @@ def main():
         print(f"record-run: attestation cross-check failed: {e}", file=sys.stderr)
 
     # 1. Durable provenance artifact.
+    import replay_memo as _replay
+    replay_checked, rejudges, replay_problems = [], [], []
+    try:
+        replay_checked = _replay.verify_replays(args.root, summary, graph=args.graph)
+        rejudges = _replay.verify_rejudges(args.root, summary, graph=args.graph)
+    except (ValueError, OSError, TypeError) as exc:
+        replay_problems.append(str(exc))
+        outcome = "REFUSED-REPLAY"
+        print("record-run: REPLAY-PROVENANCE — " + str(exc), file=sys.stderr)
     repair_checkers, checked, repair_problems = repair_receipts(summary, args.graph)
     for issue in repair_problems:
         print("record-run: checked commit refused — " + issue, file=sys.stderr)
@@ -679,6 +688,9 @@ def main():
                 "checked": checked,
                 "repairCheckers": repair_checkers,
                 "repairCheckProblems": repair_problems,
+                "replayChecked": replay_checked,
+                "rejudges": rejudges,
+                "replayProblems": replay_problems,
                 "outcome": outcome,
                 "nodesOk": ok,
                 "nodesDead": dead,
@@ -695,6 +707,10 @@ def main():
             fh,
             indent=2,
         )
+
+    if replay_problems:
+        print(f"record-run: {art}; artifact retained, Evidence row refused", file=sys.stderr)
+        return 2
 
     # 1d. Lessons, filed from the run's own summary. Written after the run
     # artifact exists on purpose: memory.py refuses provenance that points at
@@ -784,6 +800,11 @@ def main():
             parts.append(f"recall: {recall_stats['provider']}")
         claim += "; memory: " + ", ".join(parts)
     imported = summary.get("decisionsImported") or {}
+    if replay_checked:
+        claim += "; REPLAYED-MEMO " + ", ".join(r["node"] for r in replay_checked)
+    for rejudge in rejudges:
+        detail = json.dumps({k: rejudge.get(k, "") for k in ("gate", "nonce", "reason", "note")}, ensure_ascii=False)
+        claim += "; REJUDGED " + detail.replace("|", "&#124;")
     if imported:
         claim += ("; honors " + ", ".join(
             f"{d}@{imported[d]}" for d in sorted(imported)[:2]))
