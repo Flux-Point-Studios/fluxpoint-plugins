@@ -100,16 +100,22 @@ def _allow(inputs, unpinned_ok):
 def validate_pinned_inputs(root, inputs, unpinned_ok=()):
     """Rehash all pins; recorded/embedded references must name the local store."""
     _allow(inputs, unpinned_ok)
-    store = os.path.abspath(os.path.join(root, STORE))
+    store = os.path.realpath(os.path.join(root, STORE))
+    store_key = os.path.normcase(store)
     records = []
     for trail, text in _strings(inputs):
         for _, path, digest in _pins(text):
-            resolved = os.path.abspath(path if _absolute(path) else os.path.join(root, path))
+            # Resolve the existing parents even when the evidence leaf is
+            # missing. Windows short names and directory aliases must identify
+            # the same store as the recorder's canonical root; symlink leaves
+            # must still resolve inside that store.
+            resolved = os.path.realpath(path if _absolute(path) else os.path.join(root, path))
+            resolved_key = os.path.normcase(resolved)
             try:
-                inside = os.path.commonpath((store, resolved)) == store
+                inside = os.path.commonpath((store_key, resolved_key)) == store_key
             except ValueError:
                 inside = False
-            if not inside or os.path.dirname(resolved) != store:
+            if not inside or os.path.dirname(resolved_key) != store_key:
                 raise ValueError("EVIDENCE-PIN-NOT-STORED: " + path + " (assemble with resume.py first)")
             if not re.fullmatch(re.escape(digest) + r"(?:\.[A-Za-z0-9_-]{1,20})?", os.path.basename(resolved)):
                 raise ValueError("EVIDENCE-PIN-NAME: " + path + " does not name its full hash")
@@ -121,7 +127,7 @@ def validate_pinned_inputs(root, inputs, unpinned_ok=()):
 def prepare_pinned_inputs(root, inputs, unpinned_ok=()):
     """Copy verified pin bytes and rewrite references, preserving all other text."""
     _allow(inputs, unpinned_ok)
-    store = os.path.abspath(os.path.join(root, STORE))
+    store = os.path.realpath(os.path.join(root, STORE))
 
     def rewrite(text):
         replacements = []

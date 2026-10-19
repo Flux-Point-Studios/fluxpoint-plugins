@@ -48,6 +48,62 @@ class Pins(Fixture):
         digest = hashlib.sha256(content).hexdigest()
         return path, digest, str(path) + "#sha256=" + digest
 
+    def root_alias(self):
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+            short_path.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+            short_path.restype = wintypes.DWORD
+            size = short_path(str(self.root), None, 0)
+            if not size:
+                raise ctypes.WinError(ctypes.get_last_error())
+            buffer = ctypes.create_unicode_buffer(size)
+            result = short_path(str(self.root), buffer, size)
+            if not result or result >= size:
+                raise ctypes.WinError(ctypes.get_last_error())
+            # Volumes without generated 8.3 names still exercise the native
+            # case alias. The recorder resolves both to the existing parent.
+            return Path(buffer.value if buffer.value != str(self.root) else str(self.root).swapcase())
+        alias = self.root / "directory alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        return alias
+
+    def test_store_aliases_resolve_before_present_and_missing_leaf_checks(self):
+        _, digest, ref = self.pin()
+        ep.prepare_pinned_inputs(self.root, {"note": '"' + ref + '"'})
+        alias = self.root_alias()
+        stored = self.root / ep.STORE / (digest + ".json")
+        alias_ref = str(alias / ep.STORE / stored.name) + "#sha256=" + digest
+        canonical_root = os.path.realpath(self.root)
+        records = ep.validate_pinned_inputs(canonical_root, {"note": '"' + alias_ref + '"'})
+        self.assertEqual(len(records), 1)
+        self.assertTrue(os.path.samefile(records[0]["path"], stored))
+        stored.unlink()
+        with self.assertRaisesRegex(ValueError, "EVIDENCE-PIN-MISSING"):
+            ep.validate_pinned_inputs(canonical_root, {"note": '"' + alias_ref + '"'})
+
+    def test_preparing_from_root_alias_writes_canonical_store_references(self):
+        _, _, ref = self.pin()
+        prepared = ep.prepare_pinned_inputs(self.root_alias(), {"note": '"' + ref + '"'})
+        self.assertIn(os.path.realpath(self.root / ep.STORE), prepared["note"])
+        records = ep.validate_pinned_inputs(os.path.realpath(self.root), prepared)
+        self.assertEqual(os.path.normcase(os.path.dirname(records[0]["path"])),
+                         os.path.normcase(os.path.realpath(self.root / ep.STORE)))
+
+    def test_store_leaf_symlink_cannot_escape_content_store(self):
+        path, digest, _ = self.pin()
+        stored = self.root / ep.STORE / (digest + ".json")
+        stored.parent.mkdir(parents=True)
+        try:
+            stored.symlink_to(path)
+        except OSError as exc:
+            if os.name != "nt":
+                raise
+            self.skipTest("Windows symlink privilege unavailable: " + str(exc))
+        with self.assertRaisesRegex(ValueError, "EVIDENCE-PIN-NOT-STORED"):
+            ep.validate_pinned_inputs(self.root, {"note": '"' + str(stored) + "#sha256=" + digest + '"'})
+
     def test_copies_rewrites_and_rehashes_nested_notes(self):
         path, digest, ref = self.pin()
         args = {"repair": {"notes": ["Read \"" + ref + "\" and preserve café\r\n"]}}
