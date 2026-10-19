@@ -44,7 +44,7 @@ Campaign section to use it.
     "maxNodes": 100,
     "verifyFloorTokens": 50000,
     "cacheTtl": "1h",
-    "maxEstimatedTokens": 1350000
+    "maxEstimatedTokens": 2250000
   },
   "defaults": {
     "effort": "medium"
@@ -237,10 +237,12 @@ Campaign section to use it.
 - Any node returning nothing halts (`onRed: halt`).
 - Halt conditions a human can name: either harness gate red, a proof-audit
   verdict of WEAKENED, a red-team verdict of BLOCK.
-- Budget: 16 planned agent calls covers the six nodes with headroom; no node
-  carries a panel, so the verification floor is untouched. The cost
-  ceiling is 250k estimated tokens over an estimate of ~192k under the
-  declared 1-hour prompt-cache TTL.
+- Budget: up to 100 work seats, including the independent attack/refutation
+  calls. The cost ceiling is 2.25M estimated tokens, including the expanded
+  locked packet, prompt text and cold prefills under the declared 1-hour
+  prompt-cache TTL. Re-run `--check` with the consuming repository's packet
+  and expected findings; named unpriced runtime substitutions need their own
+  allowance beyond the printed estimate.
 
 ## Decisions
 Appended automatically by `scripts/record-run.py` — do not hand-edit.

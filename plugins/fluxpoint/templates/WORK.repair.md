@@ -17,7 +17,7 @@ the repository's normal merge policy after the final gate passes.
   "budget": {
     "maxNodes": 256,
     "cacheTtl": "1h",
-    "maxEstimatedTokens": 10000000
+    "maxEstimatedTokens": 13000000
   },
   "requiredArgs": [
     "findings"
@@ -251,3 +251,8 @@ and bypass that work-seat ceiling, as tree sentinels do: proof collection and
 cleanup still run after a work seat is declined. Receipt spawn ids are the
 harness's unique Workflow call labels, which the journal exposes; this API
 does not supply provider-specific opaque agent ids.
+
+The 13M estimated-token ceiling includes the expanded locked packet and leaves
+headroom above this template's declared worst-case token estimate. Run `--check`
+against the consuming repository's packet, slices and expected findings before
+launch; runtime substitutions listed as unpriced still need their own allowance.

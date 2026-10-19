@@ -84,8 +84,9 @@ Costs above describe concrete work and risk, not measured time or price estimate
     Actual tree sentinels and deterministic reducers receive no packet.
     This is a stated estimate, not a measured tokenizer count or a context-limit guarantee.
     Template ceilings include packet headroom; recompute against each goal's
-    actual locked packet before launching. The consolidation, discovery and
-    starter example ceilings are 350,000, 2,500,000 and 200,000.
+    actual locked packet before launching. The starter, consolidation, discovery,
+    feature, verified and repair ceilings are 350,000, 600,000, 5,000,000,
+    2,500,000, 2,250,000 and 13,000,000 estimated tokens, respectively.
 
 ## Implementation validation
 

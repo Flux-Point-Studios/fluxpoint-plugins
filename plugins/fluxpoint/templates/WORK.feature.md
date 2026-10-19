@@ -31,7 +31,7 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
     "maxNodes": 100,
     "verifyFloorTokens": 50000,
     "cacheTtl": "1h",
-    "maxEstimatedTokens": 1350000
+    "maxEstimatedTokens": 2500000
   },
   "defaults": {
     "effort": "medium"
@@ -251,11 +251,11 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
 - Dead council seats drop and log; the campaign proceeds if at least one
   design survives.
 - Budget: up to 100 agent calls, verification floor 50k tokens, and a
-  cost ceiling of 1.35M estimated tokens over the compiler's estimate
-  (~222k under the declared 1-hour prompt-cache TTL, prompt text included;
-  `{{prev}}`, `{{decisions.*}}` and the launch `{{A.goal}}` are named as
-  unpriced; the one effort transition into a key the run has not warmed,
-  design -> choose, is a cold prefill the estimate charges for).
+  cost ceiling of 2.5M estimated tokens, including the expanded locked packet,
+  prompt text, verification calls and cold prefills under the declared 1-hour
+  prompt-cache TTL. Re-run `--check` with the consuming repository's packet
+  and expected findings; its named unpriced runtime substitutions still need
+  an allowance beyond the printed estimate.
 - Halt conditions a human can name: independent harness exit != 0, a
   proof-audit verdict of WEAKENED, and a red-team verdict of BLOCK.
 
