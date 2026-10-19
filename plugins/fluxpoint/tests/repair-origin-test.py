@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from repair_proof_fixture import wire as proof_fixture
 
 PLUGIN = Path(__file__).resolve().parents[1]
 SCRIPTS = PLUGIN / 'scripts'
@@ -210,7 +211,7 @@ class RealReplay(unittest.TestCase):
 
 class RuntimeOriginGuards(unittest.TestCase):
     def run_graph(self, mode='introduced', integration=False):
-        ir = {'version': 1, 'campaign': 'origin repair', 'treeGuard': False, 'budget': {'maxNodes': 30},
+        ir = {'version': 1, 'campaign': 'origin repair', 'treeGuard': False, 'budget': {'maxNodes': 500},
               'lists': {'slices': [{'key': 'parser', 'targetClasses': ['decode']}]},
               'nodes': [
                   {'id': 'fix', 'foreach': 'slices', 'mutates': True, 'prompt': 'fix {{roundDir}} {{lastCheck}}', 'contract': 'SliceV1'},
@@ -263,7 +264,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
 '''.replace('MODE', json.dumps(mode))
         with tempfile.TemporaryDirectory() as tmp:
             script, out = Path(tmp) / 'run.mjs', Path(tmp) / 'out.json'
-            script.write_text(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(str(out)) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(str(out)) + ',JSON.stringify({error:String(e)})));')
+            script.write_text(proof_fixture(prefix) + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(str(out)) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(str(out)) + ',JSON.stringify({error:String(e)})));')
             proc = subprocess.run(['node', str(script)], text=True, capture_output=True, timeout=20)
             self.assertTrue(out.exists(), proc.stderr)
             data = json.loads(out.read_text())

@@ -410,6 +410,291 @@
         "type": "string",
         "pattern": "^[0-9a-fA-F]{7,40}$"
       }
+    },
+    "siblings": {
+      "type": "array",
+      "description": "Sibling claims on the fixer; independent executed observations on the checker. finding is a pinned targetClasses identity. NOT-APPLICABLE cites inspected snapshot file:line.",
+      "items": {
+        "type": "object",
+        "required": [
+          "finding",
+          "invariant",
+          "axis",
+          "surface",
+          "attack",
+          "control",
+          "outcome",
+          "reason"
+        ],
+        "properties": {
+          "finding": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "invariant": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "surface": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "axis": {
+            "enum": [
+              "field",
+              "encoding",
+              "caller",
+              "network",
+              "role",
+              "path"
+            ]
+          },
+          "attack": {
+            "type": "object",
+            "required": [
+              "command",
+              "result"
+            ],
+            "properties": {
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "result": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          },
+          "control": {
+            "type": "object",
+            "required": [
+              "command",
+              "result"
+            ],
+            "properties": {
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "result": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          },
+          "outcome": {
+            "enum": [
+              "DEFENDED",
+              "NOT-APPLICABLE"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "outcome"
+              ],
+              "properties": {
+                "outcome": {
+                  "const": "NOT-APPLICABLE"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "pattern": "[^\\s:]+:[0-9]+"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "targetClasses": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      }
+    },
+    "diffCoverage": {
+      "type": "object",
+      "required": [
+        "patchSha256",
+        "hunks"
+      ],
+      "properties": {
+        "patchSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "hunks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "surface",
+              "attack",
+              "control"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "surface": {
+                "enum": [
+                  "outbound-calls",
+                  "alarms",
+                  "timers",
+                  "caches",
+                  "parsers",
+                  "guards",
+                  "other"
+                ]
+              },
+              "attack": {
+                "type": "object",
+                "required": [
+                  "command",
+                  "result"
+                ],
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "result": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  }
+                }
+              },
+              "control": {
+                "type": "object",
+                "required": [
+                  "command",
+                  "result"
+                ],
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "result": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "operational": {
+          "type": "object",
+          "properties": {
+            "latency": {
+              "type": "object",
+              "required": [
+                "command",
+                "result",
+                "deadlineMs",
+                "observedMs"
+              ],
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "result": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "deadlineMs": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "observedMs": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "pool": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "alarmRate": {
+              "type": "object",
+              "required": [
+                "command",
+                "result",
+                "seriesPath",
+                "seriesSha256",
+                "durationSeconds",
+                "falsePositives",
+                "maxPerDay"
+              ],
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "result": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "seriesPath": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "seriesSha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "durationSeconds": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "falsePositives": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "maxPerDay": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "if": {
@@ -430,6 +715,32 @@
       "blockers": {
         "maxItems": 0
       }
-    }
+    },
+    "required": [
+      "targetClasses",
+      "siblings",
+      "diffCoverage"
+    ],
+    "allOf": [
+      {
+        "if": {
+          "required": [
+            "targetClasses"
+          ],
+          "properties": {
+            "targetClasses": {
+              "minItems": 1
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "siblings": {
+              "minItems": 1
+            }
+          }
+        }
+      }
+    ]
   }
 }

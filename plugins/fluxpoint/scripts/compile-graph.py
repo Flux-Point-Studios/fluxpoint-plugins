@@ -2035,6 +2035,18 @@ def plan_groups(ir):
                         groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()})
                     groups.append({"calls": [(work.get("id", "?"), node_key(work, ir))] * count, "park": False,
                                    "kind": "work", "node": work, "items": lists.get(n.get("foreach"), []) if count == fan else [None], "track": frozenset()})
+                    if work.get("contract") == "FixCheckV1":
+                        # At most six diff surface attackers plus the no-claims
+                        # skeptic, and three independent refuters per claim.
+                        # A repaired diff is small; expectItems is per attacker.
+                        seats = 7
+                        refuters = 6 * int(work.get("expectItems", 1)) * 3
+                        groups.append({"calls": [(work.get("id", "?") + ":diff-attack", ("", "medium"))] * (count * seats),
+                                       "park": False, "kind": "work", "node": work, "track": frozenset()})
+                        groups.append({"calls": [(work.get("id", "?") + ":diff-refute", ("", "medium"))] * (count * refuters),
+                                       "park": False, "kind": "refute", "track": frozenset()})
+                        groups.append({"calls": [("repair-witness", sentinel)] * (count * (4 + 2 * (seats + refuters))),
+                                       "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()})
                 if tree_guard:
                     groups.extend([{"calls": [("tree-check", sentinel)], "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()} for _ in range(2 if repair_integrations(n) else 1)])
             continue
@@ -3129,6 +3141,19 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("const FIX_ORIGINS = []")
         with open(os.path.join(os.path.dirname(__file__), "repair-origins.js"), encoding="utf-8") as helpers:
             a(helpers.read())
+        a("const REPAIR_DIFF_REVIEWS = []")
+        plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        a("const REPAIR_PROOF_HELPER = " + js_str(os.path.join(plugin_root, "scripts", "py.sh").replace("\\", "/")))
+        a("const REPAIR_REVIEW_AGENT = " + js_str(os.path.join(plugin_root, "agents", "red-team-reviewer.md").replace("\\", "/")))
+        with open(os.path.join(plugin_root, "workflows", "red-team.js"), encoding="utf-8") as source:
+            catalogue = source.read()
+        for name in ("LENSES", "REFUTERS"):
+            match = re.search(r"const " + name + r" = \[\n.*?\n\]", catalogue, re.S)
+            if not match:
+                raise GraphError("repair review catalogue missing from workflows/red-team.js: " + name)
+            a(match.group(0).replace("const " + name, "const REPAIR_REVIEW_" + name, 1))
+        with open(os.path.join(os.path.dirname(__file__), "repair-proof.js"), encoding="utf-8") as helpers:
+            a(helpers.read())
     if any(judge_size(n) for n in nodes):
         a("const WINNERS = {}")
     a("const RESULTS = {}")
@@ -3179,7 +3204,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     elif repair_loops(ir):
         extra += ", launch: REPAIR_LAUNCH"
     if repair_loops(ir):
-        extra += ", fixOrigins: FIX_ORIGINS"
+        extra += ", fixOrigins: FIX_ORIGINS, repairDiffReviews: REPAIR_DIFF_REVIEWS, repairReadNonce: A._replayLaunchNonce"
     if tree_guard:
         extra += ", tree: TREE"
     if modern:
@@ -4115,7 +4140,8 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
                 if token.startswith("prev."):
                     mapping[token] = f"tokenText(({prev} || {{}})[{js_str(token.split('.', 1)[1])}] ?? null)"
         mapping.update(roundDir="roundDir", lastCheck="tokenText(lastCheck)")
-        pre = "measurePreamble() + " if work.get("isolation") == "measure" else "basePreamble() + " if work.get("mutates") or work.get("isolation") else ""
+        checker_snapshot = work.get("contract") == "FixCheckV1" and work.get("isolation") == "measure"
+        pre = "" if checker_snapshot else "measurePreamble() + " if work.get("isolation") == "measure" else "basePreamble() + " if work.get("mutates") or work.get("isolation") else ""
         if ir.get("authorizedBy") and (work.get("mutates") or work.get("irreversible")):
             pre = "authorizationPreamble() + " + pre
         pre += "longPreamble() + "
@@ -4146,6 +4172,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     a(f"    const fixed = await spawn(reframeBrief + {prompt(fixer)}, {opts(fixer, ir, fixer.get('phase', phase_name), '`' + fixer['id'] + ':${item.key}:r${round_' + var + '}`')})")
     a(f"    if (!fixed) {{ abort_{var} = DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD'; return {{ ...state, roundDir }} }}")
     if fixer.get("contract") == "SliceV1":
+        a(f"    if (Object.prototype.hasOwnProperty.call(fixed, 'packetConflict')) {{ abort_{var} = 'HALTED'; note({js_str(fixer['id'])}, 'PACKET-CONFLICT', 'Locked-check conflict requires a recorded operator ruling'); return {{ ...state, fixed, roundDir }} }}")
         a(f"    const resourceIssue = repairResourcesIssue(fixed)")
         a(f"    if (resourceIssue) {{ abort_{var} = 'HALTED'; note({js_str(nid)}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: item.key, round: round_{var} }}); return {{ ...state, fixed, roundDir }} }}")
     a(f"    const patches = [...(state.patches || []), {{ item: item.key, round: round_{var}, patch: roundDir + 'patch.diff' }}]")
@@ -4154,12 +4181,31 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
 
     a(f"    if (requiredClasses.length && !validReframe_{var}(fixed.reframe, requiredClasses)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: third narrow patch refused`, {{ classes: requiredClasses }}); return {{ ...state, fixed, roundDir }} }}")
     a(f"    if (!affordable(`{nid}:${{item.key}}`)) {{ abort_{var} = 'BUDGET-EXHAUSTED'; return {{ ...state, fixed, roundDir }} }}")
-    a(f"    const checked = await spawn(originBrief + reframeBrief + 'Independently validate any supplied reframe against its authoritative invariant and rerun its measurement yourself; return reframe.validated true only with your own measurement.\\n' + {prompt(n, 'fixed')}, {opts(n, ir, phase_name, '`' + nid + ':${item.key}:r${round_' + var + '}`')})")
+    if n.get("contract") == "FixCheckV1":
+        a("    const patchManifest = await repairReadPatch(originContext)")
+        a(f"    if (patchManifest.issue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'DIFF-UNPROVEN', patchManifest.issue); return {{ ...state, fixed, roundDir, patches }} }}")
+        proof_brief = "repairProofBrief(patchManifest, originContext, fixed) + "
+    else:
+        proof_brief = ""
+    checker_spawn = "repairCheckedSpawn(originContext, patchManifest, " if n.get("contract") == "FixCheckV1" else "spawn("
+    a(f"    let checked = await {checker_spawn}originBrief + {proof_brief}reframeBrief + 'Independently validate any supplied reframe against its authoritative invariant and rerun its measurement yourself; return reframe.validated true only with your own measurement.\\n' + {prompt(n, 'fixed')}, {opts(n, ir, phase_name, '`' + nid + ':${item.key}:r${round_' + var + '}`')})")
     a(f"    if (!checked) {{ abort_{var} = DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD'; return {{ ...state, fixed, roundDir }} }}")
     if n.get("contract") == "RedTeamV1":
         a(f"    if (redTeamIncoherent(checked)) {{ abort_{var} = 'HALTED'; return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
     if n.get("contract") == "FixCheckV1":
         a(f"    if (checked.verdict === 'PASS' && ((checked.findings || []).length || (checked.blockers || []).length)) {{ abort_{var} = 'HALTED'; return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
+        a("    let diffAttack = null")
+        a("    if (checked.verdict === 'PASS') {")
+        a("      const coherent = repairCheckOrigins(checked, originContext)")
+        a(f"      if (coherent.issue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'ORIGIN-UNPROVEN', coherent.issue); return {{ ...state, fixed, roundDir, lastCheck: checked, patches }} }}")
+        a("      const proofIssue = repairSiblingIssue(checked, originContext, fixed) || repairCoverageIssue(checked, patchManifest, fixed) || repairCheckerEvidenceIssue(checked, originContext, patchManifest)")
+        a(f"      if (proofIssue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, proofIssue.split(':')[0], proofIssue); return {{ ...state, fixed, roundDir, lastCheck: checked, patches }} }}")
+        a(f"      const review = await repairDiffAttack(originContext, patchManifest, {js_str(phase_name)})")
+        a("      diffAttack = review.receipt")
+        a(f"      if (review.issue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'DIFF-ATTACK-UNPROVEN', review.issue); return {{ ...state, fixed, roundDir, lastCheck: checked, patches }} }}")
+        a("      if (review.findings.length) checked = { ...checked, verdict: 'FAIL', findings: review.findings, blockers: [], evidence: [...checked.evidence, 'Harness diff attack kept '+review.findings.length+' claim(s) open'], diffAttack }")
+        a("      else checked = { ...checked, diffAttack }")
+        a("    }")
         a("    const attribution = repairCheckOrigins(checked, originContext)")
         a(f"    if (attribution.issue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'ORIGIN-UNPROVEN', attribution.issue, {{ item: item.key, round: round_{var} }}); return {{ ...state, fixed, roundDir, lastCheck: checked, patches }} }}")
 
@@ -4167,7 +4213,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     a(f"    const complete = checked[{js_str(field)}] {op} {lit}")
     a(f"    if (complete && requiredClasses.length && !validReframe_{var}(checked.reframe, requiredClasses, true)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: checker did not validate the class reframe`); return {{ ...state, fixed, roundDir, lastCheck: checked }} }}")
     if n.get("contract") == "FixCheckV1":
-        a(f"    FIX_ORIGINS.push({{ node: {js_str(nid)}, item: item.key, round: round_{var}, origins: attribution.origins, verdict: checked.verdict, context: originContext, findings: checked.findings, blockers: checked.blockers, evidence: checked.evidence, check: checked, commits: checked.verdict === 'PASS' ? (checked.commits || []) : [], sharedResources: fixed.sharedResources || [] }})")
+        a(f"    FIX_ORIGINS.push({{ node: {js_str(nid)}, item: item.key, round: round_{var}, origins: attribution.origins, verdict: checked.verdict, context: originContext, findings: checked.findings, blockers: checked.blockers, evidence: checked.evidence, check: checked, commits: checked.verdict === 'PASS' ? (checked.commits || []) : [], sharedResources: fixed.sharedResources || [], fixerSiblings: fixed.siblings || [], diffAttack }})")
     class_fields = rep.get("classBy") or ["defectClass"]
     a(f"    const classFields = {json.dumps(class_fields)}")
     a(f"    const findings = Array.isArray(checked[{js_str(n.get('verifyOver') or 'findings')}]) ? checked[{js_str(n.get('verifyOver') or 'findings')}] : []")
@@ -4204,6 +4250,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
         a(f"    RESULTS[{js_str(merge['id'])}] = merged")
         a("    if (!merged) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
         if merge.get("contract") == "SliceV1":
+            a(f"    if (Object.prototype.hasOwnProperty.call(merged, 'packetConflict')) {{ INCOMPLETE = true; note({js_str(merge['id'])}, 'PACKET-CONFLICT', 'Locked-check conflict requires a recorded operator ruling'); return summary('HALTED') }}")
             a("    const resourceIssue = repairResourcesIssue(merged)")
             a(f"    if (resourceIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: '_integration', round: round_{var} }}); return summary('HALTED') }}")
         a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff' }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))] }}")
@@ -4213,7 +4260,14 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
         if ir.get("treeGuard", True):
             a(f"    if (!await treeCheck(`integration {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
         a(f"    if (!affordable({js_str(review['id'])})) {{ INCOMPLETE = true; return summary('BUDGET-EXHAUSTED') }}")
-        a(f"    const integrated = await spawn(originBrief + reframeBrief + {prompt(review, 'merged')}, {opts(review, ir, review.get('phase', phase_name), '`' + review['id'] + ':r${round_' + var + '}`')})")
+        if review.get("contract") == "FixCheckV1":
+            a("    const patchManifest = await repairReadPatch(originContext)")
+            a(f"    if (patchManifest.issue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'DIFF-UNPROVEN', patchManifest.issue); return summary('INCOMPLETE') }}")
+            proof_brief = "repairProofBrief(patchManifest, originContext, merged) + "
+        else:
+            proof_brief = ""
+        checker_spawn = "repairCheckedSpawn(originContext, patchManifest, " if review.get("contract") == "FixCheckV1" else "spawn("
+        a(f"    let integrated = await {checker_spawn}originBrief + {proof_brief}reframeBrief + {prompt(review, 'merged')}, {opts(review, ir, review.get('phase', phase_name), '`' + review['id'] + ':r${round_' + var + '}`')})")
         a(f"    RESULTS[{js_str(review['id'])}] = integrated")
         a("    if (!integrated) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
         if review.get("contract") == "RedTeamV1":
@@ -4222,6 +4276,19 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
             a(f"    if (!await treeCheck(`after integration {nid} round ${{round_{var}}}`, {js_str(phase_name)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
         if review.get("contract") == "FixCheckV1":
             a("    if (integrated.verdict === 'PASS' && ((integrated.findings || []).length || (integrated.blockers || []).length)) { INCOMPLETE = true; return summary('HALTED') }")
+            a("    let diffAttack = null")
+            a("    if (integrated.verdict === 'PASS') {")
+            a("      const coherent = repairCheckOrigins(integrated, originContext)")
+            a(f"      if (coherent.issue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'ORIGIN-UNPROVEN', coherent.issue); return summary('INCOMPLETE') }}")
+            a("      const proofIssue = repairSiblingIssue(integrated, originContext, merged) || repairCoverageIssue(integrated, patchManifest, merged) || repairCheckerEvidenceIssue(integrated, originContext, patchManifest)")
+            a(f"      if (proofIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, proofIssue.split(':')[0], proofIssue); return summary('INCOMPLETE') }}")
+            a(f"      const review = await repairDiffAttack(originContext, patchManifest, {js_str(review.get('phase', phase_name))})")
+            a("      diffAttack = review.receipt")
+            a(f"      if (review.issue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'DIFF-ATTACK-UNPROVEN', review.issue); return summary('INCOMPLETE') }}")
+            a("      if (review.findings.length) integrated = { ...integrated, verdict: 'FAIL', findings: review.findings, blockers: [], evidence: [...integrated.evidence, 'Harness integration diff attack kept claims open'], diffAttack }")
+            a("      else integrated = { ...integrated, diffAttack }")
+            a(f"      RESULTS[{js_str(review['id'])}] = integrated")
+            a("    }")
             a("    const attribution = repairCheckOrigins(integrated, originContext)")
             a(f"    if (attribution.issue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'ORIGIN-UNPROVEN', attribution.issue, {{ item: '_integration', round: round_{var} }}); return summary('INCOMPLETE') }}")
 
@@ -4230,7 +4297,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
         a(f"    const integrationFailed = integrated[{js_str(mfield)}] {mop} {mlit}")
         a(f"    if (!integrationFailed && requiredClasses.length && !validReframe_{var}(integrated.reframe, requiredClasses, true)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'independent integration review did not validate the class reframe'); return summary('REFRAME-REQUIRED') }}")
         if review.get("contract") == "FixCheckV1":
-            a(f"    FIX_ORIGINS.push({{ node: {js_str(review['id'])}, item: '_integration', integration: true, round: round_{var}, origins: attribution.origins, verdict: integrated.verdict, context: originContext, findings: integrated.findings, blockers: integrated.blockers, evidence: integrated.evidence, check: integrated, commits: integrated.verdict === 'PASS' ? (integrated.commits || []) : [], sharedResources: merged.sharedResources || [] }})")
+            a(f"    FIX_ORIGINS.push({{ node: {js_str(review['id'])}, item: '_integration', integration: true, round: round_{var}, origins: attribution.origins, verdict: integrated.verdict, context: originContext, findings: integrated.findings, blockers: integrated.blockers, evidence: integrated.evidence, check: integrated, commits: integrated.verdict === 'PASS' ? (integrated.commits || []) : [], sharedResources: merged.sharedResources || [], fixerSiblings: merged.siblings || [], diffAttack }})")
         a(f"    integrationLast_{var} = integrated")
         a("    if (integrationFailed) {")
         a(f"      const classFields = {json.dumps(class_fields)}")

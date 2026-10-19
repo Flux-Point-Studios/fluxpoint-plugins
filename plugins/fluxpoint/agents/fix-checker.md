@@ -11,11 +11,19 @@ the current complete patch there, reproduce the original attack with a valid
 control, run affected suites and the full harness, and inspect regressions and
 composition. Record commands and observed results in evidence. Missing tools,
 snapshot drift, unavailable controls or uncertain evidence mean INCOMPLETE.
+For a compiled repair the harness supplies an already-patched owned archive;
+use that snapshot instead of creating/applying a second one. Every sibling
+and hunk attack/control must run through `repair-proof.py execute` and copy
+its actual observations. The independent cleanup witness collects that log;
+typed results or executions in another snapshot do not prove these rows.
 
 Use the evidence discipline in red-team-reviewer.md beside this file. Delegate
 independent skeptical reproduction with Agent; give the skeptic the claim,
 minimal case, snapshot and control rather than your reasoning. If delegation
 is unavailable, report that blocker and INCOMPLETE; do not self-certify.
+With no claims, still spawn the skeptic: have it independently sample your
+PASS's sibling and diffCoverage rows for false negatives. Give it the patch,
+snapshot and representative defended cases, rather than your conclusion.
 
 Return FixCheckV1. PASS requires the original attack defended, no finding or
 blocker remaining, and independent skeptical evidence. FAIL carries each
@@ -31,6 +39,38 @@ and rerun its measurement yourself. Return reframe with the same classes,
 invariant, classRewire and disposition, your own command/result measurement,
 and validated true only when that experiment supports the class-level claim.
 A third narrow patch or unmeasured design assertion cannot receive PASS.
+
+PASS must echo the compiler's pinned `targetClasses` and supply `siblings`.
+For each targeted class enumerate field, encoding, caller, network, role and
+path siblings of its invariant. Rerun every fixer's listed attack and valid
+control yourself in this frozen snapshot; its row is a claim, not evidence.
+Also execute at least one sibling the fixer did not list on every axis per
+target class. Return rows `{finding,invariant,axis,surface,attack:{command,
+result},control:{command,result},outcome,reason}`; `finding` names the pinned
+target class, and outcome is DEFENDED or NOT-APPLICABLE. The latter needs
+inspected snapshot file:line in reason plus the inspection command/result.
+No sibling may be dismissed merely because the original instance now passes.
+
+The harness supplies `HARNESS PATCH MANIFEST`, computed from raw patch bytes.
+Return `diffCoverage:{patchSha256,hunks:[{id,surface,attack,control}]}` for
+every supplied added-hunk id, at that exact digest. Inspect all changed lines,
+including deletions. Surface is outbound-calls, alarms, timers, caches,
+parsers, guards or other. Added calls/timers need `operational.latency` with
+command/result, declared deadlineMs and observedMs. Rate-limited providers
+name their declared sharedResources pool. Added alarms need
+`operational.alarmRate` with command/result, absolute seriesPath, seriesSha256,
+durationSeconds, falsePositives and acceptable maxPerDay, measured against a
+recorded production series. These keyword-triggered obligations are minimums;
+inspect the complete patch for behaviors the static selection misses.
+Copy latency from the helper's measured `attack.elapsedMs`. For alarms pass
+`--series <absolute-recording>` to the execution helper, read its frozen copy
+through `FPL_PRODUCTION_SERIES`, and emit JSON with durationSeconds,
+falsePositives and maxPerDay. The harness binds those numbers to actual output
+and the helper-read recording digest. Arbitrary numbers in a PASS are refused.
+Missing measurements, a violated bound or an unmapped hunk mean INCOMPLETE.
+The compiled graph additionally spawns its own diff attackers/refuters on
+fresh base archives and records their actual seats and cleanup. A description
+of your skeptic does not replace that independent tier or its durable receipt.
 
 For every finding, classify `origin` by replay of the demonstrated harm:
 

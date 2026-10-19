@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
+sys.path.insert(0, str(SCRIPTS))
 
 
 def module(name):
@@ -78,9 +79,42 @@ class UncheckedRepairsTests(unittest.TestCase):
                'evidence': check['evidence'], 'commits': commits, 'check': check,
                'context': {'base': self.base, 'item': 'slice', 'round': 1,
                            'patches': [patch], 'current': patch, 'targetClasses': ['legacy-defect']}}
-        return {'outcome': 'COMPLETE', 'contracts': {'check': 'FixCheckV1'},
+        summary = {'outcome': 'COMPLETE', 'contracts': {'check': 'FixCheckV1'},
                 'launch': {'root': str(self.root), 'nonce': 'launch'},
                 'tree': {'baseline': {'head': self.base}}, 'fixOrigins': [row]}
+        # A positive fixture includes the new complete diff proof; negative
+        # cases below still mutate one independent obligation at a time.
+        from repair_diff import manifest, AXES
+        data = subprocess.run(['git', '-C', str(self.root), 'diff', '--binary', self.base, commits[-1]],
+                              capture_output=True, check=True).stdout
+        path = Path(patch['patch'])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        measured = manifest(data)
+        observed = {'command': 'pytest regression.py', 'result': 'executed attack and valid control passed'}
+        check['targetClasses'] = ['legacy-defect']
+        check['siblings'] = [dict(finding='legacy-defect', invariant='all sibling paths preserve the invariant',
+                                 axis=axis, surface='independent-' + axis, attack=observed, control=observed,
+                                 outcome='DEFENDED', reason='independently executed sibling case') for axis in AXES]
+        check['diffCoverage'] = {'patchSha256': measured['patchSha256'], 'hunks': [
+            dict(id=h['id'], surface='other', attack=observed, control=observed) for h in measured['hunks']]}
+        nonce = '1' * 64
+        check['checkerWitness'] = dict(status='CLEANED', spawnId='check:slice:r1', base=self.base,
+                                       patchSha256=measured['patchSha256'], readNonce=nonce,
+                                       snapshot='/snapshot/checker', token='f' * 64,
+                                       observations=[dict(base=self.base, patchSha256=measured['patchSha256'], attack=observed, control=observed, reproduces=False)])
+        proof = dict(version=1, base=self.base, item='slice', round=1, patch=patch['patch'],
+                     patchSha256=measured['patchSha256'], readNonce=nonce, clean=True, blockers=[], refuters=[], findings=[])
+        lenses = ['authority', 'value', 'state', 'input', 'operations', 'composition', 'coverage-skeptic']
+        proof['attackers'] = [dict(spawnId='repair-diff:slice:r1:attack:' + lens, lens=lens, completed=True,
+                                   base=self.base, patchSha256=measured['patchSha256'], observations=[
+                                       dict(base=self.base, patchSha256=measured['patchSha256'], attack=observed, control=observed, reproduces=False)]) for lens in lenses]
+        proof['snapshots'] = [dict(status='CLEANED', token=format(i + 1, '064x'), snapshot='/snapshot/' + str(i),
+                                  spawnId=a['spawnId'], observations=a['observations']) for i, a in enumerate(proof['attackers'])]
+        row['diffAttack'] = check['diffAttack'] = proof
+        summary['repairDiffReviews'] = [proof]
+        summary['repairReadNonce'] = nonce
+        return summary
 
     def record_repair(self, commits):
         self.repair_graph()
