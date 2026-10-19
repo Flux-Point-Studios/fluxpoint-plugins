@@ -272,7 +272,10 @@ Workflow tool requires.
    returning the Workflow object on stdout. Read that plan before dispatch.
    It retains the original `_launch`, refreshes `_base`, `_ledger` and
    `_releases`, and loads replay receipts from the original journal and
-   transcripts. Pinned evidence is rehashed at assembly and recording.
+   transcripts. `_resumeArtifactSha256` pins the exact source attempt, including
+   when later resumes keep the same Workflow run ID. Initial assembly embeds
+   effective defaults too; extra unbound recorded inputs are refused. Pinned
+   evidence is rehashed at assembly and recording.
    Do not hand-copy large args or override an embedded key inline. A legacy
    run without embedded args/source archives needs an explicit fresh launch;
    the helper refuses to guess its context. A repair that changed code the campaign's verdicts

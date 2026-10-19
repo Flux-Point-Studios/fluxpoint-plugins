@@ -21,7 +21,8 @@ the runtime projects directory when its journals live outside the default
 Initial JSON contains only non-underscore fields. `--set key=@file` replaces
 one field with the exact UTF-8 text, including CRLF and trailing newlines.
 `--set-json key=@file` replaces a structured value, for example the `rejudge`
-object described by the graph compiler. Duplicate updates, underscore keys
+object described by the graph compiler. The initial assembly embeds every
+effective public IR default alongside the provided values. Duplicate updates, underscore keys
 and malformed JSON are refusals. Every other recorded input, including an
 effective default, is carried unchanged. A change in an IR default therefore
 cannot silently alter a carried repair epoch.
@@ -32,10 +33,17 @@ The immutable source archive is
 `.claude/fluxpoint/compiled/<args-sha>-<source-sha>.graph.js`. Resume verifies
 both hashes, parses the actual constant and cross-checks each embedded value
 against the canonical recorded artifact
-`.claude/fluxpoint/runs/<runId>.json`. Different graph versions may archive the
+`.claude/fluxpoint/runs/<runId>.json`. Every recorded input must be bound to
+`ARGS`; an additional summary field cannot become carried context. A direct
+compile that left defaults or inline inputs outside the embedded set needs a
+fresh fully embedded launch before structured resume. Different graph versions may archive the
 same argument bytes; each source must still pass its own hash. Missing,
 changed or conflicting source/recorded input is a refusal. Keep these local
-archives with the run records. Runs compiled before embedded arguments were
+archives with the run records. Recording preserves immutable attempt snapshots
+at `.claude/fluxpoint/runs/history/<runId>/<artifact-sha>.json` as well as the
+latest artifact. The helper pins the exact source artifact bytes in
+`_resumeArtifactSha256`, so subsequent attempts using the same Workflow run ID
+cannot replace the attempt a replay cites. Runs compiled before embedded arguments were
 introduced require an explicit fresh launch with a reviewed initial JSON;
 there is no trustworthy automated recovery of absent context.
 
@@ -68,7 +76,8 @@ exception, for example `--unpinned-ok /scratch/live-observation.txt`. The
 exception means the operator accepts mutable bytes outside the replay key;
 it is retained in the recorded summary and subsequent resumes. URLs are not
 treated as local evidence paths. Pins and exceptions work in nested argument
-values too. The content store uses each platform's native file paths; a
+values too. A dictionary key containing a local path or pin is refused; put
+the reference in a value so rewriting cannot collide with another key. The content store uses each platform's native file paths; a
 Windows path cannot be resolved by a Linux launcher.
 
 ## Launch identity and replay

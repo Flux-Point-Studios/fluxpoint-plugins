@@ -8,6 +8,7 @@ stdout is a Workflow object. The compiler's deterministic rerun plan and
 diagnostics go to stderr. This helper never dispatches an agent.
 """
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -82,11 +83,13 @@ def _artifact(root, run_id):
     path = base / (_safe_run(run_id) + ".json")
     if path.resolve().parent != base.resolve():
         raise ValueError("RESUME-ARTIFACT: run artifact escapes canonical store")
-    artifact = _json(path)
+    raw = path.read_bytes()
+    artifact = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs,
+                          parse_constant=lambda token: (_ for _ in ()).throw(ValueError("invalid JSON constant " + token)))
     if (not isinstance(artifact, dict) or artifact.get("runId") != run_id
             or not isinstance(artifact.get("summary"), dict)):
         raise ValueError("RESUME-ARTIFACT: recorded run id/summary missing")
-    return artifact["summary"]
+    return artifact["summary"], hashlib.sha256(raw).hexdigest()
 
 
 def _updates(args):
@@ -115,9 +118,10 @@ def assemble(args):
     compiler = _module("compile-graph")
     with open(graph, encoding="utf-8") as handle:
         ir = compiler.extract_ir(handle.read())
-    prior = _artifact(root, args.run) if args.run else None
+    resuming = args.run is not None
+    prior, source_sha = _artifact(root, args.run) if resuming else (None, None)
     allowances = list(args.unpinned_ok)
-    if prior:
+    if resuming:
         carried = recover(root, prior)
         previous_allowances = prior.get("evidenceUnpinned") or []
         if not isinstance(previous_allowances, list):
@@ -128,11 +132,19 @@ def assemble(args):
         carried = _json(args.args)
         if not isinstance(carried, dict) or any(key.startswith("_") for key in carried):
             raise ValueError("RESUME-ARGS-INVALID: initial args must contain only non-underscore keys")
+        # Freeze effective defaults in source too. A summary field absent
+        # from ARGS otherwise has no immutable binding and could be injected
+        # into a later resume without an explicit --set.
+        defaults = ir.get("argDefaults") or {}
+        if not isinstance(defaults, dict):
+            raise ValueError("RESUME-ARGS-INVALID: IR argDefaults must be an object")
+        carried = dict({key: value for key, value in defaults.items()
+                        if not key.startswith("_")}, **carried)
     before = canonical(carried)
     updates = _updates(args)
     assembled = dict(carried, **updates)
     assembled = prepare_pinned_inputs(root, assembled, allowances)
-    if prior:
+    if resuming:
         original = json.loads(before)
         for key in set(original) | set(assembled):
             if key not in updates and (key not in original or key not in assembled or
@@ -144,7 +156,7 @@ def assemble(args):
     launch_args = {"_base": fresh_base(root), "_replayLaunchNonce": secrets.token_hex(32)}
     requirements = compiler.launch_requirements(ir, embedded_args=assembled)["args"]
     needs_launch = any(item["name"] == "_launch" and item["required"] for item in requirements)
-    if prior:
+    if resuming:
         launch = prior.get("launch")
         if needs_launch and not isinstance(launch, dict):
             raise ValueError("RESUME-LAUNCH-MISSING: recorded summary.launch required; never mint a replacement on resume")
@@ -153,6 +165,7 @@ def assemble(args):
                 raise ValueError("RESUME-LAUNCH-INVALID: recorded launch stamp must be an object")
             launch_args["_launch"] = launch
         launch_args["_resumeFromRunId"] = args.run
+        launch_args["_resumeArtifactSha256"] = source_sha
         prior_results = prior.get("results") or {}
         if not isinstance(prior_results, dict):
             raise ValueError("RESUME-RESULTS-INVALID: recorded results must be an object")
@@ -160,7 +173,8 @@ def assemble(args):
         if isinstance(rejudge, dict) and rejudge:
             launch_args["_priorResults"] = {key: prior_results[key] for key in rejudge if key in prior_results}
         memo = _module("replay_memo").build_memo(root, args.run, launch,
-                      compiler.compiler_version(), projects=args.projects)
+                      compiler.compiler_version(), projects=args.projects,
+                      artifact_sha256=source_sha)
         if not isinstance(memo, dict) or set(memo) - {"_memo", "_prefix"}:
             raise ValueError("RESUME-MEMO: loader returned unsupported launch fields")
         launch_args.update(memo)
@@ -180,9 +194,10 @@ def assemble(args):
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(canonical(assembled))
-        if prior:
+        if resuming:
             command = [sys.executable, str(HERE / "compile-graph.py"), "--plan", graph,
-                       "--resume", args.run, "--args", staged, "--gates-root", root]
+                       "--resume", args.run, "--resume-artifact-sha256", source_sha,
+                       "--args", staged, "--gates-root", root]
             if args.projects:
                 command += ["--projects", args.projects]
             plan = _run(command, root)
@@ -199,7 +214,7 @@ def assemble(args):
     finally:
         os.unlink(staged)
     workflow = {"scriptPath": output, "args": launch_args}
-    if prior:
+    if resuming:
         workflow["resumeFromRunId"] = args.run
     return workflow
 

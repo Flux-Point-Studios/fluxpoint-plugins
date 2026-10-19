@@ -64,9 +64,13 @@ def recover(root, summary):
     effective = summary.get("inputs")
     if not isinstance(effective, dict) or any(key.startswith("_") for key in effective):
         raise ValueError("RESUME-INPUTS-INVALID: recorded summary.inputs must be a non-underscore object")
+    unbound = set(effective) - set(recovered)
+    if unbound:
+        raise ValueError("RESUME-INPUT-UNBOUND: recorded inputs absent from immutable ARGS: " +
+                         ", ".join(sorted(unbound)) + "; launch fresh with fully embedded args")
     for key, value in recovered.items():
         if key not in effective or canonical(effective[key]) != canonical(value):
             raise ValueError("RESUME-INPUT-DRIFT: recorded input " + key + " differs from the embedded source")
-    # Include defaults and original inline inputs too. Otherwise a changed IR
-    # default could silently change a supposedly carried value on this resume.
-    return json.loads(canonical(effective))
+    # Every carried value must be bound to immutable source bytes. The
+    # assembler embeds effective defaults on the initial launch as well.
+    return json.loads(canonical(recovered))

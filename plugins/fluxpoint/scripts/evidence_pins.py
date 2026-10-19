@@ -24,6 +24,11 @@ def _strings(value, trail=()):
         yield trail, value
     elif isinstance(value, dict):
         for key, item in value.items():
+            # Structured values render their keys too. Rewriting a key can
+            # silently collide with another key, so require references to be
+            # values where the harness can store and verify them safely.
+            if isinstance(key, str) and ("#sha256=" in key or unpinned_paths(key)):
+                raise ValueError("EVIDENCE-KEY-REFERENCE: move path/pin dictionary key into a value: " + key)
             yield from _strings(item, trail + (key,))
     elif isinstance(value, list):
         for index, item in enumerate(value):

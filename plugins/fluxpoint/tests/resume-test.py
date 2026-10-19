@@ -109,6 +109,15 @@ class Pins(Fixture):
         with self.assertRaisesRegex(ValueError, "EVIDENCE-UNPINNED.*tmp/other"):
             ep.prepare_pinned_inputs(self.root, {"repair": note["repair"] + " Read /tmp/other."})
 
+    def test_reference_bearing_dictionary_keys_are_refused(self):
+        for key in ("/tmp/missing#sha256=" + "0" * 64, "/tmp/unpinned", "C:\\proof\\file.json"):
+            args = {"repair": [{key: "read evidence"}]}
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "EVIDENCE-KEY-REFERENCE"):
+                    ep.prepare_pinned_inputs(self.root, args)
+                with self.assertRaisesRegex(ValueError, "EVIDENCE-KEY-REFERENCE"):
+                    ep.validate_pinned_inputs(self.root, args)
+
     def test_record_refusal_keeps_irreversible_ledger_without_run_artifact(self):
         path, digest, ref = self.pin()
         prepared = ep.prepare_pinned_inputs(self.root, {"note": '"' + ref + '"'})
@@ -128,9 +137,15 @@ class Pins(Fixture):
 
 class ArgsArchive(Fixture):
     def test_recovers_full_text_and_effective_defaults(self):
-        inputs = {"repair": "café\r\nold note\n", "zero": 0, "bool": False}
-        summary, _ = self.archive(inputs, dict(inputs, defaultNote="none"))
-        self.assertEqual(ea.recover(self.root, summary), dict(inputs, defaultNote="none"))
+        inputs = {"repair": "café\r\nold note\n", "zero": 0, "bool": False, "defaultNote": "none"}
+        summary, _ = self.archive(inputs)
+        self.assertEqual(ea.recover(self.root, summary), inputs)
+
+    def test_unbound_recorded_inputs_are_refused_instead_of_carried(self):
+        summary, _ = self.archive({"repair": "old"})
+        summary["inputs"]["newRepair"] = "injected without --set"
+        with self.assertRaisesRegex(ValueError, "RESUME-INPUT-UNBOUND.*newRepair"):
+            ea.recover(self.root, summary)
 
     def test_summary_source_disagreement_is_drift(self):
         summary, _ = self.archive({"repair": "old"})
@@ -181,8 +196,7 @@ class Assembly(Fixture):
         self.file("WORK.md", "```json graph-ir\n" + json.dumps(self.ir) + "\n```\n")
         subprocess.run(["git", "add", "."], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "-qm", "base"], cwd=self.root, check=True)
-        self.summary, _ = self.archive({"repairA": "old A\r\n", "repairB": "old B\n"},
-                                     {"repairA": "old A\r\n", "repairB": "old B\n", "defaultNote": "none"})
+        self.summary, _ = self.archive({"repairA": "old A\r\n", "repairB": "old B\n", "defaultNote": "none"})
         self.summary["launch"] = {"since": "2026-10-18T00:00:00Z", "nonce": "original", "root": str(self.root)}
         self.save()
         self.args = argparse.Namespace(root=str(self.root), graph="WORK.md", run="wf_previous", args=None,
@@ -216,6 +230,10 @@ class Assembly(Fixture):
         self.assertEqual(self.compiled_inputs, {"repairA": "new A\r\nexact trailing\n", "repairB": "old B\n", "defaultNote": "none"})
         self.assertEqual(first["resumeFromRunId"], "wf_previous")
         self.assertEqual(first["args"]["_resumeFromRunId"], "wf_previous")
+        artifact = self.root / ".claude/fluxpoint/runs/wf_previous.json"
+        source_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        self.assertEqual(first["args"]["_resumeArtifactSha256"], source_sha)
+        self.assertEqual(self.memo_builder.call_args.kwargs["artifact_sha256"], source_sha)
         self.assertEqual(first["args"]["_launch"], self.summary["launch"])
         self.assertEqual(first["args"]["_base"]["sha"], subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root).decode().strip())
         self.assertNotEqual(first["args"]["_replayLaunchNonce"], second["args"]["_replayLaunchNonce"])
@@ -228,6 +246,21 @@ class Assembly(Fixture):
         with mock.patch.object(resume, "prepare_pinned_inputs", side_effect=lambda root, args, allowances: dict(args, repairB="accident")):
             with self.assertRaisesRegex(ValueError, "RESUME-CARRIED-DRIFT.*repairB"):
                 resume.assemble(self.args)
+
+    def test_same_workflow_run_id_pins_each_source_attempt_separately(self):
+        first = resume.assemble(self.args)
+        first_sha = first["args"]["_resumeArtifactSha256"]
+        updated = dict(self.summary["inputs"], repairA="second recorded attempt\n")
+        newer, _ = self.archive(updated)
+        newer["launch"] = self.summary["launch"]
+        self.summary = newer
+        self.save()
+        second = resume.assemble(self.args)
+        self.assertEqual(first["resumeFromRunId"], second["resumeFromRunId"])
+        self.assertNotEqual(first_sha, second["args"]["_resumeArtifactSha256"])
+        self.assertEqual(first["args"]["_resumeArtifactSha256"], first_sha)
+        self.assertEqual(self.compiled_inputs["repairA"], "second recorded attempt\n")
+        self.assertEqual(self.memo_builder.call_args.kwargs["artifact_sha256"], second["args"]["_resumeArtifactSha256"])
 
     def test_source_drift_fails_before_any_plan_or_compile(self):
         self.summary["inputs"]["repairB"] = "accident"
@@ -319,7 +352,7 @@ const agent=async(prompt,opts)=>({findings:[]});
         self.assertNotIn("error", result)
         summary = result["summary"]
         self.assertEqual(summary["inputs"], {"note": "café\r\ncarried text\n", "zero": 0, "unchanged": "default"})
-        self.assertEqual(summary["argsSha256"], ea.args_hash({"note": "café\r\ncarried text\n", "zero": 0}))
+        self.assertEqual(summary["argsSha256"], ea.args_hash({"note": "café\r\ncarried text\n", "zero": 0, "unchanged": "default"}))
         outcome = self.file("result.json", json.dumps(summary))
         self.command("record-run.py", "--root", self.root, "--graph", self.graph,
                      "--run-id", "wf_integration", "--result", outcome)
