@@ -49,7 +49,7 @@ NODE_FIELDS = {
     "foreach", "after", "mutates", "independent", "verifies", "verify",
     "verifyOver", "expectItems", "haltWhen", "haltReason", "onRed", "isolation",
     "repeat", "irreversible", "actor", "release", "wake", "decides", "honors",
-    "memory", "reduce",
+    "memory", "reduce", "lane", "pushes", "repository", "branch", "replay", "fresh",
 }
 # The two failure policies. Anything else used to fall back to a default
 # silently — a misspelled 'Halt' weakened the declared policy in the
@@ -134,7 +134,16 @@ SPEC_PREAMBLE = ("Implement and verify this locked requirement packet. Defaulted
                  "Do not weaken check commands or harness files; use the documented harness-only re-lock path "
                  "when wiring changes without changing requirements. "
                  "If a requirement is wrong, return the counterexample and propose anchored file edits "
-                 "as SliceV1.packetEdits for a reviewed spec revision; never apply or re-lock them.\n")
+                 "as SliceV1.packetEdits for a reviewed spec revision; never apply or re-lock them.\n"
+                 "For a BLOCKING repair, FIRST read the repair note's touches and changesBehaviourOf arrays, "
+                 "run specification.py --graph <this graph> --touches <declared paths> (when nonempty) and "
+                 "--reach <changed production paths/modules> (when nonempty), then probe all reached locked checks "
+                 "on a minimal scratch change before other work. A declared path conflict requires a recorded "
+                 "operator ruling and packet revision before dispatch; never treat exit 0 as edit permission. "
+                 "If a reached check goes red, stop immediately and return SliceV1.packetConflict with checks, "
+                 "failing pytest node ids in nodes and a concrete counterexample, plus proposed packetEdits. "
+                 "A conflict only blocks; it never permits skipping or weakening a gate. Static reach narrows "
+                 "only this early probe; all packet checks still run at the gate.\n")
 
 
 class GraphError(Exception):
@@ -584,6 +593,50 @@ def _uses_prev(prompt):
                for t in SUBST.findall(str(prompt)))
 
 
+def after_ids(n):
+    value = n.get("after")
+    return value if isinstance(value, list) else [value] if isinstance(value, str) and value else []
+
+
+def ancestors(n, by_id):
+    found = set()
+    def visit(node):
+        for dep in after_ids(node):
+            if isinstance(dep, str) and dep not in found and dep in by_id:
+                found.add(dep)
+                visit(by_id[dep])
+    visit(n)
+    return found
+
+
+def replay_features(ir, embedded_args=None):
+    return (any(any(key in n for key in ("lane", "replay", "fresh", "pushes", "repository", "branch")) or isinstance(n.get('after'), list) for n in ir.get("nodes", []))
+            or bool((embedded_args or {}).get("rejudge")))
+
+
+def branch_target(n, by_id=None):
+    """Only IR-owned repository/branch names may reach a live sentinel."""
+    if n.get("repository") and n.get("branch"):
+        return {"repository": n["repository"], "branch": n["branch"]}
+    producer = n if n.get("mutates") else (by_id or {}).get(n.get("verifies"), {})
+    pushes = producer.get("pushes")
+    if isinstance(pushes, str) and "#" in pushes:
+        repository, branch = pushes.rsplit("#", 1)
+        return {"repository": repository, "branch": branch}
+    return None
+
+
+def valid_branch_target(target):
+    if not isinstance(target, dict):
+        return False
+    repo, branch = target.get("repository"), target.get("branch")
+    return (isinstance(repo, str) and bool(repo.strip()) and not repo.startswith('-')
+            and not any(ord(c) < 32 for c in repo) and isinstance(branch, str)
+            and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch))
+            and not any(part in ('', '.', '..') or part.endswith('.lock') for part in branch.split('/'))
+            and '..' not in branch and not branch.endswith('.'))
+
+
 def _validate_reduce(n, where, seen, contracts):
     """Findings for one reduce node. `seen` holds the earlier nodes."""
     f = []
@@ -591,7 +644,7 @@ def _validate_reduce(n, where, seen, contracts):
     if not isinstance(red, dict):
         return [f"{where}: reduce must be an object"]
     f += _unknown(f"{where} reduce", red, REDUCE_FIELDS)
-    stray = sorted(set(n) - {"id", "phase", "reduce"})
+    stray = sorted(set(n) - {"id", "phase", "reduce", "lane"})
     if stray:
         f.append(
             f"{where}: reduce cannot be combined with {', '.join(stray)} — a "
@@ -777,7 +830,7 @@ def validate_repair(n, seen, ir, contracts):
     return f
 
 
-def validate(ir, contracts, gates=None, agents=None, specification=None):
+def validate(ir, contracts, gates=None, agents=None, specification=None, embedded_args=None):
     """Return a list of findings. Empty list means the graph may compile."""
     f = []
     if ir.get("version") != 1:
@@ -793,6 +846,11 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
     if not nodes:
         f.append("nodes: at least one node required")
     lists = ir.get("lists") or {}
+    lane_graph = any('lane' in n for n in nodes)
+    if lane_graph and not ir.get('treeGuard', True):
+        f.append('lanes require treeGuard: the fresh fork sentinel also prevents call-index cache replay after the fork')
+    by_id = {n.get('id'): n for n in nodes}
+    pushes_lanes = {}
     roles = ir.get("roles") or {}
     seen = {}
     repair_nodes = repair_loops(ir)
@@ -843,6 +901,39 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
         f += _unknown(f"{where} repeat", n.get("repeat"), REPEAT_FIELDS)
         f += _unknown(f"{where} release", n.get("release"), RELEASE_FIELDS)
         f += _unknown(f"{where} wake", n.get("wake"), WAKE_FIELDS)
+        if "lane" in n and (not isinstance(n['lane'], str) or not IDENT.fullmatch(n['lane'])):
+            f.append(f"{where}: lane must be a lowercase kebab-case name")
+        if "fresh" in n and type(n['fresh']) is not bool:
+            f.append(f"{where}: fresh must be a boolean")
+        if "replay" in n:
+            expected = 'inputs' if n.get('mutates') else 'tree' if n.get('independent') or prove_gate(n) else None
+            if n['replay'] != expected or expected is None:
+                f.append(f"{where}: replay requires 'inputs' on a mutating builder or 'tree' on an independent gate")
+            if any(n.get(k) for k in ('irreversible', 'foreach', 'repeat', 'decides', 'reduce')) or n.get('contract') == 'RedTeamV1':
+                f.append(f"{where}: replay cannot combine with loops, fan-out, decisions, red-team or irreversible effects")
+            if panel_size(n) or judge_size(n) or n.get('actor', 'agent') != 'agent':
+                f.append(f"{where}: replay requires one primary agent contract, without a panel or parked actor")
+            if not ir.get('treeGuard', True):
+                f.append(f"{where}: replay requires treeGuard so moved-tree resumes fail before memo lookup")
+            if not valid_branch_target(branch_target(n, by_id)):
+                f.append(f"{where}: replay requires an IR-owned repository and branch (builder pushes:'repository#branch')")
+            if n['replay'] == 'tree' and (not n.get('repository') or not n.get('branch')):
+                f.append(f"{where}: replay:'tree' requires explicit repository and branch")
+        if any(key in n for key in ('repository', 'branch')) and not valid_branch_target({'repository': n.get('repository'), 'branch': n.get('branch')}):
+            f.append(f"{where}: repository and branch must be supplied together as safe Git target names")
+        if 'pushes' in n:
+            if not n.get('mutates') or not valid_branch_target(branch_target(n)):
+                f.append(f"{where}: pushes requires mutates:true and 'repository#branch' with safe names")
+            elif n.get('lane'):
+                target = branch_target(n)
+                key = (os.path.normcase(os.path.normpath(target['repository'])), target['branch'])
+                previous = pushes_lanes.setdefault(key, n['lane'])
+                if previous != n['lane']:
+                    f.append(f"{where}: lanes '{previous}' and '{n['lane']}' both push {n['pushes']}; keep shared-ref writes in one lane")
+        if n.get('lane') and n.get('mutates') and not n.get('pushes'):
+            f.append(f"{where}: mutating lane nodes require pushes:'repository#branch'")
+        if n.get('irreversible') and n.get('lane'):
+            f.append(f"{where}: irreversible nodes are lane-free barriers")
         if not IDENT.match(str(n.get("id", ""))):
             f.append(f"{where}: id must be lowercase kebab-case")
         if nid in seen:
@@ -919,7 +1010,7 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
             role_agent = ((ir.get("roles") or {}).get(n.get("role")) or {}).get("agentType")
             if role_agent:
                 f.append(f"{where}: judges:N cannot bind a role agentType; its seats return JudgmentV1")
-            pred = seen.get(n.get("after")) or {}
+            pred = seen.get(n.get("after")) or {} if isinstance(n.get('after'), str) else {}
             if not pred.get("foreach") or pred.get("repeat") or panel_size(pred) or pred.get("decides"):
                 f.append(f"{where}: judges:N must consume an earlier unverified foreach of keyed candidate objects")
             else:
@@ -982,10 +1073,21 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
         # Edge layer: dependencies must already exist (keeps the DAG acyclic
         # and the emission order honest).
         after = n.get("after")
-        if after and after not in seen:
-            f.append(f"{where}: after '{after}' is not a node defined earlier")
-        uses_winner = bool(judge_size(seen.get(after) or {}) and "winner" in SUBST.findall(str(n.get("prompt", ""))))
-        if after and not (_uses_prev(n.get("prompt", "")) or uses_winner):
+        if after is not None and (not isinstance(after, (str, list)) or isinstance(after, list) and (not after or any(not isinstance(d, str) for d in after) or len(set(str(d) for d in after)) != len(after))):
+            f.append(f"{where}: after must be one predecessor id or a nonempty unique list of ids")
+        deps = [d for d in after_ids(n) if isinstance(d, str)]
+        for dep in deps:
+            if dep not in seen:
+                f.append(f"{where}: after '{dep}' is not a node defined earlier")
+        uses_winner = bool(isinstance(after, str) and judge_size(seen.get(after) or {}) and "winner" in SUBST.findall(str(n.get("prompt", ""))))
+        if isinstance(after, list):
+            tokens = SUBST.findall(str(n.get('prompt', '')))
+            for dep in deps:
+                if not any(t == 'prev.' + dep or t.startswith('prev.' + dep + '.') for t in tokens):
+                    f.append(f"{where}: after join '{dep}' is never consumed; use {{{{prev.{dep}}}}} or {{{{prev.{dep}.<field>}}}}")
+            if 'prev' in tokens:
+                f.append(f"{where}: a list after requires named {{{{prev.<id>}}}} projections, not an ambiguous whole prev")
+        elif after and not (_uses_prev(n.get("prompt", "")) or uses_winner):
             # Nodes already run in declaration order, so an `after` whose
             # output is never consumed is a phantom edge: it reads as a
             # dependency in the spec and constrains nothing in the run.
@@ -1064,7 +1166,7 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
         bound = {"A", "campaign"}
         if n.get("after"):
             bound.add("prev")
-            if judge_size(seen.get(n["after"]) or {}):
+            if isinstance(n['after'], str) and judge_size(seen.get(n["after"]) or {}):
                 bound.add("winner")
         if n.get("foreach"):
             bound.update({"item", "i"})
@@ -1120,6 +1222,15 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                 # precise failure this scope check exists to prevent. So the
                 # token is validated all the way down, and emission binds it.
                 if root == "prev" and "prev" in site_bound and tok != "prev":
+                    if isinstance(after, list) and site != 'haltReason':
+                        parts = tok.split('.')
+                        if len(parts) not in (2, 3) or parts[1] not in deps or '[' in tok:
+                            f.append(f"{where}: {site} requires prev.<predecessor id> or prev.<predecessor id>.<field> for a join")
+                        elif len(parts) == 3:
+                            pred = seen.get(parts[1]) or {}
+                            if result_shape(pred) != 'object' or parts[2] not in contracts.get(pred.get('contract'), {}).get('properties', {}):
+                                f.append(f"{where}: {site} {{{{{tok}}}}} does not name a field on that predecessor's object contract")
+                        continue
                     if "[" in tok or tok.count(".") != 1:
                         f.append(
                             f"{where}: {site} uses {{{{{tok}}}}} — only "
@@ -1512,6 +1623,7 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
             guards = [
                 o for o in seen.values()
                 if o.get("independent") and o.get("haltWhen") and o.get("verifies")
+                and (not lane_graph or o.get('id') in ancestors(n, by_id))
             ]
             if not guards:
                 f.append(
@@ -1561,6 +1673,11 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
                 f.append(f"{where}: verifies '{n['verifies']}' but is not marked independent:true")
         seen[nid] = n
 
+    for loop in repair_nodes:
+        for owned in repair_owned({'nodes': [loop]}) | {loop.get('verifies')}:
+            if owned in by_id and by_id[owned].get('lane') != loop.get('lane'):
+                f.append(f"node '{loop.get('id')}': fixer, checker and integration nodes must stay inside one lane")
+
     # Budget layer: fan-out must fit the declared ceiling.
     budget = ir.get("budget") or {}
     max_nodes = budget.get("maxNodes")
@@ -1585,7 +1702,7 @@ def validate(ir, contracts, gates=None, agents=None, specification=None):
         if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
             f.append("budget.maxEstimatedTokens must be a positive integer")
         elif ttl is None or ttl in CACHE_TTLS:
-            est = estimate_tokens(ir, contracts, specification)
+            est = estimate_tokens(ir, contracts, specification, embedded_args)
             if est["total"] > cap:
                 f.append(
                     f"budget: the graph is estimated at ~{est['total']:,} tokens "
@@ -1602,15 +1719,17 @@ def red_team_sources(n, ir):
     """Lens producers on the declared path into a red-team gate."""
     by_id = {x.get("id"): x for x in ir.get("nodes", [])}
     found, visited = [], set()
-    current = n
-    while current:
-        dep = current.get("after") or (current.get("reduce") or {}).get("from")
-        if not dep or dep in visited:
-            break
-        visited.add(dep)
-        current = by_id.get(dep)
-        if current and current.get("contract") == "RedTeamV1" and current.get("foreach"):
-            found.append(current["id"])
+    def visit(current):
+        deps = after_ids(current) or ([(current.get('reduce') or {}).get('from')] if current.get('reduce') else [])
+        for dep in deps:
+            if dep in visited or dep not in by_id:
+                continue
+            visited.add(dep)
+            producer = by_id[dep]
+            if producer.get('contract') == 'RedTeamV1' and producer.get('foreach'):
+                found.append(dep)
+            visit(producer)
+    visit(n)
     return found
 
 
@@ -1765,10 +1884,13 @@ def warnings(ir, agents=None, specification=None):
     if serial:
         pairs = ", ".join(f"'{a}' -> '{b}'" for a, b in serial[:3])
         more = f" (+{len(serial) - 3} more)" if len(serial) > 3 else ""
+        by_id = {n.get('id'): n for n in nodes}
+        different = any(by_id.get(a, {}).get('contract') != by_id.get(b, {}).get('contract') for a, b in serial)
+        remedy = ('declare separate lanes and an explicit multi-predecessor join' if different else 'fold them into one foreach fan-out')
         w.append(
             f"{len(serial)} adjacent top-level pair(s) declare no dependency "
             f"({pairs}{more}) yet run serially in declaration order — if they "
-            f"are truly independent, fold them into one foreach fan-out so "
+            f"are truly independent, {remedy} so "
             f"they overlap; if the order matters, it is an undeclared edge")
     return w
 
@@ -1857,6 +1979,17 @@ def plan_groups(ir):
     if tree_guard:
         groups.append({"calls": [("tree-check", sentinel)], "park": False, "sentinel": True,
                        "track": frozenset()})
+        if replay_features(ir):
+            extra_checks, fork_seen = 0, False
+            for kind, stage in execution_stages(ir):
+                if kind == 'lanes':
+                    extra_checks += 1
+                    fork_seen = True
+                elif (fork_seen or isinstance(stage.get('after'), list)) and not (stage.get('independent') or prove_gate(stage)):
+                    extra_checks += 1
+            extra_checks += sum(n.get('replay') == 'inputs' for n in ir.get('nodes', []))
+            groups.extend({'calls': [('tree-check', sentinel)], 'park': False, 'sentinel': True,
+                           'kind': 'sentinel', 'track': frozenset()} for _ in range(extra_checks))
     return groups
 
 
@@ -1876,11 +2009,12 @@ def held_by(ir):
         if nid in memo:
             return memo[nid]
         n = by_id.get(nid) or {}
-        dep = n.get("after") or (n.get("reduce") or {}).get("from")
+        deps = after_ids(n) or ([(n.get('reduce') or {}).get('from')] if n.get('reduce') else [])
         out = frozenset()
-        if isinstance(dep, str) and dep in by_id and dep not in stack:
-            up = walk(dep, stack | {nid})
-            out = up | ({dep} if by_id[dep].get("actor", "agent") != "agent" else frozenset())
+        for dep in deps:
+            if isinstance(dep, str) and dep in by_id and dep not in stack:
+                up = walk(dep, stack | {nid})
+                out = out | up | ({dep} if by_id[dep].get("actor", "agent") != "agent" else frozenset())
         memo[nid] = out
         return out
 
@@ -1977,7 +2111,7 @@ def prompt_bytes(texts, ir, item=None, index=0):
     return shared, varying
 
 
-def estimate_tokens(ir, contracts=None, specification=None):
+def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
     """Cold-input-token equivalents for the worst-case plan.
 
     A call's prefix is warm when an earlier call at the same (model, effort)
@@ -1995,6 +2129,9 @@ def estimate_tokens(ir, contracts=None, specification=None):
     could price, and the assumptions it rested on, so a reader can disagree
     with a number rather than a feeling.
     """
+    source_ir = ir
+    if embedded_args is not None:
+        ir = dict(ir, argDefaults=dict(ir.get("argDefaults") or {}, **embedded_args))
     budget = ir.get("budget") or {}
     ttl = budget.get("cacheTtl") or DEFAULT_CACHE_TTL
     persist = CACHE_TTLS.get(ttl, 300) >= 3600
@@ -2057,7 +2194,7 @@ def estimate_tokens(ir, contracts=None, specification=None):
         "total": sum(r["estimatedTokens"] for r in per_node.values()),
         "calls": calls, "cold": cold, "ttl": ttl,
         "perNode": per_node,
-        "unpriced": unpriced_expansions(ir),
+        "unpriced": unpriced_expansions(source_ir, embedded_args),
         "assumptions": {"prefixTokens": PREFIX_TOKENS,
                         "specificationInputTokens": spec_input,
                         "promptTokensPerByte": PROMPT_TOKENS_PER_BYTE,
@@ -2068,7 +2205,7 @@ def estimate_tokens(ir, contracts=None, specification=None):
     }
 
 
-def unpriced_expansions(ir):
+def unpriced_expansions(ir, embedded_args=None):
     """[(token, [nodeId, ...])] for every {{token}} the estimate prices at 0.
 
     A run-time value — a predecessor's result, an honored decision, what a
@@ -2095,8 +2232,8 @@ def unpriced_expansions(ir):
                     arg = tok.split(".")[1].split("[")[0] if "." in tok else None
                     if arg is None:
                         label = "{{A}} (launch args)"
-                    elif arg not in defaults:
-                        label = "{{A." + arg + "}} (launch arg)"
+                    elif arg not in (embedded_args or {}):
+                        label = "{{A." + arg + "}} (" + ("priced at default" if arg in defaults else "launch arg") + ")"
                 if label:
                     ids = found.setdefault(label, [])
                     if n.get("id", "?") not in ids:
@@ -2210,7 +2347,7 @@ def js_tmpl(s):
 TEXT_ROOTS = {"item", "A", "lastCheck"}
 
 
-def js_template(s, mapping=None):
+def js_template(s, mapping=None, safe_args=False):
     """Render an IR prompt as a JS template literal, honoring {{expr}}.
 
     mapping rewrites bare tokens to JS expressions, which is how {{prev}}
@@ -2227,6 +2364,9 @@ def js_template(s, mapping=None):
         tok = m.group(1)
         if tok in mapping:
             return "${" + mapping[tok] + "}"
+        if safe_args and tok.split('.')[0].split('[')[0] == 'A':
+            path = re.findall(r'[^.\[\]]+', tok)[1:]
+            return '${tokenText(promptArg(' + json.dumps(path) + '))}'
         if tok.split(".")[0].split("[")[0] in TEXT_ROOTS:
             return "${tokenText(" + tok + ")}"
         return "${" + tok + "}"
@@ -2248,7 +2388,15 @@ def subst_mapping(n, var=None, texts=None):
     """
     texts = [str(n.get("prompt", ""))] if texts is None else texts
     mapping = {}
-    if n.get("after"):
+    if isinstance(n.get('after'), list):
+        for dep in after_ids(n):
+            mapping['prev.' + dep] = f"JSON.stringify(RESULTS[{js_str(dep)}])"
+            for text in texts:
+                for tok in SUBST.findall(text):
+                    if tok.startswith('prev.' + dep + '.'):
+                        fld = tok.split('.', 2)[2]
+                        mapping[tok] = f"JSON.stringify((RESULTS[{js_str(dep)}] || {{}})[{js_str(fld)}] ?? null)"
+    elif n.get("after"):
         mapping["winner"] = f"JSON.stringify(WINNERS[{js_str(n['after'])}])"
         # {{prev}} carries the predecessor's contract into this prompt -- the
         # justified barrier (judging candidates side by side, reducing a set).
@@ -2403,7 +2551,7 @@ def compiler_version():
         return "unknown"
 
 
-def launch_requirements(ir):
+def launch_requirements(ir, embedded_args=None):
     """One launch contract for emitted refusals, metadata and CLI reports.
 
     A tree-guarded non-isolated graph still accepts an absent launch reading
@@ -2429,6 +2577,14 @@ def launch_requirements(ir):
             check += " || typeof v.root !== 'string' || !v.root.trim()"
         args.append(dict(name="_launch", fields=fields, required=True,
                          condition="prove: or repair nodes", producer="attest.py --stamp", check=check))
+    if replay_features(ir, embedded_args) and not any(a['name'] == '_launch' for a in args):
+        args.append(dict(name='_launch', fields=['nonce', 'root'], required=True,
+                         condition='lanes or per-node replay', producer='graph-run launcher (immutable across resumes)',
+                         check="!v || typeof v !== 'object' || Array.isArray(v) || typeof v.nonce !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v.nonce) || typeof v.root !== 'string' || !v.root.trim()"))
+    if replay_features(ir, embedded_args) or repair:
+        args.append(dict(name='_replayLaunchNonce', fields=[], required=True,
+                         condition='fresh tree/repair sentinels on every launch and resume', producer='graph-run launcher secrets.token_hex(32)',
+                         check="typeof v !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v)"))
     for name, needed, producer, condition in (
             ("_ledger", any(n.get("irreversible") for n in nodes), "ledger.py --load", "irreversible nodes"),
             ("_releases", any(n.get("actor", "agent") != "agent" for n in nodes), "release.py --load", "human or third-party nodes")):
@@ -2462,10 +2618,11 @@ def launch_requirements_note(ir):
 
 
 def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=None,
-         project_prefix=""):
+         project_prefix="", embedded_args=None):
     nodes = ir["nodes"]
     lists = ir.get("lists") or {}
     nodes_by_id = {x.get("id"): x for x in nodes}
+    modern = replay_features(ir, embedded_args)
     tree_guard = ir.get("treeGuard", True)
     measure_nodes = [n for n in nodes if n.get("isolation") == "measure"]
     worktree_nodes = [n for n in nodes
@@ -2488,8 +2645,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             phases.append(p)
     needs_panel = any(panel_size(n) for n in nodes)
 
-    est = estimate_tokens(ir, contracts, specification)
-    launch = launch_requirements(ir)
+    est = estimate_tokens(ir, contracts, specification, embedded_args)
+    launch = launch_requirements(ir, embedded_args)
     version = compiler_version()
     L = []
     a = L.append
@@ -2521,12 +2678,20 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("}")
     a("")
     a("// --- inputs: normalize object | JSON string | bare string, fail loudly ---")
+    if embedded_args is not None:
+        import hashlib
+        packed = json.dumps(embedded_args, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        a('const ARGS = ' + packed + ';')
+        a('const ARGS_SHA256 = ' + json.dumps(hashlib.sha256(packed.encode('utf-8')).hexdigest()) + ';')
     a("const A =")
     a("  args && typeof args === 'object'")
     a("    ? args")
     a("    : typeof args === 'string' && args.trim()")
     a("    ? (() => { try { return JSON.parse(args) } catch { return { target: args } } })()")
     a("    : {}")
+    if embedded_args is not None:
+        a("for (const key of Object.keys(ARGS)) if (Object.prototype.hasOwnProperty.call(A, key)) throw new Error('embedded launch argument cannot be overridden inline: ' + key)")
+        a("Object.assign(A, ARGS)")
     for req in launch["args"]:
         shape = req["name"] + (" {" + ", ".join(req["fields"]) + "}" if req["fields"] else "")
         message = (f"compiled by fluxpoint {version}, which needs args.{shape} from {req['producer']} "
@@ -2537,7 +2702,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         prefix = "" if req["required"] else f"A[{js_str(req['name'])}] !== undefined && "
         a(f"if ({prefix}((value) => {check})(A[{js_str(req['name'])}])) throw new Error({js_str(message)})")
     for k, v in (ir.get("argDefaults") or {}).items():
-        a(f"if (!A[{js_str(k)}]) A[{js_str(k)}] = {js_str(v)}")
+        condition = f"!Object.prototype.hasOwnProperty.call(A, {js_str(k)})" if embedded_args is not None else f"!A[{js_str(k)}]"
+        a(f"if ({condition}) A[{js_str(k)}] = {js_str(v)}")
     a(f"const campaign = {js_str(ir['campaign'])}")
     a("// {{item...}} / {{A...}} render text as itself and structure as JSON.")
     a("function tokenText(v) { return v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v) }")
@@ -2905,6 +3071,14 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         extra += ", fixOrigins: FIX_ORIGINS"
     if tree_guard:
         extra += ", tree: TREE"
+    if modern:
+        extra += ", memoRecords: MEMO_RECORDS, callRecords: CALL_RECORDS, rejudges: REJUDGES"
+        if not prove_nodes and not repair_loops(ir):
+            extra += ", launch: A._launch"
+    if embedded_args is not None:
+        extra += ", argsSha256: ARGS_SHA256, evidenceUnpinned: A._evidenceUnpinned || []"
+        if not modern and not prove_nodes and not repair_loops(ir):
+            extra += ", launch: A._launch || null"
     reducers = [n["id"] for n in nodes if is_reduce(n)]
     if reducers:
         # Named so a consumer counting produced items can tell a reducer's
@@ -2975,7 +3149,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("// and recorded as SKIPPED — a graph never quietly does less than it says.")
     a("function affordable(label) {")
     a("  if (!budget.total) return true")
-    a("  const rem = budget.remaining()")
+    a("  const rem = budget.remaining()" + (" - RESERVED" if modern else ""))
     a("  if (rem < NODE_FLOOR) {")
     a("    log(`budget floor: ${label} NOT RUN — ${Math.round(rem / 1000)}k remaining < ${Math.round(NODE_FLOOR / 1000)}k floor`)")
     a("    INCOMPLETE = true")
@@ -2984,6 +3158,26 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("  return true")
     a("}")
     a("")
+    if modern:
+        a("const REPLAY_COMPILER = " + js_str(version))
+        metadata = {}
+        for node in nodes:
+            nid = node['id']
+            metadata[nid] = dict(id=nid, after=after_ids(node), replay=node.get('replay'),
+                                 contract=node.get('contract'),
+                                 fresh=node.get('fresh', False), irreversible=bool(node.get('irreversible')),
+                                 redTeam=node.get('contract') == 'RedTeamV1', mutates=bool(node.get('mutates')),
+                                 gate=bool(node.get('independent') or prove_gate(node)), verifies=node.get('verifies'),
+                                 verifiedBy=[g['id'] for g in nodes if g.get('verifies') == nid and (g.get('independent') or prove_gate(g))],
+                                 target=branch_target(node, nodes_by_id))
+        a("const REPLAY_NODES = " + json.dumps(metadata, ensure_ascii=False))
+        a("if (!A._launch || typeof A._launch.nonce !== 'string') throw new Error('replay/rejudge requires the immutable launch stamp')")
+        a("if (typeof A._replayLaunchNonce !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(A._replayLaunchNonce)) throw new Error('graph-run must provide a fresh _replayLaunchNonce')")
+        with open(os.path.join(os.path.dirname(__file__), 'graph-replay.js'), encoding='utf-8') as helpers:
+            a(helpers.read())
+        a("const originalSpawn = spawn")
+        a("spawn = (prompt, options) => replaySpawn(prompt, options, originalSpawn)")
+        a("")
     if needs_panel:
         a("// --- verification: refuters attack the claim; majority kills it ---")
         a(f"const VERIFY_FLOOR = {int(floor)}")
@@ -3145,21 +3339,35 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  return /^[A-Za-z]:/.test(root) ? root.toLowerCase() : root")
         a("}")
         a("const TREE = { baseline: null, launch: null, checks: [], unknown: false }")
-        a("async function treeCheck(point, phase) {")
+        a("async function treeCheck(point, phase" + (", target = null, forceLive = false" if modern else "") + ") {")
         a("  // agent(), not spawn(): a guard rail must not spend the node budget")
         a("  // and must still run after the ceiling is reached.")
+        if modern:
+            a("  const gateId = point.startsWith('before ') ? point.slice(7) : null")
+            a("  target = target || (gateId && REPLAY_NODES[gateId] && REPLAY_NODES[gateId].target) || null")
+            a("  const unique = FORKED || forceLive || !!target || !!(gateId && REPLAY_NODES[gateId] && REPLAY_NODES[gateId].fresh)")
+            a("  const extra = (unique ? '\\nLIVE TREE READING NONCE: ' + A._replayLaunchNonce + ' point ' + point : '') + (gateId ? rejudgeText(gateId) : '')")
+            a("  const branchPrompt = target ? '\\nAlso run exactly: git -C ' + JSON.stringify(target.repository) + ' ls-remote origin ' + JSON.stringify('refs/heads/' + target.branch) + '. Return the sole full hexadecimal commit in tip, and the exact declared repository and branch as repository and branch. No matches or multiple matches means tip must be empty. Never use a worker-reported sha.' : ''")
+            a("  const treeSchema = target ? { ...C.TreeCheckV1, required: [...new Set([...(C.TreeCheckV1.required || []), 'root','repository','branch','tip'])], properties: { ...C.TreeCheckV1.properties, repository: { type: 'string' }, branch: { type: 'string' }, tip: { type: 'string' } } } : C.TreeCheckV1")
         a("  const r = await agent(longPreamble() + 'Run exactly three commands in the repository at "
           "the current working directory and return their output verbatim in the "
           "schema, nothing else: `git rev-parse --show-toplevel` as root, `git rev-parse HEAD` as head, and `git status "
           "--porcelain` as porcelain (empty string when clean). Do not fix, clean, "
-          "or explain anything.', "
-          "{ label: `tree-check:${point}`, phase, schema: C['TreeCheckV1'], effort: 'low' })")
+          "or explain anything.'" + (" + extra + branchPrompt, " if modern else ", ") +
+          "{ label: `tree-check:${point}`, phase, schema: " + ("treeSchema" if modern else "C['TreeCheckV1']") + ", effort: 'low' })")
         a("  if (!r) {")
         a("    note('tree-check', 'DEAD', `${point}: sentinel died — tree state unknown`)")
         a("    INCOMPLETE = true; TREE.unknown = true")
         a("    return false")
         a("  }")
         a("  const rec = { point, root: typeof r.root === 'string' ? treeRoot(r.root) : null, head: String(r.head || '').trim(), porcelain: treeNorm(r.porcelain) }")
+        if modern:
+            a("  if (target) {")
+            a("    if (r.repository !== target.repository || r.branch !== target.branch || typeof r.tip !== 'string' || !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(r.tip.trim())) { TREE.unknown = true; note('tree-check', 'TREE-UNKNOWN', point + ': branch reading missing or mismatched'); return false }")
+            a("    Object.assign(rec, { repository: target.repository, branch: target.branch, tip: r.tip.trim().toLowerCase() })")
+            a("  } else Object.assign(rec, { repository: rec.root, branch: null, tip: rec.head })")
+            a("  if (gateId) LIVE_READINGS[gateId] = readingValue(rec)")
+            a("  if (point.startsWith('replay ')) LIVE_READINGS[point.slice(7)] = readingValue(rec)")
         a("  TREE.checks.push(rec)")
         a("  if (!TREE.baseline) { TREE.baseline = rec; return true }")
         a("  if (rec.head === TREE.baseline.head && rec.porcelain === TREE.baseline.porcelain) return true")
@@ -3199,27 +3407,96 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  log('tree guard: no launch reading in args._base — a resume cannot tell whether the tree moved since the run it replays; /fluxpoint:graph-run passes one')")
         a("}")
         a("")
-    consumed = repair_owned(ir)
-    for n in nodes:
-        if n.get("id") in consumed:
-            continue
-        if n in repair_loops(ir):
-            a(emit_repair(n, ir, bool(specification)))
-            continue
-        if tree_guard and (prove_gate(n) or n.get("independent")):
-            a("// The gate is about to mint a verdict about the tree; assert it is")
-            a("// still the tree every earlier verdict described.")
-            a(f"if (!await treeCheck({js_str('before ' + n['id'])}, "
-              f"{js_str(n.get('phase', 'Run'))})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
-        a(emit_node(n, ir, specification=bool(specification)))
-        a("")
+    if modern:
+        a(emit_scheduled(ir, bool(specification)))
+        a("if (HALT) return summary(HALT.outcome)")
+        a("const unreachedRejudges = Object.keys(A.rejudge || {}).filter(id => !REJUDGE_REACHED.has(id))")
+        a("if (unreachedRejudges.length) { note('rejudge', 'REFUSED', 'unreached gates: ' + unreachedRejudges.join(', ')); return summary('REJUDGE-NOT-REACHED') }")
+    else:
+        consumed = repair_owned(ir)
+        for n in nodes:
+            if n.get("id") in consumed:
+                continue
+            if n in repair_loops(ir):
+                a(emit_repair(n, ir, bool(specification)))
+                continue
+            if tree_guard and (prove_gate(n) or n.get("independent")):
+                a("// The gate is about to mint a verdict about the tree; assert it is")
+                a("// still the tree every earlier verdict described.")
+                a(f"if (!await treeCheck({js_str('before ' + n['id'])}, "
+                  f"{js_str(n.get('phase', 'Run'))})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
+            a(emit_node(n, ir, specification=bool(specification)))
+            a("")
     if tree_guard:
         a(f"if (!await treeCheck('campaign-end', {js_str(last_phase)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
     a("return summary('COMPLETE')")
     return "\n".join(L) + "\n"
 
 
-def emit_parked(n, specification=False):
+def execution_stages(ir):
+    """Declaration-ordered lane bodies separated by global join barriers."""
+    consumed = repair_owned(ir)
+    nodes = [n for n in ir['nodes'] if n.get('id') not in consumed]
+    by_id = {n['id']: n for n in ir['nodes']}
+    stages, batch = [], {}
+    batch_ids = set()
+    def flush():
+        if batch:
+            stages.append(('lanes', list(batch.values())))
+            batch.clear()
+            batch_ids.clear()
+    for n in nodes:
+        lane = n.get('lane')
+        foreign = any(d in batch_ids and by_id[d].get('lane') != lane for d in after_ids(n))
+        if not lane or foreign or n.get('irreversible'):
+            flush()
+            stages.append(('join', n))
+        else:
+            batch.setdefault(lane, []).append(n)
+            batch_ids.add(n['id'])
+    flush()
+    return stages
+
+
+def emit_scheduled(ir, specification=False):
+    lines = []
+    tree_guard = ir.get('treeGuard', True)
+    def body(n, join=False):
+        out = []
+        if tree_guard and (join or n.get('independent') or prove_gate(n)):
+            point = 'before ' + n['id']
+            out.append(f"if (!await treeCheck({js_str(point)}, {js_str(n.get('phase', 'Run'))}, null, {'true' if join else 'false'})) return halt(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
+        code = emit_repair(n, ir, specification, replay_runtime=True) if n in repair_loops(ir) else emit_node(n, ir, specification=specification, replay_runtime=True)
+        # Every old local early return becomes a shared halt. The coordinator
+        # waits for all in-flight lanes and produces exactly one final summary.
+        code = re.sub(r"return summary\(([^\n]*?)\)", r"return halt(\1)", code)
+        out.append(code)
+        return '\n'.join(out)
+    fork_seen = False
+    fork_number = 0
+    for kind, stage in execution_stages(ir):
+        if kind == 'join':
+            n = stage
+            joined = fork_seen or isinstance(n.get('after'), list)
+            lines.append(f"await runGraphNode({js_str(n['id'])}, async () => {{\n{body(n, join=joined)}\n}})")
+        else:
+            fork_seen = True
+            fork_number += 1
+            lines.append('if (!HALT) {\nFORKED = true')
+            if tree_guard:
+                phase = stage[0][0].get('phase', 'Run')
+                lines.append(f"if (!await treeCheck('fork {fork_number}', {js_str(phase)}, null, true)) halt(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
+            lines.append('if (!HALT) await parallel([')
+            for lane in stage:
+                lines.append('async () => {')
+                for n in lane:
+                    lines.append(f"await runGraphNode({js_str(n['id'])}, async () => {{\n{body(n)}\n}})")
+                lines.append('},')
+            lines.append('])\n}')
+    return '\n'.join(lines)
+
+
+def emit_parked(n, specification=False, safe_args=False):
     """A node no agent can run: released from a file, or reported blocked.
 
     Emits no spawn at all. The campaign continues past it rather than
@@ -3260,8 +3537,8 @@ def emit_parked(n, specification=False):
         a("        specificationPreamble() +")
     a(f"        `A campaign step cannot be run by an agent and is about to be "
       f"handed to a person. Do not simply agree.\\n\\n` +")
-    a(f"        `The step: ` + {js_template(str(n['prompt']), mapping)} + `\\n` +")
-    a(f"        `What the human is being asked to do: ` + {js_template(instructions, mapping)} + `\\n` +")
+    a(f"        `The step: ` + {js_template(str(n['prompt']), mapping, safe_args)} + `\\n` +")
+    a(f"        `What the human is being asked to do: ` + {js_template(instructions, mapping, safe_args)} + `\\n` +")
     a(f"        `The stated reason no agent can do it: ` + "
       f"{js_str(str(rel.get('whyNotAgent', 'unstated')))} + `\\n\\n` +")
     a("        `FIRST, challenge that reason. Could this actually be done "
@@ -3357,7 +3634,7 @@ def emit_reduce(n, ir):
     return "\n".join(L)
 
 
-def emit_node(n, ir, specification=False):
+def emit_node(n, ir, specification=False, replay_runtime=False):
     nid = n["id"]
     var = "n_" + nid.replace("-", "_")
     phase = n.get("phase", "Run")
@@ -3385,7 +3662,7 @@ def emit_node(n, ir, specification=False):
         pre += "longPreamble() + "
     if specification:
         pre += "specificationPreamble() + "
-    prompt = (pre + js_template(n["prompt"], mapping)) if not is_reduce(n) else None
+    prompt = (pre + js_template(n["prompt"], mapping, replay_runtime or replay_features(ir))) if not is_reduce(n) else None
     L = []
     a = L.append
     kind = "reduce" if is_reduce(n) else tier
@@ -3400,9 +3677,10 @@ def emit_node(n, ir, specification=False):
     # with itself about why.
     has_parked = any(o.get("actor", "agent") != "agent" for o in ir["nodes"])
     dep = n.get("after") or (n.get("reduce") or {}).get("from")
-    guard = has_parked and dep and n.get("actor", "agent") == "agent"
+    guard = has_parked and dep and (n.get("actor", "agent") == "agent" or replay_features(ir))
     if guard:
-        a(f"if (BLOCKED.has({js_str(dep)})) {{")
+        check = (f"{json.dumps(dep)}.some(id => BLOCKED.has(id))" if isinstance(dep, list) else f"BLOCKED.has({js_str(dep)})")
+        a(f"if ({check}) {{")
         a(f"  note({js_str(nid)}, 'BLOCKED', 'blocked on {dep}')")
         a(f"  log(`BLOCKED at {nid}: inherited from {dep}`)")
         a(f"  BLOCKED.add({js_str(nid)})")
@@ -3411,7 +3689,7 @@ def emit_node(n, ir, specification=False):
         a("} else {")
 
     if n.get("actor", "agent") != "agent":
-        a(emit_parked(n, specification))
+        a(emit_parked(n, specification, replay_runtime or replay_features(ir)))
     elif is_reduce(n):
         a(emit_reduce(n, ir))
     elif judge_size(n):
@@ -3695,7 +3973,7 @@ def emit_judges(n, ir, prompt, phase):
     return "\n".join(L)
 
 
-def emit_repair(n, ir, specification=False):
+def emit_repair(n, ir, specification=False, replay_runtime=False):
     """Paired fix/check rounds with per-item dropout and cumulative integration."""
     nid = n["id"]
     var = "n_" + nid.replace("-", "_")
@@ -3720,7 +3998,7 @@ def emit_repair(n, ir, specification=False):
         pre += "longPreamble() + "
         if specification:
             pre += "specificationPreamble() + "
-        return pre + js_template(work["prompt"], mapping)
+        return pre + js_template(work["prompt"], mapping, replay_runtime or replay_features(ir))
 
     a(f"// ===== repair loop {nid}: fixer + fresh-tree checker =====")
     a(f"phase({js_str(phase_name)})")
@@ -4124,11 +4402,111 @@ def prose_pin_findings(text, ir):
     return findings
 
 
+def archive_compiled(root, args, source):
+    """Keep the exact executed source recoverable after the output is replaced."""
+    import hashlib
+    packed = json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    args_sha = hashlib.sha256(packed.encode("utf-8")).hexdigest()
+    raw = source.encode("utf-8")
+    source_sha = hashlib.sha256(raw).hexdigest()
+    folder = os.path.join(root, ".claude", "fluxpoint", "compiled")
+    os.makedirs(folder, exist_ok=True)
+    target = os.path.join(folder, args_sha + "-" + source_sha + ".graph.js")
+    try:
+        with open(target, "xb") as handle:
+            handle.write(raw)
+    except FileExistsError:
+        with open(target, "rb") as handle:
+            if handle.read() != raw:
+                raise ValueError("immutable source archive changed: " + target)
+    return target
+
+
+def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, projects=None, imports_resolved=None):
+    """Render with verified prior results, but never contact a model or forge.
+
+    Branch readings are hypothetical matches. That is why a memo row is
+    conditional rather than presented as a promised replay before the launch.
+    """
+    import subprocess
+    helper = _sibling('replay_memo')
+    source = helper.artifact(root, run_id)['summary']
+    launch = source.get('launch')
+    if not isinstance(launch, dict):
+        raise ValueError('resume source has no immutable launch stamp')
+    replay = helper.build_memo(root, run_id, launch, compiler_version(), projects=projects)
+    def git(*argv):
+        return subprocess.check_output(['git', '-C', root, *argv], text=True, stderr=subprocess.PIPE).strip()
+    base = dict(root=git('rev-parse', '--show-toplevel'), sha=git('rev-parse', 'HEAD'),
+                branch=git('branch', '--show-current'), porcelain=subprocess.check_output(['git', '-C', root, 'status', '--porcelain'], text=True))
+    runtime_args = dict(replay, _base=base, _launch=launch, _replayLaunchNonce='plan-hypothetical-live-reading',
+                        _resumeFromRunId=run_id, _priorResults=source.get('results') or {}, _ledger={}, _releases={})
+    if source.get('ledger'):
+        runtime_args['_ledger'] = {r['key']: r for r in source['ledger'] if isinstance(r, dict) and 'key' in r}
+    readings = [r.get('verifiedReading') for r in replay.get('_memo', {}).values()]
+    readings += [(r.get('payload') or {}).get('tree') for r in replay.get('_memo', {}).values()]
+    readings += [r for r in (source.get('tree') or {}).get('checks', []) if isinstance(r, dict) and r.get('tip')]
+    readings = [r for r in readings if isinstance(r, dict)]
+    compiled = emit(ir, contracts, imports_resolved, specification=specification, embedded_args=public_args)
+    try:
+        result = subprocess.run(['node', os.path.join(os.path.dirname(__file__), 'graph-plan.js')],
+                                input=json.dumps(dict(source=compiled, args=runtime_args, results=source.get('results') or {}, readings=readings)),
+                                capture_output=True, text=True, timeout=30)
+    except FileNotFoundError as exc:
+        raise ValueError('--plan needs Node.js to render the exact generated program locally; it never spawns an agent') from exc
+    if result.returncode:
+        raise ValueError('plan rendering refused: ' + result.stderr.strip())
+    rendered = json.loads(result.stdout)['summary']
+    requested = set(public_args.get('rejudge') or {})
+    reached = {r.get('gate') for r in rendered.get('rejudges', [])}
+    if requested - reached:
+        raise ValueError('rejudge gates are not reached: ' + ', '.join(sorted(requested - reached)))
+    records = {r['node']: r for r in rendered.get('memoRecords', [])}
+    old_inputs = source.get('inputs') or {}
+    effective = dict(ir.get('argDefaults') or {}, **public_args)
+    rows = []
+    for n in ir['nodes']:
+        nid = n['id']
+        record = records.get(nid)
+        if record and record['mode'] == 'prefix':
+            status, cause = 'prefix', 'unchanged runtime call prefix'
+        elif record and record['mode'] == 'memo':
+            status, cause = 'memo if the live read matches', 'same inputs and replayed ancestors; branch reading still required'
+        else:
+            status = 'live'
+            if nid in (public_args.get('rejudge') or {}):
+                cause = 'rejudge'
+            elif n.get('fresh'):
+                cause = 'fresh'
+            elif not record:
+                cause = 'not reached in the prior-result render (' + str(rendered.get('outcome')) + ')' if nid not in rendered.get('results', {}) else 'node has no scalar replay declaration'
+            else:
+                live = [d for d in after_ids(n) if d in records and records[d]['mode'] == 'live']
+                changed = []
+                for tok in SUBST.findall(str(n.get('prompt', ''))):
+                    if tok == 'A':
+                        changed.extend(k for k in set(effective) | set(old_inputs) if effective.get(k) != old_inputs.get(k))
+                    elif tok.startswith('A.'):
+                        key = tok.split('.')[1]
+                        if effective.get(key) != old_inputs.get(key):
+                            changed.append(key)
+                cause = ('live ancestor ' + ', '.join(live) if live else 'arg changed: ' + ', '.join(sorted(set(changed))) if changed else 'no matching verified memo/prefix entry')
+        entries = [e for e in replay.get('_memo', {}).values() if e.get('payload', {}).get('id') == nid]
+        entries += [e for e in replay.get('_prefix', []) if e.get('label') == nid]
+        cost = next((e['cost'] for e in entries if isinstance(e.get('cost'), dict)), {'minutes': None, 'tokens': None})
+        rows.append(dict(node=nid, status=status, cause=cause, minutes=cost.get('minutes'), tokens=cost.get('tokens')))
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("graph", nargs="?", default="WORK.md", help="path to WORK.md (or any file with a graph-ir block)")
     ap.add_argument("-o", "--out", help="path to write the compiled .graph.js")
+    ap.add_argument("--args", help="embed non-underscore args from JSON; none explicitly removes embedded args")
     ap.add_argument("--check", action="store_true", help="validate and measure the compiled script")
+    ap.add_argument('--plan', action='store_true', help='render a deterministic rerun plan using verified prior results, without agents')
+    ap.add_argument('--resume', help='source Workflow run id for --plan')
+    ap.add_argument('--projects', help='runtime projects directory for journal/transcript provenance')
     ap.add_argument('--packet-edits', help='with --check, measure anchored packet edit proposals from a JSON array without writing files')
     ap.add_argument("--max-script-bytes", type=int, default=WORKFLOW_SCRIPT_LIMIT,
                     help="Workflow launch limit in UTF-8 bytes (default: 524288)")
@@ -4143,6 +4521,8 @@ def main():
     ap.add_argument("--gates-root", default=".",
                     help=f"directory holding {GATES}, which prove: tiers resolve against")
     args = ap.parse_args()
+    if args.plan and (not args.resume or args.out or args.check or args.args in (None, 'none')):
+        ap.error('--plan requires --resume RUN and --args FILE, and cannot emit a script')
     if args.max_script_bytes < 1 or args.script_headroom_bytes < 0:
         ap.error("script limit must be positive and headroom margin nonnegative")
     if args.packet_edits and (not args.check or args.out or args.check_script):
@@ -4154,7 +4534,19 @@ def main():
     import specification as spec_mod
 
     projection = None
+    embedded_args = None
     try:
+        if args.args and args.args != "none":
+            with open(args.args, encoding="utf-8") as fh:
+                embedded_args = json.load(fh, object_pairs_hook=spec_mod.unique_keys)
+            if not isinstance(embedded_args, dict) or any(key.startswith("_") for key in embedded_args):
+                raise ValueError("--args must be an object with only non-underscore keys")
+            # Reject NaN/Infinity, which JSON.parse/Workflow cannot represent.
+            json.dumps(embedded_args, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if args.out and os.path.isfile(args.out) and args.args is None:
+            with open(args.out, encoding="utf-8") as fh:
+                if re.search(r"^const ARGS = ", fh.read(), re.MULTILINE):
+                    raise ValueError("embedded args would be dropped: pass --args FILE, or --args none for an explicit fresh launch")
         with open(args.graph, encoding="utf-8") as fh:
             text = fh.read()
         # The graph file's own header says which packet and which contracts
@@ -4187,7 +4579,7 @@ def main():
 
     agents = load_agents(args.gates_root)
     gates = load_gates(args.gates_root)
-    findings = validate(ir, contracts, gates, agents)
+    findings = validate(ir, contracts, gates, agents, embedded_args=embedded_args)
     if not findings:
         findings.extend(prose_pin_findings(text, ir))
     specification = None
@@ -4202,7 +4594,7 @@ def main():
                 packet, identity = projection[:2]
             specification = {"packet": packet, "identity": identity,
                              "path": os.path.relpath(packet_file, args.gates_root).replace(os.sep, "/")}
-            findings = validate(ir, contracts, gates, agents, specification)
+            findings = validate(ir, contracts, gates, agents, specification, embedded_args)
         except (OSError, ValueError, TypeError) as e:
             print(f"graph-compile: spec required before implementation: {e}", file=sys.stderr)
             return 1
@@ -4243,7 +4635,21 @@ def main():
             print(f"  - {f}", file=sys.stderr)
         return 1
 
-    est = estimate_tokens(ir, contracts, specification)
+    if args.plan:
+        try:
+            rows = rerun_plan(ir, contracts, embedded_args, args.gates_root, args.resume,
+                              specification, args.projects, resolved)
+        except (OSError, ValueError, TypeError) as exc:
+            print('graph-compile: resume plan refused: ' + str(exc), file=sys.stderr)
+            return 1
+        print('Rerun plan (no agents; branch memo hits remain conditional on a fresh live reading):')
+        for row in rows:
+            minutes = 'unknown' if row['minutes'] is None else str(row['minutes'])
+            tokens = 'unknown' if row['tokens'] is None else str(row['tokens'])
+            print(f"{row['node']}: {row['status']} — {row['cause']}; recorded minutes={minutes}, tokens={tokens}")
+        return 0
+
+    est = estimate_tokens(ir, contracts, specification, embedded_args)
     cap = (ir.get("budget") or {}).get("maxEstimatedTokens")
     blind = unpriced_note(est)
     cost_line = (f"~{est['total']:,} estimated tokens"
@@ -4259,7 +4665,7 @@ def main():
         graph_rel = "../"
     js = emit(ir, contracts, resolved, specification,
               graph_file=None if graph_rel.startswith("../") else graph_rel,
-              project_prefix=git_prefix(args.gates_root))
+              project_prefix=git_prefix(args.gates_root), embedded_args=embedded_args)
     script_bytes = len(js.encode("utf-8"))
     headroom = args.max_script_bytes - script_bytes
     size_line = ("projected " if projection is not None else "") + f"script {script_bytes:,} bytes, headroom {headroom:,} of {args.max_script_bytes:,} bytes"
@@ -4294,6 +4700,12 @@ def main():
         return 0
 
     if args.out:
+        if embedded_args is not None:
+            try:
+                archive_compiled(args.gates_root, embedded_args, js)
+            except (OSError, ValueError) as exc:
+                print(f"graph-compile: source archive refused: {exc}", file=sys.stderr)
+                return 1
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(js)

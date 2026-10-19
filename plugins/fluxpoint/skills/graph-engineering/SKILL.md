@@ -69,6 +69,63 @@ Durable coordination rides on the executor: every run has a `runId`,
 longest unchanged prefix, and `record-run.py` writes the provenance
 artifact and the Evidence row.
 
+## Independent lanes, replay and rejudging
+
+Declare `lane: "engine"` or `lane: "publisher"` on independent chains to
+start their bodies concurrently. Nodes inside one lane retain declaration
+order. A lane-free node joins the active lanes; irreversible nodes must be
+lane-free, and their independent `prove:` guard must be an actual `after`
+ancestor. An earlier guard in a sibling lane cannot authorize an effect.
+Use `after: ["gate-engine", "gate-publisher"]` for a consumer that needs both
+results, and consume each explicitly with `{{prev.gate-engine}}` or a
+contract field such as `{{prev.gate-publisher.exit}}`. Every listed edge is
+validated. Keep a repair loop's fixer, checker and integration nodes in the
+same lane. A halted lane stops new spawns in every lane; already running
+calls finish and are recorded before the single final outcome is returned.
+
+Every mutating lane node declares `pushes: "repository#branch"`. Lanes may
+not push the same declared repository/branch. Use one consistent repository
+identity for a shared remote; aliases are not separate write destinations.
+Lanes require the tree guard. It reads before each gate, at forks and joins,
+and at campaign end. Guards after the first fork include the launcher's
+fresh `_replayLaunchNonce`, so the Workflow call-index cache cannot replay
+an old reading. In-flight calls reserve their token floors atomically.
+
+Replay is opt-in: `replay: "inputs"` on a scalar builder, and `replay:
+"tree"` on a scalar independent gate. The gate declares `repository` and
+`branch`; it receives a fresh fixed-command sentinel's exact tip, must check
+out that commit and return it as `sha`. A missing or different `sha` halts.
+A builder replays only when its branch's live reading equals the reading
+at its recorded verifying gate. No worker-reported head admits a replay.
+Every `after` ancestor must itself have replayed in this launch. A live
+ancestor forces its descendants live, including joined consumers. Loops,
+fan-outs, councils, red-team and irreversible effects use their existing
+execution paths rather than node memo replay. `fresh: true` forces a live
+call for exchange, chain, CI and clock readings.
+
+The launcher alone loads `_memo` and fingerprinted `_prefix` entries from
+completed journal calls, transcripts and the recorded compiler receipts.
+Never hand-write either map. SHA-256 keys bind the complete resolved prompt,
+options, immutable launch stamp, gate reading and ordered ancestor keys;
+record-run independently corroborates replay provenance before appending
+Evidence. `REPLAYED-MEMO runId/agentId` names the original execution.
+
+For an explicit gate-only rerun, supply public args
+`rejudge: {"gate-engine": {"nonce": "review-2", "reason": "why the prior judgment needs review", "note": "optional gate-specific context"}}`.
+Only that gate and its preceding sentinel receive the nonce and note.
+Reasons remain record metadata, and the old verdict remains recorded.
+Whole-argument prompt tokens exclude rejudge metadata and internal launcher
+state. Unknown or unreached gates refuse the launch plan.
+
+Before resuming, run `compile-graph.py --plan WORK.md --resume RUN --args
+args.json --gates-root .`. It renders the exact generated program locally
+with verified prior results, using Node.js and no agents or network reads.
+Each node is `prefix`, `memo if the live read matches`, or `live`, with its
+cause and recorded cost (unknown values are explicit). A conditional memo
+prediction is checked against a real fresh reading during the launch.
+Graphs without these declarations or rejudge args keep their existing
+serial script and runtime keys.
+
 ## The IR is the source of truth
 
 One ```json graph-ir fenced block in WORK.md. `graph-run` compiles it
