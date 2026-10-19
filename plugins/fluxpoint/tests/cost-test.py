@@ -436,6 +436,7 @@ import glob
 import re
 REPO = os.path.dirname(os.path.dirname(PLUGIN))
 GATES = cg.load_gates(REPO)
+spec_mod = cg._sibling('specification')
 for t in sorted(glob.glob(os.path.join(PLUGIN, "templates", "WORK*.md"))):
     src = open(t, encoding="utf-8").read()
     m = cg.IR_FENCE.search(src)
@@ -446,7 +447,26 @@ for t in sorted(glob.glob(os.path.join(PLUGIN, "templates", "WORK*.md"))):
     name = os.path.basename(t)
     report(f"{name} declares cacheTtl 1h", b.get("cacheTtl") == "1h", str(b.get("cacheTtl")))
     cap = b.get("maxEstimatedTokens")
-    total = est(tir)["total"]
+    # The CLI binds the repository's locked packet before its final estimate.
+    # Keep synthetic unit cases packet-free, but price shipped campaigns with
+    # that same packet/identity/path wrapper rather than testing a lower bill.
+    bound = None
+    spec_path = spec_mod.headers(src).get('SPEC')
+    if (spec_path or spec_mod.required(REPO)
+            or any(n.get('mutates') or n.get('irreversible') for n in tir['nodes'])):
+        packet_file, _ = spec_mod.packet_paths(REPO, spec_path)
+        packet, identity = spec_mod.load(REPO, spec=spec_path)
+        bound = {'packet': packet, 'identity': identity,
+                 'path': os.path.relpath(packet_file, REPO).replace(os.sep, '/')}
+    total = cg.estimate_tokens(tir, CONTRACTS, specification=bound)["total"]
+    cli = subprocess.run([sys.executable, os.path.join(PLUGIN, 'scripts', 'compile-graph.py'),
+                          t, '--check', '--gates-root', REPO], capture_output=True,
+                         text=True, encoding='utf-8', env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+    measured = re.search(r'~([\d,]+) estimated tokens', cli.stdout)
+    report(f'{name} template estimate matches its bound-packet CLI check',
+           cli.returncode == 0 and measured is not None
+           and int(measured.group(1).replace(',', '')) == total,
+           f'{total} tokens' if cli.returncode == 0 else cli.stderr.strip())
     report(f"{name} declares a cost ceiling the estimate fits with headroom",
            isinstance(cap, int) and total <= cap <= total * 2, f"{total} <= {cap}")
     report(f"{name} carries no redundant inline effort",
