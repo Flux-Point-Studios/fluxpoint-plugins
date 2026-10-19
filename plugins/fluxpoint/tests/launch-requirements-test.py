@@ -50,7 +50,7 @@ class LaunchRequirements(unittest.TestCase):
                        {'id': 'repair', 'repeat': {'until': 'exit == 0'}}]
         requirements = cg.launch_requirements(ir)
         args = {item['name']: item for item in requirements['args']}
-        self.assertEqual(set(args), {'_base', '_launch', '_releases', '_ledger', 'target'})
+        self.assertEqual(set(args), {'_base', '_launch', '_releases', '_ledger', '_replayLaunchNonce', 'target'})
         self.assertEqual(args['_launch']['fields'], ['since', 'nonce', 'root'])
         for name, producer in [('_launch', 'attest.py --stamp'), ('_ledger', 'ledger.py --load'), ('_releases', 'release.py --load')]:
             self.assertEqual(args[name]['producer'], producer)

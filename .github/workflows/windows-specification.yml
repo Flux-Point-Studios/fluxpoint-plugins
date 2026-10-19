@@ -69,6 +69,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python plugins/fluxpoint/tests/forge-evidence-test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/forge-fault-race-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python plugins/fluxpoint/tests/repair-proof-test.py
           exit $LASTEXITCODE
       - name: Sample actual Windows machine health (read-only)

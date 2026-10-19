@@ -291,7 +291,8 @@
       ],
       "checks": [
         "graph-compiler-tests",
-        "replay-provenance-tests"
+        "replay-provenance-tests",
+        "graph-lane-tests"
       ],
       "counterexample": "A live ancestor, moved branch, ambiguous transcript or forged memo reuses a green result"
     },
@@ -303,7 +304,8 @@
       ],
       "checks": [
         "graph-compiler-tests",
-        "replay-provenance-tests"
+        "replay-provenance-tests",
+        "resume-input-tests"
       ],
       "counterexample": "An unchanged epoch drifts or a pinned evidence file changes without refusing launch"
     },
@@ -314,7 +316,9 @@
         "oct19-execution-evidence"
       ],
       "checks": [
-        "attestation-tests"
+        "attestation-tests",
+        "gate-fault-tests",
+        "forge-fault-race-tests"
       ],
       "counterexample": "Assertion failure or an unpaired red is silently superseded by a later green"
     },
@@ -325,7 +329,9 @@
         "oct19-execution-evidence"
       ],
       "checks": [
-        "attestation-tests"
+        "attestation-tests",
+        "forge-witness-tests",
+        "forge-fault-race-tests"
       ],
       "counterexample": "A self-authored green row, moved PR head or modified pipeline helper admits a pass"
     },
@@ -336,7 +342,8 @@
         "oct19-execution-evidence"
       ],
       "checks": [
-        "specification-tests"
+        "specification-tests",
+        "packet-closure-tests"
       ],
       "counterexample": "An imported fixture changes outside the trust base or a conflict authorizes a weaker check"
     },
@@ -347,7 +354,8 @@
         "oct19-execution-evidence"
       ],
       "checks": [
-        "repair-acceptance-tests"
+        "repair-acceptance-tests",
+        "repair-diff-tests"
       ],
       "counterexample": "A narrow original-attack PASS or forged diff receipt marks unchecked repair commits as checked"
     }
@@ -442,6 +450,97 @@
       "scope": "Checked repair commit refusal without coherent pinned evidence",
       "assumptions": [
         "Fixture execution validates enforcement; it does not establish arbitrary agent or external runtime correctness"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "graph-lane-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/graph-replay-test.py"
+      ],
+      "scope": "Execute concurrent joins, shared halt, fresh branch sentinels, replay keys and rejudgment",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "resume-input-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/resume-test.py"
+      ],
+      "scope": "Exercise source archives, exact embedded input carry and evidence pin refusal",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "gate-fault-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/fault-attempts-test.py"
+      ],
+      "scope": "Exercise crash floors, one native/reference pair, retained completion facts and red history",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "forge-witness-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/forge-evidence-test.py"
+      ],
+      "scope": "Exercise independent forge identities, source re-reads and pipeline coverage closure",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "packet-closure-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/packet-inputs-test.py"
+      ],
+      "scope": "Exercise tracked support closure, live drift, planned locked edits and reachability",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "repair-diff-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/repair-proof-test.py"
+      ],
+      "scope": "Exercise measured patches, witnessed sibling/coverage commands, attack/refutation seats and checked commit identity",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "forge-fault-race-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/forge-fault-race-test.py"
+      ],
+      "scope": "Completed local red dominates CI; only authenticated interruption yields to a freshly verified forge green; retained completion records prevent mutable log history laundering",
+      "assumptions": [
+        "GitHub transport uses fixture JSON; real git and supervised local commands execute"
       ],
       "timeoutSeconds": 180
     }
