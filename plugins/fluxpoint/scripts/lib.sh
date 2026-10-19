@@ -449,11 +449,17 @@ import specification
 root = pathlib.Path.cwd()
 for packet in specification.declared_packets(root):
     try:
-        lock = specification.packet_paths(root, packet)[1]
+        packet_file, lock = specification.packet_paths(root, packet)
         data = json.loads(lock.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or not isinstance(data.get("harness", {}), dict):
             continue
-        for path in data.get("harness", {}):
+        paths = set(data.get("harness", {}))
+        try:
+            doc = json.loads(packet_file.read_text(encoding="utf-8"))
+            paths.update(specification.packet_inputs.trust_paths(root, doc, paths))
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        for path in sorted(paths):
             try:
                 print(specification.in_repo(path, "locked harness input").as_posix())
             except (ValueError, TypeError):

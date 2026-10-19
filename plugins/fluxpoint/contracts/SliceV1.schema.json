@@ -136,6 +136,25 @@
         }
       }
     },
+    "packetConflict": {
+      "type": "object",
+      "description": "An early locked-check contradiction. This only blocks for an operator ruling; it never authorizes changing a packet, skipping checks or narrowing requirements.",
+      "required": ["checks", "nodes", "counterexample"],
+      "additionalProperties": false,
+      "properties": {
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "counterexample": {"type": "string", "minLength": 1}
+      }
+    },
     "sharedResources": {
       "type": "array",
       "description": "Every shared pool, executor, cache, lock or single-writer store to which this patch adds a writer or reader. Explicit [] means none. Name all affected users, including existing writers reached by a new reader.",

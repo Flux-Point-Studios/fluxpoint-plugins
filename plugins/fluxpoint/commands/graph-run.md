@@ -253,6 +253,20 @@ Workflow tool requires.
    authorization-context stop, not a code defect. Resume from the operator's
    run command or go for this graph, with no invented code repair; if a
    narrower message arrived, ask for the run command to be re-issued first.
+   Before recompiling or dispatching a BLOCKING repair, write a structured
+   repair note with JSON arrays `touches: [<repo-relative planned paths>]`
+   and `changesBehaviourOf: [<production paths or module names>]`; use `[]`
+   explicitly when none. Run `specification.py --graph <graph> --touches
+   <paths>` for nonempty touches (it must exit 0; exit 4 names holding checks)
+   and `specification.py --graph <graph> --reach <paths-or-modules>` for
+   nonempty behaviour changes. Append that JSON as "locked checks that must
+   stay green untouched". An edit to a locked input or a demanded behaviour
+   contradicting a reached check needs a recorded operator ruling and packet
+   revision before dispatch. A declared path list is not permission or live
+   change evidence. The builder first probes reached checks on a minimal
+   scratch change and returns `SliceV1.packetConflict` immediately if red,
+   with check ids, failing test node ids and a counterexample plus proposed
+   `packetEdits`. A conflict only blocks; it never permits skipping a gate.
 8. Graph green is not done. The campaign still exits through the
    loop-engineering ship pipeline — `scripts/harness.sh --full`, red-team
    `VERDICT: SHIP`, the Merge policy in WORK.md — and the Stop-hook DoD
