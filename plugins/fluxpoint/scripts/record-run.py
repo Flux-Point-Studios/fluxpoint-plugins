@@ -431,6 +431,16 @@ def main():
     except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
         print(f"record-run: ledger append failed: {e}", file=sys.stderr)
 
+    # Pin bytes are harness inputs, not a claim an agent can vouch for. Do
+    # this after the once-only ledger append, but before any run/Evidence row.
+    try:
+        import evidence_pins as _pins
+        _pins.validate_pinned_inputs(args.root, summary.get("inputs") or {},
+                                     summary.get("evidenceUnpinned") or [])
+    except (OSError, ValueError, TypeError) as e:
+        print(f"record-run: evidence pin verification failed: {e}", file=sys.stderr)
+        return 1
+
     import specification as _spec
     harness_identity = None
     try:
