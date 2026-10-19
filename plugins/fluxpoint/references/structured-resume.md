@@ -1,0 +1,95 @@
+# Structured launch and resume
+
+Keep campaign context in a JSON file and let the harness assemble the Workflow
+object. Complete graph-run's preflight and launch-turn authorization checks
+before dispatching that object; the helper itself never launches an agent.
+
+```sh
+python3 scripts/resume.py --root /checkout --graph WORK.md --args initial.json
+python3 scripts/resume.py --root /checkout --graph WORK.md --run wf_previous \
+  --set repairRelay=@relay-note.txt --set repairPublisher=@publisher-note.txt
+```
+
+Run these paths from the installed plugin, or use its `scripts/py.sh` wrapper.
+stdout contains only the Workflow JSON object, including `scriptPath`, launch
+`args` and, on resume, `resumeFromRunId`. The deterministic compiler plan,
+compile result and exact-file size check go to stderr. Read the plan before
+launching. `--out` selects another generated script path. `--projects` selects
+the runtime projects directory when its journals live outside the default
+`$CLAUDE_CONFIG_DIR/projects` (normally `~/.claude/projects`).
+
+Initial JSON contains only non-underscore fields. `--set key=@file` replaces
+one field with the exact UTF-8 text, including CRLF and trailing newlines.
+`--set-json key=@file` replaces a structured value, for example the `rejudge`
+object described by the graph compiler. The initial assembly embeds every
+effective public IR default alongside the provided values. Duplicate updates, underscore keys
+and malformed JSON are refusals. Every other recorded input, including an
+effective default, is carried unchanged. A change in an IR default therefore
+cannot silently alter a carried repair epoch.
+
+The compiler emits canonical `ARGS` and its full `ARGS_SHA256`; summary inputs
+retain the full resolved text and `argsSha256` identifies the embedded set.
+The immutable source archive is
+`.claude/fluxpoint/compiled/<args-sha>-<source-sha>.graph.js`. Resume verifies
+both hashes, parses the actual constant and cross-checks each embedded value
+against the canonical recorded artifact
+`.claude/fluxpoint/runs/<runId>.json`. Every recorded input must be bound to
+`ARGS`; an additional summary field cannot become carried context. A direct
+compile that left defaults or inline inputs outside the embedded set needs a
+fresh fully embedded launch before structured resume. Different graph versions may archive the
+same argument bytes; each source must still pass its own hash. Missing,
+changed or conflicting source/recorded input is a refusal. Keep these local
+archives with the run records. Recording preserves immutable attempt snapshots
+at `.claude/fluxpoint/runs/history/<runId>/<artifact-sha>.json` as well as the
+latest artifact. The helper pins the exact source artifact bytes in
+`_resumeArtifactSha256`, so subsequent attempts using the same Workflow run ID
+cannot replace the attempt a replay cites. Runs compiled before embedded arguments were
+introduced require an explicit fresh launch with a reviewed initial JSON;
+there is no trustworthy automated recovery of absent context.
+
+Incoming inline values cannot override an embedded key. Recompiling an
+embedded script without `--args` refuses; `--args none` deliberately removes
+the embedded set for a fresh launch. `--check --args initial.json` prices the
+real rendered note text. Without an args file, the compiler names arguments
+priced at defaults as estimate blind spots.
+
+## Pin evidence read by repair notes
+
+Use a full SHA-256 reference in a note, quoting paths containing spaces:
+
+```text
+Read /scratch/audit.json#sha256=<64 hex characters>.
+Read "C:\campaign evidence\triage.json#sha256=<64 hex characters>".
+```
+
+The helper hashes the file, copies the verified bytes into
+`.claude/fluxpoint/evidence/<full-sha><extension>`, and embeds its absolute
+store reference with the full hash. All other note text stays in the prompt.
+Existing content is verified rather than overwritten. Source mutation during
+copy, missing files, a corrupt store entry or a digest mismatch refuse the
+launch. Every resume rehashes carried pins before compiling; `record-run.py`
+rehashes them again before recording an artifact or Evidence row. Irreversible
+effects still enter the once-only ledger before a recording refusal.
+
+Every absolute local path in a note must have a pin or an explicitly named
+exception, for example `--unpinned-ok /scratch/live-observation.txt`. The
+exception means the operator accepts mutable bytes outside the replay key;
+it is retained in the recorded summary and subsequent resumes. URLs are not
+treated as local evidence paths. Pins and exceptions work in nested argument
+values too. A dictionary key containing a local path or pin is refused; put
+the reference in a value so rewriting cannot collide with another key. The content store uses each platform's native file paths; a
+Windows path cannot be resolved by a Linux launcher.
+
+## Launch identity and replay
+
+Resume keeps the recorded `_launch` stamp intact. `_base` is read fresh from
+Git; required irreversible ledgers and actor release maps are freshly loaded.
+Every invocation gets a fresh `_replayLaunchNonce`. `_memo` and `_prefix`
+come from the harness rereading completed journal calls and transcripts, never
+from the input JSON. The compiler's `--plan` owns replay decisions and rejects
+unknown or unreached rejudge gates. A tree-moving repair still halts
+`TREE-MOVED`; start a fresh run after reviewing the changed tree.
+
+Embedded context has the same authority as inline context. It does not extend
+the relayed user request, bypass a human confirmation, discharge a red gate or
+authorize dispatch by itself.

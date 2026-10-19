@@ -91,7 +91,7 @@ Workflow tool requires.
    fields and inline overrides, and counts every byte toward the script limit.
    Recompiling an embedded script without `--args` refuses to drop its notes;
    `--args none` explicitly discards them for a fresh launch. See
-   `docs/structured-resume.md` for evidence pins and exact argument carry.
+   `references/structured-resume.md` for evidence pins and exact argument carry.
 4. Load whatever state the graph refuses to start without.
    `resume.py` supplies these readings and a fresh 32-byte
    `_replayLaunchNonce` automatically. Treat `_memo`, `_prefix`,
