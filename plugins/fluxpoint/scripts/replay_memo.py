@@ -304,7 +304,9 @@ def _source_calls(root, run_id, launch, compiler, projects, seen, cache=None):
             raise ReplayError("memo result differs from source")
         entry = dict(key=record["key"], prompt=record["prompt"], result=record.get("result"),
                      payload=record["payload"], runId=origin["runId"], agentId=origin["agentId"],
-                     cost=origin.get("cost", {"minutes": None, "tokens": None}))
+                     cost=origin.get("cost", {"minutes": None, "tokens": None}),
+                     replay=record.get("replay"), fresh=record.get("fresh", False),
+                     irreversible=record.get("irreversible", False), contract=record.get("contract"))
         if record.get("verifiedReading") is not None:
             reading = record["verifiedReading"]
             # A builder's replay binds to an actual verifying gate's sentinel,
@@ -328,10 +330,18 @@ def build_memo(root, run_id, launch, compiler_version, projects=None):
     _, calls, entries = _source_calls(root, run_id, launch, compiler_version, projects, set())
     memo = {}
     for entry in entries:
+        if (entry.get("replay") not in ("inputs", "tree") or entry.get("fresh")
+                or entry.get("irreversible") or entry.get("contract") == "RedTeamV1"
+                or (entry["replay"] == "inputs" and not entry.get("verifiedReading"))
+                or (entry["replay"] == "tree" and entry["payload"]["tree"] is None)):
+            continue
         if entry["key"] in memo and canonical(memo[entry["key"]]) != canonical(entry):
             raise ReplayError("conflicting source memo entries")
         memo[entry["key"]] = entry
-    return {"_memo": memo, "_prefix": calls}
+    prefix = [dict(promptSha256=hashlib.sha256(c["prompt"].encode("utf-8")).hexdigest(),
+                   optsSha256=memo_key(c["opts"]), resultSha256=memo_key(c["result"]),
+                   runId=c["runId"], agentId=c["agentId"], cost=c.get("cost")) for c in calls]
+    return {"_memo": memo, "_prefix": prefix}
 
 
 def _graph_nodes(graph):

@@ -37,7 +37,8 @@ class ReplayMemoTests(unittest.TestCase):
                            prompt=call["prompt"], opts=call["opts"], tree=self.tree if index else None,
                            ancestors=[self.records[0]["key"]] if index else [])
             self.records.append(dict(node=payload["id"], key=rm.memo_key(payload), payload=payload,
-                                     prompt=call["prompt"], result=call["result"], mode="live"))
+                                     prompt=call["prompt"], result=call["result"], mode="live",
+                                     replay="tree" if index else "inputs"))
         self.records[0].update(verifiedReading=self.tree, verifiedBy=["gate"], verifiedByNode="gate")
         self.records[1]["verifies"] = "build"
         self.summary = dict(campaign="test", launch=self.launch, callRecords=self.calls, memoRecords=self.records,
@@ -72,6 +73,17 @@ class ReplayMemoTests(unittest.TestCase):
         self.assertEqual(builder["agentId"], "a0")
         self.assertEqual(builder["verifiedReading"], self.tree)
         self.assertEqual(builder["cost"], {"minutes": 2, "tokens": 15})
+        prefix = result["_prefix"][0]
+        self.assertNotIn("prompt", prefix)
+        self.assertEqual(prefix["promptSha256"], hashlib.sha256(self.calls[0]["prompt"].encode()).hexdigest())
+
+    def test_only_opted_in_nodes_are_exported_to_the_memo(self):
+        self.records[1]["fresh"] = True
+        self.save()
+        self.assertEqual(len(self.build()["_memo"]), 1)
+        self.records[0].pop("replay")
+        self.save()
+        self.assertEqual(self.build()["_memo"], {})
 
     def test_live_transcript_and_journal_are_re_read(self):
         self.build()
