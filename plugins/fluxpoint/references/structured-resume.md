@@ -5,12 +5,14 @@ object. Complete graph-run's preflight and launch-turn authorization checks
 before dispatching that object; the helper itself never launches an agent.
 
 ```sh
-python3 scripts/resume.py --root /checkout --graph WORK.md --args initial.json
-python3 scripts/resume.py --root /checkout --graph WORK.md --run wf_previous \
+ROOT=/path/to/installed/fluxpoint
+bash "$ROOT/scripts/py.sh" resume.py --root /checkout --graph WORK.md --args initial.json
+bash "$ROOT/scripts/py.sh" resume.py --root /checkout --graph WORK.md --run wf_previous \
   --set repairRelay=@relay-note.txt --set repairPublisher=@publisher-note.txt
 ```
 
-Run these paths from the installed plugin, or use its `scripts/py.sh` wrapper.
+Set `ROOT` to the installed plugin directory. Its `scripts/py.sh` wrapper
+selects a supported interpreter on the current platform.
 stdout contains only the Workflow JSON object, including `scriptPath`, launch
 `args` and, on resume, `resumeFromRunId`. The deterministic compiler plan,
 compile result and exact-file size check go to stderr. Read the plan before
