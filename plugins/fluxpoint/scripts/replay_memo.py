@@ -340,7 +340,7 @@ def build_memo(root, run_id, launch, compiler_version, projects=None):
         memo[entry["key"]] = entry
     prefix = [dict(promptSha256=hashlib.sha256(c["prompt"].encode("utf-8")).hexdigest(),
                    optsSha256=memo_key(c["opts"]), resultSha256=memo_key(c["result"]),
-                   runId=c["runId"], agentId=c["agentId"], cost=c.get("cost")) for c in calls]
+                   label=c["opts"].get("label"), runId=c["runId"], agentId=c["agentId"], cost=c.get("cost")) for c in calls]
     return {"_memo": memo, "_prefix": prefix}
 
 
