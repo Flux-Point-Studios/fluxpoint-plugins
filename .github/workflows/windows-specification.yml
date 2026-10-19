@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
@@ -57,22 +59,17 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: |
-          python plugins/fluxpoint/tests/graph-replay-test.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python plugins/fluxpoint/tests/replay-memo-test.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python plugins/fluxpoint/tests/resume-test.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python plugins/fluxpoint/tests/packet-inputs-test.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python plugins/fluxpoint/tests/fault-attempts-test.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python plugins/fluxpoint/tests/forge-evidence-test.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python plugins/fluxpoint/tests/forge-fault-race-test.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python plugins/fluxpoint/tests/repair-proof-test.py
-          exit $LASTEXITCODE
+          $failed = $false
+          foreach ($suite in @(
+            'graph-replay-test.py', 'replay-memo-test.py', 'resume-test.py',
+            'packet-inputs-test.py', 'fault-attempts-test.py',
+            'forge-evidence-test.py', 'forge-fault-race-test.py', 'repair-proof-test.py'
+          )) {
+            python "plugins/fluxpoint/tests/$suite"
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+          }
+          if ($failed) { exit 1 }
+          exit 0
       - name: Sample actual Windows machine health (read-only)
         if: ${{ !cancelled() }}
         env:
