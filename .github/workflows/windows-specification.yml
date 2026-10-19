@@ -52,6 +52,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python plugins/fluxpoint/tests/box-health-windows-test.py
           exit $LASTEXITCODE
+      - name: Exercise graph replay, resume, packet closure and gate evidence
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python plugins/fluxpoint/tests/graph-replay-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/replay-memo-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/resume-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/packet-inputs-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/fault-attempts-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/forge-evidence-test.py
+          exit $LASTEXITCODE
       - name: Sample actual Windows machine health (read-only)
         if: ${{ !cancelled() }}
         env:
