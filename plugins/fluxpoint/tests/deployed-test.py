@@ -36,6 +36,21 @@ class DeployedTests(unittest.TestCase):
         self.doc = {"version": 1, "gates": {"api-deployed": f'"{self.python.as_posix()}" suite.py'},
                     "deployed": {"api": {"pins": "requirements.txt", "python": str(self.python), "gate": "api-deployed"}}}
         self.save()
+        # A cited local verdict certifies committed, clean content. The venv
+        # is measured by deployed_resolution; the suite's output is an artifact.
+        (self.root / ".gitignore").write_text("venv/\nran\n")
+        self.git("init", "-q")
+        self.git("config", "user.name", "deployed fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.commit("declared deployed gate")
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.root), *args],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(self, message):
+        self.git("add", ".gitignore", attest.GATES, "requirements.txt", "suite.py")
+        self.git("commit", "-qm", message)
 
     def save(self):
         (self.root / attest.GATES).write_text(json.dumps(self.doc))
@@ -48,12 +63,15 @@ class DeployedTests(unittest.TestCase):
         self.assertEqual(self.execute("matching"), 0)
         self.assertTrue((self.root / "ran").exists())
         row = attest.read(str(self.root))[-1]
+        self.assertFalse(row["dirty"])
+        self.assertEqual(row["treeSha"], self.git("rev-parse", "HEAD"))
         self.assertTrue(row["resolutionChecked"])
         self.assertEqual(row["dependencies"]["api"], {"demo-package": "0.13.1"})
         self.assertIn("api", row["pinsSha256"])
 
     def test_mismatch_mints_red_without_starting_suite(self):
         self.pins.write_text("demo-package==0.19.2\nmissing==1.0\n")
+        self.commit("deploy different exact pins")
         self.assertEqual(self.execute("mismatch"), 1)
         self.assertFalse((self.root / "ran").exists())
         row = attest.read(str(self.root))[-1]
@@ -65,6 +83,31 @@ class DeployedTests(unittest.TestCase):
                    'prove': {'check': 'api-deployed'}, 'contracts': {'check': 'HarnessCheckV1'},
                    'results': {'check': {'exit': 1, 'attestId': row['attestId']}}}
         self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]['status'], 'ATTESTED')
+
+    def test_uncommitted_resolution_mismatch_remains_red_but_cannot_attest_a_commit(self):
+        self.pins.write_text("demo-package==0.19.2\n")
+        self.assertEqual(self.execute("dirty-mismatch"), 1)
+        self.assertFalse((self.root / "ran").exists())
+        row = attest.read(str(self.root))[-1]
+        self.assertEqual(row["exit"], 1)
+        self.assertTrue(row["dirty"])
+        summary = {"launch": {"since": row["started"], "nonce": "n"},
+                   "prove": {"check": "api-deployed"}, "contracts": {"check": "HarnessCheckV1"},
+                   "results": {"check": {"exit": 1, "attestId": row["attestId"]}}}
+        self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]["status"], "STALE")
+
+    def test_unknown_tree_runs_but_cannot_attest_committed_content(self):
+        # Hide the repository without relying on platform-specific removal of
+        # open files. Gate execution still produces a real, retained verdict.
+        (self.root / ".git").rename(self.root / "hidden-git")
+        self.assertEqual(self.execute("unknown-tree"), 0)
+        row = attest.read(str(self.root))[-1]
+        self.assertTrue(row["dirty"])
+        self.assertEqual(row["treeSha"], "")
+        summary = {"launch": {"since": row["started"], "nonce": "n"},
+                   "prove": {"check": "api-deployed"}, "contracts": {"check": "HarnessCheckV1"},
+                   "results": {"check": {"exit": 0, "attestId": row["attestId"]}}}
+        self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]["status"], "STALE")
 
     def test_nonexact_or_empty_pins_refuse(self):
         for text in ("demo-package>=0.13\n", "# nothing\n", "-r other.txt\n"):
