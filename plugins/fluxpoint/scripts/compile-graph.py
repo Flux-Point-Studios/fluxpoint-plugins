@@ -698,7 +698,7 @@ def push_identity(target, repository_root=None):
     if not os.path.isdir(repo):
         return _destination_identity(repo, target['branch'])
     def git(*argv):
-        return subprocess.run(['git', '-C', repo, *argv], capture_output=True, text=True, timeout=5)
+        return subprocess.run(['git', '-C', repo, *argv], capture_output=True, text=True, encoding='utf-8', timeout=5)
     def destination(url):
         if not _remote_syntax(url) and not re.match(r'^[A-Za-z]:', url) and not os.path.isabs(url):
             url = os.path.join(repo, url)
@@ -2620,7 +2620,7 @@ def git_prefix(root):
     try:
         import subprocess
         r = subprocess.run(["git", "-C", root or ".", "rev-parse", "--show-prefix"],
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, encoding='utf-8', timeout=10)
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -4670,9 +4670,9 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
         raise ValueError('resume source has no immutable launch stamp')
     replay = helper.build_memo(root, run_id, launch, compiler_version(), projects=projects, artifact_sha256=source_sha)
     def git(*argv):
-        return subprocess.check_output(['git', '-C', root, *argv], text=True, stderr=subprocess.PIPE).strip()
+        return subprocess.check_output(['git', '-C', root, *argv], text=True, encoding='utf-8', stderr=subprocess.PIPE).strip()
     base = dict(root=git('rev-parse', '--show-toplevel'), sha=git('rev-parse', 'HEAD'),
-                branch=git('branch', '--show-current'), porcelain=subprocess.check_output(['git', '-C', root, 'status', '--porcelain'], text=True))
+                branch=git('branch', '--show-current'), porcelain=subprocess.check_output(['git', '-C', root, 'status', '--porcelain'], text=True, encoding='utf-8'))
     runtime_args = dict(replay, _base=base, _launch=launch, _replayLaunchNonce='plan-hypothetical-live-reading',
                         _resumeFromRunId=run_id, _resumeArtifactSha256=source_sha, _priorResults=source.get('results') or {}, _ledger={}, _releases={})
     if source.get('ledger'):
@@ -4684,8 +4684,8 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     compiled = emit(ir, contracts, imports_resolved, specification=specification, embedded_args=public_args)
     try:
         result = subprocess.run(['node', os.path.join(os.path.dirname(__file__), 'graph-plan.js')],
-                                input=json.dumps(dict(source=compiled, args=runtime_args, results=source.get('results') or {}, readings=readings)),
-                                capture_output=True, text=True, timeout=30)
+                                input=json.dumps(dict(source=compiled, args=runtime_args, results=source.get('results') or {}, readings=readings), ensure_ascii=False),
+                                capture_output=True, text=True, encoding='utf-8', timeout=30)
     except FileNotFoundError as exc:
         raise ValueError('--plan needs Node.js to render the exact generated program locally; it never spawns an agent') from exc
     if result.returncode:

@@ -4,12 +4,15 @@ import copy
 import hashlib
 import importlib.util
 import json
+import locale
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 spec = importlib.util.spec_from_file_location('scheduler_compiler', SCRIPTS / 'compile-graph.py')
@@ -52,12 +55,38 @@ const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
 const fn=new AsyncFunction('args','agent','budget','parallel','phase','log',input.source);
 fn(input.args,agent,{total:1000000,remaining:()=>remainingTokens,spent:()=>0},fns=>Promise.all(fns.map(f=>f())),()=>{},()=>{}).then(result=>console.log(JSON.stringify({result,events,rawCalls,maximum}))).catch(error=>{console.error(error.stack);process.exitCode=1});
 '''.replace('SETUP', setup).replace('BODY', body)
-    p = subprocess.run(['node','-e',harness],input=json.dumps({'source':source,'args':dict(BASE,**(args or {}))}),text=True,capture_output=True,timeout=15)
+    p = subprocess.run(['node','-e',harness],input=json.dumps({'source':source,'args':dict(BASE,**(args or {}))},ensure_ascii=False),text=True,encoding='utf-8',capture_output=True,timeout=15)
     if p.returncode: raise AssertionError(p.stderr)
     return json.loads(p.stdout)
 
 
 class GraphReplay(unittest.TestCase):
+    def test_unicode_memo_transport_ignores_windows_default_codepage(self):
+        ir=self.replay_graph(); ir['argDefaults']={'repairA':'réparé 🦀 東京','repairB':'unchanged λ'}
+        body="if(opts.label.startsWith('b')) result.sha='c'.repeat(40);"
+        with patch.object(locale,'getpreferredencoding',return_value='cp1252'), patch.object(locale,'getencoding',return_value='cp1252',create=True):
+            first=execute(ir,body=body)['result']
+            out=execute(ir,args=self.memo_args(first),body=body)
+        self.assertNotIn('start:a',out['events']); self.assertNotIn('start:b',out['events'])
+        replayed=next(r for r in out['result']['memoRecords'] if r['node']=='a')
+        self.assertIn('réparé 🦀 東京',replayed['prompt'])
+
+    def test_production_plan_transports_json_as_utf8_under_windows_codepage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'répertoire 🦀'; root.mkdir()
+            def git(*args): subprocess.run(['git','-C',str(root),*args],check=True,capture_output=True,encoding='utf-8')
+            git('init','-q'); git('config','user.name','Replay Test'); git('config','user.email','replay@example.invalid')
+            git('commit','-q','--allow-empty','-m','baseline')
+            ir=graph([node('inspect',fresh=False,prompt='Inspect {{A.language}}')])
+            source={'launch':{'nonce':'original','root':str(root)},'results':{'inspect':{'outcome':'réparé 🦀 東京'}},'inputs':{'language':'réparé 🦀 東京'}}
+            helpers={'replay_memo':SimpleNamespace(build_memo=lambda *a,**kw:{'_memo':{},'_prefix':[]}),
+                     'run_artifacts':SimpleNamespace(read=lambda *a,**kw:({'summary':source},'f'*64))}
+            with patch.object(c,'_sibling',side_effect=helpers.__getitem__), patch.object(locale,'getpreferredencoding',return_value='cp1252'), patch.object(locale,'getencoding',return_value='cp1252',create=True), patch.object(subprocess,'run',wraps=subprocess.run) as ran:
+                rows=c.rerun_plan(ir,CONTRACTS,{'language':'réparé 🦀 東京'},str(root),'source-run')
+            self.assertEqual(rows[0]['node'],'inspect')
+            self.assertEqual(ran.call_args.kwargs['encoding'],'utf-8')
+            self.assertIn('réparé 🦀 東京',ran.call_args.kwargs['input'])
+
     def memo_args(self, result):
         memo={r['key']:dict(r,runId='source-run',artifactSha256='f'*64,agentId='agent-'+r['node']) for r in result['memoRecords'] if r['result'] is not None}
         return {'_memo':memo,'_resumeFromRunId':'source-run','_resumeArtifactSha256':'f'*64,'_replayLaunchNonce':'new-fresh'}
@@ -179,7 +208,7 @@ class GraphReplay(unittest.TestCase):
         helpers=(SCRIPTS/'graph-replay.js').read_text().split('const CALL_RECORDS')[0]
         value={'emoji':'🦀 café','keys':{'z':1,'a':False},'array':[None,0,-1,'λ']}
         raw=json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))
-        p=subprocess.run(['node','-e',helpers+'\nconsole.log(sha256(canonical('+json.dumps(value)+')))'],text=True,capture_output=True,check=True)
+        p=subprocess.run(['node','-e',helpers+'\nconsole.log(sha256(canonical('+json.dumps(value)+')))'],text=True,encoding='utf-8',capture_output=True,check=True)
         self.assertEqual(p.stdout.strip(),hashlib.sha256(raw.encode()).hexdigest())
 
     def test_lane_tree_readings_after_fork_are_launch_unique(self):
@@ -284,7 +313,7 @@ class GraphReplay(unittest.TestCase):
 
     def test_legacy_compilation_is_byte_identical(self):
         # Compare the baseline compiler, not a hand-written expected string.
-        original=subprocess.run(['git','show','c848f07:plugins/fluxpoint/scripts/compile-graph.py'],text=True,capture_output=True,check=True).stdout
+        original=subprocess.run(['git','show','c848f07:plugins/fluxpoint/scripts/compile-graph.py'],text=True,encoding='utf-8',capture_output=True,check=True).stdout
         scope={'__name__':'baseline','__file__':str(SCRIPTS/'compile-graph.py')}; exec(compile(original,'baseline','exec'),scope)
         ir=graph([node('a'),node('b',after='a',prompt='Use {{prev}}')])
         self.assertEqual(c.emit(ir,CONTRACTS),scope['emit'](ir,CONTRACTS))
