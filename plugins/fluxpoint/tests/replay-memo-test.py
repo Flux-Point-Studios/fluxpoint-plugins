@@ -13,6 +13,7 @@ import unittest
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import replay_memo as rm
+import run_artifacts
 
 
 class ReplayMemoTests(unittest.TestCase):
@@ -41,6 +42,10 @@ class ReplayMemoTests(unittest.TestCase):
                                      replay="tree" if index else "inputs"))
         self.records[0].update(verifiedReading=self.tree, verifiedBy=["gate"], verifiedByNode="gate")
         self.records[1]["verifies"] = "build"
+        self.records[0]['verifiedReadingCallIndex'] = 1
+        self.records[0]['callIndex'] = 0
+        self.records[1].update(readingCallIndex=1, reading=self.tree, callIndex=2)
+        self.calls.insert(1, self.sentinel('before gate'))
         self.summary = dict(campaign="test", launch=self.launch, callRecords=self.calls, memoRecords=self.records,
                             results={r["node"]: r["result"] for r in self.records})
         events = []
@@ -59,15 +64,64 @@ class ReplayMemoTests(unittest.TestCase):
         path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
 
     def save(self):
-        (self.store / (self.run + ".json")).write_text(json.dumps(dict(runId=self.run, summary=self.summary)), encoding="utf-8")
+        _, self.snapshot = run_artifacts.write(self.root, self.run, dict(runId=self.run, summary=self.summary))
         self.write_rows(self.directory / "journal.jsonl", self.events)
+
+    def source(self, agent='a0'):
+        return dict(runId=self.run, artifactSha256=self.snapshot, agentId=agent)
+
+    def sentinel(self, point, request=None, nonce='live-attempt-1', tree=None):
+        tree = self.tree if tree is None else tree
+        prompt = rm._sentinel_base() + '\nLIVE TREE READING NONCE: ' + nonce + ' point ' + point
+        if request:
+            prompt += '\nREJUDGE NONCE: ' + request['nonce'] + '\nREJUDGE LAUNCH NONCE: ' + nonce
+            if 'note' in request:
+                prompt += '\nOPERATOR REJUDGE NOTE (verbatim):\n' + request['note']
+        if tree['branch'] is not None:
+            prompt += ('\nAlso run exactly: git -C ' + json.dumps(tree['repository']) + ' ls-remote origin '
+                       + json.dumps('refs/heads/' + tree['branch'])
+                       + '. Return the sole full hexadecimal commit in tip, and the exact declared repository and branch as repository and branch. '
+                       'No matches or multiple matches means tip must be empty. Never use a worker-reported sha.')
+        return dict(prompt=prompt, opts=dict(label='tree-check:' + point, effort='low'), result=copy.deepcopy(tree), mode='live')
+
+    def current(self, summary, run='wf_current'):
+        calls = summary.setdefault('callRecords', [])
+        if not calls:
+            for record in summary.get('memoRecords', []):
+                if record.get('mode') == 'prefix':
+                    record['source'] = self.source()
+                    calls.append(dict(copy.deepcopy(self.calls[0]), source=self.source(), mode='prefix'))
+                elif record.get('mode') == 'live':
+                    original = next(c for c in self.calls if c['opts'].get('label') == record['node'])
+                    calls.append(dict(copy.deepcopy(original), mode='live'))
+                elif record.get('mode') == 'memo':
+                    point = ('replay ' if record['replay'] == 'inputs' else 'before ') + record['node']
+                    record['readingCallIndex'] = len(calls)
+                    calls.append(self.sentinel(point, nonce='current-attempt-2'))
+        directory = self.projects / 'project/session/subagents/workflows' / run
+        directory.mkdir(parents=True, exist_ok=True)
+        events = []
+        for i, call in enumerate(calls):
+            if call.get('source'):
+                continue
+            aid = 'current' + str(i)
+            events.extend([dict(type='started', agentId=aid, opts=call['opts']),
+                           dict(type='result', agentId=aid, result=call['result'])])
+            self.write_rows(directory / ('agent-' + aid + '.jsonl'), [
+                dict(type='user', message=dict(role='user', content=call['prompt']))])
+        self.write_rows(directory / 'journal.jsonl', events)
+        return run
+
+    def verify(self, current):
+        run = self.current(current)
+        return rm.verify_replays(self.root, current, projects=self.projects, run_id=run)
 
     def build(self):
         return rm.build_memo(self.root, self.run, self.launch, self.compiler, projects=self.projects)
 
     def test_corroborates_completed_calls_and_deduplicates_api_usage(self):
         result = self.build()
-        self.assertEqual(len(result["_prefix"]), 2)
+        self.assertEqual(len(result["_prefix"]), 3)
         self.assertEqual(len(result["_memo"]), 2)
         builder = result["_memo"][self.records[0]["key"]]
         self.assertEqual(builder["agentId"], "a0")
@@ -123,22 +177,23 @@ class ReplayMemoTests(unittest.TestCase):
             self.build()
 
     def test_gate_verdict_must_cover_the_sentinel_tip(self):
-        self.calls[1]["result"]["sha"] = "c" * 40
+        self.calls[2]["result"]["sha"] = "c" * 40
         self.save()
         with self.assertRaisesRegex(rm.ReplayError, "sentinel's exact branch tip"):
             self.build()
 
     def test_recording_refuses_live_ancestor_and_missing_live_read(self):
         replay = copy.deepcopy(self.records[1])
-        replay.update(mode="memo", source={"runId": self.run, "agentId": "a1"}, reading=self.tree)
+        replay.update(mode="memo", source=self.source('a2'), reading=self.tree)
         current = dict(campaign="test", launch=self.launch, memoRecords=[self.records[0], replay],
                        results={"gate": replay["result"]})
         with self.assertRaisesRegex(rm.ReplayError, "live or missing ancestor"):
-            rm.verify_replays(self.root, current, projects=self.projects)
+            self.verify(current)
         current["memoRecords"][0] = dict(self.records[0], mode="prefix")
         current["memoRecords"][1].pop("reading")
-        with self.assertRaisesRegex(rm.ReplayError, "live tree/branch"):
-            rm.verify_replays(self.root, current, projects=self.projects)
+        current.pop('callRecords')
+        with self.assertRaises(rm.ReplayError):
+            self.verify(current)
 
     def test_missing_failed_and_ambiguous_sources_fail_closed(self):
         source = self.directory / "agent-a0.jsonl"
@@ -158,42 +213,49 @@ class ReplayMemoTests(unittest.TestCase):
 
     def test_recorder_independently_verifies_memo_and_omitted_receipts(self):
         replay = copy.deepcopy(self.records[0])
-        replay.update(mode="memo", source={"runId": self.run, "agentId": "a0"}, reading=self.tree)
+        replay.update(mode="memo", source=self.source(), reading=self.tree)
         current = dict(campaign="test", launch=self.launch, memoRecords=[replay],
                        results={"build": replay["result"]},
                        provenance=[dict(node="build", status="REPLAYED-MEMO")])
-        checked = rm.verify_replays(self.root, current, projects=self.projects)
+        checked = self.verify(current)
         self.assertEqual(checked[0]["node"], "build")
         current["memoRecords"][0]["result"] = {"outcome": "forged"}
         current["results"]["build"] = {"outcome": "forged"}
-        with self.assertRaisesRegex(rm.ReplayError, "corroborate"):
-            rm.verify_replays(self.root, current, projects=self.projects)
+        with self.assertRaisesRegex(rm.ReplayError, "differs from source"):
+            self.verify(current)
         current["memoRecords"] = []
         with self.assertRaisesRegex(rm.ReplayError, "no independently verified"):
-            rm.verify_replays(self.root, current, projects=self.projects)
+            self.verify(current)
 
-    def test_provenance_cannot_cycle_between_artifacts(self):
-        self.calls[0]["source"] = {"runId": self.run, "agentId": "a0"}
+    def test_same_run_id_earlier_attempt_is_not_a_cycle(self):
+        original_hash = self.snapshot
+        self.calls[0]["source"] = self.source()
+        self.calls[0]['mode'] = 'prefix'
         self.save()
-        with self.assertRaisesRegex(rm.ReplayError, "cyclic"):
-            self.build()
+        self.assertNotEqual(self.snapshot, original_hash)
+        memo = self.build()['_memo']
+        self.assertEqual(memo[self.records[0]['key']]['artifactSha256'], original_hash)
 
     def test_rejudge_keeps_verbatim_context_and_prior_verdict(self):
         request = dict(nonce="review-2", reason="Host investigation completed | keep prior red", note="Rerun this gate.\nRetain both attempts.")
         current = dict(campaign="test", launch=self.launch, inputs={"rejudge": {"gate": request}},
                        results={"gate": {"sha": "b" * 40, "exit": 0}},
                        tree={"checks": [dict(point="before gate", **self.tree)]},
-                       rejudges=[dict(gate="gate", tree=self.tree, priorVerdict=self.calls[1]["result"],
-                                      sourceRunId=self.run, **request)])
-        row = rm.verify_rejudges(self.root, current)[0]
+                       rejudges=[dict(gate="gate", tree=self.tree, priorVerdict=self.calls[2]["result"],
+                                      sourceRunId=self.run, sourceArtifactSha256=self.snapshot, readingCallIndex=0, **request)])
+        current['callRecords'] = [self.sentinel('before gate', request),
+            dict(prompt='Judge now\nREJUDGE NONCE: '+request['nonce']+'\nREJUDGE LAUNCH NONCE: live-attempt-1\nOPERATOR REJUDGE NOTE (verbatim):\n'+request['note'],
+                 opts={'label':'gate','effort':'high'}, result=current['results']['gate'], mode='live')]
+        run = self.current(current)
+        row = rm.verify_rejudges(self.root, current, projects=self.projects, run_id=run)[0]
         self.assertEqual(row["reason"], request["reason"])
         self.assertEqual(row["note"], request["note"])
         current["rejudges"][0]["priorVerdict"] = {"exit": 1}
         with self.assertRaisesRegex(rm.ReplayError, "prior verdict"):
-            rm.verify_rejudges(self.root, current)
+            rm.verify_rejudges(self.root, current, projects=self.projects, run_id=run)
         current["rejudges"] = []
         with self.assertRaisesRegex(rm.ReplayError, "not reached"):
-            rm.verify_rejudges(self.root, current)
+            rm.verify_rejudges(self.root, current, projects=self.projects, run_id=run)
 
     def test_recording_refuses_forged_replay_but_retains_artifact(self):
         graph = self.root / "WORK.md"
@@ -202,7 +264,7 @@ class ReplayMemoTests(unittest.TestCase):
         graph.write_text("# Run\n```json graph-ir\n" + json.dumps(ir) + "\n```\n\n## Evidence\n"
                          "| When (UTC) | Source | Outcome | Claim | Proof |\n| --- | --- | --- | --- | --- |\n")
         replay = copy.deepcopy(self.records[0])
-        replay.update(mode="memo", source={"runId": self.run, "agentId": "a0"}, result={"outcome": "forged"})
+        replay.update(mode="memo", source=self.source(), result={"outcome": "forged"})
         summary = dict(campaign="test", outcome="COMPLETE", launch=self.launch, memoRecords=[replay],
                        provenance=[dict(node="build", status="REPLAYED-MEMO")], results={})
         env = dict(os.environ, CLAUDE_CONFIG_DIR=str(self.root))
@@ -222,6 +284,89 @@ class ReplayMemoTests(unittest.TestCase):
         self.save()
         self.assertEqual(self.build(), {"_memo": {}, "_prefix": []})
 
+    def test_source_and_current_readings_require_raw_fixed_sentinel_calls(self):
+        self.records[1]['readingCallIndex'] = 0
+        self.save()
+        with self.assertRaisesRegex(rm.ReplayError, 'fixed sentinel'):
+            self.build()
+        self.records[1]['readingCallIndex'] = 1
+        self.records[0]['verifiedReadingCallIndex'] = 0
+        self.save()
+        with self.assertRaisesRegex(rm.ReplayError, 'fixed sentinel'):
+            self.build()
+
+    def test_sentinel_raw_result_and_target_cannot_be_replaced_by_summary_claim(self):
+        for field in ('tip', 'root', 'porcelain'):
+            original = copy.deepcopy(self.calls[1]['result'])
+            self.calls[1]['result'][field] = 'c' * 40 if field == 'tip' else 'changed'
+            self.events[3]['result'] = self.calls[1]['result']
+            self.save()
+            with self.subTest(field=field), self.assertRaisesRegex(rm.ReplayError, 'raw sentinel'):
+                self.build()
+            self.calls[1]['result'] = original
+            self.events[3]['result'] = original
+
+    def test_missing_journal_opts_requires_exact_bound_transcript_header(self):
+        for event in self.events:
+            if event['type'] == 'started':
+                event.pop('opts', None)
+        self.save()
+        with self.assertRaisesRegex(rm.ReplayError, 'no matching completed'):
+            self.build()
+        for i, call in enumerate(self.calls):
+            call['prompt'] = 'Fluxpoint-Call-Opts-SHA256: ' + rm.memo_key(call['opts']) + '\n' + call['prompt']
+            self.write_rows(self.directory / ('agent-a' + str(i) + '.jsonl'), [dict(type='user', message=dict(role='user', content=call['prompt']))])
+        for record in self.records:
+            call = self.calls[0 if record['node'] == 'build' else 2]
+            record['prompt'] = record['payload']['prompt'] = call['prompt']
+        self.records[0]['key'] = rm.memo_key(self.records[0]['payload'])
+        self.records[1]['payload']['ancestors'] = [self.records[0]['key']]
+        self.records[1]['key'] = rm.memo_key(self.records[1]['payload'])
+        self.save()
+        self.assertEqual(len(self.build()['_memo']), 2)
+        self.calls[0]['opts']['effort'] = 'low'
+        self.save()
+        with self.assertRaisesRegex(rm.ReplayError, 'no matching completed'):
+            self.build()
+
+    def test_failed_null_receipt_fences_prefix_without_losing_independent_memo(self):
+        self.calls.insert(0, dict(prompt='Failed worker', opts={'label':'failed'}, result=None, mode='live'))
+        self.records[0]['verifiedReadingCallIndex'] += 1
+        self.records[1]['readingCallIndex'] += 1
+        self.records[0]['callIndex'] += 1
+        self.records[1]['callIndex'] += 1
+        self.save()
+        result = self.build()
+        self.assertEqual(result['_prefix'], [])
+        self.assertEqual(len(result['_memo']), 2)
+
+    def test_history_is_immutable_after_same_id_latest_is_replaced(self):
+        original = self.snapshot
+        self.summary['newAttempt'] = 2
+        self.save()
+        self.assertNotEqual(self.snapshot, original)
+        old, checked = run_artifacts.read(self.root, self.run, original)
+        self.assertEqual(checked, original)
+        self.assertNotIn('newAttempt', old['summary'])
+        history = self.store / 'history' / self.run / (original + '.json')
+        history.write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'SHA-256 mismatch'):
+            run_artifacts.read(self.root, self.run, original)
+
+    def test_fabricated_prior_verdict_has_no_completed_call(self):
+        self.summary['results']['gate'] = {'sha':'b'*40, 'exit':0, 'invented':True}
+        self.save()
+        request = dict(nonce='review-2', reason='Retain prior result')
+        current = dict(campaign='test', launch=self.launch, inputs={'rejudge':{'gate':request}},
+                       results={'gate':{'sha':'b'*40,'exit':0}}, tree={'checks':[dict(point='before gate', **self.tree)]},
+                       callRecords=[self.sentinel('before gate', request), dict(prompt='Gate\nREJUDGE NONCE: review-2',
+                            opts={'label':'gate','effort':'high'}, result={'sha':'b'*40,'exit':0})],
+                       rejudges=[dict(gate='gate',tree=self.tree,priorVerdict=self.summary['results']['gate'],
+                            sourceRunId=self.run,sourceArtifactSha256=self.snapshot,readingCallIndex=0,**request)])
+        run = self.current(current)
+        with self.assertRaisesRegex(rm.ReplayError, 'no corroborated completed'):
+            rm.verify_rejudges(self.root, current, projects=self.projects, run_id=run)
+
     def test_run_ids_and_source_symlinks_cannot_escape_store(self):
         for value in ("../escape", "C:stream", "CON", "run."):
             with self.subTest(value=value), self.assertRaises(rm.ReplayError):
@@ -235,7 +380,8 @@ class ReplayMemoTests(unittest.TestCase):
             rm.artifact(self.root, "escape")
 
     def test_canonical_bytes_match_javascript_sha256(self):
-        value = {"é": "café", "a": [1.0, 0.000001, 1e-7, -0.0, 1e21], "z": {"b": 2, "a": 1}}
+        value = {"é": "café", "a": [1.0, 0.000001, 1e-7, -0.0, 1e21, 1e20, 1.0000000000000001e18], "z": {"b": 2, "a": 1},
+                 'schema': {'minimum': 1e-7}}
         script = ("const crypto=require('node:crypto'); const x=" + json.dumps(value) + ";"
                   "function c(v){if(Array.isArray(v))return '['+v.map(c).join(',')+']';"
                   "if(v&&typeof v==='object')return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+c(v[k])).join(',')+'}';"

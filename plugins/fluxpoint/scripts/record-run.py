@@ -681,8 +681,13 @@ def main():
     import replay_memo as _replay
     replay_checked, rejudges, replay_problems = [], [], []
     try:
-        replay_checked = _replay.verify_replays(args.root, summary, graph=args.graph)
-        rejudges = _replay.verify_rejudges(args.root, summary, graph=args.graph)
+        validated = None
+        if summary.get('memoRecords') or summary.get('callRecords') or summary.get('rejudges'):
+            validated = _replay.validate_current(args.root, summary, args.run_id, graph=args.graph)
+        replay_checked = _replay.verify_replays(args.root, summary, graph=args.graph,
+                                               run_id=args.run_id, validated=validated)
+        rejudges = _replay.verify_rejudges(args.root, summary, graph=args.graph,
+                                          run_id=args.run_id, validated=validated)
     except (ValueError, OSError, TypeError) as exc:
         replay_problems.append(str(exc))
         outcome = "REFUSED-REPLAY"
@@ -692,9 +697,7 @@ def main():
         print("record-run: checked commit refused — " + issue, file=sys.stderr)
     os.makedirs(args.state_dir, exist_ok=True)
     art = os.path.join(args.state_dir, f"{args.run_id}.json")
-    with open(art, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(
-            {
+    artifact_data = {
                 "runId": args.run_id,
                 "when": ts,
                 # To the second: `when` keeps the Evidence row's minute for
@@ -722,10 +725,13 @@ def main():
                 "proofAudit": proof_audit,
                 "attestation": attestation,
                 "summary": summary,
-            },
-            fh,
-            indent=2,
-        )
+            }
+    try:
+        import run_artifacts as _attempts
+        art, _artifact_sha256 = _attempts.write(args.root, args.run_id, artifact_data)
+    except (OSError, ValueError) as exc:
+        print(f'record-run: immutable artifact publication failed: {exc}', file=sys.stderr)
+        return 1
 
     if replay_problems:
         print(f"record-run: {art}; artifact retained, Evidence row refused", file=sys.stderr)
