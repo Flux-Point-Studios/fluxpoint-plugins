@@ -248,7 +248,9 @@ def _validate_record(record, summary, launch, compiler):
     if tree is not None and (record.get('replay') == 'tree' or isinstance(tree, dict) and tree.get('branch') is not None):
         if (not isinstance(tree, dict) or not isinstance(tree.get("tip"), str)
                 or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", tree["tip"])
-                or not isinstance(record.get("result"), dict) or record["result"].get("sha") != tree["tip"]):
+                or not isinstance(record.get("result"), dict)
+                or not isinstance(record['result'].get('sha'), str)
+                or record['result']['sha'].lower() != tree['tip'].lower()):
             raise ReplayError("gate verdict does not name the sentinel's exact branch tip")
 
 
@@ -390,6 +392,9 @@ def _source_calls(root, run_id, launch, compiler, projects, seen, cache=None, ar
 
 
 def _validate_summary(root, summary, run_id, digest, launch, compiler, projects, seen, cache, graph=None):
+    inputs = summary.get('inputs', {})
+    if not isinstance(inputs, dict) or not isinstance(inputs.get('rejudge', {}), dict):
+        raise ReplayError('rejudge input must be an object')
     if canonical(summary.get("launch")) != canonical(launch):
         raise ReplayError("memo source belongs to another launch")
     receipts = summary.get("callRecords", [])

@@ -182,6 +182,20 @@ class ReplayMemoTests(unittest.TestCase):
         with self.assertRaisesRegex(rm.ReplayError, "sentinel's exact branch tip"):
             self.build()
 
+    def test_gate_commit_hex_case_matches_the_runtime_comparison(self):
+        self.calls[2]['result']['sha'] = 'B' * 40
+        self.save()
+        result = self.build()
+        self.assertEqual(result['_memo'][self.records[1]['key']]['result']['sha'], 'B' * 40)
+
+    def test_malformed_rejudge_inputs_are_named_provenance_errors(self):
+        for value in ('not-a-map', None, []):
+            with self.subTest(value=value):
+                self.summary['inputs'] = {'rejudge': value}
+                self.save()
+                with self.assertRaisesRegex(rm.ReplayError, 'rejudge input must be an object'):
+                    self.build()
+
     def test_recording_refuses_live_ancestor_and_missing_live_read(self):
         replay = copy.deepcopy(self.records[1])
         replay.update(mode="memo", source=self.source('a2'), reading=self.tree)
