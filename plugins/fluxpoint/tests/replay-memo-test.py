@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -381,17 +382,78 @@ class ReplayMemoTests(unittest.TestCase):
         with self.assertRaisesRegex(rm.ReplayError, 'no corroborated completed'):
             rm.verify_rejudges(self.root, current, projects=self.projects, run_id=run)
 
-    def test_run_ids_and_source_symlinks_cannot_escape_store(self):
+    def test_run_ids_cannot_escape_store(self):
         for value in ("../escape", "C:stream", "CON", "run."):
             with self.subTest(value=value), self.assertRaises(rm.ReplayError):
                 rm.artifact(self.root, value)
-        path = self.store / "escape.json"
+
+    def symlink(self, path, target, directory=False):
         try:
-            path.symlink_to(self.root / "outside.json")
+            path.symlink_to(target, target_is_directory=directory)
         except (OSError, NotImplementedError):
             self.skipTest("symlinks unavailable")
+
+    def test_source_file_symlinks_cannot_escape_store_even_when_unresolved(self):
+        for exists in (True, False):
+            run_id = "existing_escape" if exists else "dangling_escape"
+            target = self.root / (run_id + ".json")
+            if exists:
+                target.write_text(json.dumps(dict(runId=run_id, summary={})), encoding="utf-8")
+            self.symlink(self.store / (run_id + ".json"), target)
+            with self.subTest(target_exists=exists):
+                with self.assertRaisesRegex(rm.ReplayError, "escapes"):
+                    rm.artifact(self.root, run_id)
+                # Emulate Windows 3.9 returning the lexical path when resolving
+                # a dangling target. The explicit link check must still reject.
+                with patch.object(Path, 'resolve', lambda path, strict=False: path.absolute()):
+                    with self.assertRaisesRegex(rm.ReplayError, "escapes"):
+                        rm.artifact(self.root, run_id)
+                    with self.assertRaisesRegex(ValueError, "escapes"):
+                        run_artifacts.write(self.root, run_id, dict(runId=run_id, summary={}))
+
+    def test_linked_history_directories_cannot_redirect_reads_or_writes(self):
+        outside = self.root / "outside_history"
+        outside.mkdir()
+        run_id = "history_escape"
+        history = self.store / "history"
+        self.symlink(history / run_id, outside, directory=True)
+        data = (json.dumps(dict(runId=run_id, summary={})) + "\n").encode("utf-8")
+        digest = hashlib.sha256(data).hexdigest()
+        (outside / (digest + ".json")).write_bytes(data)
         with self.assertRaisesRegex(rm.ReplayError, "escapes"):
-            rm.artifact(self.root, "escape")
+            rm.artifact(self.root, run_id, digest)
+        with self.assertRaisesRegex(ValueError, "escapes"):
+            run_artifacts.write(self.root, run_id, dict(runId=run_id, summary={"new": True}))
+        self.assertFalse((self.store / (run_id + ".json")).exists())
+        self.assertEqual([p.name for p in outside.iterdir()], [digest + ".json"])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows junction behavior')
+    def test_windows_history_junction_cannot_redirect_a_snapshot(self):
+        outside = self.root / "junction_target"
+        outside.mkdir()
+        run_id = "junction_escape"
+        path = self.store / "history" / run_id
+        subprocess.run(['cmd.exe', '/d', '/c', 'mklink', '/J', str(path), str(outside)],
+                       check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        self.assertTrue(path.is_dir())
+        with self.assertRaisesRegex(ValueError, "escapes"):
+            run_artifacts.write(self.root, run_id, dict(runId=run_id, summary={}))
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse((self.store / (run_id + ".json")).exists())
+
+    def test_checkout_ancestor_symlink_preserves_normal_artifact_store(self):
+        checkout = self.root / "checkout"
+        checkout.mkdir()
+        alias = self.root / "checkout_alias"
+        self.symlink(alias, checkout, directory=True)
+        row = dict(runId="normal", summary={"attempt": 1})
+        latest, first = run_artifacts.write(alias, "normal", row)
+        self.assertTrue(Path(latest).is_file())
+        changed = dict(runId="normal", summary={"attempt": 2})
+        _, second = run_artifacts.write(alias, "normal", changed)
+        self.assertNotEqual(first, second)
+        self.assertEqual(run_artifacts.read(alias, "normal")[0], changed)
+        self.assertEqual(run_artifacts.read(alias, "normal", first)[0], row)
 
     def test_canonical_bytes_match_javascript_sha256(self):
         value = {"é": "café", "a": [1.0, 0.000001, 1e-7, -0.0, 1e21, 1e20, 1.0000000000000001e18], "z": {"b": 2, "a": 1},

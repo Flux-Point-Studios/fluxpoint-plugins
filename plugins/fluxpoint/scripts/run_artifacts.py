@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 
 
@@ -23,6 +24,20 @@ def _path(root, run_id, digest=None):
         if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
             raise ValueError('invalid run artifact SHA-256')
         path = base / 'history' / run_id / (digest + '.json')
+    # Windows resolve(strict=False) may leave a dangling symlink unresolved.
+    # Artifact entries are regular files/directories, so reject links below the
+    # canonical store before reading, snapshotting or creating anything there.
+    # lstat also identifies Windows junctions through their reparse attribute.
+    current = base
+    for component in path.relative_to(base).parts:
+        current = current / component
+        try:
+            entry = current.lstat()
+        except FileNotFoundError:
+            continue
+        if (stat.S_ISLNK(entry.st_mode) or
+                getattr(entry, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)):
+            raise ValueError('run artifact escapes canonical run store through a link')
     if not path.resolve().is_relative_to(base.resolve()):
         raise ValueError('run artifact escapes canonical run store')
     return path
