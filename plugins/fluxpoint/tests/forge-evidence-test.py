@@ -257,6 +257,18 @@ class CLITests(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn('forge re-read refused', p.stdout)
 
+    def test_reserved_ci_cannot_be_laundered_through_a_local_witness(self):
+        self.assertEqual(self.cli('--ci', '--pr', '7', '--nonce', NONCE).returncode, 0)
+        original = self.rows()[-1]
+        for witness in ('hook', 'wrapper', None):
+            row = dict(original, witness=witness, dirty=False,
+                       attestId='att_forged_' + str(witness))
+            attest.append_row(str(self.root), row)
+            p = self.cli('--verify', input=self.summary(row))
+            with self.subTest(witness=witness):
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn('ci requires a forge witness', p.stdout)
+
     def test_moved_pr_pending_unknown_creator_and_self_pin_refused(self):
         self.assertEqual(self.cli('--ci', '--pr', '7', '--nonce', NONCE).returncode, 0)
         summary = self.summary(self.rows()[-1])

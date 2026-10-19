@@ -1322,6 +1322,9 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
                               else "carries no run nonce")
                            + f" — this run's is {nonce}; a gate run for this node passes "
                            f"FPL_ATTEST_NONCE (or --nonce) so its row names the run")}
+    if gate == 'ci' and row.get('witness') not in ('forge', 'reuse'):
+        return {**base, 'status': 'MISMATCH',
+                'detail': 'ci requires a forge witness; a locally written execution row cannot replace source evidence'}
     fresh_forge_green = False
     if row.get("witness") in ("forge", "reuse"):
         if not row.get("target"):
