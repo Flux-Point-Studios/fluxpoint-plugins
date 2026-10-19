@@ -617,7 +617,7 @@ def replay_features(ir, embedded_args=None):
 
 def branch_target(n, by_id=None):
     """Only IR-owned repository/branch names may reach a live sentinel."""
-    if n.get("repository") and n.get("branch"):
+    if not n.get('mutates') and n.get("repository") and n.get("branch"):
         return {"repository": n["repository"], "branch": n["branch"]}
     producer = n if n.get("mutates") else (by_id or {}).get(n.get("verifies"), {})
     pushes = producer.get("pushes")
@@ -638,35 +638,22 @@ def valid_branch_target(target):
             and '..' not in branch and not branch.endswith('.') and not branch.startswith('refs/'))
 
 
-def push_identity(target):
-    """A ref is shared across worktrees, path aliases and clones of an origin.
+def _remote_syntax(value):
+    return '://' in value or (not re.match(r'^[A-Za-z]:', value)
+                             and bool(re.fullmatch(r'(?:[^/@:]+@)?(?:\[[^]]+\]|[^/:]+):.+', value)))
 
-    Only local Git configuration is read; compilation never contacts a remote.
-    Unavailable checkouts retain a conservative normalized declaration identity.
-    """
+
+def _destination_identity(repo, branch):
     import posixpath
-    import subprocess
     from urllib.parse import urlsplit, unquote
-    repo = target['repository']
-    if os.path.isdir(repo):
-        try:
-            origin = subprocess.run(['git', '-C', repo, 'config', '--get', 'remote.origin.url'],
-                                    capture_output=True, text=True, timeout=5)
-            if origin.returncode == 0 and origin.stdout.strip():
-                value = origin.stdout.strip()
-                if not re.match(r'^[A-Za-z][A-Za-z0-9+.-]*://|^[^/@]+@[^/:]+:', value) and not os.path.isabs(value):
-                    value = os.path.join(repo, value)
-                repo = value
-            else:
-                common = subprocess.run(['git', '-C', repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-                                        capture_output=True, text=True, timeout=5)
-                repo = common.stdout.strip() if common.returncode == 0 else os.path.realpath(repo)
-        except (OSError, subprocess.SubprocessError):
-            repo = os.path.realpath(repo)
     if '://' in repo:
         url = urlsplit(repo)
         if url.scheme == 'file':
             repo = unquote(url.path)
+            if url.netloc and url.netloc.lower() != 'localhost':
+                repo = '//' + url.netloc + repo
+            elif re.match(r'^/[A-Za-z]:', repo):
+                repo = repo[1:]
         else:
             host = (url.hostname or '').lower()
             path = unquote(url.path).strip('/')
@@ -676,23 +663,63 @@ def push_identity(target):
             port = url.port
             if (url.scheme, port) in (('http', 80), ('https', 443), ('ssh', 22)):
                 port = None
-            return ('remote:' + host + (':' + str(port) if port else '') + '/' + path, target['branch'])
-    scp = re.fullmatch(r'[^/@]+@([^/:]+):(.+)', repo)
+            return ('remote:' + host + (':' + str(port) if port else '') + '/' + path, branch)
+    scp = re.fullmatch(r'(?:[^/@:]+@)?(\[[^]]+\]|[^/:]+):(.+)', repo) if not re.match(r'^[A-Za-z]:', repo) else None
     if scp:
         host, path = scp.groups()
+        host = host.strip('[]')
         path = path.strip('/')
         if host.lower() in ('github.com', 'gitlab.com', 'bitbucket.org'):
             path = path.lower()
         path = path.removesuffix('.git')
-        return ('remote:' + host.lower() + '/' + path, target['branch'])
+        return ('remote:' + host.lower() + '/' + path, branch)
     repo = repo.replace('\\', '/')
+    if re.match(r'^[A-Za-z]:', repo) and not re.match(r'^[A-Za-z]:/', repo):
+        raise ValueError('drive-relative repository paths have no stable push identity')
     repo = posixpath.normpath(repo)
     if re.match(r'^[A-Za-z]:', repo) or repo.startswith('//'):
         repo = repo.lower()
     else:
         repo = os.path.realpath(repo).replace('\\', '/')
     repo = repo.removesuffix('/.git')
-    return ('path:' + repo, target['branch'])
+    return ('path:' + repo, branch)
+
+
+def push_identity(target, repository_root=None):
+    """Read effective fetch/push URLs locally, including Git URL rewrites.
+
+    A sentinel reads origin's fetch URL. Distinct or multiple push destinations
+    cannot share that proof and are refused rather than keyed to the wrong ref.
+    """
+    import subprocess
+    repo = target['repository']
+    if repository_root and not os.path.isabs(repo) and not re.match(r'^[A-Za-z]:', repo) and not _remote_syntax(repo):
+        repo = os.path.join(repository_root, repo)
+    if not os.path.isdir(repo):
+        return _destination_identity(repo, target['branch'])
+    def git(*argv):
+        return subprocess.run(['git', '-C', repo, *argv], capture_output=True, text=True, timeout=5)
+    def destination(url):
+        if not _remote_syntax(url) and not re.match(r'^[A-Za-z]:', url) and not os.path.isabs(url):
+            url = os.path.join(repo, url)
+        return _destination_identity(url, target['branch'])
+    try:
+        fetch = git('remote', 'get-url', 'origin')
+        pushed = git('remote', 'get-url', '--push', '--all', 'origin')
+        if fetch.returncode == 0 or pushed.returncode == 0:
+            urls = [u for u in pushed.stdout.splitlines() if u.strip()]
+            if fetch.returncode or pushed.returncode or len(urls) != 1:
+                raise ValueError('origin requires one effective push destination for its sentinel reading')
+            key = destination(urls[0])
+            if key != destination(fetch.stdout.strip()):
+                raise ValueError('origin fetch and push destinations differ; the sentinel cannot attest the pushed ref')
+            return key
+        common = git('rev-parse', '--git-common-dir')
+        if common.returncode:
+            raise ValueError('cannot establish the declared repository push identity')
+        return destination(common.stdout.strip())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError('cannot read effective push configuration') from exc
 
 
 def _validate_reduce(n, where, seen, contracts):
@@ -888,7 +915,7 @@ def validate_repair(n, seen, ir, contracts):
     return f
 
 
-def validate(ir, contracts, gates=None, agents=None, specification=None, embedded_args=None):
+def validate(ir, contracts, gates=None, agents=None, specification=None, embedded_args=None, repository_root=None):
     """Return a list of findings. Empty list means the graph may compile."""
     f = []
     if ir.get("version") != 1:
@@ -993,15 +1020,22 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
                 f.append(f"{where}: replay:'tree' requires explicit repository and branch")
         if any(key in n for key in ('repository', 'branch')) and not valid_branch_target({'repository': n.get('repository'), 'branch': n.get('branch')}):
             f.append(f"{where}: repository and branch must be supplied together as safe Git target names")
+        if n.get('mutates') and any(key in n for key in ('repository', 'branch')):
+            f.append(f"{where}: builders declare their sole target with pushes; repository/branch belong to gates")
+        if valid_branch_target(branch_target(n, by_id)) and ('replay' in n or n.get('repository')):
+            try:
+                push_identity(branch_target(n, by_id), repository_root)
+            except ValueError as exc:
+                f.append(f"{where}: replay target refused: {exc}")
         if 'pushes' in n:
             if not n.get('mutates') or not valid_branch_target(branch_target(n)):
                 f.append(f"{where}: pushes requires mutates:true and 'repository#branch' with safe names")
             elif n.get('lane'):
                 target = branch_target(n)
                 try:
-                    key = push_identity(target)
-                except ValueError:
-                    f.append(f"{where}: pushes repository has an invalid remote URL")
+                    key = push_identity(target, repository_root)
+                except ValueError as exc:
+                    f.append(f"{where}: pushes repository identity refused: {exc}")
                     key = (str(target['repository']), target['branch'])
                 previous = pushes_lanes.setdefault(key, n['lane'])
                 if previous != n['lane']:
@@ -1749,8 +1783,17 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
                 f.append(f"{where}: cannot verify itself")
             if not n.get("independent"):
                 f.append(f"{where}: verifies '{n['verifies']}' but is not marked independent:true")
-            if lane_graph and n['verifies'] not in ancestors(n, by_id):
-                f.append(f"{where}: a lane verifier must declare its producer as an after ancestor; verifies alone does not order concurrent lanes")
+            if replay_features(ir, embedded_args) and n['verifies'] not in ancestors(n, by_id):
+                f.append(f"{where}: a lane/replay verifier must declare its producer as an after ancestor; verifies alone does not bind replay ancestry")
+            producer = by_id.get(n['verifies']) or {}
+            expected_target = branch_target(producer) if producer.get('pushes') else None
+            actual_target = branch_target(n, by_id)
+            if valid_branch_target(expected_target) and valid_branch_target(actual_target):
+                try:
+                    if push_identity(expected_target, repository_root) != push_identity(actual_target, repository_root):
+                        f.append(f"{where}: gate repository/branch differs from the pushes target of the producer it verifies")
+                except ValueError as exc:
+                    f.append(f"{where}: cannot bind the verifying gate to its pushed ref: {exc}")
         seen[nid] = n
 
     for loop in repair_nodes:
@@ -4771,7 +4814,7 @@ def main():
 
     agents = load_agents(args.gates_root)
     gates = load_gates(args.gates_root)
-    findings = validate(ir, contracts, gates, agents, embedded_args=embedded_args)
+    findings = validate(ir, contracts, gates, agents, embedded_args=embedded_args, repository_root=args.gates_root)
     if not findings:
         findings.extend(prose_pin_findings(text, ir))
     specification = None
@@ -4786,7 +4829,7 @@ def main():
                 packet, identity = projection[:2]
             specification = {"packet": packet, "identity": identity,
                              "path": os.path.relpath(packet_file, args.gates_root).replace(os.sep, "/")}
-            findings = validate(ir, contracts, gates, agents, specification, embedded_args)
+            findings = validate(ir, contracts, gates, agents, specification, embedded_args, repository_root=args.gates_root)
         except (OSError, ValueError, TypeError) as e:
             print(f"graph-compile: spec required before implementation: {e}", file=sys.stderr)
             return 1

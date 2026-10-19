@@ -131,9 +131,20 @@ class GraphReplay(unittest.TestCase):
         self.assertEqual(c.validate(ir,CONTRACTS),[])
         out=execute(ir)
         self.assertGreater(out['events'].index('start:check'),out['events'].index('end:a'))
+        for n in ir['nodes']: n.pop('lane')
+        ir['nodes'][0]['replay']='inputs'; ir['nodes'][1].update(replay='tree',repository='repo-a',branch='main')
+        ir['nodes'][1].pop('after'); ir['nodes'][1]['prompt']='Judge current tree'
+        self.assertTrue(any('after ancestor' in x for x in c.validate(ir,CONTRACTS)))
+
+    def test_verifier_target_is_the_actual_branch_its_producer_pushes(self):
+        ir=self.replay_graph()
+        ir['nodes'][1]['repository']='another-repository'
+        self.assertTrue(any('differs from the pushes target' in x for x in c.validate(ir,CONTRACTS)))
+        ir['nodes'][1]['repository']='repo-a'; ir['nodes'][1]['branch']='another-branch'
+        self.assertTrue(any('differs from the pushes target' in x for x in c.validate(ir,CONTRACTS)))
 
     def test_shared_push_identity_normalizes_windows_and_common_origins(self):
-        for left,right in [('C:/Repo','c:\\repo'),('/repo','/repo/.git'),('https://github.com/Owner/Project.git','git@github.com:owner/project')]:
+        for left,right in [('C:/Repo','c:\\repo'),('/repo','/repo/.git'),('file:///C:/Repo','c:\\repo'),('file://server/share/repo','//server/share/repo'),('https://github.com/Owner/Project.git','git@github.com:owner/project'),('ssh://git.example/org/repo.git','git.example:org/repo.git')]:
             self.assertEqual(c.push_identity({'repository':left,'branch':'main'}),c.push_identity({'repository':right,'branch':'main'}))
         with tempfile.TemporaryDirectory() as tmp:
             targets=[]
@@ -143,6 +154,20 @@ class GraphReplay(unittest.TestCase):
                 subprocess.run(['git','-C',str(path),'remote','add','origin','https://example.invalid/org/shared.git'],check=True)
                 targets.append({'repository':str(path),'branch':'main'})
             self.assertEqual(c.push_identity(targets[0]),c.push_identity(targets[1]))
+
+    def test_effective_origin_rewrites_and_split_push_destinations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'clone'; path.mkdir()
+            subprocess.run(['git','init','-q',str(path)],check=True)
+            def git(*args): subprocess.run(['git','-C',str(path),*args],check=True)
+            git('remote','add','origin','https://old.invalid/org/repo.git')
+            git('config','url.https://actual.invalid/.insteadOf','https://old.invalid/')
+            self.assertEqual(c.push_identity({'repository':str(path),'branch':'main'}),c.push_identity({'repository':'https://actual.invalid/org/repo.git','branch':'main'}))
+            self.assertEqual(c.push_identity({'repository':'clone','branch':'main'},repository_root=tmp),c.push_identity({'repository':str(path),'branch':'main'}))
+            git('remote','set-url','--push','origin','https://different.invalid/org/repo.git')
+            with self.assertRaisesRegex(ValueError,'fetch and push'): c.push_identity({'repository':str(path),'branch':'main'})
+            git('remote','set-url','--add','--push','origin','https://another.invalid/org/repo.git')
+            with self.assertRaisesRegex(ValueError,'one effective'): c.push_identity({'repository':str(path),'branch':'main'})
 
     def test_irreversible_guard_must_be_actual_ancestor(self):
         ir=self.lanes(); ir['nodes'][3]['haltWhen']='exit != 0'; ir['requiredArgs']=['confirm']; ir['nodes'].append(node('effect',irreversible=True,after='b-gate',prompt='Use {{prev}}'))
