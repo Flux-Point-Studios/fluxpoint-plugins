@@ -104,8 +104,8 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
   if(mode==='missing-witness'&&label.includes(':read:'))return null;
   if(mode==='patch-drift'&&label.includes(':after-review'))appendFileSync(PATCH_PATH,'\n');
   const command=p.split('COMMAND: ')[1].split('\n')[0];
-  try {return JSON.parse(execFileSync(process.env.FPL_BASH||'bash',['-c',command],{encoding:'utf8'}));}
-  catch(e){return {status:'INCOMPLETE',issue:String(e)}}
+  try {return JSON.parse(execFileSync(BASH_EXEC,['-c',command],{encoding:'utf8'}));}
+  catch(e){try{return JSON.parse(e.stdout.toString('utf8'))}catch(_){return {status:'INCOMPLETE',issue:String(e)}}}
  }
  if(label.startsWith('fix:')||label.startsWith('merge:')){
   const r=structuredClone(slice);
@@ -168,6 +168,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         args = {'_base': {'sha': self.base, 'porcelain': ''}, '_launch': {'root': str(self.root), 'nonce': 'launch'},
                 '_replayLaunchNonce': nonce, 'findings': ['Original targeted finding']}
         values = {'ARGS': args, 'MODE': mode, 'PATCH_PATH': str(self.patches[0]), 'HEAD': self.head,
+                  'BASH_EXEC': os.environ.get('FPL_BASH') or ('C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else 'bash'),
                   'SERIES_SHA': __import__('hashlib').sha256(self.series.read_bytes()).hexdigest(), 'SERIES': str(self.series),
                   'PYTHON_EXEC': sys.executable, 'HELPER_SCRIPT': str(SCRIPTS / 'repair-proof.py'),
                   'CONTROL_COMMAND': subprocess.list2cmdline([sys.executable, '-c', 'print("valid control")']) if os.name == 'nt' else shlex.join([sys.executable, '-c', 'print("valid control")']),
@@ -177,12 +178,17 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
             prefix = prefix.replace(key, json.dumps(value))
         script, out = self.root / 'run.mjs', self.root / 'out.json'
         script.write_text(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(str(out)) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(str(out)) + ',JSON.stringify({error:String(e),stack:e.stack,calls})));', encoding='utf-8')
-        p = subprocess.run(['node', str(script)], capture_output=True, text=True, timeout=90,
+        p = subprocess.run(['node', str(script)], capture_output=True, text=True, encoding='utf-8', timeout=90,
                            env=dict(os.environ, FPL_PY=sys.executable))
         self.assertTrue(out.exists(), p.stderr)
-        result = json.loads(out.read_text())
+        result = json.loads(out.read_text(encoding='utf-8'))
         if nonce:
             self.assertNotIn('error', result, result.get('stack'))
+        if nonce and mode in ('pass', 'claim-refuted') and result.get('r', {}).get('outcome') != 'COMPLETE':
+            print('Unexpected repair proof outcome: ' + json.dumps({
+                'mode': mode, 'outcome': result.get('r', {}).get('outcome'),
+                'provenance': result.get('r', {}).get('provenance', []),
+            }), file=sys.stderr)
         return result
 
     def test_clean_pass_spawns_independent_diff_attack_and_live_patch_receipt(self):
@@ -353,12 +359,33 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         import hashlib
         vectors = [b'', b'abc', bytes(range(256)), self.data,
                    'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+é guard\n'.encode()]
-        script = (SCRIPTS / 'repair-proof.js').read_text() + '\n' + 'const vectors=' + json.dumps([base64.b64encode(v).decode() for v in vectors]) + ';\nconsole.log(JSON.stringify(vectors.map(v=>repairSHA256(repairBytes(v)))));'
-        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=True)
+        script = (SCRIPTS / 'repair-proof.js').read_text(encoding='utf-8') + '\n' + 'const vectors=' + json.dumps([base64.b64encode(v).decode() for v in vectors]) + ';\nconsole.log(JSON.stringify(vectors.map(v=>repairSHA256(repairBytes(v)))));'
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', check=True)
         self.assertEqual(json.loads(result.stdout), [hashlib.sha256(v).hexdigest() for v in vectors])
-        script = (SCRIPTS / 'repair-proof.js').read_text() + '\nconsole.log(JSON.stringify(repairManifest(repairBytes(' + json.dumps(base64.b64encode(vectors[-1]).decode()) + '))));'
-        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=True)
+        script = (SCRIPTS / 'repair-proof.js').read_text(encoding='utf-8') + '\nconsole.log(JSON.stringify(repairManifest(repairBytes(' + json.dumps(base64.b64encode(vectors[-1]).decode()) + '))));'
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', check=True)
         self.assertEqual(json.loads(result.stdout), manifest(vectors[-1]))
+        # Execute the real witness guard with native pathlib-style Windows
+        # responses. Different roots and POSIX literal backslashes stay distinct.
+        cases = [
+            ('drive-mixed', r'C:\repo/.claude/patch.diff', r'C:\repo\.claude\patch.diff', True),
+            ('drive-letter-case', r'c:/repo/patch.diff', r'C:\repo\patch.diff', True),
+            ('different-drive', r'C:\repo/patch.diff', r'D:\repo\patch.diff', False),
+            ('unc-native', '//server/share/patch.diff', r'\\server\share\patch.diff', True),
+            ('different-share', '//server/share/patch.diff', r'\\server\other\patch.diff', False),
+            ('different-server', '//server/share/patch.diff', r'\\elsewhere\share\patch.diff', False),
+            ('unc-local-root', '//server/share/patch.diff', '/server/share/patch.diff', False),
+            ('posix-literal-backslash', r'/repo/literal\name/patch.diff', '/repo/literal/name/patch.diff', False),
+        ]
+        setup = "const A={_replayLaunchNonce:'" + '1' * 64 + "'},REPAIR_LAUNCH={root:'ignored'},REPAIR_PROOF_HELPER='ignored';let reply;const repairText=v=>typeof v==='string'&&!!v.trim();const agent=async()=>reply;\n"
+        script = setup + (SCRIPTS / 'repair-proof.js').read_text(encoding='utf-8') + '\nconst cases=' + json.dumps(cases) + ';\n' + '''
+(async()=>{const results=[];for(const [name,expected,actual]of cases){
+ const context={base:'a'.repeat(40),item:'slice',round:1,current:{patch:expected}};
+ reply={status:'READ',base:context.base,item:context.item,round:1,patch:actual,rawPatch:''};
+ const result=await repairReadPatch(context);results.push([name,!result.issue]);
+}console.log(JSON.stringify(results));})();'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', check=True)
+        self.assertEqual(json.loads(result.stdout), [[name, expected] for name, _, _, expected in cases])
 
     def test_helper_materializes_exact_bytes_and_confirms_owned_cleanup(self):
         patch = str(self.patches[0])

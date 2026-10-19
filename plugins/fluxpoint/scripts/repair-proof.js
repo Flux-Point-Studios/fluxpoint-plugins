@@ -115,6 +115,16 @@ function repairCoverageIssue(check, measured, fixed) {
 }
 const REPAIR_SENTINEL_SCHEMA = {type:'object',required:['status'],properties:{status:{type:'string'},rawPatch:{type:'string'},base:{type:'string'},patch:{type:'string'},item:{type:'string'},round:{type:'integer'},snapshot:{type:'string'},token:{type:'string'},patchSha256:{type:'string'},observations:{type:'array',items:{type:'object'}},issue:{type:'string'}}}
 const repairQuote = s => "'" + String(s).replace(/'/g, "'\\''") + "'"
+function repairSamePath(expected, actual) {
+  if (typeof expected !== 'string' || typeof actual !== 'string') return false
+  // Native pathlib normalizes mixed Windows separators. A POSIX backslash
+  // remains a filename character, so do not normalize arbitrary paths.
+  const windows = s => /^(?:[A-Za-z]:[\\/]|(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+(?:[\\/]|$))/.test(s)
+  if (!windows(expected) || !windows(actual)) return expected === actual
+  const key = s => s.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive) => drive.toUpperCase() + ':')
+  // Keep both leading UNC slashes and the exact server/share authority.
+  return key(expected) === key(actual)
+}
 function repairIdentity(context) { const p = context.integrated || context.current; return {base:context.base,item:context.item,round:context.round,patch:p.patch} }
 async function repairSentinel(mode, context, extra = {}, id = '') {
   const identity = repairIdentity(context)
@@ -127,7 +137,9 @@ async function repairReadPatch(context, readId = 'before-check') {
   if (typeof A._replayLaunchNonce !== 'string' || !/^[0-9a-f]{64}$/.test(A._replayLaunchNonce)) return {issue:'DIFF-UNPROVEN: fresh _replayLaunchNonce is required at every launch/resume'}
   const r = await repairSentinel('read',context,{},readId)
   const id = repairIdentity(context)
-  if (!r || r.status !== 'READ' || Object.keys(id).some(k => r[k] !== id[k])) return {issue:'DIFF-UNPROVEN: fixed patch witness missing or identity mismatched'}
+  if (!r || r.status !== 'READ') return {issue:'DIFF-UNPROVEN: fixed patch witness missing or failed'+(repairText(r?.issue)?': '+r.issue:'')}
+  const mismatched = Object.keys(id).filter(k => k === 'patch' ? !repairSamePath(id[k],r[k]) : r[k] !== id[k])
+  if (mismatched.length) return {issue:'DIFF-UNPROVEN: fixed patch witness identity mismatch in '+mismatched.join(', ')+(mismatched.includes('patch')?' (expected '+JSON.stringify(id.patch)+', observed '+JSON.stringify(r.patch)+')':'')}
   try { return {...repairManifest(repairBytes(r.rawPatch)),...id} }
   catch (e) { return {issue:'DIFF-UNPROVEN: '+String(e.message || e)} }
 }
@@ -154,7 +166,7 @@ async function repairCheckedSpawn(context, measured, prompt, options) {
   let result = null, cleanup = null
   try { result = await spawn(repairSnapshotBrief(snapshot)+prompt,options) }
   finally { cleanup = await repairSentinel('cleanup',context,{snapshot:snapshot.snapshot,token:snapshot.token},options.label) }
-  const valid = cleanup && cleanup.status === 'CLEANED' && cleanup.snapshot === snapshot.snapshot && cleanup.token === snapshot.token
+  const valid = cleanup && cleanup.status === 'CLEANED' && repairSamePath(snapshot.snapshot,cleanup.snapshot) && cleanup.token === snapshot.token
   if (!valid) return {verdict:'INCOMPLETE',findings:[],blockers:['checker snapshot/process cleanup unconfirmed'],evidence:['harness refused undrained or missing checker snapshot']}
   return result && typeof result === 'object' ? {...result,checkerWitness:{...cleanup,spawnId:options.label,base:context.base,patchSha256:measured.patchSha256,readNonce:A._replayLaunchNonce}} : null
 }
@@ -179,7 +191,7 @@ async function repairDiffAttack(context, measured, phaseName) {
     catch (e) { receipt.blockers.push(id+': agent failed: '+String(e.message || e)) }
     finally {
       const cleaned = await repairSentinel('cleanup',context,{snapshot:snapshot.snapshot,token:snapshot.token},id)
-      if (!cleaned || cleaned.status !== 'CLEANED' || cleaned.snapshot !== snapshot.snapshot || cleaned.token !== snapshot.token) receipt.blockers.push(id+': snapshot/process cleanup unconfirmed')
+      if (!cleaned || cleaned.status !== 'CLEANED' || !repairSamePath(snapshot.snapshot,cleaned.snapshot) || cleaned.token !== snapshot.token) receipt.blockers.push(id+': snapshot/process cleanup unconfirmed')
       else { executions = cleaned.observations; receipt.snapshots.push({...cleaned,spawnId:id}) }
     }
     return result && typeof result === 'object' ? {...result,_executed:executions} : null
