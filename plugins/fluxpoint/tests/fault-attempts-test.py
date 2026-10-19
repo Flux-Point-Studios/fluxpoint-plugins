@@ -200,9 +200,9 @@ sys.exit(subprocess.call(command,cwd=root,env=env))
         self.assertEqual(attempts.unclosed_reds(at, str(self.root), rows, green, self.launch)[0], [cancelled['attestId']])
         self.assertEqual(attempts.unclosed_reds(at, str(self.root), rows, green, self.launch, fresh_forge_green=True)[0], [])
         completed = dict(cancelled, attestId='att_completed_red', exit=1, cancelled=True)
-        self.assertEqual(attempts.unclosed_reds(at, str(self.root), [completed, green], green, self.launch, fresh_forge_green=True)[0], ['att_completed_red'])
+        self.assertEqual(attempts.unclosed_reds(at, str(self.root), [cancelled, completed, green], green, self.launch, fresh_forge_green=True)[0], ['att_completed_red'])
         forged = dict(cancelled, attestId='att_agent_written', token='not-a-wrapper-completion')
-        self.assertEqual(attempts.unclosed_reds(at, str(self.root), [forged, green], green, self.launch, fresh_forge_green=True)[0], ['att_agent_written'])
+        self.assertEqual(attempts.unclosed_reds(at, str(self.root), [cancelled, forged, green], green, self.launch, fresh_forge_green=True)[0], ['att_agent_written'])
 
     def test_late_cancellation_cannot_relabel_a_completed_failure(self):
         finish = bg.finish

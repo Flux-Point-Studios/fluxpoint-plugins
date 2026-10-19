@@ -84,6 +84,13 @@ reclassifies the original crash and checks the reference digest and deployed
 resolution. All four attestation ids are reserved to that one verifying node.
 A later ordinary green can pass only after every red in scope has such a valid
 green pair. The run artifact and Evidence row retain the verified crash count.
+Before filtering the writable log by gate, nonce, tree or launch time, the reader
+cross-checks known red wrapper completions in `attest-bg`. A missing row or altered
+identity cannot make that retained failure disappear. These are two retained
+local views, not a cryptographic boundary against rewriting all local evidence.
+An interrupted local loser can yield to CI only after its cancellation completion
+and log are authenticated and the covering forge green is re-read successfully;
+a completed assertion or crash stays red.
 
 This is a gate-execution exception, not a node retry setting. Commands run outside
 attestation remain unwitnessed. Compiler warnings identify schema-only exit

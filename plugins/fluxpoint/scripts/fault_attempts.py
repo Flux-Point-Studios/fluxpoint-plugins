@@ -232,8 +232,37 @@ def verify_pair(at, root, rows, pair, launch, gates=None):
     return ids
 
 
+def retained_red_mismatches(at, root, rows, cited, launch):
+    """Check retained execution scope before selecting mutable log rows.
+
+    A wrapper completion is a second retained view of a known execution.
+    Removing its row or editing gate/tree/nonce/time must not erase a red.
+    This does not make two locally writable files a cryptographic boundary.
+    """
+    store = bg.Store(root, DIRECTORY)
+    tree = cited.get('treeSha') or cited.get('headSha')
+    problems = []
+    for path in sorted(Path(store.directory).glob('*.json')):
+        rec = store.read(path.stem)
+        if (not rec or rec.get('status') not in ('DONE', 'CANCELLED') or
+                not rec.get('attestId') or type(rec.get('exit')) is not int or rec['exit'] == 0 or
+                rec.get('gate') != cited.get('gate') or rec.get('nonce') != launch.get('nonce') or
+                not at._same_commit(rec.get('treeSha') or rec.get('headSha'), tree) or
+                str(rec.get('started') or '') < str(launch.get('since') or '')):
+            continue
+        hits = [r for r in rows if r.get('attestId') == rec['attestId']]
+        if (len(hits) != 1 or hits[0].get('witness') != 'wrapper' or
+                hits[0].get('token') != rec['token'] or
+                hits[0].get('started') != rec.get('started') or
+                bool(hits[0].get('cancelRequested')) != bool(rec.get('cancelRequested')) or
+                any(hits[0].get(k) != rec.get(k) for k in RUNNER_FIELDS)):
+            problems.append(str(rec['attestId']) + ' (retained red history missing or altered)')
+    return problems
+
+
 def unclosed_reds(at, root, rows, cited, launch, fresh_forge_green=False):
     """A later pass never erases a red attempt in the same run and tree."""
+    retained_issues = retained_red_mismatches(at, root, rows, cited, launch)
     tree = cited.get('treeSha') or cited.get('headSha')
     reds = [row for row in rows if row.get('gate') == cited.get('gate') and at._same_commit(row.get('treeSha') or row.get('headSha'), tree)
             and row.get('nonce') == launch.get('nonce') and type(row.get('exit')) is int and row['exit'] != 0
@@ -266,7 +295,7 @@ def unclosed_reds(at, root, rows, cited, launch, fresh_forge_green=False):
                 events.add(row['attestId'])
         except (OSError, ValueError, KeyError, TypeError):
             pass
-    return [row.get('attestId') for row in reds if row.get('attestId') not in closed], receipts, sorted(events)
+    return [row.get('attestId') for row in reds if row.get('attestId') not in closed] + retained_issues, receipts, sorted(events)
 
 
 def rerun(at, root, original_id, nonce, detach=False, token=None, tree=None):
