@@ -227,11 +227,20 @@ def _validate_record(record, summary, launch, compiler):
         raise ReplayError("memo payload identity mismatch")
     if record.get("key") != memo_key(payload):
         raise ReplayError("memo receipt SHA-256 mismatch")
+    tree = payload["tree"]
+    if tree is not None:
+        if (not isinstance(tree, dict) or not isinstance(tree.get("tip"), str)
+                or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", tree["tip"])
+                or not isinstance(record.get("result"), dict) or record["result"].get("sha") != tree["tip"]):
+            raise ReplayError("gate verdict does not name the sentinel's exact branch tip")
 
 
-def _source_calls(root, run_id, launch, compiler, projects, seen):
+def _source_calls(root, run_id, launch, compiler, projects, seen, cache=None):
+    cache = {} if cache is None else cache
     if run_id in seen:
         raise ReplayError("cyclic replay provenance")
+    if run_id in cache:
+        return cache[run_id]
     seen = seen | {run_id}
     summary = artifact(root, run_id)["summary"]
     if canonical(summary.get("launch")) != canonical(launch):
@@ -241,7 +250,8 @@ def _source_calls(root, run_id, launch, compiler, projects, seen):
     if not isinstance(receipts, list) or not isinstance(records, list):
         raise ReplayError("compiler call and memo receipts must be arrays")
     if not receipts and not records:
-        return summary, [], []
+        cache[run_id] = (summary, [], [])
+        return cache[run_id]
     calls = _journal_calls(run_id, projects)
     unused = list(calls)
     validated = []
@@ -252,7 +262,7 @@ def _source_calls(root, run_id, launch, compiler, projects, seen):
         if source:
             if not isinstance(source, dict):
                 raise ReplayError("invalid replay call source")
-            _, source_calls, _ = _source_calls(root, source.get("runId"), launch, compiler, projects, seen)
+            _, source_calls, _ = _source_calls(root, source.get("runId"), launch, compiler, projects, seen, cache)
             matches = [c for c in source_calls if c["agentId"] == source.get("agentId")]
             if len(matches) != 1:
                 raise ReplayError("replayed call source missing or ambiguous")
@@ -281,7 +291,7 @@ def _source_calls(root, run_id, launch, compiler, projects, seen):
         _validate_record(record, summary, launch, compiler)
         if record.get("mode") == "memo":
             source = record.get("source") or {}
-            _, _, previous = _source_calls(root, source.get("runId"), launch, compiler, projects, seen)
+            _, _, previous = _source_calls(root, source.get("runId"), launch, compiler, projects, seen, cache)
             candidates = [x for x in previous if x["key"] == record["key"] and x["agentId"] == source.get("agentId")]
         else:
             candidates = [c for c in validated if c["prompt"] == record["prompt"]
@@ -309,7 +319,8 @@ def _source_calls(root, run_id, launch, compiler, projects, seen):
             entry["verifiedReading"] = reading
             entry["verifiedByNode"] = verifier
         verified.append(entry)
-    return summary, validated, verified
+    cache[run_id] = (summary, validated, verified)
+    return cache[run_id]
 
 
 def build_memo(root, run_id, launch, compiler_version, projects=None):
@@ -342,6 +353,8 @@ def verify_replays(root, summary, projects=None, graph=None):
     if not isinstance(records, list):
         raise ReplayError("memoRecords must be an array")
     checked = []
+    sources = {}
+    compiler_version = _json(Path(__file__).resolve().parents[1] / ".claude-plugin/plugin.json")["version"]
     nodes = _graph_nodes(graph) if graph is not None and records else None
     for record in records:
         if not isinstance(record, dict):
@@ -357,13 +370,27 @@ def verify_replays(root, summary, projects=None, graph=None):
                 raise ReplayError("graph does not permit memo replay for " + str(record.get("node")))
         payload = record.get("payload") or {}
         compiler = payload.get("compiler")
+        if compiler != compiler_version:
+            raise ReplayError("memo compiler version differs from the installed compiler")
         _validate_record(record, summary, summary.get("launch"), compiler)
+        if canonical((summary.get("results") or {}).get(record["node"])) != canonical(record.get("result")):
+            raise ReplayError("memo result differs from the node's recorded result")
+        for key in payload["ancestors"]:
+            ancestor = [r for r in records if isinstance(r, dict) and r.get("key") == key]
+            if len(ancestor) != 1 or ancestor[0].get("mode") not in ("prefix", "memo"):
+                raise ReplayError("memo follows a live or missing ancestor")
         source = record.get("source") or {}
-        data = build_memo(root, source.get("runId"), summary.get("launch"), compiler, projects)
+        source_id = source.get("runId")
+        if source_id not in sources:
+            sources[source_id] = build_memo(root, source_id, summary.get("launch"), compiler, projects)
+        data = sources[source_id]
         original = data["_memo"].get(record.get("key"))
         if (not original or original["agentId"] != source.get("agentId")
                 or any(canonical(original.get(k)) != canonical(record.get(k)) for k in ("prompt", "result", "payload"))):
             raise ReplayError("REPLAYED-MEMO source does not corroborate result")
+        expected_reading = payload["tree"] if payload["tree"] is not None else original.get("verifiedReading")
+        if not isinstance(expected_reading, dict) or canonical(record.get("reading")) != canonical(expected_reading):
+            raise ReplayError("memo has no matching live tree/branch sentinel reading")
         checked.append({"node": record["node"], "key": record["key"], "source": source})
     # A provenance label cannot bypass checks by omitting its memo receipt.
     labelled = [r for r in summary.get("provenance", []) if isinstance(r, dict)

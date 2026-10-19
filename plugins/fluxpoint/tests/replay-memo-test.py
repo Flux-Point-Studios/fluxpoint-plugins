@@ -110,6 +110,24 @@ class ReplayMemoTests(unittest.TestCase):
         with self.assertRaisesRegex(rm.ReplayError, "verifying gate"):
             self.build()
 
+    def test_gate_verdict_must_cover_the_sentinel_tip(self):
+        self.calls[1]["result"]["sha"] = "c" * 40
+        self.save()
+        with self.assertRaisesRegex(rm.ReplayError, "sentinel's exact branch tip"):
+            self.build()
+
+    def test_recording_refuses_live_ancestor_and_missing_live_read(self):
+        replay = copy.deepcopy(self.records[1])
+        replay.update(mode="memo", source={"runId": self.run, "agentId": "a1"}, reading=self.tree)
+        current = dict(campaign="test", launch=self.launch, memoRecords=[self.records[0], replay],
+                       results={"gate": replay["result"]})
+        with self.assertRaisesRegex(rm.ReplayError, "live or missing ancestor"):
+            rm.verify_replays(self.root, current, projects=self.projects)
+        current["memoRecords"][0] = dict(self.records[0], mode="prefix")
+        current["memoRecords"][1].pop("reading")
+        with self.assertRaisesRegex(rm.ReplayError, "live tree/branch"):
+            rm.verify_replays(self.root, current, projects=self.projects)
+
     def test_missing_failed_and_ambiguous_sources_fail_closed(self):
         source = self.directory / "agent-a0.jsonl"
         source.rename(source.with_suffix(".old"))
@@ -128,12 +146,14 @@ class ReplayMemoTests(unittest.TestCase):
 
     def test_recorder_independently_verifies_memo_and_omitted_receipts(self):
         replay = copy.deepcopy(self.records[0])
-        replay.update(mode="memo", source={"runId": self.run, "agentId": "a0"})
+        replay.update(mode="memo", source={"runId": self.run, "agentId": "a0"}, reading=self.tree)
         current = dict(campaign="test", launch=self.launch, memoRecords=[replay],
+                       results={"build": replay["result"]},
                        provenance=[dict(node="build", status="REPLAYED-MEMO")])
         checked = rm.verify_replays(self.root, current, projects=self.projects)
         self.assertEqual(checked[0]["node"], "build")
         current["memoRecords"][0]["result"] = {"outcome": "forged"}
+        current["results"]["build"] = {"outcome": "forged"}
         with self.assertRaisesRegex(rm.ReplayError, "corroborate"):
             rm.verify_replays(self.root, current, projects=self.projects)
         current["memoRecords"] = []
