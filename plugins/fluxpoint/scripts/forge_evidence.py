@@ -168,7 +168,7 @@ class GitHub:
         try:
             # Neither GH_REPO nor GH_HOST may redirect proof to a different forge.
             p = subprocess.run(['gh', 'api', path, '--hostname', 'github.com'], cwd=self.root,
-                               capture_output=True, text=True, timeout=timeout)
+                               capture_output=True, text=True, encoding='utf-8', timeout=timeout)
         except subprocess.TimeoutExpired as e:
             raise RuntimeError('GitHub observation timed out') from e
         if p.returncode:

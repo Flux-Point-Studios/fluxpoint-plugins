@@ -77,6 +77,34 @@ class ForgeTests(unittest.TestCase):
         self.assertEqual(self.observe()['exit'], 0)
         self.assertEqual(self.observe()['evidence'][0]['appId'], 42)
 
+    def test_utf8_github_contexts_survive_a_windows_cp1252_default(self):
+        status_name, check_name = 'Vérification λ 東京 🦀', 'Contrôle — prêt'
+        self.ci['contexts'] = [status_name, check_name]
+        self.api[self.status][0].update(context=status_name, description='Déploiement vérifié 🦀')
+        self.api[self.checks] = {'total_count': 1, 'check_runs': [
+            {'id': 9, 'name': check_name, 'app': {'id': 42}, 'status': 'completed',
+             'conclusion': 'success', 'head_sha': HEAD}]}
+        real_run = subprocess.run
+        def github_json(argv, **kwargs):
+            self.assertEqual(argv[:2], ['gh', 'api'])
+            self.assertEqual(argv[3:], ['--hostname', 'github.com'])
+            payload = self.get(argv[2].replace('repos/fixture/repo/', PREFIX + '/'))
+            data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+            # Exercise the actual subprocess decoder, rather than returning a
+            # pre-decoded mock response. Emulate the Windows platform default
+            # only when the caller has not selected an explicit transport codec.
+            kwargs.setdefault('encoding', 'cp1252')
+            return real_run([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(' + repr(data) + ')'], **kwargs)
+        with patch.object(forge.subprocess, 'run', side_effect=github_json):
+            got = forge.observe('.', self.ci, 'pr:7')
+            self.assertEqual(got['exit'], 0)
+            self.assertEqual(got['contexts'], {status_name: 'success', check_name: 'success'})
+            self.assertEqual({row['context'] for row in got['evidence']}, {status_name, check_name})
+            self.api[self.status][0]['state'] = 'failure'
+            red = forge.observe('.', self.ci, 'pr:7')
+            self.assertEqual(red['exit'], 1)
+            self.assertEqual(red['contexts'][status_name], 'failure')
+
     def test_unpinned_green_never_counts_and_historical_red_dominates(self):
         self.api[self.status][0]['creator']['login'] = 'writer'
         self.assertIsNone(self.observe()['exit'])
