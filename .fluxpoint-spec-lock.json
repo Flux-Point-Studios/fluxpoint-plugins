@@ -1,5 +1,13 @@
 {
   "version": 1,
-  "sha256": "b82d61826e53e854e0f49f5ac3bcb6b895847597f8624c2984672aec0d92b5e4",
-  "proofBaselineSha256": null
+  "sha256": "74380049c7cff54b3f776fda04e9be55830cbfb497c5f112767fd7d0c229b38e",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/attest-test.sh": "4bcce5f6f06c047649b325d70ffa9dffb4f1726cfb42eee6ce195e8755dd84c9",
+    "plugins/fluxpoint/tests/compile-test.py": "9eca2ae05cbdbd25f467c7957dbfd27933cd8a770f1a1c38da194bd9ab7736e9",
+    "plugins/fluxpoint/tests/cost-test.py": "5f71d023e961596d738b547523a6ad38c472eda89be6db2a00b8d547ac927039",
+    "plugins/fluxpoint/tests/proof-verdict-test.py": "9e79a7c52c45c591dcb2d9d99e3973d12f783b04ffae5b776dbcd917c95c570f",
+    "plugins/fluxpoint/tests/specification-test.py": "6f2909ce134e399e3301da8f09d2bb92bda2bd5152264516bc445b1bca185d65",
+    "plugins/fluxpoint/tests/unchecked-repairs-test.py": "75a8f5c6d89247007e0b8d6d31da59ba96bcf913daef4120cb0d3f9e3621427b"
+  }
 }
