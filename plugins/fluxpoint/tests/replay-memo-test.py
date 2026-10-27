@@ -29,7 +29,7 @@ class ReplayMemoTests(unittest.TestCase):
         self.store = self.root / ".claude/fluxpoint/runs"
         self.store.mkdir(parents=True)
         self.launch = {"since": "2026-10-19T19:00:00Z", "nonce": "a" * 64}
-        self.compiler = "1.46.0"
+        self.compiler = json.loads((SCRIPTS.parent / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))["version"]
         self.tree = dict(root="/checkout", head="a" * 40, porcelain="", repository="o/r", branch="main", tip="b" * 40)
         self.calls = [dict(prompt="Build café", opts={"label": "build", "effort": "high"}, result={"outcome": "committed"}),
                       dict(prompt="Judge exact tree", opts={"label": "gate", "effort": "high"}, result={"sha": "b" * 40, "exit": 0})]

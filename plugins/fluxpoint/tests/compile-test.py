@@ -1548,5 +1548,240 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p,schema:
 council_case()
 
 
+def probe_declarations_case():
+    """--check validates probe declarations with the audit's own grammar (#192).
+
+    A builder that runs a script left its isolated probe incomplete in every
+    audit round, so the graph could never read SOUND. Script commands now
+    need a reviewed `probe` declaration, and --check refuses what the audit
+    would refuse before a round is bought.
+    """
+    global passed, failed
+    import subprocess
+    import tempfile
+    runner = 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log -- python scripts/build.py --all'
+    awaited = 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py await --timeout 240 <token>'
+    tool = 'python scripts/tool.py report --json'
+
+    def node(nid, prompt, probe=None, **extra):
+        n = {"id": nid, "prompt": prompt, "contract": "DesignV1", "isolation": "worktree", **extra}
+        if probe is not None:
+            n["probe"] = probe
+        return n
+
+    def shape(command, form, **extra):
+        return {"commands": [{"command": command, "kind": "shape", "form": form, **extra}]}
+
+    def help_form(command):
+        return shape(command, command + " --help")
+
+    def read_only(command):
+        return {"commands": [{"command": command, "kind": "read-only"}]}
+
+    def run(nid, command, probe, **extra):
+        return node(nid, "Run " + command, probe, **extra)
+
+    later = "python scripts/check.py --key {{item.key}} --strict"
+    remainder = 'longrun.py start --log build.log python child.py'
+    clean = [
+        node("read-only", "Run " + tool, {"commands": [{"command": tool, "kind": "read-only"}]}),
+        node("remainder", "Run " + runner,
+             shape(runner, 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log --help')),
+        node("subcommand", "Run " + runner, shape(runner, 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --help')),
+        node("data", "Then `" + awaited + "`", shape(awaited, awaited + " --help", data={"token": "token"})),
+        node("template", "Use `cd <dir> && python ...` there.",
+             {"templates": [{"template": "cd <dir> && python ...", "instances": ["cd {{A._launch.root}} && " + tool]}],
+              "commands": [{"command": "cd {{A._launch.root}} && " + tool, "kind": "read-only"}]}),
+        node("grammar", "Run `git -C {{A._launch.root}} fetch origin && git status | cat`"),
+        node("later-binding", "Run `cd {{item.key}} && python tool.py`", foreach="dims"),
+        node("unbound", "Run `python {{A.tool}} --check`",
+             {"commands": [{"command": "python {{A.tool}} --check", "kind": "read-only"}]}),
+        run("rule-ok-python-options", "python3 -I -u scripts/tool.py report",
+            shape("python3 -I -u scripts/tool.py report", "python3 -I -u scripts/tool.py --help")),
+        run("rule-ok-python-module", "python -m pytest -q tests", shape("python -m pytest -q tests", "python -m pytest --help")),
+        run("rule-ok-node-script", "node scripts/build.js --all", shape("node scripts/build.js --all", "node scripts/build.js --help")),
+        run("rule-ok-windows-python", "C:/Python311/python.exe scripts/tool.py report",
+            shape("C:/Python311/python.exe scripts/tool.py report", "C:/Python311/python.exe scripts/tool.py --help")),
+        run("rule-ok-rm-options", "rm -rf build", shape("rm -rf build", "rm -rf --help")),
+        run("git-id-plain-read", "git status --porcelain", read_only("git status --porcelain")),
+        run("win-forward-python", '"C:/Program Files/Python/python.exe" scripts/a.py --check',
+            shape('"C:/Program Files/Python/python.exe" scripts/a.py --check',
+                  '"C:/Program Files/Python/python.exe" scripts/a.py --help')),
+        node("rule-f-typed-item", "Run `" + later + "`",
+             shape(later, "python scripts/check.py --key {{item.key}} --help", data={"item.key": "token"}), foreach="dims"),
+    ]
+    refused = {
+        "undeclared": (node("undeclared", "Run " + tool), "no probe declaration for " + tool),
+        "unbound-undeclared": (node("unbound-undeclared", "Run `python {{A.tool}} --check`"),
+                               "no probe declaration for python A.tool --check"),
+        "stray": (node("stray", "Run " + tool, {"commands": [{"command": tool, "kind": "read-only"},
+                                                             {"command": "python other.py", "kind": "read-only"}]}),
+                  "matches no inventoried command"),
+        "stray-template": (node("stray-template", "Run " + tool, {
+            "commands": [{"command": tool, "kind": "read-only"}],
+            "templates": [{"template": "git -C <dir> status", "instances": ["git -C /x status"]}]}),
+            "matches no inventoried command"),
+        "kind": (node("kind", "Run " + tool, {"commands": [{"command": tool, "kind": "trusted"}]}), "kind must be"),
+        "key": (node("key", "Run " + tool, {"commands": [{"command": tool, "kind": "read-only"}], "allow": ["python"]}),
+                "unknown field 'allow'"),
+        "after-separator": (node("after-separator", "Run " + runner, shape(
+            runner, 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log -- --help')), "-- separator"),
+        "blind-append": (node("blind-append", "Run " + runner, shape(runner, runner + " --help")), "-- separator"),
+        "names-child": (node("names-child", "Run `" + remainder + "`", shape(
+            remainder, "longrun.py start --log build.log python --help")), "names another program"),
+        "not-prefix": (node("not-prefix", "Run " + tool, shape(tool, "python scripts/tool.py status --help")), "not a prefix"),
+        "no-help": (node("no-help", "Run " + tool, shape(tool, tool)), "ends a program part in --help"),
+        "git-help": (node("git-help", "Run `git push origin main`", shape("git push origin main", "git push --help")),
+                     "ends a program part in --help"),
+        "read-only-git": (node("read-only-git", "Run `git push origin main`",
+                               {"commands": [{"command": "git push origin main", "kind": "read-only"}]}), "not a git read"),
+        "read-only-data": (node("read-only-data", "Then `" + awaited + "`",
+                                {"commands": [{"command": awaited, "kind": "read-only"}]}), "placeholder"),
+        "untyped-data": (node("untyped-data", "Then `" + awaited + "`", shape(awaited, awaited + " --help")),
+                         "<token> has no declared type"),
+        "data-type": (node("data-type", "Then `" + awaited + "`", shape(awaited, awaited + " --help", data={"token": "path"})),
+                      "data type"),
+        "instance": (node("instance", "Use `cd <dir> && python ...` there.",
+                          {"templates": [{"template": "cd <dir> && python ...", "instances": ["git status"]}]}),
+                     "does not instantiate"),
+        "no-placeholder": (node("no-placeholder", "Run " + tool,
+                                {"templates": [{"template": tool, "instances": [tool]}]}), "no <placeholder>"),
+        # A: -h is human-readable or a host in du, df, sort, ls and docker run.
+        "rule-a-dash-h": (run("rule-a-dash-h", "python3 scripts/tool.py report",
+                              shape("python3 scripts/tool.py report", "python3 scripts/tool.py -h")), "-h is not a help flag"),
+        "rule-a-ls": (run("rule-a-ls", "ls -la build", shape("ls -la build", "ls -h")), "-h is not a help flag"),
+        # B: an interpreter's options before its script cannot carry code.
+        "rule-b-python-c": (run("rule-b-python-c", 'python3 -c "import shutil; shutil.rmtree(\'x\')"',
+                                help_form('python3 -c "import shutil; shutil.rmtree(\'x\')"')), "the option -c"),
+        "rule-b-node-e": (run("rule-b-node-e", 'node -e "require(\'fs\').rmSync(\'x\',{recursive:true})"',
+                              help_form('node -e "require(\'fs\').rmSync(\'x\',{recursive:true})"')), "the option -e"),
+        "rule-b-bash-c": (run("rule-b-bash-c", "bash -c 'for f in a b; do rm -f $f; done'",
+                              help_form("bash -c 'for f in a b; do rm -f $f; done'")), "the option -c"),
+        "rule-b-sh-c": (run("rule-b-sh-c", "sh -c 'exec python x.py'", help_form("sh -c 'exec python x.py'")), "the option -c"),
+        "rule-b-python-ic": (run("rule-b-python-ic", "python -Ic 'import os'", help_form("python -Ic 'import os'")),
+                             "the option -Ic"),
+        "rule-b-node-eval": (run("rule-b-node-eval", 'node --eval "1"', help_form('node --eval "1"')), "the option --eval"),
+        "rule-b-node-print": (run("rule-b-node-print", 'node -p "1"', help_form('node -p "1"')), "the option -p"),
+        "rule-b-python-stdin": (run("rule-b-python-stdin", "python3 -", help_form("python3 -")), "the option - before"),
+        "rule-b-windows-python": (run("rule-b-windows-python", 'C:/Python311/python3.11.exe -c "import os"',
+                                      help_form('C:/Python311/python3.11.exe -c "import os"')), "the option -c"),
+        "rule-b-py-launcher": (run("rule-b-py-launcher", 'py -c "import os"', help_form('py -c "import os"')), "the option -c"),
+        "rule-b-expansion": (run("rule-b-expansion", 'bash "$ROOT/scripts/run.sh" check',
+                                 shape('bash "$ROOT/scripts/run.sh" check', 'bash "$ROOT/scripts/run.sh" --help')),
+                             "shell expansion"),
+        # C: a launcher hands its trailing words to another program or host.
+        "rule-c-npx": (run("rule-c-npx", "npx some-package", help_form("npx some-package")), "forwards its trailing words"),
+        "rule-c-docker": (run("rule-c-docker", "docker run --rm img", help_form("docker run --rm img")),
+                          "forwards its trailing words"),
+        "rule-c-sudo": (run("rule-c-sudo", "sudo python3 scripts/tool.py", shape("sudo python3 scripts/tool.py", "sudo --help")),
+                        "forwards its trailing words"),
+        "rule-c-env": (run("rule-c-env", "/usr/bin/env python3 scripts/tool.py",
+                           shape("/usr/bin/env python3 scripts/tool.py", "/usr/bin/env --help")), "forwards its trailing words"),
+        "rule-c-timeout": (run("rule-c-timeout", "timeout 60 python3 scripts/tool.py",
+                               shape("timeout 60 python3 scripts/tool.py", "timeout --help")), "forwards its trailing words"),
+        # D: a read-only declaration never runs a writer, a launcher or inline code.
+        "rule-d-rm": (run("rule-d-rm", "rm -rf build", read_only("rm -rf build")), "writes files or reaches the network"),
+        "rule-d-curl": (run("rule-d-curl", "curl -X POST https://example.invalid/x",
+                            read_only("curl -X POST https://example.invalid/x")), "writes files or reaches the network"),
+        "rule-d-python-c": (run("rule-d-python-c", 'python3 -c "import os"', read_only('python3 -c "import os"')),
+                            "the option -c"),
+        "rule-d-sudo": (run("rule-d-sudo", "sudo cat /etc/hosts", read_only("sudo cat /etc/hosts")),
+                        "forwards its trailing words"),
+        "rule-d-assignment": (run("rule-d-assignment", "FOO=1 python3 scripts/tool.py", read_only("FOO=1 python3 scripts/tool.py")),
+                              "variable assignment"),
+        "rule-d-expansion": (run("rule-d-expansion", '"$TOOL" report', read_only('"$TOOL" report')), "shell expansion"),
+        "rule-d-second-part": (run("rule-d-second-part", "cd build && rm -rf out", read_only("cd build && rm -rf out")),
+                               "writes files or reaches the network"),
+        # Also refused: --help after a writer's operand, which a POSIXLY_CORRECT
+        # build acts on first, and a quoted -- separator.
+        "rule-x-rm-operand": (run("rule-x-rm-operand", "rm -rf out", shape("rm -rf out", "rm -rf out --help")),
+                              "after an operand of rm"),
+        "rule-x-quoted-separator": (run("rule-x-quoted-separator", 'longrun.py start --log L "--" python child.py',
+                                        shape('longrun.py start --log L "--" python child.py',
+                                              'longrun.py start --log L "--" --help')), "-- separator"),
+        # Git is checked by its subcommand, so only the plain word git is git.
+        "git-id-path": (run("git-id-path", "/usr/bin/git reset --hard", read_only("/usr/bin/git reset --hard")),
+                        "write it git"),
+        "git-id-quoted": (run("git-id-quoted", "'git' reset --hard", read_only("'git' reset --hard")), "write it git"),
+        "git-id-exe": (run("git-id-exe", "git.exe push origin main", read_only("git.exe push origin main")), "write it git"),
+        "git-id-path-c": (run("git-id-path-c", "/usr/bin/git -C /scratch/repo reset --hard",
+                              read_only("/usr/bin/git -C /scratch/repo reset --hard")), "write it git"),
+        "git-id-shape": (run("git-id-shape", "/usr/bin/git push origin main",
+                             shape("/usr/bin/git push origin main", "/usr/bin/git push --help")), "write it git"),
+        "git-id-undeclared": (run("git-id-undeclared", "/usr/bin/git status", None), "write it git"),
+        "git-id-plain-reset": (run("git-id-plain-reset", "git reset --hard", read_only("git reset --hard")), "not a git read"),
+        # A backslash in a program word is an escape to a shell and a separator
+        # to Windows, so a declaration may not name its program that way.
+        "win-git-double": (run("win-git-double", r'"C:\Tools\git.exe" reset --hard',
+                               read_only(r'"C:\Tools\git.exe" reset --hard')), "forward slashes"),
+        "win-git-single": (run("win-git-single", r"'C:\Program Files\Git\cmd\git.exe' reset --hard",
+                               read_only(r"'C:\Program Files\Git\cmd\git.exe' reset --hard")), "forward slashes"),
+        "win-git-bare": (run("win-git-bare", r"C:\Tools\git.exe reset --hard", read_only(r"C:\Tools\git.exe reset --hard")),
+                         "forward slashes"),
+        "win-rm": (run("win-rm", r"C:\Tools\rm.exe -rf build", read_only(r"C:\Tools\rm.exe -rf build")), "forward slashes"),
+        "win-python-c": (run("win-python-c", r'"C:\Py\python.exe" -c "import os"',
+                             help_form(r'"C:\Py\python.exe" -c "import os"')), "forward slashes"),
+        "win-docker": (run("win-docker", r"C:\Tools\docker.exe run --rm img", help_form(r"C:\Tools\docker.exe run --rm img")),
+                       "forward slashes"),
+        "win-git-inline": (node("win-git-inline", r'Then `"C:\Tools\git.exe" status` reports the tree.'), "forward slashes"),
+        "escaped-rm": (run("escaped-rm", r"r\m -rf build", read_only(r"r\m -rf build")),
+                       r"probe.commands[0]: r\m -rf build: "),
+        # F: a later-bound token is data, typed only inside a shape form.
+        "rule-f-read-only": (node("rule-f-read-only", "Run `" + later + "`", read_only(later), foreach="dims"),
+                             "cannot carry {{item.key}}"),
+        "rule-f-untyped": (node("rule-f-untyped", "Run `" + later + "`",
+                                shape(later, "python scripts/check.py --key {{item.key}} --help"), foreach="dims"),
+                           "{{item.key}} has no declared type"),
+        "rule-f-launch-key": (node("rule-f-launch-key", "Run `python {{A.tool}} --check`",
+                                   shape("python {{A.tool}} --check", "python {{A.tool}} --help", data={"A.tool": "token"})),
+                              "launch bindings"),
+        "rule-f-form-token": (node("rule-f-form-token", "Run `python scripts/check.py --strict`",
+                                   shape("python scripts/check.py --strict", "python scripts/check.py {{item.key}} --help"),
+                                   foreach="dims"),
+                              "form carries"),
+    }
+
+    def check(nodes, env=None):
+        ir = {"version": 1, "campaign": "probe declarations", "budget": {"maxNodes": 256},
+              "lists": {"dims": [{"key": "a"}]}, "nodes": nodes}
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "WORK.md"), "w", encoding="utf-8") as fh:
+                fh.write("STATUS: DESIGN\n\n```json graph-ir\n" + json.dumps(ir) + "\n```\n")
+            return subprocess.run([sys.executable, os.path.join(PLUGIN, "scripts", "compile-graph.py"), "WORK.md", "--check"],
+                                  cwd=d, capture_output=True, text=True, encoding="utf-8", env=env)
+
+    good = check(clean)
+    mixed = check(clean + [n for n, _ in refused.values()])
+    lines = mixed.stderr.splitlines()
+    checks = [("--check accepts declared script, shape, data, template, grammar and later-bound commands",
+               good.returncode == 0, good.stderr[-300:])]
+    for nid, (_, needle) in refused.items():
+        mine = [x for x in lines if f"node '{nid}'" in x]
+        checks.append((f"--check refuses {nid}", any(needle in x for x in mine), mine or lines[-3:]))
+    for n in clean:
+        mine = [x for x in lines if f"node '{n['id']}'" in x]
+        checks.append((f"--check raises nothing on {n['id']} beside refused nodes", mixed.returncode == 1 and not mine, mine))
+    nodeless = check(clean, env=dict(os.environ, PATH=tempfile.gettempdir()))
+    checks.append(("--check without Node.js refuses rather than skipping the probe grammar",
+                   nodeless.returncode == 1 and "Node.js" in nodeless.stderr, nodeless.stderr[-200:]))
+    plain = copy.deepcopy(BASE)
+    plain["nodes"][0]["probe"] = {"commands": []}
+    measured = copy.deepcopy(BASE)
+    measured["nodes"][0].update(isolation="measure", probe={"commands": []})
+    probed = copy.deepcopy(BASE)
+    probed["nodes"][0].update(isolation="worktree", probe={"commands": []})
+    for name, ir, want in [("probe on a node the audit never probes is refused", plain, True),
+                           ("probe on a measure node is refused", measured, True),
+                           ("probe on an isolated node is a known field", probed, False)]:
+        got = [x for x in cg.validate(ir, CONTRACTS) if "probe" in x]
+        checks.append((name, bool(got) == want and all("audit does not probe" in x for x in got), got))
+    for name, ok, got in checks:
+        print(f"{'PASS' if ok else 'FAIL'}  probe: {name:<70} -> {'yes' if ok else str(got)[:160]}")
+        passed, failed = passed + ok, failed + (not ok)
+
+
+probe_declarations_case()
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -10,6 +10,15 @@ when:
     branch: main
   - event: manual
 
+# The default clone fetches one commit, and graph-replay-test reads the
+# baseline compiler from c848f07 with git show, so clone the full history.
+clone:
+  - name: git
+    image: woodpeckerci/plugin-git:2.9.2
+    settings:
+      depth: 0
+      partial: false
+
 steps:
   - name: harness-full
     # Both steps carry an empty depends_on so they start together and neither

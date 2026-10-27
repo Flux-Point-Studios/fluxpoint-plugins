@@ -23,6 +23,7 @@ agent/parallel/pipeline/phase/log/args and reads what came back:
     which the runtime forbids because they break resume
   - the command's claims about the workflow match the script
 """
+import copy
 import json
 import os
 import re
@@ -538,6 +539,370 @@ no_command = command_probe('Read the target and report risks.', [], 'The prompt 
 report('a node with no prescribed command retains explicit no-command coverage',
        no_command.get('r', {}).get('verdict') == 'SOUND', 'concrete noCommandsReason accepted')
 
+# ============================ typed probe receipts for script commands (#192)
+# A builder that runs a script could never complete its probe: the grammar
+# admits no interpreter. A node now declares, in the IR, how each script
+# command is probed: `read-only` runs the exact command, `shape` runs a
+# reviewed --help form that must stop before the program forwards it.
+LAUNCH = {"_launch": {"root": "/plugin"}, "_base": {"sha": "abc123"}}
+
+
+def resolved(text):
+    return text.replace('{{A._launch.root}}', LAUNCH["_launch"]["root"])
+
+
+TOOL = 'python scripts/tool.py report --json'
+RUNNER = 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log -- python scripts/build.py --all'
+RUNNER_RESOLVED = resolved(RUNNER)
+RUNNER_FORM = 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log --help'
+AWAIT = 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py await --timeout 240 <token>'
+AWAIT_RESOLVED = resolved(AWAIT)
+AWAIT_FORM = AWAIT + ' --help'
+AWAIT_RUN = AWAIT_RESOLVED.replace('<token>', 'fpl-probe-token') + ' --help'
+
+
+def finding(title):
+    return dict(severity='HIGH', title=title, defectClass='isolation-shape',
+                classRewire='derive the probe form from the reviewed declaration in the IR',
+                failurePath='the isolation hook refuses the declared shape, so the builder dies at launch',
+                evidence='hook text: command refused in this worktree', rewire='rewire the node so that ' + title)
+
+
+def declared_probe(prompt, declaration, rows, findings=(), bindings=LAUNCH, refute=None, plan=False):
+    node = {"id": "builder", "mutates": True, "prompt": prompt}
+    if declaration is not None:
+        node["probe"] = declaration
+    ir = {"nodes": [node], "argDefaults": {}}
+    response = json.dumps({"completed": True, "findings": list(findings), "commands": rows, "blockers": []})
+    respond = ("(p,o)=>o.label.startsWith('probe:')?" + response +
+               (":o.label==='reduce'?singletons(p):o.label.startsWith('refute:')?" + refute if refute else "") +
+               (":o.label==='probe-plan'?" + json.dumps(ir) if plan else "") + ":{findings:[]}")
+    args = dict(BASE, bindings=bindings)
+    if plan:
+        args.pop("ir")
+    else:
+        args["ir"] = ir
+    return run(args, respond)
+
+
+def probe_report(res):
+    reports = (res.get('r') or {}).get('probes') or []
+    return reports[0] if reports else {}
+
+
+def declared_forms(res):
+    sent = labels(res, 'probe:')
+    if not sent or 'DECLARED FORMS:\n' not in sent[0]['prompt']:
+        return None
+    return json.loads(sent[0]['prompt'].split('DECLARED FORMS:\n')[1].split('\n\n')[0])
+
+
+def sound(res):
+    return (res.get('r') or {}).get('verdict') == 'SOUND'
+
+
+def incomplete(res):
+    r = res.get('r') or {}
+    return r.get('verdict') == 'REWIRE' and r.get('deadProbes') == ['builder']
+
+
+def blocked(res, needle):
+    return incomplete(res) and any(needle in b for b in probe_report(res).get('blockers', []))
+
+
+def requires(res, command):
+    return command in (probe_report(res).get('required') or [])
+
+
+READ_ONLY = {"commands": [{"command": TOOL, "kind": "read-only"}]}
+ok = declared_probe('Run ' + TOOL, READ_ONLY, [receipt(TOOL)])
+report('#192 a declared read-only script command receipts and completes the probe',
+       sound(ok) and probe_report(ok).get('completed') is True
+       and [c.get('kind') for c in probe_report(ok).get('commands', [])] == ['read-only'],
+       f"{(ok.get('r') or {}).get('verdict')} {probe_report(ok).get('blockers')}"[:90])
+bare = declared_probe('Run ' + TOOL, None, [receipt(TOOL)])
+report('#192 an undeclared script command stays incomplete and the blocker names it',
+       incomplete(bare) and any(TOOL in b for b in probe_report(bare).get('blockers', [])),
+       f"{probe_report(bare).get('blockers')}"[:90])
+wrong = declared_probe('Run ' + TOOL, READ_ONLY, [receipt(TOOL, TOOL + ' --verbose')])
+report('#192 a read-only declaration accepts only the exact command as its receipt',
+       incomplete(wrong) and requires(wrong, TOOL), 'a changed argv is not the declared command')
+PUSH = 'git push origin main'
+for name, decl, needle in [
+        ('a declaration matching nothing', {"commands": [{"command": TOOL, "kind": "read-only"},
+                                                         {"command": 'python scripts/other.py', "kind": "read-only"}]},
+         'matches no inventoried command'),
+        ('an unknown kind', {"commands": [{"command": TOOL, "kind": "trusted"}]}, 'kind must be'),
+        ('an unknown key', {"commands": [{"command": TOOL, "kind": "read-only"}], "allow": ["python"]}, "unknown field 'allow'"),
+        ('a read-only mutating git command', {"commands": [{"command": TOOL, "kind": "read-only"},
+                                                           {"command": PUSH, "kind": "read-only"}]}, 'not a git read')]:
+    res = declared_probe('Run ' + TOOL + '\n`' + PUSH + '`', decl, [receipt(TOOL), receipt(PUSH, 'git status')])
+    report('#192 the audit refuses ' + name, blocked(res, needle), f"{probe_report(res).get('blockers')}"[:90])
+
+SHAPE = {"commands": [{"command": RUNNER, "kind": "shape", "form": RUNNER_FORM}]}
+shaped = declared_probe('Run ' + RUNNER, SHAPE, [receipt(RUNNER_RESOLVED, resolved(RUNNER_FORM))])
+shape_why = (shaped.get('r') or {}).get('why') or ''
+evidence = (shaped.get('r') or {}).get('probeEvidence') or {}
+report('#192 a REMAINDER CLI shape stopping before -- completes as shape-only',
+       sound(shaped) and [c.get('kind') for c in probe_report(shaped).get('commands', [])] == ['shape-only'],
+       f"{(shaped.get('r') or {}).get('verdict')} {probe_report(shaped).get('blockers')}"[:90])
+report('#192 the verdict names each shape-only receipt and leaves semantics to the gates',
+       'shape-only' in shape_why and RUNNER_RESOLVED in shape_why
+       and evidence.get('shapeOnly') == ['builder: ' + RUNNER_RESOLVED] and evidence.get('readOnly') == []
+       and 'attested gates' in str(evidence.get('semantic')), shape_why[-90:])
+read_why = (ok.get('r') or {}).get('why') or ''
+report('#192 an exact read-only receipt is reported as read-only, not shape-only',
+       'shape-only' not in read_why and ((ok.get('r') or {}).get('probeEvidence') or {}).get('readOnly') == ['builder: ' + TOOL],
+       read_why[-90:])
+report('#192 the probe agent is told the exact declared form to send',
+       declared_forms(shaped) == {RUNNER_RESOLVED: {"kind": "shape", "run": resolved(RUNNER_FORM)}},
+       str(declared_forms(shaped))[:90])
+ran_original = declared_probe('Run ' + RUNNER, SHAPE, [receipt(RUNNER_RESOLVED)])
+report('#192 a shape receipt that ran the original command is not coverage',
+       incomplete(ran_original) and requires(ran_original, RUNNER_RESOLVED), 'the receipt must be the declared form')
+for name, form, needle in [
+        ('--help after the -- separator', RUNNER_FORM.replace('--log build.log --help', '--log build.log -- --help'),
+         '-- separator'),
+        ('--help appended after the child argv', RUNNER + ' --help', '-- separator'),
+        ('a form that is not a prefix', RUNNER_FORM.replace('build.log', 'other.log'), 'not a prefix'),
+        ('a form that changes the cd target', 'cd /elsewhere && ' + RUNNER_FORM, 'changes an operator')]:
+    res = declared_probe('Run ' + RUNNER, {"commands": [{"command": RUNNER, "kind": "shape", "form": form}]},
+                         [receipt(RUNNER_RESOLVED, resolved(form))])
+    report('#192 a shape form is refused: ' + name, blocked(res, needle), f"{probe_report(res).get('blockers')}"[:90])
+
+refused_rows = [dict(receipt(RUNNER_RESOLVED, resolved(RUNNER_FORM)), outcome='REFUSED',
+                     evidence='hook: python launcher refused in this worktree')]
+REPRODUCED = "{refuted:false,reproduced:true,reason:'Measured the same hook refusal in this isolated worktree'}"
+hook = declared_probe('Run ' + RUNNER, SHAPE, refused_rows, [finding('isolation refuses the declared longrun shape')],
+                      refute=REPRODUCED)
+hr = hook.get('r') or {}
+report('#192 a refused shape becomes a probe finding that reaches the refuters',
+       hr.get('verdict') == 'REWIRE' and (hr.get('counts') or {}).get('confirmed') == 1
+       and hr['confirmed'][0]['probeNodes'] == ['builder'] and probe_report(hook).get('completed') is True
+       and not (hr.get('probeEvidence') or {}).get('shapeOnly'),
+       f"{hr.get('verdict')} {hr.get('why')}"[:90])
+silent = declared_probe('Run ' + RUNNER, SHAPE, refused_rows)
+report('#192 a refused shape without its finding leaves the probe incomplete',
+       incomplete(silent) and requires(silent, RUNNER_RESOLVED), 'refusal kept')
+
+TEMPLATE_PROMPT = 'Use `git -C <dir> <subcommand> ...` and `cd <dir> && python ...` from the launch checkout.'
+CD_TOOL = 'cd {{A._launch.root}} && ' + TOOL
+TEMPLATES = {"templates": [
+    {"template": 'git -C <dir> <subcommand> ...',
+     "instances": ['git -C {{A._launch.root}} status --porcelain', 'git -C {{A._launch.root}} fetch origin']},
+    {"template": 'cd <dir> && python ...', "instances": [CD_TOOL]}],
+    "commands": [{"command": CD_TOOL, "kind": "read-only"}]}
+TEMPLATE_ROWS = [receipt('git -C /plugin status --porcelain'),
+                 receipt('git -C /plugin fetch origin', 'git -C /plugin status'),
+                 receipt(resolved(CD_TOOL))]
+templated = declared_probe(TEMPLATE_PROMPT, TEMPLATES, TEMPLATE_ROWS)
+report('#192 a template instantiated by receipted concrete commands completes',
+       sound(templated) and probe_report(templated).get('required') == [r['original'] for r in TEMPLATE_ROWS],
+       f"{(templated.get('r') or {}).get('verdict')} {probe_report(templated).get('blockers')}"[:90])
+missing = declared_probe(TEMPLATE_PROMPT, TEMPLATES, TEMPLATE_ROWS[:2])
+report('#192 a template with an unreceipted instantiation stays incomplete',
+       incomplete(missing) and requires(missing, resolved(CD_TOOL)), 'instance unreceipted')
+stray = copy.deepcopy(TEMPLATES)
+stray["templates"][0]["instances"].append('git status')
+mismatched = declared_probe(TEMPLATE_PROMPT, stray, TEMPLATE_ROWS + [receipt('git status')])
+report('#192 an instance that does not instantiate its template is refused',
+       blocked(mismatched, 'does not instantiate'), f"{probe_report(mismatched).get('blockers')}"[:90])
+undeclared_template = declared_probe(TEMPLATE_PROMPT, None, [receipt('git -C <dir> <subcommand> ...'),
+                                                              receipt('cd <dir> && python ...')])
+report('#192 an undeclared illustrative template stays incomplete',
+       blocked(undeclared_template, 'no probe declaration for git -C <dir> <subcommand> ...'),
+       f"{probe_report(undeclared_template).get('blockers')}"[:90])
+
+nested = declared_probe('Run `git -C {{A._launch.root}} rev-parse {{A._base.sha}}`', None,
+                        [receipt('git -C /plugin rev-parse abc123')])
+report('#192 nested bindings {{A._launch.root}} and {{A._base.sha}} resolve before matching',
+       sound(nested) and probe_report(nested).get('prescribed') == ['git -C /plugin rev-parse abc123'],
+       f"{probe_report(nested).get('prescribed')}"[:90])
+quoted = declared_probe('Run `cd "{{A.unbound.path}}" && git status`', None,
+                        [receipt('cd "{{A.unbound.path}}" && git status')])
+report('#192 an unresolved binding leaves the probe incomplete even inside quotes',
+       incomplete(quoted) and any('unresolved' in b for b in probe_report(quoted).get('blockers', [])),
+       f"{probe_report(quoted).get('blockers')}"[:90])
+
+DATA = {"commands": [{"command": AWAIT, "kind": "shape", "form": AWAIT_FORM, "data": {"token": "token"}}]}
+awaited = declared_probe('Then `' + AWAIT + '`', DATA, [receipt(AWAIT_RESOLVED, AWAIT_RUN)])
+report('#192 a typed data placeholder takes its dummy only inside the declared shape',
+       sound(awaited) and declared_forms(awaited) == {AWAIT_RESOLVED: {"kind": "shape", "run": AWAIT_RUN}},
+       f"{(awaited.get('r') or {}).get('verdict')} {probe_report(awaited).get('blockers')}"[:90])
+real_token = declared_probe('Then `' + AWAIT + '`', DATA,
+                            [receipt(AWAIT_RESOLVED, AWAIT_RUN.replace('fpl-probe-token', 'tok-from-a-live-run'))])
+report('#192 the probe cannot choose its own placeholder value',
+       incomplete(real_token) and requires(real_token, AWAIT_RESOLVED), 'dummy is fixed by type')
+for name, decl, needle in [
+        ('read-only', {"commands": [{"command": AWAIT, "kind": "read-only"}]}, 'placeholder'),
+        ('untyped', {"commands": [{"command": AWAIT, "kind": "shape", "form": AWAIT_FORM}]}, '<token> has no declared type'),
+        ('unknown type', {"commands": [{"command": AWAIT, "kind": "shape", "form": AWAIT_FORM, "data": {"token": "path"}}]},
+         'data type'),
+        ('undeclared', None, 'no probe declaration for ' + AWAIT_RESOLVED)]:
+    res = declared_probe('Then `' + AWAIT + '`', decl, [receipt(AWAIT_RESOLVED, AWAIT_RUN)])
+    report('#192 a data placeholder outside a typed shape is refused: ' + name, blocked(res, needle),
+           f"{probe_report(res).get('blockers')}"[:90])
+
+INLINE = 'python3 -c "import shutil; shutil.rmtree(\'x\')"'
+for name, prompt, decl, rows, needle in [
+        ('rule A: -h is not a help flag', 'Run ' + RUNNER,
+         {"commands": [{"command": RUNNER, "kind": "shape", "form": RUNNER_FORM.replace('--help', '-h')}]},
+         [receipt(RUNNER_RESOLVED, resolved(RUNNER_FORM.replace('--help', '-h')))], '-h is not a help flag'),
+        ('rule B: an interpreter option that runs inline code', 'Run ' + INLINE,
+         {"commands": [{"command": INLINE, "kind": "shape", "form": INLINE + ' --help'}]},
+         [receipt(INLINE, INLINE + ' --help')], 'the option -c'),
+        ('rule C: a launcher that forwards --help', 'Run npx some-package',
+         {"commands": [{"command": 'npx some-package', "kind": "shape", "form": 'npx some-package --help'}]},
+         [receipt('npx some-package', 'npx some-package --help')], 'forwards its trailing words'),
+        ('rule D: a read-only declaration of a writer', 'Run rm -rf build',
+         {"commands": [{"command": 'rm -rf build', "kind": "read-only"}]},
+         [receipt('rm -rf build')], 'writes files or reaches the network')]:
+    res = declared_probe(prompt, decl, rows)
+    report('#192 ' + name + ' leaves the probe incomplete', blocked(res, needle) and not declared_forms(res),
+           f"{probe_report(res).get('blockers')}"[:90])
+
+# A later-bound token ({{prev.sha}}, {{item.id}}) is data an earlier output
+# fills in, typed like <token> and given its dummy only inside a shape form.
+BUILD = ('bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log -- '
+         'python scripts/build.py g2 --suites-sha {{prev.sha}}')
+BUILD_FORM = 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log --help'
+CHECK = 'python scripts/check.py --sha {{prev.sha}} --strict'
+CHECK_FORM = 'python scripts/check.py --sha {{prev.sha}} --help'
+typed = declared_probe('Run ' + BUILD, {"commands": [{"command": BUILD, "kind": "shape", "form": BUILD_FORM,
+                                                      "data": {"prev.sha": "sha"}}]},
+                       [receipt(resolved(BUILD), resolved(BUILD_FORM))])
+report('#192 rule F: a typed {{prev.sha}} command completes with its shape form',
+       sound(typed) and requires(typed, resolved(BUILD))
+       and declared_forms(typed) == {resolved(BUILD): {"kind": "shape", "run": resolved(BUILD_FORM)}},
+       f"{(typed.get('r') or {}).get('verdict')} {probe_report(typed).get('blockers')}"[:90])
+carried = declared_probe('Run ' + CHECK, {"commands": [{"command": CHECK, "kind": "shape", "form": CHECK_FORM,
+                                                        "data": {"prev.sha": "sha"}}]},
+                         [receipt(CHECK, 'python scripts/check.py --sha ' + '0' * 40 + ' --help')])
+report('#192 rule F: a form that carries {{prev.sha}} runs with the sha dummy',
+       sound(carried) and declared_forms(carried) == {
+           CHECK: {"kind": "shape", "run": 'python scripts/check.py --sha ' + '0' * 40 + ' --help'}},
+       f"{probe_report(carried).get('blockers')}"[:90])
+for name, decl, needle in [
+        ('an untyped {{prev.sha}} stays unresolved', {"commands": [{"command": BUILD, "kind": "shape", "form": BUILD_FORM}]},
+         'unresolved binding in ' + resolved(BUILD)),
+        ('an undeclared {{prev.sha}} stays unresolved', None, 'unresolved binding in ' + resolved(BUILD)),
+        ('a read-only declaration carrying {{prev.sha}} is refused',
+         {"commands": [{"command": BUILD, "kind": "read-only"}]}, 'cannot carry {{prev.sha}}'),
+        ('data keyed A.x is refused', {"commands": [{"command": BUILD, "kind": "shape", "form": BUILD_FORM,
+                                                     "data": {"prev.sha": "sha", "A.x": "token"}}]}, 'launch bindings'),
+        ('a form carrying a token the command lacks is refused',
+         {"commands": [{"command": BUILD, "kind": "shape", "form": BUILD_FORM.replace('--help', '{{prev.id}} --help'),
+                        "data": {"prev.sha": "sha"}}]}, 'form carries')]:
+    res = declared_probe('Run ' + BUILD, decl, [receipt(resolved(BUILD), resolved(BUILD_FORM))])
+    report('#192 rule F: ' + name, blocked(res, needle), f"{probe_report(res).get('blockers')}"[:90])
+
+# Git is checked by its subcommand, so only the plain word git counts as git:
+# a path, quotes or .exe would carry reset --hard past the read check.
+def read_only_evidence(res):
+    return ((res.get('r') or {}).get('probeEvidence') or {}).get('readOnly')
+
+
+for spelling, command in [('a path', '/usr/bin/git reset --hard'), ('quotes', "'git' reset --hard"),
+                          ('.exe', 'git.exe push origin main'),
+                          ('a path and -C', '/usr/bin/git -C /scratch/repo reset --hard')]:
+    res = declared_probe('Run ' + command, {"commands": [{"command": command, "kind": "read-only"}]}, [receipt(command)])
+    report('#192 git identity: a read-only git spelled with ' + spelling + ' is refused',
+           blocked(res, 'write it git') and not declared_forms(res) and read_only_evidence(res) == [],
+           f"{(res.get('r') or {}).get('verdict')} {probe_report(res).get('blockers')}"[:90])
+plain_reset = declared_probe('Run git reset --hard', {"commands": [{"command": 'git reset --hard', "kind": "read-only"}]},
+                             [receipt('git reset --hard')])
+report('#192 git identity: a read-only plain git reset --hard is refused', blocked(plain_reset, 'not a git read'),
+       f"{probe_report(plain_reset).get('blockers')}"[:90])
+plain_read = declared_probe('Run git status --porcelain',
+                            {"commands": [{"command": 'git status --porcelain', "kind": "read-only"}]},
+                            [receipt('git status --porcelain')])
+report('#192 git identity: a read-only plain git status --porcelain is accepted',
+       sound(plain_read) and read_only_evidence(plain_read) == ['builder: git status --porcelain'],
+       f"{probe_report(plain_read).get('blockers')}"[:90])
+for name, prompt, decl, rows in [
+        ('an undeclared grammar part', 'Run /usr/bin/git status', None, [receipt('/usr/bin/git status')]),
+        ('a shape form', 'Run /usr/bin/git push origin main',
+         {"commands": [{"command": '/usr/bin/git push origin main', "kind": "shape", "form": '/usr/bin/git push --help'}]},
+         [receipt('/usr/bin/git push origin main', '/usr/bin/git push --help')]),
+        ('a template instance', 'Run `<git> -C <dir> status`',
+         {"templates": [{"template": '<git> -C <dir> status', "instances": ['/usr/bin/git -C /x status']}]},
+         [receipt('/usr/bin/git -C /x status')])]:
+    res = declared_probe(prompt, decl, rows)
+    report('#192 git identity: git spelled as a path is refused in ' + name, blocked(res, 'write it git'),
+           f"{probe_report(res).get('blockers')}"[:90])
+
+# A backslash in a program word is an escape to a shell and a separator to
+# Windows, so neither reading can name the program safely.
+for name, command, decl in [
+        ('a double-quoted Windows git, read-only', r'"C:\Tools\git.exe" reset --hard', "read-only"),
+        ('a single-quoted Windows git, read-only', r"'C:\Program Files\Git\cmd\git.exe' reset --hard", "read-only"),
+        ('an unquoted Windows git, read-only', r'C:\Tools\git.exe reset --hard', "read-only"),
+        ('a Windows rm.exe, read-only', r'C:\Tools\rm.exe -rf build', "read-only"),
+        ('a Windows python with -c, as a shape', r'"C:\Py\python.exe" -c "import os"', "shape"),
+        ('a Windows docker, as a shape', r'C:\Tools\docker.exe run --rm img', "shape")]:
+    entry = {"command": command, "kind": decl}
+    if decl == "shape":
+        entry["form"] = command + ' --help'
+    res = declared_probe('Run ' + command, {"commands": [entry]},
+                         [receipt(command, entry.get("form", command))])
+    report('#192 backslash program: ' + name + ' is refused', blocked(res, 'forward slashes') and not declared_forms(res),
+           f"{(res.get('r') or {}).get('verdict')} {probe_report(res).get('blockers')}"[:90])
+escaped = declared_probe(r'Run r\m -rf build', {"commands": [{"command": r'r\m -rf build', "kind": "read-only"}]},
+                         [receipt(r'r\m -rf build')])
+report('#192 backslash program: an escaped r\\m stays refused as read-only',
+       incomplete(escaped) and not declared_forms(escaped), f"{probe_report(escaped).get('blockers')}"[:90])
+FORWARD = '"C:/Program Files/Python/python.exe" scripts/a.py'
+forward = declared_probe('Run ' + FORWARD + ' --check',
+                         {"commands": [{"command": FORWARD + ' --check', "kind": "shape", "form": FORWARD + ' --help'}]},
+                         [receipt(FORWARD + ' --check', FORWARD + ' --help')])
+report('#192 backslash program: a forward-slash Windows python shape is accepted', sound(forward),
+       f"{probe_report(forward).get('blockers')}"[:90])
+
+# The inventory must not lose an explicit instruction to run something, nor
+# invent a command out of the punctuation left beside an inline one.
+def inventoried(prompt, reason='The prompt describes work and prescribes no command.'):
+    return command_probe(prompt, [], reason)
+
+
+for name, prompt, expected in [
+        ('an execution verb mid-line', 'Before approving, execute `aiken check`.', ['aiken check']),
+        ('invoke', 'Then invoke `aiken fmt --check` on the tree.', ['aiken fmt --check']),
+        ('a quoted Windows interpreter', 'Then `"C:/Py/python.exe" x.py` writes the report.', ['"C:/Py/python.exe" x.py'])]:
+    res = inventoried(prompt)
+    got = probe_report(res).get('prescribed')
+    report('#192 inventory: ' + name + ' is inventoried, not read as no command',
+           got == expected and (res.get('r') or {}).get('verdict') == 'REWIRE', f"{got}"[:90])
+for name, prompt, expected in [
+        ('Run `git status`. adds no "." command', 'Run `git status`.', ['git status']),
+        ('runs does not count as run', 'The nightly job runs `aiken check` for us.', [])]:
+    got = probe_report(inventoried(prompt)).get('prescribed')
+    report('#192 inventory: ' + name, got == expected, f"{got}"[:90])
+BUILDER_PROMPT = '\n'.join([
+    '1. Read the packet first.',
+    '2. Run `python scripts/x.py`. Keep its report.',
+    '3. Start the build in the background: `bash "/p/scripts/py.sh" longrun.py start --log L -- python scripts/b.py g2 '
+    '--suites-sha {{prev.sha}}`. Keep the token it prints.',
+    '4. In the foreground, run `bash "/p/scripts/py.sh" longrun.py await --timeout 240 <token>`, again on exit 3, '
+    'until it completes.',
+    'If the build must stop, cancel it with `bash "/p/scripts/py.sh" longrun.py cancel <token>` and say why.',
+    'Read the last line of `/w/g2-build.log` with the file tool.',
+    'When nothing is left to do, return outcome `stopped`.'])
+builder = probe_report(inventoried(BUILDER_PROMPT)).get('prescribed')
+report('#192 inventory: a builder prompt inventories exactly the four commands it names',
+       builder == ['python scripts/x.py',
+                   'bash "/p/scripts/py.sh" longrun.py start --log L -- python scripts/b.py g2 --suites-sha {{prev.sha}}',
+                   'bash "/p/scripts/py.sh" longrun.py await --timeout 240 <token>',
+                   'bash "/p/scripts/py.sh" longrun.py cancel <token>'], f"{builder}"[:90])
+windows_inline = probe_report(inventoried(r'Then `"C:\Tools\git.exe" status` reports the tree.')).get('prescribed')
+report('#192 backslash program: an inline Windows git with no verb is inventoried',
+       windows_inline == [r'"C:\Tools\git.exe" status'], f"{windows_inline}"[:90])
+
+discovered = declared_probe('Run ' + TOOL, READ_ONLY, [receipt(TOOL)], plan=True)
+report('#192 a discovered probe plan carries the node declarations',
+       sound(discovered) and len(labels(discovered, 'probe-plan')) == 1
+       and 'mutates, probe and foreach' in labels(discovered, 'probe-plan')[0]['prompt'],
+       f"{(discovered.get('r') or {}).get('why')}"[:90])
+
 # ======================================== meta is a pure literal
 m = re.search(r"^export const meta = (\{.*?^\})", SRC, re.S | re.M)
 meta = m.group(1) if m else ""
@@ -587,6 +952,20 @@ for name, ok in (
          "`LENSES`" in CMD and "`REFUTERS`" in CMD
          and re.search(r"^const LENSES = \[", SRC, re.M) and re.search(r"^const REFUTERS = \[", SRC, re.M))):
     report(name, bool(ok), "stated" if ok else "MISSING OR STALE")
+
+# The documented probe declaration completes a probe over the commands it names.
+example = re.search(r'```json\n\s*"probe": (\{.*?\n\s*\})\n\s*```', CMD, re.S)
+documented = json.loads(example.group(1)) if example else {}
+doc_commands = [c["command"] for c in documented.get("commands", [])]
+doc_prompt = "\n".join(["Run " + doc_commands[0]] + ["Then `" + c + "`" for c in doc_commands[1:]]
+                       + ["Use `" + t["template"] + "`." for t in documented.get("templates", [])]) if doc_commands else ""
+doc_rows = [receipt(resolved(c["command"]), resolved(c["command"]) if c["kind"] == "read-only"
+                    else resolved(c["form"]).replace("<token>", "fpl-probe-token"))
+            for c in documented.get("commands", [])]
+doc_rows += [receipt(resolved(i)) for t in documented.get("templates", []) for i in t["instances"]]
+doc_probe = declared_probe(doc_prompt, documented, doc_rows) if doc_commands else {}
+report("the command's probe declaration example completes a probe", bool(doc_commands) and sound(doc_probe),
+       f"{probe_report(doc_probe).get('blockers') if doc_probe else 'example NOT FOUND'}"[:90])
 
 history = [{"mode": "multi", "counts": {"confirmed": n}, "confirmed": [
     {"title": "variant " + str(i), "defectClass": "unbounded-reader"}]} for i, n in enumerate([3, 2])]

@@ -126,7 +126,7 @@ const PROBE_VERDICT = {
 const PROBE_PLAN = {
   type: 'object', required: ['nodes', 'argDefaults'], properties: {
     nodes: { type: 'array', items: { type: 'object', required: ['id', 'prompt'], properties: {
-      id: { type: 'string' }, prompt: { type: 'string' }, isolation: {}, mutates: { type: 'boolean' },
+      id: { type: 'string' }, prompt: { type: 'string' }, isolation: {}, mutates: { type: 'boolean' }, probe: {},
     } } }, argDefaults: { type: 'object' }, lists: { type: 'object' },
   },
 }
@@ -139,6 +139,12 @@ const PROBE_RESULT = {
     } } },
   },
 }
+
+// --------------------------------------------------------- probe grammar --
+// compile-graph.py --check runs this section alone under node, so nothing in
+// it may read a workflow global. The static check and the Probe phase share
+// this grammar, but --check reads an unresolved {{A.x}} launch binding as
+// the word A.x, so they agree only once the audit has the real arguments.
 
 // These checks certify a deliberately small shell grammar. An agent's claim
 // that it exercised a command is insufficient: bind every receipt to the
@@ -226,46 +232,336 @@ function readOnlyGit(g) {
   if (g.command === 'worktree') return g.args[0] === 'list' && g.args.slice(1).every(x => ['--porcelain', '-z', '-v', '--verbose'].includes(x))
   return false
 }
+const READ_WORDS = ['cd', 'pwd', 'test', '[', 'echo', 'printf', 'cat', 'grep', 'head', 'tail', 'wc', 'true', 'false']
 function readOnlyWords(words) {
   if (words[0] === 'git') return readOnlyGit(gitCommand(words))
   // No interpreters, user programs, assignments, redirections or background
   // processes: their effects cannot be established from this receipt.
-  return ['cd', 'pwd', 'test', '[', 'echo', 'printf', 'cat', 'grep', 'head', 'tail', 'wc', 'true', 'false'].includes(words[0])
+  return READ_WORDS.includes(words[0])
+}
+const same = (x, y) => JSON.stringify(x) === JSON.stringify(y)
+const isObject = x => !!x && typeof x === 'object' && !Array.isArray(x)
+const nonEmpty = x => typeof x === 'string' && !!x.trim()
+// A safe part repeats the original's words, except that a git part may swap
+// its subcommand for a read while keeping -C, --git-dir and --work-tree.
+function grammarPart(words, other) {
+  if (!readOnlyWords(other)) return false
+  if (words[0] !== 'git') return same(words, other)
+  const x = gitCommand(words), y = gitCommand(other)
+  return !!x && !!y && same(x.prefix, y.prefix) && (!readOnlyGit(x) || same(words, other))
+}
+function sameFrame(a, b, depth) {
+  return !!a && !!b && same(a.operators, b.operators) && a.parts.length === b.parts.length
+    && same(a.substitutions, b.substitutions) && b.substitutions.every(s => safeCommandShape(s, s, depth + 1))
 }
 function safeCommandShape(original, safe, depth = 0) {
   if (depth > 8) return false
   const a = shellParts(original), b = shellParts(safe)
-  if (!a || !b || JSON.stringify(a.operators) !== JSON.stringify(b.operators)
-      || a.parts.length !== b.parts.length || JSON.stringify(a.substitutions) !== JSON.stringify(b.substitutions)) return false
-  if (!b.substitutions.every(s => safeCommandShape(s, s, depth + 1))) return false
-  return a.parts.every((words, i) => {
-    const other = b.parts[i]
-    if (!readOnlyWords(other)) return false
-    if (words[0] !== 'git') return JSON.stringify(words) === JSON.stringify(other)
-    const x = gitCommand(words), y = gitCommand(other)
-    return !!x && !!y && JSON.stringify(x.prefix) === JSON.stringify(y.prefix)
-      && (!readOnlyGit(x) || JSON.stringify(words) === JSON.stringify(other))
-  })
+  return sameFrame(a, b, depth) && a.parts.every((words, i) => grammarPart(words, b.parts[i]))
+}
+function grammarCommand(command) {
+  const a = shellParts(command)
+  return !!a && a.substitutions.every(s => safeCommandShape(s, s, 1))
+    && a.parts.every(words => words[0] === 'git' ? !!gitCommand(words) : readOnlyWords(words))
+}
+const COMMAND_WORD = /^(?:git|cd|pwd|test|\[|echo|printf|cat|grep|head|tail|wc|true|false|bash|sh|python(?:3(?:\.[0-9]+)?)?|node|npm|npx|make|curl|wget|rm|cp|mv|touch|mkdir|\.\/[^\s]+)(?:\s|$)/
+// An inline span is a command when its first word names, by basename, a
+// program the grammar knows, or when an execution verb directly precedes it.
+const EXECUTE_BEFORE = /\b(?:run|execute|probe|invoke)(?:\s+(?:exactly|this command))?\s*:?\s*$/i
+const INLINE_COMMAND = '\u0000'
+// A backslash is an escape to a shell and a separator to Windows, so a
+// program counts as known under either reading and the inventory fails closed.
+function knownProgram(word) {
+  const unquoted = word.replace(/["']/g, '')
+  return [unquoted, unquoted.replace(/\\/g, '/')].map(programName).some(name =>
+    name === 'git' || READ_WORDS.includes(name) || PYTHON.test(name) || BARE_INTERPRETERS.includes(name)
+    || LAUNCHERS.includes(name) || WRITERS.includes(name) || COMMAND_WORD.test(name))
 }
 function prescribedCommands(prompt) {
   const commands = []
   const add = s => { s = s.trim(); if (s) commands.push(s) }
-  const starts = /^(?:git|cd|pwd|test|\[|echo|printf|cat|grep|head|tail|wc|true|false|bash|sh|python(?:3(?:\.[0-9]+)?)?|node|npm|npx|make|curl|wget|rm|cp|mv|touch|mkdir|\.\/[^\s]+)(?:\s|$)/
   // Keep compound lines intact. Unsupported multi-line continuations and
   // grammar stay in the inventory and cannot obtain a passing receipt.
   const prose = prompt.replace(/```([^\n]*)\n([\s\S]*?)```/g, (full, lang, body) => {
     if (/^(?:bash|sh|shell|console)?\s*$/.test(lang)) body.split('\n').filter(x => x.trim() && !x.trim().startsWith('#')).forEach(add)
     else if (/^(?:bash|sh|shell|console)\b/.test(lang)) add(body)
     return ''
-  }).replace(/`([^`\n]+)`/g, (full, command) => { if (starts.test(command.trim())) add(command); return '' })
+  }).replace(/`([^`\n]+)`/g, (full, command, offset, text) => {
+    const first = command.trim().match(new RegExp('^' + SHELL_WORD))
+    if (!COMMAND_WORD.test(command.trim()) && !(first && knownProgram(first[0])) && !EXECUTE_BEFORE.test(text.slice(0, offset))) return ''
+    add(command)
+    return INLINE_COMMAND
+  })
   for (const line of prose.split('\n')) {
-    const text = line.trim().replace(/^(?:[-*]|\d+[.)])\s+/, '').replace(/^(?:Run|Execute|Probe)(?:\s+(?:exactly|this command))?\s*:?\s+/i, '')
-    if (starts.test(text)) add(text)
+    const bare = line.split(INLINE_COMMAND).join('')
+    const text = bare.trim().replace(/^(?:[-*]|\d+[.)])\s+/, '').replace(/^(?:Run|Execute|Probe)(?:\s+(?:exactly|this command))?\s*:?\s+/i, '')
+    // Prose punctuation left beside an inline command is not a command.
+    if (bare !== line && /^[\s.,;:!?)]*$/.test(text)) continue
+    if (COMMAND_WORD.test(text)) add(text)
     // Explicit instructions to execute an unfamiliar executable also need a
     // receipt; the safe grammar will leave them incomplete until reviewed.
-    else if (/^(?:Run|Execute|Probe)\s/i.test(line.trim())) add(text)
+    else if (/^(?:Run|Execute|Probe)\s/i.test(bare.trim())) add(text)
   }
   return [...new Set(commands)]
+}
+
+// {{A.x}} and nested {{A._launch.root}} resolve through own keys only. An
+// unresolved token stays literal, and the probe treats that command as
+// unresolved rather than letting a quoted {{...}} pass as a path. The static
+// check, which has no runtime bindings, reads one as the plain word A.x.
+const BINDING = /\{\{\s*A((?:\.[A-Za-z0-9_-]+)+)\s*\}\}/g
+const UNRESOLVED = /\{\{[\s\S]*?\}\}/
+function resolveBindings(text, bindings, standIn) {
+  return text.replace(BINDING, (full, path) => {
+    let value = bindings
+    for (const key of path.slice(1).split('.')) {
+      if (!value || typeof value !== 'object' || !Object.prototype.hasOwnProperty.call(value, key)) {
+        return standIn ? 'A' + path : full
+      }
+      value = value[key]
+    }
+    return typeof value === 'string' ? value : JSON.stringify(value)
+  })
+}
+
+// A node's `probe` declaration is reviewed with the IR and says how a command
+// outside the grammar is probed. 'read-only' runs the exact command. 'shape'
+// runs a --help form, which proves the isolation hook admits the executable,
+// cwd and argv prefix without running the command's effect; what the command
+// does stays for the attested gates to prove. A template in the prompt is
+// discharged only by the concrete instances it declares, each receipted.
+const PROBE_KINDS = ['read-only', 'shape']
+const PROBE_FIELDS = { probe: ['commands', 'templates'], command: ['command', 'kind', 'form', 'data'], template: ['template', 'instances'] }
+// Data an earlier output fills in, written <name> or as a later-bound token
+// such as {{prev.sha}} or {{item.id}}, has a type and, in a shape form only, a
+// fixed dummy: the probe never picks a value of its own.
+const PROBE_DATA = { token: 'fpl-probe-token', sha: '0'.repeat(40), integer: '0' }
+const PLACEHOLDER = /<([A-Za-z][A-Za-z0-9_-]*)>/g
+const LATER_BOUND = /\{\{\s*([^{}]*?)\s*\}\}/g
+const ELLIPSIS = /(^|\s)\.\.\.(?=\s|$)/
+const SHELL_WORD = String.raw`(?:[^\s"'\\]|\\.|"(?:[^"\\]|\\.)*"|'[^']*')+`
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key)
+const placeholders = text => [...text.matchAll(PLACEHOLDER)].map(m => m[1])
+const laterBound = text => [...text.matchAll(LATER_BOUND)].map(m => m[1])
+const fillData = (text, data) => text.replace(PLACEHOLDER, (full, name) => PROBE_DATA[data[name]])
+  .replace(LATER_BOUND, (full, name) => PROBE_DATA[data[name]])
+const unknownFields = (where, obj, level) =>
+  Object.keys(obj).filter(k => !PROBE_FIELDS[level].includes(k)).map(k => `${where}: unknown field '${k}'`)
+function templatePattern(template) {
+  const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const names = []
+  let source = '^', last = 0
+  for (const m of template.matchAll(/<([A-Za-z][A-Za-z0-9_-]*)>|(^|\s)\.\.\.(?=\s|$)/g)) {
+    source += escape(template.slice(last, m.index))
+    if (m[1] !== undefined) {
+      const seen = names.indexOf(m[1])
+      if (seen < 0) names.push(m[1])
+      source += seen < 0 ? `(${SHELL_WORD})` : `\\${seen + 1}`
+    } else source += m[2] ? '(?:\\s.*)?' : '.*'
+    last = m.index + m[0].length
+  }
+  return new RegExp(source + escape(template.slice(last)) + '$', 's')
+}
+
+// Programs the grammar recognises by basename, quotes, directory and .exe
+// removed. An interpreter's options before its script can carry code, a
+// launcher hands its trailing words to another program, container or host,
+// and a writer changes files or reaches the network. Any other program is
+// the declaration's reviewed assertion.
+const unquote = word => word.replace(/["'\\]/g, '')
+const programName = word => unquote(word).split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, '')
+const PYTHON = /^(?:python(?:3(?:\.\d+)?)?|py)$/
+const PYTHON_OPTIONS = ['-I', '-u', '-B', '-E', '-s', '-S', '-O']
+const BARE_INTERPRETERS = ['node', 'nodejs', 'bash', 'sh', 'zsh', 'dash', 'ksh', 'perl', 'ruby']
+const LAUNCHERS = ['docker', 'podman', 'kubectl', 'ssh', 'wsl', 'sudo', 'doas', 'su', 'chroot', 'env', 'nice', 'nohup',
+  'setsid', 'stdbuf', 'timeout', 'time', 'xargs', 'exec', 'command', 'builtin', 'eval', 'source', '.', 'npx', 'pnpx',
+  'bunx', 'uvx', 'pipx', 'cmd', 'pwsh', 'powershell']
+const WRITERS = ['rm', 'rmdir', 'cp', 'mv', 'ln', 'touch', 'mkdir', 'chmod', 'chown', 'dd', 'tee', 'truncate',
+  'install', 'curl', 'wget', 'rsync', 'scp', 'sftp', 'nc']
+function interpreterRefusal(words) {
+  const name = programName(words[0])
+  const safe = PYTHON.test(name) ? PYTHON_OPTIONS : BARE_INTERPRETERS.includes(name) ? [] : null
+  for (const word of safe ? words.slice(1) : []) {
+    if (word.includes('$')) {
+      return `gives ${name} a shell expansion before its script, so the grammar cannot tell whether it is an option; ` +
+        'resolve it through {{A.x}} or cd into its directory first'
+    }
+    const option = unquote(word)
+    if (safe === PYTHON_OPTIONS && option === '-m') return ''
+    if (!option.startsWith('-')) return ''
+    if (!safe.includes(option)) {
+      return `gives ${name} the option ${option} before its script, where ${name} may take ` +
+        `${safe.length ? 'only ' + safe.join(' ') + ' or -m <module>' : 'no option'}: others run inline code or read a script from stdin`
+    }
+  }
+  return ''
+}
+// How a program word may be spelled. A backslash has no single reading: a
+// shell takes it as an escape (r\m runs rm), Windows as a separator
+// (C:\Tools\git.exe is git). Git is judged by its subcommand, so only the
+// plain word git counts as Git; a path, quotes or .exe would carry any
+// subcommand past readOnlyGit.
+function spellingRefusal(word) {
+  if (word.includes('\\')) {
+    return `names its program as ${word}, and a shell reads a backslash as an escape while Windows reads it as a ` +
+      'separator; write the path with forward slashes'
+  }
+  if (word !== 'git' && programName(word) === 'git') {
+    return `spells git as ${word}; write it git, which the grammar checks by its subcommand`
+  }
+  return ''
+}
+function programRefusal(words, readOnly) {
+  const spelling = spellingRefusal(words[0])
+  if (spelling) return spelling
+  if (words[0].includes('$')) return 'takes its program from a shell expansion, so the grammar cannot tell what runs; resolve it through {{A.x}}'
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(unquote(words[0]))) return 'starts with a variable assignment, which hides the program that runs'
+  const name = programName(words[0])
+  if (LAUNCHERS.includes(name)) return `runs ${name}, which forwards its trailing words to another program or host`
+  if (readOnly && WRITERS.includes(name)) return `runs ${name}, which writes files or reaches the network`
+  return interpreterRefusal(words)
+}
+// Only --help ends a form: -h means human-readable output in du, df, sort and
+// ls, and a hostname in docker run. The flag must reach the declared
+// program's own parser, so it ends a prefix of that part's words before any
+// -- separator, any word naming another program and any writer operand.
+function helpRefusal(words, other) {
+  const flag = unquote(other[other.length - 1]), prefix = other.slice(0, -1)
+  if (flag === '-h') {
+    return 'ends in -h, and -h is not a help flag in every program: du, df, sort and ls read it as human-readable ' +
+      'output and docker run as a hostname; end the form in --help'
+  }
+  if (flag !== '--help' || words[0] === 'git' || READ_WORDS.includes(words[0])) {
+    return 'neither repeats a read-only part nor ends a program part in --help'
+  }
+  if (!prefix.length || prefix.length > words.length || !prefix.every((w, i) => w === words[i])) {
+    return 'puts words before the help flag that are not a prefix of the command'
+  }
+  if (prefix.some(w => unquote(w) === '--')) return 'puts the help flag after a -- separator, so the program forwards it'
+  const program = programRefusal(prefix, false)
+  if (program) return program
+  const child = prefix.slice(1).find(w => COMMAND_WORD.test(unquote(w)))
+  if (child) return `puts the help flag after ${child}, which names another program that would receive it`
+  const name = programName(prefix[0])
+  const operand = WRITERS.includes(name) && prefix.slice(1).find(w => !unquote(w).startsWith('-'))
+  return operand ? `puts the help flag after an operand of ${name} (${operand}), which a POSIXLY_CORRECT build acts on first` : ''
+}
+function shapeRefusal(command, form) {
+  const a = shellParts(command), b = shellParts(form)
+  if (!a || !b) return 'it does not parse under the probe grammar'
+  if (!sameFrame(a, b, 0)) return 'it changes an operator, a part or a $(...) substitution'
+  let shaped = 0
+  for (let i = 0; i < a.parts.length; i++) {
+    if (grammarPart(a.parts[i], b.parts[i])) continue
+    const why = helpRefusal(a.parts[i], b.parts[i])
+    if (why) return `part ${i + 1} ${why}`
+    shaped++
+  }
+  return shaped ? '' : 'no part takes a help form, so the read-only grammar already covers it'
+}
+function declarationRefusal(command, d, resolve) {
+  if (!PROBE_KINDS.includes(d.kind)) return `kind must be ${PROBE_KINDS.join(' or ')}`
+  if (ELLIPSIS.test(command)) return 'an illustrative ... belongs in probe.templates with concrete instances'
+  const names = placeholders(command), later = laterBound(command)
+  if (d.kind === 'read-only') {
+    if (d.form !== undefined || d.data !== undefined) return 'a read-only declaration runs the exact command and takes no form or data'
+    if (names.length) return 'a read-only declaration cannot carry a <placeholder>; only a shape form takes a typed dummy'
+    if (later.length) return `a read-only declaration cannot carry {{${later[0]}}}; only a shape form gives a later-bound token a typed dummy`
+    const a = shellParts(command)
+    if (!a) return 'it does not parse under the probe grammar (redirection, backtick, background or unbalanced quote)'
+    if (!a.substitutions.every(s => safeCommandShape(s, s, 1))) return 'a $(...) substitution is outside the read-only grammar'
+    if (a.parts.some(words => words[0] === 'git' && !readOnlyGit(gitCommand(words)))) {
+      return 'a read-only declaration runs the exact command, and its git part is not a git read'
+    }
+    return a.parts.map(words => programRefusal(words, true)).find(Boolean) || ''
+  }
+  if (!nonEmpty(d.form)) return 'a shape declaration needs the form the probe runs'
+  const data = d.data === undefined ? {} : d.data
+  if (!isObject(data)) return 'data must map each <placeholder> or later-bound token to a type'
+  for (const [name, type] of Object.entries(data)) {
+    if (/^A(?:[.[]|$)/.test(name)) return `data cannot type {{${name}}}: launch bindings resolve from argDefaults and bindings`
+    if (!names.includes(name) && !later.includes(name)) return `data names ${name}, which the command does not carry`
+    if (!hasOwn(PROBE_DATA, type)) return `data type for ${name} must be one of ${Object.keys(PROBE_DATA).join(', ')}`
+  }
+  const missing = names.find(name => !hasOwn(data, name))
+  if (missing) return `placeholder <${missing}> has no declared type`
+  const untyped = later.find(name => !hasOwn(data, name))
+  if (untyped) return `{{${untyped}}} has no declared type, so the command stays unresolved`
+  const form = resolve(d.form)
+  if (ELLIPSIS.test(form) || placeholders(form).some(name => !names.includes(name))
+      || laterBound(form).some(name => !later.includes(name))) {
+    return 'the form carries a placeholder or token the command does not'
+  }
+  const why = shapeRefusal(fillData(command, data), fillData(form, data))
+  return why ? 'shape form refused: ' + why : ''
+}
+// What a probed node must receipt, and how. `blockers` are the reasons no
+// receipt set can complete the probe; `unresolved` names commands holding a
+// {{...}} that neither resolved nor took a declared type, which only the
+// audit can judge.
+function probeCoverage(node, bindings, standIn) {
+  const resolve = s => resolveBindings(s, bindings, standIn)
+  const prescribed = prescribedCommands(resolve(node.prompt))
+  const blockers = [], instances = [], templates = new Set(), named = new Set(), declared = new Map()
+  const decl = node.probe === undefined ? {} : node.probe
+  if (!isObject(decl)) blockers.push('probe must be an object of commands and templates')
+  else blockers.push(...unknownFields('probe', decl, 'probe'))
+  const entries = key => {
+    if (!isObject(decl) || decl[key] === undefined) return []
+    if (Array.isArray(decl[key])) return decl[key]
+    blockers.push(`probe.${key} must be an array`)
+    return []
+  }
+  entries('templates').forEach((t, i) => {
+    const where = `probe.templates[${i}]`
+    if (!isObject(t) || !nonEmpty(t.template) || !Array.isArray(t.instances) || !t.instances.length
+        || !t.instances.every(nonEmpty) || new Set(t.instances).size !== t.instances.length) {
+      blockers.push(`${where}: needs a template and a non-empty list of unique concrete instances`)
+      return
+    }
+    blockers.push(...unknownFields(where, t, 'template'))
+    const template = resolve(t.template)
+    if (!prescribed.includes(template)) blockers.push(`${where}: ${template} matches no inventoried command`)
+    if (templates.has(template)) blockers.push(`${where}: ${template} is declared twice`)
+    templates.add(template)
+    if (!placeholders(template).length && !ELLIPSIS.test(template)) {
+      blockers.push(`${where}: ${template} has no <placeholder> or ..., so declare it as a command instead`)
+    }
+    const pattern = templatePattern(template)
+    for (const instance of t.instances.map(resolve)) {
+      if (ELLIPSIS.test(instance) || !pattern.test(instance)) blockers.push(`${where}: ${instance} does not instantiate ${template}`)
+      instances.push(instance)
+    }
+  })
+  const required = [...new Set([...prescribed.filter(c => !templates.has(c)), ...instances])]
+  entries('commands').forEach((d, i) => {
+    const where = `probe.commands[${i}]`
+    if (!isObject(d) || !nonEmpty(d.command)) { blockers.push(`${where}: needs a command`); return }
+    blockers.push(...unknownFields(where, d, 'command'))
+    const command = resolve(d.command)
+    if (!required.includes(command)) blockers.push(`${where}: ${command} matches no inventoried command or template instance`)
+    if (named.has(command)) { blockers.push(`${where}: ${command} is declared twice`); return }
+    named.add(command)
+    const refusal = declarationRefusal(command, d, resolve)
+    if (refusal) blockers.push(`${where}: ${command}: ${refusal}`)
+    else declared.set(command, { kind: d.kind, run: d.kind === 'shape' ? fillData(resolve(d.form), d.data || {}) : command })
+  })
+  const unresolved = required.filter(c => UNRESOLVED.test(c) && !declared.has(c))
+  for (const c of required) {
+    if (unresolved.includes(c) || named.has(c) || grammarCommand(c)) continue
+    const spelling = (shellParts(c) || { parts: [] }).parts.map(words => spellingRefusal(words[0])).find(Boolean)
+    blockers.push(spelling ? `${c}: ${spelling}`
+      : `no probe declaration for ${c}: it is outside the read-only grammar, so declare it in the node's probe.commands or probe.templates`)
+  }
+  return { prescribed, required, declared, blockers, unresolved }
+}
+// The evidence one receipt carries: 'read-only' when the exact command ran,
+// 'shape-only' when a safe form ran in its place. Neither is semantic proof.
+function receiptKind(receipt, coverage) {
+  const declared = coverage.declared.get(receipt.original)
+  if (declared) return receipt.safe === declared.run ? (declared.kind === 'read-only' ? 'read-only' : 'shape-only') : null
+  if (!safeCommandShape(receipt.original, receipt.safe)) return null
+  return receipt.safe === receipt.original ? 'read-only' : 'shape-only'
 }
 
 // ---------------------------------------------------------------- inputs --
@@ -528,9 +824,13 @@ function summarize(raw, judged, dead, verifiers, deadVerifiers) {
     }
   }
   const settledMatched = judged.filter(d => d.settled)
+  const accepted = kind => PROBE_REPORTS.flatMap(r => r.commands
+    .filter(c => isObject(c) && c.kind === kind && c.outcome === 'ACCEPTED').map(c => `${r.node}: ${c.original}`))
+  const readOnly = accepted('read-only'), shapeOnly = accepted('shape-only')
   const counts = {
     probes: PROBES.length, probesReturned: PROBES.length - DEAD_PROBES.filter(id => id !== 'plan').length,
     probeCommands: PROBE_REPORTS.reduce((n, r) => n + r.commands.length, 0),
+    probeReadOnly: readOnly.length, probeShapeOnly: shapeOnly.length,
     lenses: RUN_LENSES.length,
     lensesReturned: RUN_LENSES.length - dead.length,
     raw: raw.length,
@@ -560,16 +860,22 @@ function summarize(raw, judged, dead, verifiers, deadVerifiers) {
       : `${unverified.length} finding(s) left UNVERIFIED by a verifier that returned nothing`)
   }
   const verdict = sound ? 'SOUND' : 'REWIRE'
+  // A shape-only receipt says the isolation hook admitted a form, not that
+  // the command works, so every verdict names them.
+  const shapeNote = shapeOnly.length ? '; shape-only probe receipts, where the isolation hook admitted a safe form ' +
+    `and the command itself never ran: ${shapeOnly.join('; ')}` : ''
   log(`counts: ${counts.lensesReturned}/${counts.lenses} lens(es), ${counts.raw} raw -> ${counts.distinct} distinct ` +
     `(${counts.settledMatched} settled) -> ${counts.confirmed} confirmed, ${counts.refuted} refuted, ` +
     `${counts.unverified} unverified; ${verifiers} verifier(s), ${deadVerifiers} returned nothing`)
-  log(`verdict: ${verdict}${why.length ? ` (${why.join('; ')})` : ''}`)
+  log(`verdict: ${verdict}${why.length ? ` (${why.join('; ')})` : ''}${shapeNote}`)
   return {
     mode: MODE,
     graph: A.graph,
     lenses: RUN_LENSES.map(l => l.id),
     deadLenses: dead,
     probes: PROBE_REPORTS, deadProbes: DEAD_PROBES,
+    probeEvidence: { readOnly, shapeOnly,
+      semantic: 'none: the audit runs no command for its effect, so semantic and runtime proof stays with the attested gates' },
     settled: SETTLED,
     counts,
     confirmed: confirmed.map(publicFinding),
@@ -579,9 +885,9 @@ function summarize(raw, judged, dead, verifiers, deadVerifiers) {
     refuted: unique(refuted.flatMap(d => [d.title, ...d.variants])),
     settledMatched: settledMatched.map(d => ({ id: d.id, title: d.title, settled: d.settled, status: d.status })),
     verdict,
-    why: why.length ? why.join('; ') : (MODE === 'single'
+    why: (why.length ? why.join('; ') : (MODE === 'single'
       ? 'the single auditor found no failure path'
-      : `${counts.lenses} lens(es) returned and ${counts.raw ? 'every distinct finding was refuted' : 'none found a failure path'}`),
+      : `${counts.lenses} lens(es) returned and ${counts.raw ? 'every distinct finding was refuted' : 'none found a failure path'}`)) + shapeNote,
   }
 }
 
@@ -633,7 +939,7 @@ let probeIR = A.ir
 const DEAD_PROBES = [], PROBE_REPORTS = [], probeRaw = []
 if (probeIR === undefined) {
   phase('Probe')
-  probeIR = await agent(`Read the exact graph-ir JSON in ${A.graph}. Return EVERY node's id, prompt, isolation, mutates and foreach fields unchanged, plus argDefaults and lists. Do not execute commands or omit non-isolated nodes; this is a mechanical probe plan, not an audit.`,
+  probeIR = await agent(`Read the exact graph-ir JSON in ${A.graph}. Return EVERY node's id, prompt, isolation, mutates, probe and foreach fields unchanged, plus argDefaults and lists. Do not execute commands or omit non-isolated nodes; this is a mechanical probe plan, not an audit.`,
     { label: 'probe-plan', phase: 'Probe', schema: PROBE_PLAN, effort: 'low' })
 }
 if (!probeIR || !Array.isArray(probeIR.nodes) || !probeIR.nodes.every(n => n && typeof n.id === 'string' && n.id.trim() && typeof n.prompt === 'string'
@@ -647,20 +953,19 @@ if (!probeIR || !Array.isArray(probeIR.nodes) || !probeIR.nodes.every(n => n && 
 const PROBES = probeIR.nodes.filter(n => n.isolation !== 'measure' &&
   (n.isolation === true || n.isolation === 'worktree' || n.mutates === true))
 const probeArgs = { ...(probeIR.argDefaults || {}), ...(A.bindings || {}) }
-function resolvedProbePrompt(n) {
-  return n.prompt.replace(/\{\{\s*A\.([A-Za-z0-9_-]+)\s*\}\}/g, (full, key) =>
-    Object.prototype.hasOwnProperty.call(probeArgs, key) ?
-      (typeof probeArgs[key] === 'string' ? probeArgs[key] : JSON.stringify(probeArgs[key])) : full)
-}
+const COVERAGE = new Map(PROBES.map(n => [n.id, probeCoverage(n, probeArgs)]))
 function probePrompt(n) {
-  const prompt = resolvedProbePrompt(n)
+  const prompt = resolveBindings(n.prompt, probeArgs)
+  const coverage = COVERAGE.get(n.id)
   return [
     `Probe isolated node ${n.id} from ${A.graph}. Read its actual prompt in that file and ${A.pluginRoot}/agents/graph-auditor.md. Compare it with the resolved prompt below; a stale or mismatched plan is incomplete coverage. This agent has isolation: worktree, matching the node's runtime boundary.`,
     'Run each command the prompt prescribes ONLY in a non-mutating safe read form. Preserve its shell shape: the same git -C target, cd target, $(...) substitution, &&, ; and | chaining. Replace mutating subcommands such as fetch, worktree add, checkout or writes with safe reads such as status, rev-parse HEAD or a genuinely non-mutating --dry-run. Never fetch, change refs, add worktrees, deploy, delete, write shared files or execute an unreviewed program. If a safe equivalent cannot preserve the shape, mark it UNRESOLVED and incomplete; do not execute the mutation.',
     'Record original command, safe command actually sent to the tool, ACCEPTED / REFUSED / UNRESOLVED, and the exact runtime hook response or measured output. An ordinary Git syntax error, a failed prerequisite or an earlier && short-circuit is UNRESOLVED, not evidence that the runtime accepted the unexecuted shape. Resolve foreach item operands from the graph lists. Missing tools or unresolved command operands leave coverage incomplete; data-only context placeholders do not require executing future nodes. If no command is prescribed, return commands:[] and a concrete noCommandsReason.',
     'For every hook refusal, return a finding with the command and hook text as evidence, a concrete failurePath, severity, title, rewire, defectClass and classRewire. Empty findings do not discharge incomplete command coverage. Return completed only after every prescribed safe command shape was reached. These results certify prescribed commands only: agents may later invent compound commands outside this probe.',
     'Return exactly one command receipt for each PRESCRIBED COMMANDS entry, copying original verbatim. Preserve all compound operators, command substitutions and global Git operands in safe. Unsupported syntax or programs cannot receive complete coverage. If the inventory misses a prescribed command, report a blocker rather than claiming completion.',
-    'PRESCRIBED COMMANDS:\n' + JSON.stringify(prescribedCommands(prompt)),
+    "DECLARED FORMS maps a prescribed command to the node's reviewed probe declaration in the IR. Send exactly its run text as safe, and nothing else for that command: read-only runs the exact command; shape runs a --help form that proves the isolation hook admits that executable, cwd and argv prefix without running the command's effect. Never put a value of your own in place of a <placeholder>. An illustrative template in the prompt is covered by its declared instances, which PRESCRIBED COMMANDS already lists.",
+    'PRESCRIBED COMMANDS:\n' + JSON.stringify(coverage.required),
+    'DECLARED FORMS:\n' + JSON.stringify(Object.fromEntries(coverage.declared)),
     'RESOLVED PROMPT:\n' + prompt,
     'ARGUMENT BINDINGS:\n' + JSON.stringify(probeArgs),
     'NODE AND LISTS:\n' + JSON.stringify({ node: n, lists: probeIR.lists || {} }),
@@ -673,18 +978,23 @@ if (PROBES.length) {
   PROBES.forEach((n, i) => {
     const r = results[i]
     const commands = r && Array.isArray(r.commands) ? r.commands : []
-    const prescribed = prescribedCommands(resolvedProbePrompt(n))
-    const validCommands = commands.every(c => c && typeof c.original === 'string' && c.original.trim()
+    const coverage = COVERAGE.get(n.id)
+    const kinds = commands.map(c => isObject(c) && typeof c.original === 'string' && typeof c.safe === 'string' ? receiptKind(c, coverage) : null)
+    const validCommands = commands.every((c, j) => c && typeof c.original === 'string' && c.original.trim()
       && typeof c.safe === 'string' && c.safe.trim() && ['ACCEPTED', 'REFUSED'].includes(c.outcome)
-      && typeof c.evidence === 'string' && c.evidence.trim() && safeCommandShape(c.original, c.safe))
-      && commands.length === prescribed.length
-      && prescribed.every(command => commands.filter(c => c && c.original === command).length === 1)
+      && typeof c.evidence === 'string' && c.evidence.trim() && kinds[j])
+      && commands.length === coverage.required.length
+      && coverage.required.every(command => commands.filter(c => c && c.original === command).length === 1)
+    const declarationBlockers = [...coverage.blockers, ...coverage.unresolved.map(c => `unresolved binding in ${c}`)]
     const complete = r && r.completed === true && Array.isArray(r.findings) && Array.isArray(r.blockers)
-      && !r.blockers.length && validCommands && (commands.length || typeof r.noCommandsReason === 'string' && r.noCommandsReason.trim().length >= 10)
+      && !r.blockers.length && !declarationBlockers.length && validCommands
+      && (commands.length || typeof r.noCommandsReason === 'string' && r.noCommandsReason.trim().length >= 10)
     if (!complete) DEAD_PROBES.push(n.id)
     const blockers = r && Array.isArray(r.blockers) ? [...r.blockers] : ['probe returned no complete report']
+    blockers.push(...declarationBlockers)
     if (!validCommands) blockers.push('command receipts do not cover the prescribed inventory with safe, matching shell shapes')
-    PROBE_REPORTS.push({ node: n.id, completed: !!complete, prescribed, commands, blockers })
+    PROBE_REPORTS.push({ node: n.id, completed: !!complete, prescribed: coverage.prescribed, required: coverage.required,
+      commands: commands.map((c, j) => isObject(c) ? { ...c, kind: kinds[j] } : c), blockers })
     if (r && Array.isArray(r.findings)) r.findings.forEach(f => {
       if (!f || !Object.prototype.hasOwnProperty.call(RANK, f.severity) || typeof f.title !== 'string'
         || f.title.trim().length < 8 || typeof f.failurePath !== 'string' || f.failurePath.trim().length < 20
