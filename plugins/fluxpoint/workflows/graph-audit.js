@@ -311,15 +311,19 @@ function resolveBindings(text, bindings, standIn) {
 // discharged only by the concrete instances it declares, each receipted.
 const PROBE_KINDS = ['read-only', 'shape']
 const PROBE_FIELDS = { probe: ['commands', 'templates'], command: ['command', 'kind', 'form', 'data'], template: ['template', 'instances'] }
-// Data filled in by an earlier output has a type and, in a shape form only, a
+// Data an earlier output fills in, written <name> or as a later-bound token
+// such as {{prev.sha}} or {{item.id}}, has a type and, in a shape form only, a
 // fixed dummy: the probe never picks a value of its own.
 const PROBE_DATA = { token: 'fpl-probe-token', sha: '0'.repeat(40), integer: '0' }
-const HELP = ['--help', '-h']
 const PLACEHOLDER = /<([A-Za-z][A-Za-z0-9_-]*)>/g
+const LATER_BOUND = /\{\{\s*([^{}]*?)\s*\}\}/g
 const ELLIPSIS = /(^|\s)\.\.\.(?=\s|$)/
 const SHELL_WORD = String.raw`(?:[^\s"'\\]|\\.|"(?:[^"\\]|\\.)*"|'[^']*')+`
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key)
 const placeholders = text => [...text.matchAll(PLACEHOLDER)].map(m => m[1])
+const laterBound = text => [...text.matchAll(LATER_BOUND)].map(m => m[1])
 const fillData = (text, data) => text.replace(PLACEHOLDER, (full, name) => PROBE_DATA[data[name]])
+  .replace(LATER_BOUND, (full, name) => PROBE_DATA[data[name]])
 const unknownFields = (where, obj, level) =>
   Object.keys(obj).filter(k => !PROBE_FIELDS[level].includes(k)).map(k => `${where}: unknown field '${k}'`)
 function templatePattern(template) {
@@ -337,20 +341,72 @@ function templatePattern(template) {
   }
   return new RegExp(source + escape(template.slice(last)) + '$', 's')
 }
-// The help flag must reach the declared program's own parser: it ends a
-// prefix of that part's words, before any -- separator and before any word
-// naming a program the prefix would forward it to.
+
+// Programs the grammar recognises by basename, quotes, directory and .exe
+// removed. An interpreter's options before its script can carry code, a
+// launcher hands its trailing words to another program, container or host,
+// and a writer changes files or reaches the network. Any other program is
+// the declaration's reviewed assertion.
+const unquote = word => word.replace(/["'\\]/g, '')
+const programName = word => unquote(word).split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, '')
+const PYTHON = /^(?:python(?:3(?:\.\d+)?)?|py)$/
+const PYTHON_OPTIONS = ['-I', '-u', '-B', '-E', '-s', '-S', '-O']
+const BARE_INTERPRETERS = ['node', 'nodejs', 'bash', 'sh', 'zsh', 'dash', 'ksh', 'perl', 'ruby']
+const LAUNCHERS = ['docker', 'podman', 'kubectl', 'ssh', 'wsl', 'sudo', 'doas', 'su', 'chroot', 'env', 'nice', 'nohup',
+  'setsid', 'stdbuf', 'timeout', 'time', 'xargs', 'exec', 'command', 'builtin', 'eval', 'source', '.', 'npx', 'pnpx',
+  'bunx', 'uvx', 'pipx', 'cmd', 'pwsh', 'powershell']
+const WRITERS = ['rm', 'rmdir', 'cp', 'mv', 'ln', 'touch', 'mkdir', 'chmod', 'chown', 'dd', 'tee', 'truncate',
+  'install', 'curl', 'wget', 'rsync', 'scp', 'sftp', 'nc']
+function interpreterRefusal(words) {
+  const name = programName(words[0])
+  const safe = PYTHON.test(name) ? PYTHON_OPTIONS : BARE_INTERPRETERS.includes(name) ? [] : null
+  for (const word of safe ? words.slice(1) : []) {
+    if (word.includes('$')) {
+      return `gives ${name} a shell expansion before its script, so the grammar cannot tell whether it is an option; ` +
+        'resolve it through {{A.x}} or cd into its directory first'
+    }
+    const option = unquote(word)
+    if (safe === PYTHON_OPTIONS && option === '-m') return ''
+    if (!option.startsWith('-')) return ''
+    if (!safe.includes(option)) {
+      return `gives ${name} the option ${option} before its script, where ${name} may take ` +
+        `${safe.length ? 'only ' + safe.join(' ') + ' or -m <module>' : 'no option'}: others run inline code or read a script from stdin`
+    }
+  }
+  return ''
+}
+function programRefusal(words, readOnly) {
+  if (words[0].includes('$')) return 'takes its program from a shell expansion, so the grammar cannot tell what runs; resolve it through {{A.x}}'
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(unquote(words[0]))) return 'starts with a variable assignment, which hides the program that runs'
+  const name = programName(words[0])
+  if (LAUNCHERS.includes(name)) return `runs ${name}, which forwards its trailing words to another program or host`
+  if (readOnly && WRITERS.includes(name)) return `runs ${name}, which writes files or reaches the network`
+  return interpreterRefusal(words)
+}
+// Only --help ends a form: -h means human-readable output in du, df, sort and
+// ls, and a hostname in docker run. The flag must reach the declared
+// program's own parser, so it ends a prefix of that part's words before any
+// -- separator, any word naming another program and any writer operand.
 function helpRefusal(words, other) {
-  const prefix = other.slice(0, -1)
-  if (!HELP.includes(other[other.length - 1]) || words[0] === 'git' || READ_WORDS.includes(words[0])) {
-    return 'neither repeats a read-only part nor ends a program part in --help or -h'
+  const flag = unquote(other[other.length - 1]), prefix = other.slice(0, -1)
+  if (flag === '-h') {
+    return 'ends in -h, and -h is not a help flag in every program: du, df, sort and ls read it as human-readable ' +
+      'output and docker run as a hostname; end the form in --help'
+  }
+  if (flag !== '--help' || words[0] === 'git' || READ_WORDS.includes(words[0])) {
+    return 'neither repeats a read-only part nor ends a program part in --help'
   }
   if (!prefix.length || prefix.length > words.length || !prefix.every((w, i) => w === words[i])) {
     return 'puts words before the help flag that are not a prefix of the command'
   }
-  if (prefix.includes('--')) return 'puts the help flag after a -- separator, so the program forwards it'
-  const child = prefix.slice(1).find(w => COMMAND_WORD.test(w))
-  return child ? `puts the help flag after ${child}, which names another program that would receive it` : ''
+  if (prefix.some(w => unquote(w) === '--')) return 'puts the help flag after a -- separator, so the program forwards it'
+  const program = programRefusal(prefix, false)
+  if (program) return program
+  const child = prefix.slice(1).find(w => COMMAND_WORD.test(unquote(w)))
+  if (child) return `puts the help flag after ${child}, which names another program that would receive it`
+  const name = programName(prefix[0])
+  const operand = WRITERS.includes(name) && prefix.slice(1).find(w => !unquote(w).startsWith('-'))
+  return operand ? `puts the help flag after an operand of ${name} (${operand}), which a POSIXLY_CORRECT build acts on first` : ''
 }
 function shapeRefusal(command, form) {
   const a = shellParts(command), b = shellParts(form)
@@ -368,39 +424,43 @@ function shapeRefusal(command, form) {
 function declarationRefusal(command, d, resolve) {
   if (!PROBE_KINDS.includes(d.kind)) return `kind must be ${PROBE_KINDS.join(' or ')}`
   if (ELLIPSIS.test(command)) return 'an illustrative ... belongs in probe.templates with concrete instances'
-  const names = placeholders(command)
+  const names = placeholders(command), later = laterBound(command)
   if (d.kind === 'read-only') {
     if (d.form !== undefined || d.data !== undefined) return 'a read-only declaration runs the exact command and takes no form or data'
     if (names.length) return 'a read-only declaration cannot carry a <placeholder>; only a shape form takes a typed dummy'
+    if (later.length) return `a read-only declaration cannot carry {{${later[0]}}}; only a shape form gives a later-bound token a typed dummy`
     const a = shellParts(command)
     if (!a) return 'it does not parse under the probe grammar (redirection, backtick, background or unbalanced quote)'
     if (!a.substitutions.every(s => safeCommandShape(s, s, 1))) return 'a $(...) substitution is outside the read-only grammar'
     if (a.parts.some(words => words[0] === 'git' && !readOnlyGit(gitCommand(words)))) {
       return 'a read-only declaration runs the exact command, and its git part is not a git read'
     }
-    return ''
+    return a.parts.map(words => programRefusal(words, true)).find(Boolean) || ''
   }
   if (!nonEmpty(d.form)) return 'a shape declaration needs the form the probe runs'
   const data = d.data === undefined ? {} : d.data
-  if (!isObject(data)) return 'data must map each <placeholder> to a type'
-  const missing = names.find(name => !Object.prototype.hasOwnProperty.call(data, name))
-  if (missing) return `placeholder <${missing}> has no declared type`
+  if (!isObject(data)) return 'data must map each <placeholder> or later-bound token to a type'
   for (const [name, type] of Object.entries(data)) {
-    if (!names.includes(name)) return `data names <${name}>, which the command does not carry`
-    if (!Object.prototype.hasOwnProperty.call(PROBE_DATA, type)) {
-      return `data type for <${name}> must be one of ${Object.keys(PROBE_DATA).join(', ')}`
-    }
+    if (/^A(?:[.[]|$)/.test(name)) return `data cannot type {{${name}}}: launch bindings resolve from argDefaults and bindings`
+    if (!names.includes(name) && !later.includes(name)) return `data names ${name}, which the command does not carry`
+    if (!hasOwn(PROBE_DATA, type)) return `data type for ${name} must be one of ${Object.keys(PROBE_DATA).join(', ')}`
   }
+  const missing = names.find(name => !hasOwn(data, name))
+  if (missing) return `placeholder <${missing}> has no declared type`
+  const untyped = later.find(name => !hasOwn(data, name))
+  if (untyped) return `{{${untyped}}} has no declared type, so the command stays unresolved`
   const form = resolve(d.form)
-  if (ELLIPSIS.test(form) || placeholders(form).some(name => !names.includes(name))) {
-    return 'the form carries a placeholder the command does not'
+  if (ELLIPSIS.test(form) || placeholders(form).some(name => !names.includes(name))
+      || laterBound(form).some(name => !later.includes(name))) {
+    return 'the form carries a placeholder or token the command does not'
   }
   const why = shapeRefusal(fillData(command, data), fillData(form, data))
   return why ? 'shape form refused: ' + why : ''
 }
 // What a probed node must receipt, and how. `blockers` are the reasons no
-// receipt set can complete the probe; `unresolved` names commands whose
-// bindings never resolved, which only the audit can judge.
+// receipt set can complete the probe; `unresolved` names commands holding a
+// {{...}} that neither resolved nor took a declared type, which only the
+// audit can judge.
 function probeCoverage(node, bindings, standIn) {
   const resolve = s => resolveBindings(s, bindings, standIn)
   const prescribed = prescribedCommands(resolve(node.prompt))
@@ -448,7 +508,7 @@ function probeCoverage(node, bindings, standIn) {
     if (refusal) blockers.push(`${where}: ${command}: ${refusal}`)
     else declared.set(command, { kind: d.kind, run: d.kind === 'shape' ? fillData(resolve(d.form), d.data || {}) : command })
   })
-  const unresolved = required.filter(c => UNRESOLVED.test(c))
+  const unresolved = required.filter(c => UNRESOLVED.test(c) && !declared.has(c))
   for (const c of required) {
     if (!unresolved.includes(c) && !named.has(c) && !grammarCommand(c)) {
       blockers.push(`no probe declaration for ${c}: it is outside the read-only grammar, so declare it in the node's probe.commands or probe.templates`)

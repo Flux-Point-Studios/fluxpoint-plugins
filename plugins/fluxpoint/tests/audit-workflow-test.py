@@ -743,6 +743,59 @@ for name, decl, needle in [
     report('#192 a data placeholder outside a typed shape is refused: ' + name, blocked(res, needle),
            f"{probe_report(res).get('blockers')}"[:90])
 
+INLINE = 'python3 -c "import shutil; shutil.rmtree(\'x\')"'
+for name, prompt, decl, rows, needle in [
+        ('rule A: -h is not a help flag', 'Run ' + RUNNER,
+         {"commands": [{"command": RUNNER, "kind": "shape", "form": RUNNER_FORM.replace('--help', '-h')}]},
+         [receipt(RUNNER_RESOLVED, resolved(RUNNER_FORM.replace('--help', '-h')))], '-h is not a help flag'),
+        ('rule B: an interpreter option that runs inline code', 'Run ' + INLINE,
+         {"commands": [{"command": INLINE, "kind": "shape", "form": INLINE + ' --help'}]},
+         [receipt(INLINE, INLINE + ' --help')], 'the option -c'),
+        ('rule C: a launcher that forwards --help', 'Run npx some-package',
+         {"commands": [{"command": 'npx some-package', "kind": "shape", "form": 'npx some-package --help'}]},
+         [receipt('npx some-package', 'npx some-package --help')], 'forwards its trailing words'),
+        ('rule D: a read-only declaration of a writer', 'Run rm -rf build',
+         {"commands": [{"command": 'rm -rf build', "kind": "read-only"}]},
+         [receipt('rm -rf build')], 'writes files or reaches the network')]:
+    res = declared_probe(prompt, decl, rows)
+    report('#192 ' + name + ' leaves the probe incomplete', blocked(res, needle) and not declared_forms(res),
+           f"{probe_report(res).get('blockers')}"[:90])
+
+# A later-bound token ({{prev.sha}}, {{item.id}}) is data an earlier output
+# fills in, typed like <token> and given its dummy only inside a shape form.
+BUILD = ('bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log -- '
+         'python scripts/build.py g2 --suites-sha {{prev.sha}}')
+BUILD_FORM = 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log --help'
+CHECK = 'python scripts/check.py --sha {{prev.sha}} --strict'
+CHECK_FORM = 'python scripts/check.py --sha {{prev.sha}} --help'
+typed = declared_probe('Run ' + BUILD, {"commands": [{"command": BUILD, "kind": "shape", "form": BUILD_FORM,
+                                                      "data": {"prev.sha": "sha"}}]},
+                       [receipt(resolved(BUILD), resolved(BUILD_FORM))])
+report('#192 rule F: a typed {{prev.sha}} command completes with its shape form',
+       sound(typed) and requires(typed, resolved(BUILD))
+       and declared_forms(typed) == {resolved(BUILD): {"kind": "shape", "run": resolved(BUILD_FORM)}},
+       f"{(typed.get('r') or {}).get('verdict')} {probe_report(typed).get('blockers')}"[:90])
+carried = declared_probe('Run ' + CHECK, {"commands": [{"command": CHECK, "kind": "shape", "form": CHECK_FORM,
+                                                        "data": {"prev.sha": "sha"}}]},
+                         [receipt(CHECK, 'python scripts/check.py --sha ' + '0' * 40 + ' --help')])
+report('#192 rule F: a form that carries {{prev.sha}} runs with the sha dummy',
+       sound(carried) and declared_forms(carried) == {
+           CHECK: {"kind": "shape", "run": 'python scripts/check.py --sha ' + '0' * 40 + ' --help'}},
+       f"{probe_report(carried).get('blockers')}"[:90])
+for name, decl, needle in [
+        ('an untyped {{prev.sha}} stays unresolved', {"commands": [{"command": BUILD, "kind": "shape", "form": BUILD_FORM}]},
+         'unresolved binding in ' + resolved(BUILD)),
+        ('an undeclared {{prev.sha}} stays unresolved', None, 'unresolved binding in ' + resolved(BUILD)),
+        ('a read-only declaration carrying {{prev.sha}} is refused',
+         {"commands": [{"command": BUILD, "kind": "read-only"}]}, 'cannot carry {{prev.sha}}'),
+        ('data keyed A.x is refused', {"commands": [{"command": BUILD, "kind": "shape", "form": BUILD_FORM,
+                                                     "data": {"prev.sha": "sha", "A.x": "token"}}]}, 'launch bindings'),
+        ('a form carrying a token the command lacks is refused',
+         {"commands": [{"command": BUILD, "kind": "shape", "form": BUILD_FORM.replace('--help', '{{prev.id}} --help'),
+                        "data": {"prev.sha": "sha"}}]}, 'form carries')]:
+    res = declared_probe('Run ' + BUILD, decl, [receipt(resolved(BUILD), resolved(BUILD_FORM))])
+    report('#192 rule F: ' + name, blocked(res, needle), f"{probe_report(res).get('blockers')}"[:90])
+
 discovered = declared_probe('Run ' + TOOL, READ_ONLY, [receipt(TOOL)], plan=True)
 report('#192 a discovered probe plan carries the node declarations',
        sound(discovered) and len(labels(discovered, 'probe-plan')) == 1

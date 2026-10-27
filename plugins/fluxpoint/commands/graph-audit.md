@@ -75,7 +75,8 @@ is for a graph run.
    `ir`, a mechanical reader discovers all nodes and `argDefaults` first;
    an unavailable plan blocks SOUND. `bindings` overrides `argDefaults`
    when resolving `{{A.x}}` and nested paths such as `{{A._launch.root}}`;
-   a command left holding any `{{...}}` leaves the probe incomplete.
+   a command left holding any other `{{...}}` leaves the probe incomplete
+   unless a shape declaration types it (below).
 
    Each probe reads the actual node prompt and tries its prescribed commands
    only in safe, non-mutating read forms. Preserve the `git -C` target,
@@ -115,18 +116,37 @@ is for a graph run.
      ]
    }
    ```
-   - `read-only` runs the exact command. Any Git part must be a read.
+   - `read-only` runs the exact command. Any Git part must be a read. No
+     part may run a writer or network tool (`rm`, `cp`, `mv`, `touch`,
+     `mkdir`, `curl`, `wget` and their kin), a launcher, an interpreter with
+     an option before its script, a variable assignment, or a program named
+     by a shell expansion.
    - `shape` runs `form` instead: the command's words up to some point,
-     then `--help` or `-h`. Every other part repeats exactly, with the same
-     operators, `cd` and `git -C` targets and `$(...)` substitutions. The
-     help flag may not follow a `--` separator or a word naming another
-     program, because a launcher such as `longrun.py start --log L -- <argv>`
-     forwards it to the child after starting work. Use the shortest prefix
-     that reaches the program's own argument parser.
-   - `<name>` in a shape command is data an earlier output fills in.
-     `data` gives it a type, `token`, `sha` or `integer`, and the probe runs
-     the form with that type's fixed dummy, never a value of its own. A
-     read-only command cannot carry one.
+     then `--help`. `-h` is refused, because `du`, `df`, `sort` and `ls`
+     read it as human-readable output and `docker run` as a hostname. Every
+     other part repeats exactly, with the same operators, `cd` and
+     `git -C` targets and `$(...)` substitutions. The help flag may not
+     follow a `--` separator or a word naming another program, where
+     `longrun.py start --log L -- <argv>` would forward it to the child
+     after starting work, nor an operand of a writer such as `rm`. Use the
+     shortest prefix that reaches the program's own argument parser.
+   - A launcher hands its trailing words to another program, container or
+     host, so it never takes a shape form: `docker`, `podman`, `kubectl`,
+     `ssh`, `wsl`, `sudo`, `env`, `nice`, `nohup`, `timeout`, `time`,
+     `xargs`, `exec`, `eval`, `npx`, `pipx` and similar.
+   - An interpreter takes no option before its script or module. Python
+     (`python`, `python3`, `python3.N`, `py`) takes only `-I`, `-u`, `-B`,
+     `-E`, `-s`, `-S` and `-O`, and `-m <module>` counts as its script;
+     `node`, `bash`, `sh` and the other shells take none. So `-c`, `-e`,
+     `-p`, `--eval` and combined forms such as `-Ic` are refused, by name.
+   - `<name>` in a shape command, or a later-bound token such as
+     `{{prev.sha}}` or `{{item.id}}`, is data an earlier output fills in.
+     `data` gives it a type, `token`, `sha` or `integer`, keyed by the name
+     or by the token text without braces (`"prev.sha": "sha"`), and the
+     probe runs the form with that type's fixed dummy, never a value of its
+     own. A read-only command cannot carry either. `{{A.x}}` is a launch
+     binding: it resolves from `argDefaults` and `bindings` and is never
+     typed as data.
    - A `template` is an illustrative command from the prompt, with `<name>`
      or `...` placeholders. Its `instances` are the concrete commands the
      node runs; each must match the template and is receipted like any
@@ -136,6 +156,13 @@ is for a graph run.
    leave the probe incomplete. `--check` refuses the same, except bindings
    known only at launch. Wording a prompt so the inventory misses a command
    is not a remedy: the node still runs it.
+
+   A declaration remains the author's reviewed assertion. A `read-only`
+   program must really be read-only, and a `shape` program must act on
+   `--help` in its own parser before any effect. The grammar refuses the
+   classes above mechanically and no more. The Probe phase runs the
+   declarations before any lens reads the IR, so review the IR diff,
+   including every `probe` object, before launching the audit.
 
    Each receipt in the result carries its evidence `kind`: `read-only` when
    the exact command ran, `shape-only` when a safe form ran in its place,

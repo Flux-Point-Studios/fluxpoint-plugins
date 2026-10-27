@@ -202,8 +202,12 @@ reviewed `--help` form placed before any `--` or child program, and a
 command or a declaration the probe would refuse, so the gap shows before a
 round is bought. A shape-only receipt proves the isolation hook admits the
 command's executable, cwd and argv prefix, and the graph's attested gates
-prove what the command does. `commands/graph-audit.md` holds the rules and
-an example declaration.
+prove what the command does. The grammar refuses known hazards (`-h`,
+inline-code interpreter options, launchers such as `docker` or `npx`,
+writers declared read-only), but a declaration stays the author's
+assertion, and the probe runs it before any lens reads the IR, so review
+the IR diff first. `commands/graph-audit.md` holds the rules and an
+example declaration.
 
 ## Work nobody on the graph can do
 

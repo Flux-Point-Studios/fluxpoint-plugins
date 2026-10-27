@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "sha256": "355b7aa58d71efbe86d0b9f6d9c157ce1212f406e510deed15b898b3c3abc5ee",
+  "sha256": "7f114749088f45d4b64f2df1525dc702f47498399dcb3c3db65dd3ce6cc5d8d7",
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/tests/attest-test.sh": "4207fdd9fed821c821b7c2cce8d1b36dd91c22edaeec1272f547a5b9d07ab75d",
-    "plugins/fluxpoint/tests/audit-workflow-test.py": "04c38bdcc2361d60c9b4d802d783e1bf86a33411c542afc71c1c81686e709c5c",
-    "plugins/fluxpoint/tests/compile-test.py": "3968e550f63d7e5be2ae33461674ea3b792aa1556c80e86e8c6aae2fab7c9b8f",
+    "plugins/fluxpoint/tests/audit-workflow-test.py": "477b8c64c5fbb398ad71827787a3697b710a75b48b419845f76c8cd82f294724",
+    "plugins/fluxpoint/tests/compile-test.py": "1ba72f3a633734a8f64d8adc48c205880b183be6461fdbb9199fa7bad1c15c5d",
     "plugins/fluxpoint/tests/cost-test.py": "b8f3c04e833d2c754bf4f5ced2f34cc6547035f1f70cff76330bb5081449f04c",
     "plugins/fluxpoint/tests/emission-test.py": "f4ae4ffe7ce61e62e024a72e3160056b8a5c3d1dca63248ed45a0ff8f1980ffb",
     "plugins/fluxpoint/tests/fault-attempts-test.py": "5bb7047179662ad1c0304f15627f2fa851f5fb090aa5c90d747ad11d1a69511a",

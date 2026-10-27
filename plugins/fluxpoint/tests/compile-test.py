@@ -1572,6 +1572,16 @@ def probe_declarations_case():
     def shape(command, form, **extra):
         return {"commands": [{"command": command, "kind": "shape", "form": form, **extra}]}
 
+    def help_form(command):
+        return shape(command, command + " --help")
+
+    def read_only(command):
+        return {"commands": [{"command": command, "kind": "read-only"}]}
+
+    def run(nid, command, probe, **extra):
+        return node(nid, "Run " + command, probe, **extra)
+
+    later = "python scripts/check.py --key {{item.key}} --strict"
     remainder = 'longrun.py start --log build.log python child.py'
     clean = [
         node("read-only", "Run " + tool, {"commands": [{"command": tool, "kind": "read-only"}]}),
@@ -1586,6 +1596,15 @@ def probe_declarations_case():
         node("later-binding", "Run `cd {{item.key}} && python tool.py`", foreach="dims"),
         node("unbound", "Run `python {{A.tool}} --check`",
              {"commands": [{"command": "python {{A.tool}} --check", "kind": "read-only"}]}),
+        run("rule-ok-python-options", "python3 -I -u scripts/tool.py report",
+            shape("python3 -I -u scripts/tool.py report", "python3 -I -u scripts/tool.py --help")),
+        run("rule-ok-python-module", "python -m pytest -q tests", shape("python -m pytest -q tests", "python -m pytest --help")),
+        run("rule-ok-node-script", "node scripts/build.js --all", shape("node scripts/build.js --all", "node scripts/build.js --help")),
+        run("rule-ok-windows-python", "C:/Python311/python.exe scripts/tool.py report",
+            shape("C:/Python311/python.exe scripts/tool.py report", "C:/Python311/python.exe scripts/tool.py --help")),
+        run("rule-ok-rm-options", "rm -rf build", shape("rm -rf build", "rm -rf --help")),
+        node("rule-f-typed-item", "Run `" + later + "`",
+             shape(later, "python scripts/check.py --key {{item.key}} --help", data={"item.key": "token"}), foreach="dims"),
     ]
     refused = {
         "undeclared": (node("undeclared", "Run " + tool), "no probe declaration for " + tool),
@@ -1607,9 +1626,9 @@ def probe_declarations_case():
         "names-child": (node("names-child", "Run `" + remainder + "`", shape(
             remainder, "longrun.py start --log build.log python --help")), "names another program"),
         "not-prefix": (node("not-prefix", "Run " + tool, shape(tool, "python scripts/tool.py status --help")), "not a prefix"),
-        "no-help": (node("no-help", "Run " + tool, shape(tool, tool)), "--help or -h"),
+        "no-help": (node("no-help", "Run " + tool, shape(tool, tool)), "ends a program part in --help"),
         "git-help": (node("git-help", "Run `git push origin main`", shape("git push origin main", "git push --help")),
-                     "--help or -h"),
+                     "ends a program part in --help"),
         "read-only-git": (node("read-only-git", "Run `git push origin main`",
                                {"commands": [{"command": "git push origin main", "kind": "read-only"}]}), "not a git read"),
         "read-only-data": (node("read-only-data", "Then `" + awaited + "`",
@@ -1623,6 +1642,72 @@ def probe_declarations_case():
                      "does not instantiate"),
         "no-placeholder": (node("no-placeholder", "Run " + tool,
                                 {"templates": [{"template": tool, "instances": [tool]}]}), "no <placeholder>"),
+        # A: -h is human-readable or a host in du, df, sort, ls and docker run.
+        "rule-a-dash-h": (run("rule-a-dash-h", "python3 scripts/tool.py report",
+                              shape("python3 scripts/tool.py report", "python3 scripts/tool.py -h")), "-h is not a help flag"),
+        "rule-a-ls": (run("rule-a-ls", "ls -la build", shape("ls -la build", "ls -h")), "-h is not a help flag"),
+        # B: an interpreter's options before its script cannot carry code.
+        "rule-b-python-c": (run("rule-b-python-c", 'python3 -c "import shutil; shutil.rmtree(\'x\')"',
+                                help_form('python3 -c "import shutil; shutil.rmtree(\'x\')"')), "the option -c"),
+        "rule-b-node-e": (run("rule-b-node-e", 'node -e "require(\'fs\').rmSync(\'x\',{recursive:true})"',
+                              help_form('node -e "require(\'fs\').rmSync(\'x\',{recursive:true})"')), "the option -e"),
+        "rule-b-bash-c": (run("rule-b-bash-c", "bash -c 'for f in a b; do rm -f $f; done'",
+                              help_form("bash -c 'for f in a b; do rm -f $f; done'")), "the option -c"),
+        "rule-b-sh-c": (run("rule-b-sh-c", "sh -c 'exec python x.py'", help_form("sh -c 'exec python x.py'")), "the option -c"),
+        "rule-b-python-ic": (run("rule-b-python-ic", "python -Ic 'import os'", help_form("python -Ic 'import os'")),
+                             "the option -Ic"),
+        "rule-b-node-eval": (run("rule-b-node-eval", 'node --eval "1"', help_form('node --eval "1"')), "the option --eval"),
+        "rule-b-node-print": (run("rule-b-node-print", 'node -p "1"', help_form('node -p "1"')), "the option -p"),
+        "rule-b-python-stdin": (run("rule-b-python-stdin", "python3 -", help_form("python3 -")), "the option - before"),
+        "rule-b-windows-python": (run("rule-b-windows-python", 'C:/Python311/python3.11.exe -c "import os"',
+                                      help_form('C:/Python311/python3.11.exe -c "import os"')), "the option -c"),
+        "rule-b-py-launcher": (run("rule-b-py-launcher", 'py -c "import os"', help_form('py -c "import os"')), "the option -c"),
+        "rule-b-expansion": (run("rule-b-expansion", 'bash "$ROOT/scripts/run.sh" check',
+                                 shape('bash "$ROOT/scripts/run.sh" check', 'bash "$ROOT/scripts/run.sh" --help')),
+                             "shell expansion"),
+        # C: a launcher hands its trailing words to another program or host.
+        "rule-c-npx": (run("rule-c-npx", "npx some-package", help_form("npx some-package")), "forwards its trailing words"),
+        "rule-c-docker": (run("rule-c-docker", "docker run --rm img", help_form("docker run --rm img")),
+                          "forwards its trailing words"),
+        "rule-c-sudo": (run("rule-c-sudo", "sudo python3 scripts/tool.py", shape("sudo python3 scripts/tool.py", "sudo --help")),
+                        "forwards its trailing words"),
+        "rule-c-env": (run("rule-c-env", "/usr/bin/env python3 scripts/tool.py",
+                           shape("/usr/bin/env python3 scripts/tool.py", "/usr/bin/env --help")), "forwards its trailing words"),
+        "rule-c-timeout": (run("rule-c-timeout", "timeout 60 python3 scripts/tool.py",
+                               shape("timeout 60 python3 scripts/tool.py", "timeout --help")), "forwards its trailing words"),
+        # D: a read-only declaration never runs a writer, a launcher or inline code.
+        "rule-d-rm": (run("rule-d-rm", "rm -rf build", read_only("rm -rf build")), "writes files or reaches the network"),
+        "rule-d-curl": (run("rule-d-curl", "curl -X POST https://example.invalid/x",
+                            read_only("curl -X POST https://example.invalid/x")), "writes files or reaches the network"),
+        "rule-d-python-c": (run("rule-d-python-c", 'python3 -c "import os"', read_only('python3 -c "import os"')),
+                            "the option -c"),
+        "rule-d-sudo": (run("rule-d-sudo", "sudo cat /etc/hosts", read_only("sudo cat /etc/hosts")),
+                        "forwards its trailing words"),
+        "rule-d-assignment": (run("rule-d-assignment", "FOO=1 python3 scripts/tool.py", read_only("FOO=1 python3 scripts/tool.py")),
+                              "variable assignment"),
+        "rule-d-expansion": (run("rule-d-expansion", '"$TOOL" report', read_only('"$TOOL" report')), "shell expansion"),
+        "rule-d-second-part": (run("rule-d-second-part", "cd build && rm -rf out", read_only("cd build && rm -rf out")),
+                               "writes files or reaches the network"),
+        # Also refused: --help after a writer's operand, which a POSIXLY_CORRECT
+        # build acts on first, and a quoted -- separator.
+        "rule-x-rm-operand": (run("rule-x-rm-operand", "rm -rf out", shape("rm -rf out", "rm -rf out --help")),
+                              "after an operand of rm"),
+        "rule-x-quoted-separator": (run("rule-x-quoted-separator", 'longrun.py start --log L "--" python child.py',
+                                        shape('longrun.py start --log L "--" python child.py',
+                                              'longrun.py start --log L "--" --help')), "-- separator"),
+        # F: a later-bound token is data, typed only inside a shape form.
+        "rule-f-read-only": (node("rule-f-read-only", "Run `" + later + "`", read_only(later), foreach="dims"),
+                             "cannot carry {{item.key}}"),
+        "rule-f-untyped": (node("rule-f-untyped", "Run `" + later + "`",
+                                shape(later, "python scripts/check.py --key {{item.key}} --help"), foreach="dims"),
+                           "{{item.key}} has no declared type"),
+        "rule-f-launch-key": (node("rule-f-launch-key", "Run `python {{A.tool}} --check`",
+                                   shape("python {{A.tool}} --check", "python {{A.tool}} --help", data={"A.tool": "token"})),
+                              "launch bindings"),
+        "rule-f-form-token": (node("rule-f-form-token", "Run `python scripts/check.py --strict`",
+                                   shape("python scripts/check.py --strict", "python scripts/check.py {{item.key}} --help"),
+                                   foreach="dims"),
+                              "form carries"),
     }
 
     def check(nodes, env=None):
