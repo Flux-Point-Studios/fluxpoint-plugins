@@ -107,6 +107,7 @@ PATTERNS = [
     ("lean.sorry",          (".lean",), r"\bsorry\b"),
     ("lean.axiom",          (".lean",), r"^\s*axiom\b"),
     ("lean.native_decide",  (".lean",), r"\bnative_decide\b"),
+    ("lean.blaster",        (".lean",), r"(?<!#)\bblaster\b|\bblasterProven\b"),
     # --- Coq / Rocq ----------------------------------------------------
     ("coq.admitted",        (".v",),    r"\b(Admitted|admit)\b"),
     ("coq.axiom",           (".v",),    r"^\s*(Axiom|Parameter|Hypothesis)\b"),

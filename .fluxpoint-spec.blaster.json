@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "goal": "Add optional Blaster verification with explicit solver trust, complete result handling, fresh receipts and replayed scalar counterexamples",
+  "asset": "Flux Point gate execution, proof/statement ratchets, retained run evidence and counterexample ledger",
+  "scope": [
+    "Structured Lean-blaster adapter and closed proposition/witness checks",
+    "Pinned tool/dependency and project input fingerprints",
+    "Exact Nat/Int/Bool/String replay and regression pins in the existing cex ledger",
+    "Imported tactic and standalone command source coverage",
+    "Native Lean/Z3 smoke coverage and documented opt-in configuration"
+  ],
+  "outOfScope": [
+    "SMT proof reconstruction and automatic promotion to kernel proofs",
+    "General datatype/trace model reification or shrinking",
+    "Compiled Cardano CEK/ledger verification in this initial adapter slice",
+    "Automatic dependency installation in consuming repositories"
+  ],
+  "decisions": [
+    {
+      "id": "blaster-evidence",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should Blaster improve verification without weakening the existing evidence boundary?",
+        "options": [
+          {
+            "option": "optional-typed-adapter",
+            "argued_by": "model",
+            "strongest_objection": "Requires a versioned backend bridge, exact dependency pins and explicit supported replay types"
+          },
+          {
+            "option": "accept-build-exit",
+            "argued_by": "model",
+            "strongest_objection": "Blaster unknown can be a warning and successful tactics use a trusted axiom"
+          },
+          {
+            "option": "fork-proof-reconstruction",
+            "argued_by": "model",
+            "strongest_objection": "A major prover project would delay useful counterexample discovery"
+          }
+        ],
+        "chosen": "optional-typed-adapter",
+        "rationale": "Source research and scanner probes show that exit status and source hatch counts alone lose result polarity, command obligations and imported solver trust. Reuse the existing gate and counterexample stores with structured records and exact scalar replay.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "User said do it after the Blaster research recommendation",
+          "Lean-blaster a16614e5 Tactic.lean assigns blasterProven; Env.lean emits unknown as a warning",
+          "2026-10-27 scanner probes missed imported by blaster and two standalone query obligations",
+          "Focused blaster-test.py ran RED before implementation: 11 tests, missing adapter and scanner coverage"
+        ]
+      },
+      "costs": [
+        {
+          "option": "optional-typed-adapter",
+          "cost": "Maintain a small Python adapter, Lean bridge, result schema and optional toolchain fixtures",
+          "basis": "estimate",
+          "evidence": [
+            "Existing ProcessTree, spec ratchets and cex ledger provide the process/evidence infrastructure"
+          ]
+        },
+        {
+          "option": "accept-build-exit",
+          "cost": "Incorrectly accepted incomplete results and unclassified proof assumptions",
+          "basis": "measured",
+          "evidence": [
+            "Executed scanner probes and inspected current backend result paths"
+          ]
+        },
+        {
+          "option": "fork-proof-reconstruction",
+          "cost": "Unmeasured prover engineering and ongoing solver-version maintenance",
+          "basis": "unknown",
+          "evidence": [
+            "Upstream explicitly leaves proof reconstruction as a TODO"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "blaster-result-trust",
+      "statement": "Only nonempty, unique, complete expected results with a valid domain witness pass; solver trust cannot satisfy a kernel policy",
+      "decisions": [
+        "blaster-evidence"
+      ],
+      "checks": [
+        "blaster-adapter-tests"
+      ],
+      "counterexample": "An unknown command exits zero, a warning is suppressed, a witness fails or a duplicate/missing result is accepted"
+    },
+    {
+      "id": "blaster-freshness",
+      "statement": "Receipts bind the complete tracked project input set, manifest, exact tool and dependency revisions and retained logs; drift refuses",
+      "decisions": [
+        "blaster-evidence"
+      ],
+      "checks": [
+        "blaster-adapter-tests"
+      ],
+      "counterexample": "Editing a referenced definition, changing polarity or modifying the installed backend preserves a passing receipt"
+    },
+    {
+      "id": "blaster-replay",
+      "statement": "Unexpected falsifications enter the existing cex ledger; pins require a tracked concrete regression, exact scalar bindings and a fresh successful specialization of the original property",
+      "decisions": [
+        "blaster-evidence"
+      ],
+      "checks": [
+        "blaster-adapter-tests"
+      ],
+      "counterexample": "A printed model, altered input, stale receipt or unsupported model closes a counterexample without replay"
+    },
+    {
+      "id": "blaster-source-coverage",
+      "statement": "Imported Blaster tactic trust is visible to the hatch scan and standalone #blaster/#bmc/#kind obligations have statement identities",
+      "decisions": [
+        "blaster-evidence"
+      ],
+      "checks": [
+        "blaster-adapter-tests"
+      ],
+      "counterexample": "The original imported tactic and command-only scanner probes still produce zero coverage"
+    }
+  ],
+  "checks": [
+    {
+      "id": "blaster-adapter-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/blaster-test.py"
+      ],
+      "scope": "Execute the adapter CLI against a controlled backend boundary, source scanners, dependency/input freshness and concrete counterexample replay/pinning. Separate actual Lean/Z3 validation is recorded in the change evidence.",
+      "assumptions": [
+        "Fixture results establish adapter enforcement, not correctness of Blaster normalization or SMT translation",
+        "The host process runner and reviewed gate code are trusted; optional backend results retain solver trust"
+      ],
+      "timeoutSeconds": 180
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does a successful Lean build establish a kernel-checked Blaster theorem?",
+      "resolution": "No. The adapter only accepts explicit solver trust; kernel policy refuses. Existing headline assumption audit remains available and imported tactic use gets a source category."
+    },
+    {
+      "claim": "Can arbitrary solver terms be pasted into a regression and trusted as replay?",
+      "resolution": "No. Reification is restricted to explicitly typed Nat, Int, Bool and String bindings. Opaque models stay open; supported bindings specialize the original registered property and are rechecked before a pin is accepted."
+    },
+    {
+      "claim": "Does this implement all compiled Cardano ledger and protocol models?",
+      "resolution": "This slice supplies the shared trustworthy backend and replay plumbing. Compiled UPLC and ledger models remain a separately scoped later integration, with fuel/conformance requirements from the assessment."
+    }
+  ]
+}

@@ -306,6 +306,14 @@ full() {
     has lake || { echo "harness: Lean project requires lake; verification did not run" >&2; return 1; }
     lake build
   fi
+  # Opt-in solver checks: successful Lean compilation alone can include an
+  # unknown result or a trusted tactic axiom. The adapter evaluates the
+  # declared results, witnesses and exact counterexample regressions.
+  if [ -f .fluxpoint-blaster.json ]; then
+    if need_gate blaster.py .fluxpoint-blaster.json; then
+      "$FPL_PY" "$FPL_GATE" --run || return 1
+    fi
+  fi
   if [ -f _CoqProject ]; then
     has coq_makefile || { echo "harness: Coq project requires coq_makefile; verification did not run" >&2; return 1; }
     coq_makefile -f _CoqProject -o CoqMakefile && make -f CoqMakefile

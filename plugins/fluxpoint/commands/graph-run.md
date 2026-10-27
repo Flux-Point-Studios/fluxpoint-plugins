@@ -6,8 +6,9 @@ argument-hint: [path to WORK.md, plus any campaign args as JSON]
 Run the designed graph. This command is the explicit authorization the
 Workflow tool requires.
 
-1. Resolve the plugin root: try `${CLAUDE_PLUGIN_ROOT}`, else
-   `find ~/.claude/plugins ~/.codex/plugins/cache -type d -name fluxpoint 2>/dev/null | head -1`.
+1. Resolve `$ROOT`: `CLAUDE_PLUGIN_ROOT`, then `PLUGIN_ROOT`, or the parent
+   of this loaded command's `commands/` directory. Use the same installation
+   for all scripts and agents below.
    The graph file is "$ARGUMENTS" if it names one, else `WORK.md`.
 2. Preflight, all deterministic — stop and report exactly what is missing
    rather than improvising around it:

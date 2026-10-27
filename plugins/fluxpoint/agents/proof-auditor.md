@@ -102,6 +102,12 @@ Audit checklist, in priority order:
   verification timeout swallowed, a proof that only passes with a raised
   resource limit or a specific solver version. Record what it actually
   took to close.
+- **Blaster scope and trust.** When `.fluxpoint-blaster.json` is present, inspect
+  the fresh machine receipt, expected result polarity, domain witness and exact
+  regression replay. `blasterProven` is a solver trust assumption; it supplies no
+  reconstructed kernel proof. Review the fixed versus symbolic inputs and any
+  fuel bound. A successful compilation or suppressed warning cannot satisfy
+  missing backend evidence. Read `references/blaster.md` for this boundary.
 
 Report format, nothing else:
 

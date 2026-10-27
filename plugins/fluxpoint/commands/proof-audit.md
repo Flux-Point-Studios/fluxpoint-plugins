@@ -14,8 +14,9 @@ reviewed, the findings table), with `haltWhen: "verdict == 'WEAKENED'"`
 making WEAKENED harness-red structurally and `record-run.py` filing the
 verdict into the Evidence row. This command is the same audit run by hand.
 
-Resolve the plugin root: `${CLAUDE_PLUGIN_ROOT}`, else
-`find ~/.claude/plugins ~/.codex/plugins/cache -type d -name fluxpoint 2>/dev/null | head -1`. Call it `$ROOT`.
+Resolve the plugin root: `CLAUDE_PLUGIN_ROOT`, then `PLUGIN_ROOT`, or the parent of this loaded
+command's `commands/` directory. Call it `$ROOT`; use that same installation
+for all scripts and agents below.
 
 1. **Mechanical pass — both ratchets.**
    `bash "$ROOT/scripts/py.sh" proof-guard.py --scan` to see the current escape

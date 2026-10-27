@@ -30,7 +30,7 @@ probe of one environment from certifying a suite run in another. A leading
 relative to the repository. On Windows use the environment's `Scripts/python.exe`.
 
 Start the lane as a background task with
-`bash "$ROOT/scripts/py.sh" attest.py --run api-deployed --nonce <launch-nonce>`,
+`bash "$ROOT/scripts/py.sh" attest.py --run api-deployed --detach --nonce <launch-nonce>`,
 then collect it with `attest.py --await <token>`. Before starting the suite,
 the wrapper asks the declared interpreter's `importlib.metadata` with the same
 Python startup flags and working directory as the suite for each

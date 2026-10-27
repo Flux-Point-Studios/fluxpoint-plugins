@@ -23,6 +23,16 @@ Reconsider this boundary when a concrete integration supplies deployment
 identity, reproducible field checks and a measured rollback workflow that
 cannot already be expressed as an attested campaign.
 
+## Historical design record
+
+The sections below describe the versions named in their headings, beginning
+with v0.1. They preserve earlier APIs and decisions rather than serving as
+current setup instructions. For the current graph fields and verification
+tiers, use [graph engineering](skills/graph-engineering/SKILL.md); the
+[documentation index](../../docs/README.md) links the other operational guides.
+In particular, the early `verify: harness` tier below was removed; declared
+gate execution now uses `verify: "prove:<gate>"` and attested evidence.
+
 These notes record what the v0.1 smoke test proved, the redesign it
 pointed to, and how that redesign landed. Not bound by prior conventions —
 the goal was the best design, not symmetry with what came before.

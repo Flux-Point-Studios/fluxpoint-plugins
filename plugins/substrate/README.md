@@ -26,7 +26,10 @@ sweep-before-build doctrine has something deterministic to sweep.
   statements only, and a stale manifest is reported, never commanded. A
   second `SessionStart` hook runs `memory-lint.mjs` over the workspace's
   memory files, and a `PostToolUse` hook on file writes runs the
-  prose-smell gate (both below).
+  prose-smell gate (both below). A `PreToolUse` hook on `Bash|PowerShell`
+  runs the opt-in mail-sender check described below.
+- `scripts/send-chokepoint.mjs` — detects recognized mail-send paths outside
+  the repository's declared sender. Dormant without `.send-chokepoint.json`.
 - `commands/` — `/substrate:init` (onboard a workspace), `/substrate:status`
   (run and interpret `--check`), `/substrate:emit` (regenerate, and keep the
   manifest edit in the same commit as the primitive it describes),
@@ -51,9 +54,10 @@ Codex:
 
 ```
 codex plugin marketplace add Flux-Point-Studios/fluxpoint-plugins
+codex plugin add substrate@fluxpoint
 ```
 
-then enable `substrate@fluxpoint`. Onboard with `/substrate:init <repo>`
+Onboard with `/substrate:init <repo>`
 (Claude Code) or `$substrate-init <repo>` (Codex) in the workspace that
 contains your repos.
 
@@ -273,6 +277,35 @@ default, which fails. A malformed config, an unknown key, or an unknown
 mode is reported on stderr and ignored — the default applies — because a
 config that could silently switch the gate off would be the inverse of
 what a config is for.
+
+## Mail-sender gate
+
+Opt in with `.send-chokepoint.json` in the project or a parent directory:
+
+```json
+{
+  "sender": "tools/outbound_mail.py",
+  "exempt": ["services/mailer"],
+  "providers": ["graph.microsoft.com"]
+}
+```
+
+The `Bash|PowerShell` pre-tool hook checks inline commands, readable referenced
+scripts and their supported local imports for both a watched provider host and
+a recognized send verb. A detected send outside the declared paths exits 2
+before execution. `sender` is an exact path; each `exempt` entry also permits
+its descendants. Paths resolve against the configuration's directory, so a
+same-named file elsewhere does not inherit permission. Leading `cd` commands
+and Windows paths are covered by regression fixtures.
+
+Omit `providers` to use the built-in Microsoft Graph, Gmail, SendGrid, Mailgun,
+Postmark and Resend hosts. This is a static routing check: it does not send
+mail, grant authorization, verify recipients or prove that the approved
+sender enforces its own checks. Dynamic URLs and unsupported imports can
+escape detection. Missing configuration, malformed payloads and unreadable
+files allow execution; configuration problems are reported when observed.
+Do not treat it as an egress sandbox. Its tests use local fixture files and
+never contact mail providers.
 
 ## Honest limitations
 

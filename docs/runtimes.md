@@ -2,7 +2,10 @@
 
 Both plugins are one tree that two runtimes load. This page records what
 each runtime provides, what the adapter does with the differences, and what
-stays runtime-specific.
+stays runtime-specific. The payload shapes below are the adapter contract
+covered by repository fixtures. Actual hook delivery also depends on the
+installed runtime version and plugin activation; use the release smoke test
+in [CONTRIBUTING.md](../CONTRIBUTING.md) to check a live installation.
 
 ## What the runtimes share
 
@@ -48,7 +51,10 @@ difference: Codex attests red gate runs as well as green ones.
 **Project directory.** Claude Code sets `CLAUDE_PROJECT_DIR` for hooks; Codex
 does not. `fpl_cd_project` in `scripts/lib.sh` already resolves the project
 from the payload's `cwd` and the git toplevel when the variable is absent,
-and the substrate graph script does the same, so no hook depends on it.
+so Flux Point hooks do not require it. The Substrate graph CLI instead uses
+`--root`, then `CLAUDE_PROJECT_DIR`, then the process working directory. Run
+its commands from the workspace root or pass `--root` explicitly; it does
+not derive a workspace from the hook payload or the Git toplevel.
 
 **Commands.** Claude Code loads `commands/<name>.md` as `/plugin:<name>`.
 Codex has no command directory and deprecated its custom prompts in favour
@@ -85,6 +91,10 @@ locate the installed plugin when no runtime variable is set. They search
 Claude Code's cache under `~/.claude/plugins` and Codex's under
 `~/.codex/plugins/cache` (`CODEX_HOME` when set), preferring a locally
 installed marketplace copy and then the highest cached version.
+The harness first accepts `FPL_PLUGIN_ROOT`, `CLAUDE_PLUGIN_ROOT`, then
+`PLUGIN_ROOT`. For command instructions, use the injected runtime root or the
+parent of the loaded command's `commands/` directory. A recursive `find` with
+`head -1` can select a stale cache copy and should not determine the version.
 
 **State directory.** Repo-local state lives under `.claude/fluxpoint/` on
 both runtimes. The path predates Codex support and is kept because every
@@ -95,9 +105,11 @@ name, and nothing in it is specific to Claude Code.
 
 - **Graph execution.** `/fluxpoint:graph-run` compiles the IR into a Claude
   Code Workflow script and invokes the Workflow tool. Codex has no
-  equivalent executor. `graph-design`, the compile check and `graph-audit`
-  run on either runtime, and the command's own fallback for a runtime
-  without the tool applies.
+  native Workflow executor. Without that tool, the command documents running
+  the nodes as parallel subagent calls with the same contracts and recording
+  `--executor degraded-subagents`. That fallback has explicit executor
+  provenance; it does not establish Workflow journal replay guarantees.
+  `graph-design`, the compile check and `graph-audit` run on either runtime.
 - **In-session drivers.** `/goal`, `/loop` and cloud Routines are Claude
   Code features. On Codex, the outer loop and scheduled `codex exec` runs
   cover unattended work.
@@ -115,7 +127,8 @@ drive the hook scripts with payloads in both shapes: `hooks-test.sh` and
 `prose-smell.test.mjs` cover `apply_patch` payloads, `attest-test.sh` covers
 the string-shaped shell response, and `loop-runner-test.sh` runs the outer
 loop against a fake `claude` and a fake `codex`. `scripts/harness.sh --full`
-runs all of them.
+runs those suites. Native Blaster and the selected Windows jobs are separate;
+see [development setup](development-setup.md#ci-and-cloud-environments).
 
 
 ### Windows hook startup under load
@@ -131,6 +144,7 @@ force a new probe if an interpreter installation changes at the same path.
 These changes reduce exposure to the MSYS2 suspended-child startup race
 reported in #124. They do not guarantee that a runtime killing Bash also
 terminates every native child. That guarantee requires Windows runtime
-process-tree termination. Native Windows/Git Bash load and forced-timeout
-verification remains required; Linux regression tests establish cache and
-launch-count behavior only.
+process-tree termination. The Windows CI job exercises selected cleanup
+paths and an actual health observation. Sustained Git Bash load and runtime
+forced-timeout behavior still require native verification; Linux regression
+tests establish cache and launch-count behavior only.

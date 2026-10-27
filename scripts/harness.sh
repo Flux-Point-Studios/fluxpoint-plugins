@@ -281,6 +281,7 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     step "manifests agree across runtimes" manifests_in_sync
     step "portable interpreter invocations" portable_invocations
     step "locked specification + executed requirements" "$FPL_PY" "$PLUGIN/scripts/specification.py" --run
+    step "Blaster locked requirements" "$FPL_PY" "$PLUGIN/scripts/specification.py" --spec .fluxpoint-spec.blaster.json --run
     step "templates compile + emit valid JS" compile_templates
     step "shipped workflows parse under the async wrapper" check_workflows
     step "graph-audit workflow: lenses, reduce, refutation (executed)" \
@@ -322,6 +323,7 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     step "mutation ratchet (executed)" bash "$PLUGIN/tests/mutation-test.sh"
     step "deterministic metrics + safe tightening (executed)" "$FPL_PY" "$PLUGIN/tests/metric-ratchet-test.py"
     step "pinned Aiken execution metrics (executed)" "$FPL_PY" "$PLUGIN/tests/aiken-metrics-test.py"
+    step "Blaster result trust, freshness and concrete replay" "$FPL_PY" "$PLUGIN/tests/blaster-test.py"
     step "seam ratchet (executed)" bash "$PLUGIN/tests/seam-guard-test.sh"
     step "provider recordings conformance (executed)" "$FPL_PY" "$PLUGIN/tests/recordings-test.py"
     step "guard ratchet (executed)" bash "$PLUGIN/tests/guard-guard-test.sh"

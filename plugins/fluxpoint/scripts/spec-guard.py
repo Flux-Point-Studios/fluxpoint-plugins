@@ -350,9 +350,35 @@ def _lean_statement(text, start):
 
 
 def scan_lean(rel, text, _ctx):
+    source_sha = sha(text.replace("\r\n", "\n"))
     text = strip_line_comments(strip_block(text, "/-", "-/"), "--")
-    return [obligation("lean", rel, m.group(2), _lean_statement(text, m.end()))
-            for m in LEAN_DECL.finditer(text)]
+    found = [obligation("lean", rel, m.group(2), _lean_statement(text, m.end()))
+             for m in LEAN_DECL.finditer(text)]
+    # Closed Prop definitions are the named input to the optional solver
+    # bridge. Freeze the predicate body, since it is the statement being
+    # checked rather than a theorem proof body.
+    for match in re.finditer(r"^[ \t]*(?:def|abbrev)[ \t]+([^\s:]+)\s*:\s*Prop\s*:=", text, re.M):
+        tail = text[match.end():]
+        end = len(tail)
+        position = 0
+        for line in tail.splitlines(keepends=True):
+            if position and LEAN_TOP.match(line):
+                end = position
+                break
+            position += len(line)
+        found.append(obligation("lean", rel, match.group(1),
+                                "Prop := " + tail[:end] + "; body-sha256=" + sha(tail[:end])))
+    # Commands have no theorem declaration. Give them stable per-kind ordinals
+    # and conservatively bind their local definitions through the whole file.
+    # The optional Blaster adapter additionally hashes the tracked project and
+    # installed dependencies; this scanner alone is not that dependency audit.
+    counters = {}
+    for match in re.finditer(r"^[ \t]*#(blaster|bmc|kind)\b", text, re.M):
+        kind = match.group(1)
+        counters[kind] = counters.get(kind, 0) + 1
+        found.append(obligation("lean", rel, f"#{kind}:{counters[kind]}",
+                                f"#{kind} command; source-sha256={source_sha}"))
+    return found
 
 
 def scan_coq(rel, text, _ctx):
@@ -1169,12 +1195,14 @@ def _run(cmd, root):
 
 
 def audit_lean(root, o):
+    if o["name"].startswith("#"):
+        return "not-run", None, "solver command has no Lean proof term; use the backend's explicit trust receipt"
     if not shutil.which("lake"):
         return "not-run", None, "lake is not on PATH"
     module = o["file"][:-len(".lean")].replace("/", ".")
     probe = _probe(root, "Probe.lean", f"import {module}\n#print axioms {o['name']}\n")
     rc, out = _run(["lake", "env", "lean", probe], root)
-    if rc is None:
+    if rc is None or rc != 0:
         return "unreadable", None, f"lake env lean could not run: {out}"
     m = LEAN_AXIOMS.search(out)
     if m:

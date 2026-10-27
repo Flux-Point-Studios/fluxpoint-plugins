@@ -6,9 +6,10 @@ argument-hint: [one-line goal]
 Onboard this repository onto the fluxpoint harness. Work through every
 step; do not stop at copying files.
 
-1. Locate the plugin templates. Try `${CLAUDE_PLUGIN_ROOT}/templates`
-   first; if that expands empty in your shell, find them with
-   `find ~/.claude/plugins ~/.codex/plugins/cache -type d -path '*fluxpoint/templates' 2>/dev/null | head -1`.
+1. Locate the loaded plugin: `CLAUDE_PLUGIN_ROOT`, then `PLUGIN_ROOT`, or
+   the parent of this command's `commands/` directory. Call it `$ROOT` and
+   use `$ROOT/templates` and that installation's scripts throughout.
+   Do not choose the first recursive cache match; multiple versions can coexist.
 2. Copy, without overwriting anything that already exists:
    - `templates/harness.sh` → `scripts/harness.sh` (then `chmod +x`)
    - `templates/loop.sh` → `scripts/loop.sh` (then `chmod +x`)

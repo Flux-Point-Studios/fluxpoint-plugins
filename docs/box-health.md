@@ -37,8 +37,11 @@ Windows reads `Win32_Process` twice in one `powershell.exe -NoProfile`
 invocation and obtains aggregate CPU counters through `GetSystemTimes`.
 Creation timestamps prevent reused PIDs from inheriting old CPU measurements.
 TCP range and connection queries are read-only. Access failures and missing
-commands are named. Fixture tests cover the Windows command output and parser;
-native Windows/Git Bash execution remains a platform verification limitation.
+commands are named. Fixture tests cover the Windows command output and parser.
+The [Windows CI job](../.github/workflows/windows-specification.yml) also runs a
+real read-only sample and accepts a loaded runner's health findings, while
+failing unreadable collection. This is not a sustained Windows/Git Bash load
+or forced-timeout test, and Linux fixture results alone do not verify Windows.
 
 The loopback probe opens a temporary listener on `127.0.0.1` and measures five
 request/response round trips after warming the connection. Its default limit

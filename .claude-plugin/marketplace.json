@@ -11,7 +11,7 @@
       "name": "fluxpoint",
       "source": "./plugins/fluxpoint",
       "description": "Engineering harness with two drivers over one contract: a Stop-hook Definition-of-Done gate with per-edit verification and session bootstrap, plus a deterministic compiler that turns a declarative WORK.md graph IR into verified multi-agent campaigns \u2014 typed contracts, verification tiers, no self-certifying mutators, provenance-recorded evidence.",
-      "version": "1.47.0",
+      "version": "1.48.0",
       "category": "workflow",
       "keywords": [
         "loop",
@@ -29,7 +29,7 @@
       "name": "substrate",
       "source": "./plugins/substrate",
       "description": "Multi-repo primitive registry: per-repo substrate.json manifests compiled by a zero-dependency generator into one SUBSTRATE.md graph \u2014 nodes, consumes-edges, orphans as dormant value, hubs to harden first \u2014 with staleness alarms injected at every session start so new work plugs into existing primitives instead of running parallel to them.",
-      "version": "1.9.0",
+      "version": "1.9.1",
       "category": "workflow",
       "keywords": [
         "substrate",

@@ -1416,7 +1416,26 @@ def parse_fastcheck(root, output, exit_code, source=None):
     return ("rows", rows, raw_for)
 
 
+def parse_blaster(root, output, exit_code, source=None):
+    """Structured adapter evidence; expected refutations are not open bugs."""
+    import blaster
+    try:
+        receipt = blaster.loads(output)
+        rows = blaster.counterexamples(root, receipt)
+        return ("rows", rows, lambda row: {"receipt": receipt, "cexId": row["cexId"]})
+    except (ValueError, KeyError, TypeError) as exc:
+        return ("failed", "invalid Blaster verification receipt: " + str(exc))
+
+
 TOOLS = {
+    "blaster": {
+        "parse": parse_blaster,
+        "body": lambda text, name: (None, None),
+        "roots": None,
+        "ext": ".json",
+        "inverted": "not a successfully replayed concrete Blaster regression",
+        "rerun": lambda row: "blaster.py --run (registered property plus exact scalar regressions)",
+    },
     "aiken": {
         "parse": parse_aiken,
         "body": test_body,
@@ -1607,6 +1626,18 @@ def pin(root, cexid, path, testname):
         # is written as.
         exts = spec["ext"] if isinstance(spec["ext"], tuple) else (spec["ext"],)
         draft = os.path.join(d, f"{cexid}{exts[0]}.draft")
+        if tool == "blaster":
+            import blaster
+            try:
+                entry = blaster.regression(row)
+            except ValueError as exc:
+                print(f"cex: {exc}", file=sys.stderr)
+                return 1
+            with open(draft, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump(entry, fh, indent=2)
+                fh.write("\n")
+            print(f"cex: add {draft} to .fluxpoint-blaster.json regressions; run blaster.py --run, then pin")
+            return 0
         need = required_leaves(row.get("containment"), tool)
         # The draft speaks the prover's language down to its comment marker
         # and its closing line (none, for a TLA+ operator).
@@ -1698,6 +1729,11 @@ def pin(root, cexid, path, testname):
 def verify_pin(root, row, rel, testname):
     """(ok, why). The mechanical part of trusting a pin."""
     tool = row.get("tool") or "aiken"
+    if tool == "blaster":
+        import blaster
+        if rel not in tracked(root):
+            return False, "Blaster regression manifest must be tracked"
+        return blaster.verify_pin(root, row, rel, testname)
     spec = TOOLS.get(tool)
     if spec is None:
         return False, f"recorded by unknown tool '{tool}'"
@@ -1753,9 +1789,12 @@ def check(root):
     rows = current(root)
     pinned = [r for r in rows.values() if r.get("status") == "pinned"]
     openrows = [r for r in rows.values() if r.get("status") == "open"]
+    blaster_open = [r for r in openrows if r.get("tool") == "blaster"]
+    if blaster_open:
+        print(f"cex: {len(blaster_open)} Blaster counterexample(s) require concrete replay and a pin, or explicit retirement", file=sys.stderr)
     if not pinned:
         print(f"cex: {len(openrows)} open counterexample(s), none pinned yet")
-        return 1 if fuzz_fatal else 0
+        return 1 if fuzz_fatal or blaster_open else 0
     bad = []
     for row in pinned:
         pinrec = row.get("pin") or {}
@@ -1764,9 +1803,12 @@ def check(root):
         if not ok:
             bad.append((row, why))
     if not bad:
+        if blaster_open:
+            print(f"cex: RED — {len(pinned)} pins verified; {len(blaster_open)} Blaster counterexamples remain open", file=sys.stderr)
+            return 1
         print(f"cex: green — {len(pinned)} pinned counterexample(s) still in "
               f"the tree, {len(openrows)} open")
-        return 1 if fuzz_fatal else 0
+        return 1 if fuzz_fatal or blaster_open else 0
     print("\ncex: RED — a pinned counterexample lost its regression\n",
           file=sys.stderr)
     for row, why in bad:

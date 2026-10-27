@@ -7,8 +7,9 @@ Lift a park. A campaign with `actor: human` or `actor: third-party` nodes
 does not halt on them — it records what would unblock each one and keeps
 working the branches that can proceed. This is how the block is cleared.
 
-Resolve the plugin root: `${CLAUDE_PLUGIN_ROOT}`, else
-`find ~/.claude/plugins ~/.codex/plugins/cache -type d -name fluxpoint 2>/dev/null | head -1`. Call it `$ROOT`.
+Resolve the plugin root: `CLAUDE_PLUGIN_ROOT`, then `PLUGIN_ROOT`, or the parent of this loaded
+command's `commands/` directory. Call it `$ROOT`; use that same installation
+for all scripts and agents below.
 
 1. **Show what is actually waiting**, never a guess:
    `bash "$ROOT/scripts/py.sh" inbox.py --list`. With no argument, stop here —

@@ -61,11 +61,12 @@ step; do not stop at scaffolding files.
    and marks them as outside the substrate.
 4. If the seeded repo is not a git repo, add its dirname and code paths to
    `nonGitRepos` in the config, or its staleness will be skipped.
-5. Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/substrate-graph.mjs" --emit`.
-   If `${CLAUDE_PLUGIN_ROOT}` expands empty in your shell, locate the plugin
-   with `find ~/.claude/plugins ~/.codex/plugins/cache -type d -path '*substrate/scripts' 2>/dev/null | head -1`.
+5. Resolve `$ROOT` from `CLAUDE_PLUGIN_ROOT`, then `PLUGIN_ROOT`, or the
+   parent of this loaded command's `commands/` directory. Use that installation
+   throughout; the first recursive cache match may be an older version.
+   Run `node "$ROOT/scripts/substrate-graph.mjs" --emit`.
    Fix any `problem:` lines it prints and re-run until it exits 0.
-6. Read `${CLAUDE_PLUGIN_ROOT}/templates/DOCTRINE.snippet.md` and offer to
+6. Read `$ROOT/templates/DOCTRINE.snippet.md` and offer to
    append it to the workspace's instructions file — `CLAUDE.md` under Claude
    Code, `AGENTS.md` under Codex — creating the file if absent.
    Summarize the doctrine either way: the sweep comes first — before any
