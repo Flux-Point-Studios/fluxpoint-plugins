@@ -1603,6 +1603,7 @@ def probe_declarations_case():
         run("rule-ok-windows-python", "C:/Python311/python.exe scripts/tool.py report",
             shape("C:/Python311/python.exe scripts/tool.py report", "C:/Python311/python.exe scripts/tool.py --help")),
         run("rule-ok-rm-options", "rm -rf build", shape("rm -rf build", "rm -rf --help")),
+        run("git-id-plain-read", "git status --porcelain", read_only("git status --porcelain")),
         node("rule-f-typed-item", "Run `" + later + "`",
              shape(later, "python scripts/check.py --key {{item.key}} --help", data={"item.key": "token"}), foreach="dims"),
     ]
@@ -1695,6 +1696,17 @@ def probe_declarations_case():
         "rule-x-quoted-separator": (run("rule-x-quoted-separator", 'longrun.py start --log L "--" python child.py',
                                         shape('longrun.py start --log L "--" python child.py',
                                               'longrun.py start --log L "--" --help')), "-- separator"),
+        # Git is checked by its subcommand, so only the plain word git is git.
+        "git-id-path": (run("git-id-path", "/usr/bin/git reset --hard", read_only("/usr/bin/git reset --hard")),
+                        "write it git"),
+        "git-id-quoted": (run("git-id-quoted", "'git' reset --hard", read_only("'git' reset --hard")), "write it git"),
+        "git-id-exe": (run("git-id-exe", "git.exe push origin main", read_only("git.exe push origin main")), "write it git"),
+        "git-id-path-c": (run("git-id-path-c", "/usr/bin/git -C /scratch/repo reset --hard",
+                              read_only("/usr/bin/git -C /scratch/repo reset --hard")), "write it git"),
+        "git-id-shape": (run("git-id-shape", "/usr/bin/git push origin main",
+                             shape("/usr/bin/git push origin main", "/usr/bin/git push --help")), "write it git"),
+        "git-id-undeclared": (run("git-id-undeclared", "/usr/bin/git status", None), "write it git"),
+        "git-id-plain-reset": (run("git-id-plain-reset", "git reset --hard", read_only("git reset --hard")), "not a git read"),
         # F: a later-bound token is data, typed only inside a shape form.
         "rule-f-read-only": (node("rule-f-read-only", "Run `" + later + "`", read_only(later), foreach="dims"),
                              "cannot carry {{item.key}}"),
@@ -1711,7 +1723,7 @@ def probe_declarations_case():
     }
 
     def check(nodes, env=None):
-        ir = {"version": 1, "campaign": "probe declarations", "budget": {"maxNodes": 64},
+        ir = {"version": 1, "campaign": "probe declarations", "budget": {"maxNodes": 256},
               "lists": {"dims": [{"key": "a"}]}, "nodes": nodes}
         with tempfile.TemporaryDirectory() as d:
             with open(os.path.join(d, "WORK.md"), "w", encoding="utf-8") as fh:

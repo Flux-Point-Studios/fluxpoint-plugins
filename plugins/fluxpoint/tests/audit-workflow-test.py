@@ -796,6 +796,77 @@ for name, decl, needle in [
     res = declared_probe('Run ' + BUILD, decl, [receipt(resolved(BUILD), resolved(BUILD_FORM))])
     report('#192 rule F: ' + name, blocked(res, needle), f"{probe_report(res).get('blockers')}"[:90])
 
+# Git is checked by its subcommand, so only the plain word git counts as git:
+# a path, quotes or .exe would carry reset --hard past the read check.
+def read_only_evidence(res):
+    return ((res.get('r') or {}).get('probeEvidence') or {}).get('readOnly')
+
+
+for spelling, command in [('a path', '/usr/bin/git reset --hard'), ('quotes', "'git' reset --hard"),
+                          ('.exe', 'git.exe push origin main'),
+                          ('a path and -C', '/usr/bin/git -C /scratch/repo reset --hard')]:
+    res = declared_probe('Run ' + command, {"commands": [{"command": command, "kind": "read-only"}]}, [receipt(command)])
+    report('#192 git identity: a read-only git spelled with ' + spelling + ' is refused',
+           blocked(res, 'write it git') and not declared_forms(res) and read_only_evidence(res) == [],
+           f"{(res.get('r') or {}).get('verdict')} {probe_report(res).get('blockers')}"[:90])
+plain_reset = declared_probe('Run git reset --hard', {"commands": [{"command": 'git reset --hard', "kind": "read-only"}]},
+                             [receipt('git reset --hard')])
+report('#192 git identity: a read-only plain git reset --hard is refused', blocked(plain_reset, 'not a git read'),
+       f"{probe_report(plain_reset).get('blockers')}"[:90])
+plain_read = declared_probe('Run git status --porcelain',
+                            {"commands": [{"command": 'git status --porcelain', "kind": "read-only"}]},
+                            [receipt('git status --porcelain')])
+report('#192 git identity: a read-only plain git status --porcelain is accepted',
+       sound(plain_read) and read_only_evidence(plain_read) == ['builder: git status --porcelain'],
+       f"{probe_report(plain_read).get('blockers')}"[:90])
+for name, prompt, decl, rows in [
+        ('an undeclared grammar part', 'Run /usr/bin/git status', None, [receipt('/usr/bin/git status')]),
+        ('a shape form', 'Run /usr/bin/git push origin main',
+         {"commands": [{"command": '/usr/bin/git push origin main', "kind": "shape", "form": '/usr/bin/git push --help'}]},
+         [receipt('/usr/bin/git push origin main', '/usr/bin/git push --help')]),
+        ('a template instance', 'Run `<git> -C <dir> status`',
+         {"templates": [{"template": '<git> -C <dir> status', "instances": ['/usr/bin/git -C /x status']}]},
+         [receipt('/usr/bin/git -C /x status')])]:
+    res = declared_probe(prompt, decl, rows)
+    report('#192 git identity: git spelled as a path is refused in ' + name, blocked(res, 'write it git'),
+           f"{probe_report(res).get('blockers')}"[:90])
+
+# The inventory must not lose an explicit instruction to run something, nor
+# invent a command out of the punctuation left beside an inline one.
+def inventoried(prompt, reason='The prompt describes work and prescribes no command.'):
+    return command_probe(prompt, [], reason)
+
+
+for name, prompt, expected in [
+        ('an execution verb mid-line', 'Before approving, execute `aiken check`.', ['aiken check']),
+        ('invoke', 'Then invoke `aiken fmt --check` on the tree.', ['aiken fmt --check']),
+        ('a quoted Windows interpreter', 'Then `"C:/Py/python.exe" x.py` writes the report.', ['"C:/Py/python.exe" x.py'])]:
+    res = inventoried(prompt)
+    got = probe_report(res).get('prescribed')
+    report('#192 inventory: ' + name + ' is inventoried, not read as no command',
+           got == expected and (res.get('r') or {}).get('verdict') == 'REWIRE', f"{got}"[:90])
+for name, prompt, expected in [
+        ('Run `git status`. adds no "." command', 'Run `git status`.', ['git status']),
+        ('runs does not count as run', 'The nightly job runs `aiken check` for us.', [])]:
+    got = probe_report(inventoried(prompt)).get('prescribed')
+    report('#192 inventory: ' + name, got == expected, f"{got}"[:90])
+BUILDER_PROMPT = '\n'.join([
+    '1. Read the packet first.',
+    '2. Run `python scripts/x.py`. Keep its report.',
+    '3. Start the build in the background: `bash "/p/scripts/py.sh" longrun.py start --log L -- python scripts/b.py g2 '
+    '--suites-sha {{prev.sha}}`. Keep the token it prints.',
+    '4. In the foreground, run `bash "/p/scripts/py.sh" longrun.py await --timeout 240 <token>`, again on exit 3, '
+    'until it completes.',
+    'If the build must stop, cancel it with `bash "/p/scripts/py.sh" longrun.py cancel <token>` and say why.',
+    'Read the last line of `/w/g2-build.log` with the file tool.',
+    'When nothing is left to do, return outcome `stopped`.'])
+builder = probe_report(inventoried(BUILDER_PROMPT)).get('prescribed')
+report('#192 inventory: a builder prompt inventories exactly the four commands it names',
+       builder == ['python scripts/x.py',
+                   'bash "/p/scripts/py.sh" longrun.py start --log L -- python scripts/b.py g2 --suites-sha {{prev.sha}}',
+                   'bash "/p/scripts/py.sh" longrun.py await --timeout 240 <token>',
+                   'bash "/p/scripts/py.sh" longrun.py cancel <token>'], f"{builder}"[:90])
+
 discovered = declared_probe('Run ' + TOOL, READ_ONLY, [receipt(TOOL)], plan=True)
 report('#192 a discovered probe plan carries the node declarations',
        sound(discovered) and len(labels(discovered, 'probe-plan')) == 1

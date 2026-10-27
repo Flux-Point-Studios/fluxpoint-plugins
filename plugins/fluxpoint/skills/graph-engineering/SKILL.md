@@ -198,9 +198,10 @@ a script declares how each such command is probed, in a `probe` object
 beside its prompt: `read-only` runs the exact command, `shape` runs a
 reviewed `--help` form placed before any `--` or child program, and a
 `template` names the concrete commands behind an illustrative
-`git -C <dir> ...`. `compile-graph.py --check` refuses an undeclared script
-command or a declaration the probe would refuse, so the gap shows before a
-round is bought. A shape-only receipt proves the isolation hook admits the
+`git -C <dir> ...`. `compile-graph.py --check` runs the same grammar, so an
+undeclared script command or a refused declaration shows before a round is
+bought; it reads an `{{A.x}}` it cannot resolve as the word `A.x`, so the
+audit, with the real arguments, has the last word. A shape-only receipt proves the isolation hook admits the
 command's executable, cwd and argv prefix, and the graph's attested gates
 prove what the command does. The grammar refuses known hazards (`-h`,
 inline-code interpreter options, launchers such as `docker` or `npx`,

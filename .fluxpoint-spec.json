@@ -219,7 +219,7 @@
           }
         ],
         "chosen": "typed-ir-declarations",
-        "rationale": "A per-node probe object reviewed with the IR names how each script command is probed: read-only runs the exact command and may not run a writer, network tool, launcher, interpreter option, assignment or expanded program; shape runs a --help prefix (never -h) that must stop before any -- separator, child program or writer operand, never on a launcher, and with no interpreter option that can carry code; templates are discharged only by receipted concrete instances; <placeholder> and later-bound {{prev...}} or {{item...}} data take a typed fixed dummy inside a shape only. compile-graph.py --check runs the audit's own grammar section, so the static check and the Probe phase cannot disagree. Graphs whose probed nodes run only grammar commands are unaffected.",
+        "rationale": "A per-node probe object reviewed with the IR names how each script command is probed: read-only runs the exact command and may not run a writer, network tool, launcher, interpreter option, assignment or expanded program; shape runs a --help prefix (never -h) that must stop before any -- separator, child program or writer operand, never on a launcher, and with no interpreter option that can carry code; templates are discharged only by receipted concrete instances; <placeholder> and later-bound {{prev...}} or {{item...}} data take a typed fixed dummy inside a shape only. compile-graph.py --check runs the audit's own grammar section; it reads an unresolved {{A.x}} launch binding as the word A.x, so it agrees with the Probe phase only once the audit has the real resolved arguments. Graphs whose probed nodes run only grammar commands are unaffected.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
@@ -227,7 +227,8 @@
           "Read issue #192 against upstream 2438d236 (fluxpoint 1.46.0): readOnlyWords admits no interpreter, so a probe over a script command is always incomplete and SOUND is unreachable",
           "plugins/fluxpoint/scripts/longrun.py declares start's command with argparse.REMAINDER; 'longrun.py start --log L --help' printed usage, exited 0 and created no file",
           "The audit resolved only flat {{A.key}} bindings; nested {{A._launch.root}} stayed literal and an unresolved token inside quotes passed the grammar",
-          "Review of a8f0d0f: the grammar section accepted 'python3 -c ... --help', 'node -e ... --help', 'bash -c ... --help', 'sh -c ... --help', 'python -Ic ... --help' and 'npx some-package --help' as shapes and 'rm -rf build' and 'curl -X POST ...' as read-only; all eight are refused after the fix"
+          "Review of a8f0d0f: the grammar section accepted 'python3 -c ... --help', 'node -e ... --help', 'bash -c ... --help', 'sh -c ... --help', 'python -Ic ... --help' and 'npx some-package --help' as shapes and 'rm -rf build' and 'curl -X POST ...' as read-only; all eight are refused after the fix",
+          "Review of aad99bab: read-only '/usr/bin/git reset --hard', \"'git' reset --hard\", 'git.exe push origin main' and '/usr/bin/git -C /scratch/repo reset --hard' were accepted, 'Before approving, execute `aiken check`.' and a quoted Windows python inside backticks left the inventory empty, and 'Run `git status`.' invented a '.' command"
         ]
       },
       "costs": [
@@ -426,7 +427,7 @@
     },
     {
       "id": "typed-probe-receipts",
-      "statement": "A script command in a probed node is receipted only through a reviewed probe declaration: read-only runs the exact command and refuses writers, network tools, launchers, interpreter options, assignments and expanded programs; shape runs a --help prefix, never -h, placed before any -- separator, child program or writer operand, refused on a launcher or after an interpreter option that can carry code; templates complete only through receipted concrete instances; <placeholder> and later-bound {{...}} data take a typed dummy inside a shape only; nested bindings resolve before matching; every other case leaves the probe incomplete or is refused by --check; and the verdict names each shape-only receipt",
+      "statement": "A script command in a probed node is receipted only through a reviewed probe declaration: read-only runs the exact command and refuses writers, network tools, launchers, interpreter options, assignments and expanded programs; shape runs a --help prefix, never -h, placed before any -- separator, child program or writer operand, refused on a launcher or after an interpreter option that can carry code; templates complete only through receipted concrete instances; <placeholder> and later-bound {{...}} data take a typed dummy inside a shape only; nested bindings resolve before matching; every other case leaves the probe incomplete or is refused by --check; and the verdict names each shape-only receipt; Git counts only when spelled git; and the inventory keeps every inline command whose first word names a known program or that directly follows run, execute, probe or invoke, without inventing commands from leftover punctuation",
       "decisions": [
         "probe-receipts"
       ],
@@ -435,7 +436,7 @@
         "graph-compiler-tests",
         "emission-tests"
       ],
-      "counterexample": "An undeclared python command, a --help placed after --, a -h form, a python -c or npx shape, an rm declared read-only or an unreceipted template instance completes the probe, or a shape-only receipt goes unnamed in a SOUND verdict"
+      "counterexample": "An undeclared python command, a --help placed after --, a -h form, a python -c or npx shape, an rm declared read-only or an unreceipted template instance completes the probe, or a shape-only receipt goes unnamed in a SOUND verdict, a read-only /usr/bin/git reset --hard completes the probe, or 'execute `aiken check`' leaves the inventory empty"
     }
   ],
   "checks": [

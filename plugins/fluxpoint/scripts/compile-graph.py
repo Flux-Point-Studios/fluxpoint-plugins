@@ -4603,11 +4603,11 @@ PROBE_GRAMMAR = re.compile(r"^// -+ probe grammar --$.*?(?=^// -+ inputs --$)", 
 def probe_findings(ir, embedded_args=None):
     """--check: run graph-audit.js's own probe grammar over every probed node.
 
-    The audit is the only implementation, so --check cannot pass a probe
-    declaration the Probe phase would refuse, nor a script command no receipt
-    can cover. An {{A.x}} with no value here reads as the word A.x; the audit
-    re-checks with the real binding. A command still holding a later-bound
-    token ({{item...}}, {{prev}}) is left to the audit, which refuses it.
+    The audit's grammar is the only implementation, so --check judges a
+    declaration as the Probe phase does, given the same arguments. Here an
+    {{A.x}} with no value reads as the word A.x, so the two agree only once
+    the audit re-checks with the real binding. A command holding an untyped
+    later-bound token ({{item...}}, {{prev}}) is left to the audit.
     """
     import subprocess
     nodes = [n for n in ir.get("nodes") or [] if audit_probed(n)]

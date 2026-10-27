@@ -142,8 +142,9 @@ const PROBE_RESULT = {
 
 // --------------------------------------------------------- probe grammar --
 // compile-graph.py --check runs this section alone under node, so nothing in
-// it may read a workflow global: the static check and the Probe phase then
-// share one grammar and cannot disagree about what a probe may receipt.
+// it may read a workflow global. The static check and the Probe phase share
+// this grammar, but --check reads an unresolved {{A.x}} launch binding as
+// the word A.x, so they agree only once the audit has the real arguments.
 
 // These checks certify a deliberately small shell grammar. An agent's claim
 // that it exercised a command is insufficient: bind every receipt to the
@@ -264,6 +265,15 @@ function grammarCommand(command) {
     && a.parts.every(words => words[0] === 'git' ? !!gitCommand(words) : readOnlyWords(words))
 }
 const COMMAND_WORD = /^(?:git|cd|pwd|test|\[|echo|printf|cat|grep|head|tail|wc|true|false|bash|sh|python(?:3(?:\.[0-9]+)?)?|node|npm|npx|make|curl|wget|rm|cp|mv|touch|mkdir|\.\/[^\s]+)(?:\s|$)/
+// An inline span is a command when its first word names, by basename, a
+// program the grammar knows, or when an execution verb directly precedes it.
+const EXECUTE_BEFORE = /\b(?:run|execute|probe|invoke)(?:\s+(?:exactly|this command))?\s*:?\s*$/i
+const INLINE_COMMAND = '\u0000'
+function knownProgram(word) {
+  const name = programName(word)
+  return name === 'git' || READ_WORDS.includes(name) || PYTHON.test(name) || BARE_INTERPRETERS.includes(name)
+    || LAUNCHERS.includes(name) || WRITERS.includes(name) || COMMAND_WORD.test(name)
+}
 function prescribedCommands(prompt) {
   const commands = []
   const add = s => { s = s.trim(); if (s) commands.push(s) }
@@ -273,13 +283,21 @@ function prescribedCommands(prompt) {
     if (/^(?:bash|sh|shell|console)?\s*$/.test(lang)) body.split('\n').filter(x => x.trim() && !x.trim().startsWith('#')).forEach(add)
     else if (/^(?:bash|sh|shell|console)\b/.test(lang)) add(body)
     return ''
-  }).replace(/`([^`\n]+)`/g, (full, command) => { if (COMMAND_WORD.test(command.trim())) add(command); return '' })
+  }).replace(/`([^`\n]+)`/g, (full, command, offset, text) => {
+    const first = command.trim().match(new RegExp('^' + SHELL_WORD))
+    if (!COMMAND_WORD.test(command.trim()) && !(first && knownProgram(first[0])) && !EXECUTE_BEFORE.test(text.slice(0, offset))) return ''
+    add(command)
+    return INLINE_COMMAND
+  })
   for (const line of prose.split('\n')) {
-    const text = line.trim().replace(/^(?:[-*]|\d+[.)])\s+/, '').replace(/^(?:Run|Execute|Probe)(?:\s+(?:exactly|this command))?\s*:?\s+/i, '')
+    const bare = line.split(INLINE_COMMAND).join('')
+    const text = bare.trim().replace(/^(?:[-*]|\d+[.)])\s+/, '').replace(/^(?:Run|Execute|Probe)(?:\s+(?:exactly|this command))?\s*:?\s+/i, '')
+    // Prose punctuation left beside an inline command is not a command.
+    if (bare !== line && /^[\s.,;:!?)]*$/.test(text)) continue
     if (COMMAND_WORD.test(text)) add(text)
     // Explicit instructions to execute an unfamiliar executable also need a
     // receipt; the safe grammar will leave them incomplete until reviewed.
-    else if (/^(?:Run|Execute|Probe)\s/i.test(line.trim())) add(text)
+    else if (/^(?:Run|Execute|Probe)\s/i.test(bare.trim())) add(text)
   }
   return [...new Set(commands)]
 }
@@ -375,7 +393,12 @@ function interpreterRefusal(words) {
   }
   return ''
 }
+// Git is judged by its subcommand, so only the plain word git counts as Git:
+// a path, quotes or .exe would carry any subcommand past readOnlyGit.
+const oddGit = word => word !== 'git' && programName(word) === 'git'
+const gitSpelling = word => `spells git as ${word}; write it git, which the grammar checks by its subcommand`
 function programRefusal(words, readOnly) {
+  if (oddGit(words[0])) return gitSpelling(words[0])
   if (words[0].includes('$')) return 'takes its program from a shell expansion, so the grammar cannot tell what runs; resolve it through {{A.x}}'
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(unquote(words[0]))) return 'starts with a variable assignment, which hides the program that runs'
   const name = programName(words[0])
@@ -510,9 +533,10 @@ function probeCoverage(node, bindings, standIn) {
   })
   const unresolved = required.filter(c => UNRESOLVED.test(c) && !declared.has(c))
   for (const c of required) {
-    if (!unresolved.includes(c) && !named.has(c) && !grammarCommand(c)) {
-      blockers.push(`no probe declaration for ${c}: it is outside the read-only grammar, so declare it in the node's probe.commands or probe.templates`)
-    }
+    if (unresolved.includes(c) || named.has(c) || grammarCommand(c)) continue
+    const odd = (shellParts(c) || { parts: [] }).parts.map(words => words[0]).find(oddGit)
+    blockers.push(odd ? `${c}: ${gitSpelling(odd)}`
+      : `no probe declaration for ${c}: it is outside the read-only grammar, so declare it in the node's probe.commands or probe.templates`)
   }
   return { prescribed, required, declared, blockers, unresolved }
 }

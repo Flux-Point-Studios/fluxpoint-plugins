@@ -18,7 +18,9 @@ is for a graph run.
    semantics of a graph that cannot compile. Keep its summary line, with
    the estimate and cache TTL, for step 4. For every node the audit probes,
    `--check` also runs the probe grammar from `workflows/graph-audit.js`
-   under Node.js and refuses what the Probe phase would refuse (step 4).
+   under Node.js (step 4). It reads an `{{A.x}}` with no `argDefaults`
+   value as the word `A.x`, so its verdict matches the Probe phase only once
+   the audit resolves the real arguments.
 3. Load the settled list from the graph's audit log, not from memory. The
    log is `.claude/fluxpoint/audits/<graph path from the repo root, each
    / replaced by __>.json`, so `WORK.md.json` for the root `WORK.md`. It is
@@ -153,9 +155,17 @@ is for a graph run.
      other inventoried command.
    An undeclared command outside the grammar, a declaration that matches
    nothing in the inventory, a refused form and an unresolved binding each
-   leave the probe incomplete. `--check` refuses the same, except bindings
-   known only at launch. Wording a prompt so the inventory misses a command
-   is not a remedy: the node still runs it.
+   leave the probe incomplete. `--check` refuses the same, except where a
+   binding known only at launch changes the command. Wording a prompt so the
+   inventory misses a command is not a remedy: the node still runs it.
+
+   The inventory takes shell fences, command lines, and inline spans whose
+   first word names, by basename, a program the grammar knows (so
+   `"C:/Py/python.exe" x.py` counts) or that directly follow run, execute,
+   probe or invoke (so "Before approving, execute `aiken check`." counts).
+   Punctuation left beside an inline command is not a command. Git must be
+   spelled `git`: a path, quotes or `.exe` is refused wherever it appears,
+   because the grammar judges Git by its subcommand.
 
    A declaration remains the author's reviewed assertion. A `read-only`
    program must really be read-only, and a `shape` program must act on
