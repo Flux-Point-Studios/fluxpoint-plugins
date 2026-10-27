@@ -190,6 +190,21 @@ passed back as a settled list so a round does not relitigate it. `--quick`
 keeps the single auditor for checks between repairs; it never makes a
 graph READY.
 
+Before the lenses, every `isolation: true`, `isolation: 'worktree'` or
+`mutates: true` node gets an isolated probe that tries each command its
+prompt prescribes, and SOUND needs every probe complete. The probe's own
+grammar covers Git reads and a few read-only shell words. A node that runs
+a script declares how each such command is probed, in a `probe` object
+beside its prompt: `read-only` runs the exact command, `shape` runs a
+reviewed `--help` form placed before any `--` or child program, and a
+`template` names the concrete commands behind an illustrative
+`git -C <dir> ...`. `compile-graph.py --check` refuses an undeclared script
+command or a declaration the probe would refuse, so the gap shows before a
+round is bought. A shape-only receipt proves the isolation hook admits the
+command's executable, cwd and argv prefix, and the graph's attested gates
+prove what the command does. `commands/graph-audit.md` holds the rules and
+an example declaration.
+
 ## Work nobody on the graph can do
 
 The engine used to have two answers for a node it could not complete: halt

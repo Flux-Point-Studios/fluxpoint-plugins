@@ -170,6 +170,10 @@ probe("node", "haltReason", NODE_BASE,
               haltReason="a specific and quotable reason"))
 probe("node", "onRed", NODE_BASE, setnode(onRed="drop+log"))
 probe("node", "isolation", NODE_BASE, setnode(isolation="worktree"))
+# probe is read by graph-audit.js and by --check, which runs that script's
+# probe grammar; the compiler itself refuses it on a node the audit never
+# probes, which is the effect measured here.
+probe("node", "probe", NODE_BASE, setnode(probe={"commands": []}))
 probe("node", "repeat", NODE_BASE,
       setnode(verify="skeptic:1", verifyOver="findings",
               repeat={"untilDryRounds": 2, "maxRounds": 6, "dedupeBy": ["file"]}))
@@ -403,6 +407,7 @@ probed = {
         "verifyOver", "expectItems", "haltWhen", "haltReason", "onRed",
         "isolation", "repeat", "irreversible", "actor", "release", "wake",
         "decides", "honors", "memory", "reduce", "cites", "lane", "fresh", "repository", "branch", "pushes", "replay",
+        "probe",
     },
     "repeat": {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter"},
     "reduce": {"from", "over", "dedupeBy", "sortBy", "order", "topK"},

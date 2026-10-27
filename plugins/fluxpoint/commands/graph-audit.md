@@ -16,7 +16,9 @@ is for a graph run.
    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" compile-graph.py <graph> --check`.
    If it fails, report those findings and stop: there is no point judging
    semantics of a graph that cannot compile. Keep its summary line, with
-   the estimate and cache TTL, for step 4.
+   the estimate and cache TTL, for step 4. For every node the audit probes,
+   `--check` also runs the probe grammar from `workflows/graph-audit.js`
+   under Node.js and refuses what the Probe phase would refuse (step 4).
 3. Load the settled list from the graph's audit log, not from memory. The
    log is `.claude/fluxpoint/audits/<graph path from the repo root, each
    / replaced by __>.json`, so `WORK.md.json` for the root `WORK.md`. It is
@@ -72,7 +74,8 @@ is for a graph run.
    frozen snapshot and does not get this runtime-worktree probe. Without
    `ir`, a mechanical reader discovers all nodes and `argDefaults` first;
    an unavailable plan blocks SOUND. `bindings` overrides `argDefaults`
-   when resolving `{{A.x}}`; unresolved inputs leave the probe incomplete.
+   when resolving `{{A.x}}` and nested paths such as `{{A._launch.root}}`;
+   a command left holding any `{{...}}` leaves the probe incomplete.
 
    Each probe reads the actual node prompt and tries its prescribed commands
    only in safe, non-mutating read forms. Preserve the `git -C` target,
@@ -90,10 +93,57 @@ is for a graph run.
    `git status` cannot discharge a prescribed compound command. It checks
    operators, substitutions, `cd` operands and global Git targets itself.
    Existing read commands retain their arguments; only mutating Git
-   subcommands can be replaced with approved reads. The supported grammar
-   excludes redirections, backticks, background processes and arbitrary
-   programs. These require an incomplete probe, not a passing receipt.
+   subcommands can be replaced with approved reads. The grammar admits Git
+   reads and `cd`, `pwd`, `test`, `[`, `echo`, `printf`, `cat`, `grep`,
+   `head`, `tail`, `wc`, `true` and `false`. It excludes redirections,
+   backticks, background processes and every other program.
    An agent that finds a command missing from the inventory reports a blocker.
+
+   A node that runs a script says how its probe covers each such command,
+   in a node-level `probe` object reviewed with the IR:
+   ```json
+   "probe": {
+     "commands": [
+       {"command": "python scripts/report.py --json", "kind": "read-only"},
+       {"command": "bash \"{{A._launch.root}}/scripts/py.sh\" longrun.py await --timeout 240 <token>",
+        "kind": "shape", "form": "bash \"{{A._launch.root}}/scripts/py.sh\" longrun.py await --help",
+        "data": {"token": "token"}}
+     ],
+     "templates": [
+       {"template": "git -C <dir> <subcommand> ...",
+        "instances": ["git -C {{A._launch.root}} status --porcelain"]}
+     ]
+   }
+   ```
+   - `read-only` runs the exact command. Any Git part must be a read.
+   - `shape` runs `form` instead: the command's words up to some point,
+     then `--help` or `-h`. Every other part repeats exactly, with the same
+     operators, `cd` and `git -C` targets and `$(...)` substitutions. The
+     help flag may not follow a `--` separator or a word naming another
+     program, because a launcher such as `longrun.py start --log L -- <argv>`
+     forwards it to the child after starting work. Use the shortest prefix
+     that reaches the program's own argument parser.
+   - `<name>` in a shape command is data an earlier output fills in.
+     `data` gives it a type, `token`, `sha` or `integer`, and the probe runs
+     the form with that type's fixed dummy, never a value of its own. A
+     read-only command cannot carry one.
+   - A `template` is an illustrative command from the prompt, with `<name>`
+     or `...` placeholders. Its `instances` are the concrete commands the
+     node runs; each must match the template and is receipted like any
+     other inventoried command.
+   An undeclared command outside the grammar, a declaration that matches
+   nothing in the inventory, a refused form and an unresolved binding each
+   leave the probe incomplete. `--check` refuses the same, except bindings
+   known only at launch. Wording a prompt so the inventory misses a command
+   is not a remedy: the node still runs it.
+
+   Each receipt in the result carries its evidence `kind`: `read-only` when
+   the exact command ran, `shape-only` when a safe form ran in its place,
+   including a Git read standing in for a mutating subcommand. The result's
+   `probeEvidence` lists both, and the verdict line names every accepted
+   shape-only receipt. Neither is semantic proof: a shape-only receipt shows
+   that the isolation hook admits the executable, cwd and argv prefix, and
+   what the command does stays with the graph's attested gates.
 
    Probe refusals join the finding reduction and get refuters with
    `isolation: 'worktree'` too. A refuter unable to reach the same runtime

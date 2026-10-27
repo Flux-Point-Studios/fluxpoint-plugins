@@ -1548,5 +1548,124 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p,schema:
 council_case()
 
 
+def probe_declarations_case():
+    """--check validates probe declarations with the audit's own grammar (#192).
+
+    A builder that runs a script left its isolated probe incomplete in every
+    audit round, so the graph could never read SOUND. Script commands now
+    need a reviewed `probe` declaration, and --check refuses what the audit
+    would refuse before a round is bought.
+    """
+    global passed, failed
+    import subprocess
+    import tempfile
+    runner = 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log -- python scripts/build.py --all'
+    awaited = 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py await --timeout 240 <token>'
+    tool = 'python scripts/tool.py report --json'
+
+    def node(nid, prompt, probe=None, **extra):
+        n = {"id": nid, "prompt": prompt, "contract": "DesignV1", "isolation": "worktree", **extra}
+        if probe is not None:
+            n["probe"] = probe
+        return n
+
+    def shape(command, form, **extra):
+        return {"commands": [{"command": command, "kind": "shape", "form": form, **extra}]}
+
+    remainder = 'longrun.py start --log build.log python child.py'
+    clean = [
+        node("read-only", "Run " + tool, {"commands": [{"command": tool, "kind": "read-only"}]}),
+        node("remainder", "Run " + runner,
+             shape(runner, 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log --help')),
+        node("subcommand", "Run " + runner, shape(runner, 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --help')),
+        node("data", "Then `" + awaited + "`", shape(awaited, awaited + " --help", data={"token": "token"})),
+        node("template", "Use `cd <dir> && python ...` there.",
+             {"templates": [{"template": "cd <dir> && python ...", "instances": ["cd {{A._launch.root}} && " + tool]}],
+              "commands": [{"command": "cd {{A._launch.root}} && " + tool, "kind": "read-only"}]}),
+        node("grammar", "Run `git -C {{A._launch.root}} fetch origin && git status | cat`"),
+        node("later-binding", "Run `cd {{item.key}} && python tool.py`", foreach="dims"),
+        node("unbound", "Run `python {{A.tool}} --check`",
+             {"commands": [{"command": "python {{A.tool}} --check", "kind": "read-only"}]}),
+    ]
+    refused = {
+        "undeclared": (node("undeclared", "Run " + tool), "no probe declaration for " + tool),
+        "unbound-undeclared": (node("unbound-undeclared", "Run `python {{A.tool}} --check`"),
+                               "no probe declaration for python A.tool --check"),
+        "stray": (node("stray", "Run " + tool, {"commands": [{"command": tool, "kind": "read-only"},
+                                                             {"command": "python other.py", "kind": "read-only"}]}),
+                  "matches no inventoried command"),
+        "stray-template": (node("stray-template", "Run " + tool, {
+            "commands": [{"command": tool, "kind": "read-only"}],
+            "templates": [{"template": "git -C <dir> status", "instances": ["git -C /x status"]}]}),
+            "matches no inventoried command"),
+        "kind": (node("kind", "Run " + tool, {"commands": [{"command": tool, "kind": "trusted"}]}), "kind must be"),
+        "key": (node("key", "Run " + tool, {"commands": [{"command": tool, "kind": "read-only"}], "allow": ["python"]}),
+                "unknown field 'allow'"),
+        "after-separator": (node("after-separator", "Run " + runner, shape(
+            runner, 'bash "{{A._launch.root}}/scripts/py.sh" longrun.py start --log build.log -- --help')), "-- separator"),
+        "blind-append": (node("blind-append", "Run " + runner, shape(runner, runner + " --help")), "-- separator"),
+        "names-child": (node("names-child", "Run `" + remainder + "`", shape(
+            remainder, "longrun.py start --log build.log python --help")), "names another program"),
+        "not-prefix": (node("not-prefix", "Run " + tool, shape(tool, "python scripts/tool.py status --help")), "not a prefix"),
+        "no-help": (node("no-help", "Run " + tool, shape(tool, tool)), "--help or -h"),
+        "git-help": (node("git-help", "Run `git push origin main`", shape("git push origin main", "git push --help")),
+                     "--help or -h"),
+        "read-only-git": (node("read-only-git", "Run `git push origin main`",
+                               {"commands": [{"command": "git push origin main", "kind": "read-only"}]}), "not a git read"),
+        "read-only-data": (node("read-only-data", "Then `" + awaited + "`",
+                                {"commands": [{"command": awaited, "kind": "read-only"}]}), "placeholder"),
+        "untyped-data": (node("untyped-data", "Then `" + awaited + "`", shape(awaited, awaited + " --help")),
+                         "<token> has no declared type"),
+        "data-type": (node("data-type", "Then `" + awaited + "`", shape(awaited, awaited + " --help", data={"token": "path"})),
+                      "data type"),
+        "instance": (node("instance", "Use `cd <dir> && python ...` there.",
+                          {"templates": [{"template": "cd <dir> && python ...", "instances": ["git status"]}]}),
+                     "does not instantiate"),
+        "no-placeholder": (node("no-placeholder", "Run " + tool,
+                                {"templates": [{"template": tool, "instances": [tool]}]}), "no <placeholder>"),
+    }
+
+    def check(nodes, env=None):
+        ir = {"version": 1, "campaign": "probe declarations", "budget": {"maxNodes": 64},
+              "lists": {"dims": [{"key": "a"}]}, "nodes": nodes}
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "WORK.md"), "w", encoding="utf-8") as fh:
+                fh.write("STATUS: DESIGN\n\n```json graph-ir\n" + json.dumps(ir) + "\n```\n")
+            return subprocess.run([sys.executable, os.path.join(PLUGIN, "scripts", "compile-graph.py"), "WORK.md", "--check"],
+                                  cwd=d, capture_output=True, text=True, encoding="utf-8", env=env)
+
+    good = check(clean)
+    mixed = check(clean + [n for n, _ in refused.values()])
+    lines = mixed.stderr.splitlines()
+    checks = [("--check accepts declared script, shape, data, template, grammar and later-bound commands",
+               good.returncode == 0, good.stderr[-300:])]
+    for nid, (_, needle) in refused.items():
+        mine = [x for x in lines if f"node '{nid}'" in x]
+        checks.append((f"--check refuses {nid}", any(needle in x for x in mine), mine or lines[-3:]))
+    for n in clean:
+        mine = [x for x in lines if f"node '{n['id']}'" in x]
+        checks.append((f"--check raises nothing on {n['id']} beside refused nodes", mixed.returncode == 1 and not mine, mine))
+    nodeless = check(clean, env=dict(os.environ, PATH=tempfile.gettempdir()))
+    checks.append(("--check without Node.js refuses rather than skipping the probe grammar",
+                   nodeless.returncode == 1 and "Node.js" in nodeless.stderr, nodeless.stderr[-200:]))
+    plain = copy.deepcopy(BASE)
+    plain["nodes"][0]["probe"] = {"commands": []}
+    measured = copy.deepcopy(BASE)
+    measured["nodes"][0].update(isolation="measure", probe={"commands": []})
+    probed = copy.deepcopy(BASE)
+    probed["nodes"][0].update(isolation="worktree", probe={"commands": []})
+    for name, ir, want in [("probe on a node the audit never probes is refused", plain, True),
+                           ("probe on a measure node is refused", measured, True),
+                           ("probe on an isolated node is a known field", probed, False)]:
+        got = [x for x in cg.validate(ir, CONTRACTS) if "probe" in x]
+        checks.append((name, bool(got) == want and all("audit does not probe" in x for x in got), got))
+    for name, ok, got in checks:
+        print(f"{'PASS' if ok else 'FAIL'}  probe: {name:<70} -> {'yes' if ok else str(got)[:160]}")
+        passed, failed = passed + ok, failed + (not ok)
+
+
+probe_declarations_case()
+
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

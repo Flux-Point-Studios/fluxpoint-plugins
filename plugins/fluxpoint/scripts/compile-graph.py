@@ -49,7 +49,7 @@ NODE_FIELDS = {
     "foreach", "after", "mutates", "independent", "verifies", "verify",
     "verifyOver", "expectItems", "haltWhen", "haltReason", "onRed", "isolation",
     "repeat", "irreversible", "actor", "release", "wake", "decides", "honors",
-    "memory", "reduce", "lane", "pushes", "repository", "branch", "replay", "fresh", "cites",
+    "memory", "reduce", "lane", "pushes", "repository", "branch", "replay", "fresh", "cites", "probe",
 }
 # The two failure policies. Anything else used to fall back to a default
 # silently — a misspelled 'Halt' weakened the declared policy in the
@@ -148,6 +148,11 @@ SPEC_PREAMBLE = ("Implement and verify this locked requirement packet. Defaulted
 
 class GraphError(Exception):
     pass
+
+
+def audit_probed(n):
+    """Whether graph-audit.js gives this node an isolated command probe."""
+    return n.get("isolation") != "measure" and (n.get("isolation") in (True, "worktree") or n.get("mutates") is True)
 
 
 def _unknown(where, obj, allowed):
@@ -983,6 +988,9 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
         nid = n.get("id", f"<node {i}>")
         where = f"node '{nid}'"
         f += _unknown(where, n, NODE_FIELDS)
+        if "probe" in n and not audit_probed(n):
+            f.append(f"{where}: probe declarations need a node the audit probes (isolation: true or 'worktree', "
+                     f"or mutates: true); the audit does not probe this one, so the declaration would be inert")
         if 'cites' in n:
             cites = n['cites']
             if (not isinstance(cites, list) or not cites or
@@ -4589,6 +4597,41 @@ def emit_repeat(n, ir, prompt, phase, panel, over):
 
 
 # ---------------------------------------------------------------------- main
+PROBE_GRAMMAR = re.compile(r"^// -+ probe grammar --$.*?(?=^// -+ inputs --$)", re.S | re.M)
+
+
+def probe_findings(ir, embedded_args=None):
+    """--check: run graph-audit.js's own probe grammar over every probed node.
+
+    The audit is the only implementation, so --check cannot pass a probe
+    declaration the Probe phase would refuse, nor a script command no receipt
+    can cover. An {{A.x}} with no value here reads as the word A.x; the audit
+    re-checks with the real binding. A command still holding a later-bound
+    token ({{item...}}, {{prev}}) is left to the audit, which refuses it.
+    """
+    import subprocess
+    nodes = [n for n in ir.get("nodes") or [] if audit_probed(n)]
+    if not nodes:
+        return []
+    script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "workflows", "graph-audit.js")
+    with open(script, encoding="utf-8") as fh:
+        grammar = PROBE_GRAMMAR.search(fh.read())
+    if not grammar:
+        return [f"probe declarations: no probe grammar section in {script}"]
+    bindings = dict(ir.get("argDefaults") or {}, **(embedded_args or {}))
+    program = (grammar.group(0) + "\nprocess.stdout.write(JSON.stringify(" + json.dumps(nodes)
+               + ".map(n => [n.id, probeCoverage(n, " + json.dumps(bindings) + ", true).blockers])))\n")
+    try:
+        run = subprocess.run(["node", "-"], input=program, capture_output=True, text=True,
+                             encoding="utf-8", timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [f"probe declarations need Node.js: --check runs the probe grammar of {script} "
+                f"over every isolated or mutating node ({exc})"]
+    if run.returncode:
+        return [f"probe declarations: the probe grammar failed under node: {run.stderr.strip()[-400:]}"]
+    return [f"node '{nid}': probe: {blocker}" for nid, blockers in json.loads(run.stdout) for blocker in blockers]
+
+
 def prose_pin_findings(text, ir):
     """Compare only an argDefault explicitly restated beside its own name."""
     # Preserve line positions while ignoring examples and historical Evidence.
@@ -4817,6 +4860,8 @@ def main():
     findings = validate(ir, contracts, gates, agents, embedded_args=embedded_args, repository_root=args.gates_root)
     if not findings:
         findings.extend(prose_pin_findings(text, ir))
+    if not findings and args.check:
+        findings.extend(probe_findings(ir, embedded_args))
     specification = None
     spec_path = header.get("SPEC")
     if not findings and (spec_path or spec_mod.required(args.gates_root)

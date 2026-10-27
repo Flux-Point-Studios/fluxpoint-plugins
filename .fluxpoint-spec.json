@@ -8,7 +8,8 @@
     "Requirement checks in newly initialized loops",
     "Formal tool availability",
     "Statement exception validation",
-    "Issues #166–#172: graph lanes, ancestor-bound replay, explicit rejudgment, carried resume inputs, crash-pair and forge evidence, packet closure preflight, and diff-scoped repair verification"
+    "Issues #166–#172: graph lanes, ancestor-bound replay, explicit rejudgment, carried resume inputs, crash-pair and forge evidence, packet closure preflight, and diff-scoped repair verification",
+    "Issue #192: typed probe receipts so a graph whose isolated nodes run scripts can reach a SOUND audit"
   ],
   "outOfScope": [
     "Installing provers into consumer repositories",
@@ -191,6 +192,69 @@
           ]
         }
       ]
+    },
+    {
+      "id": "probe-receipts",
+      "status": "defaulted",
+      "dependsOn": [
+        "spec-boundary"
+      ],
+      "record": {
+        "question": "How should graph-audit's isolated probe receipt a script command without trusting an interpreter wholesale?",
+        "options": [
+          {
+            "option": "typed-ir-declarations",
+            "argued_by": "model",
+            "strongest_objection": "Authors must declare each script command, and --check gains a Node.js dependency to run the audit's own grammar"
+          },
+          {
+            "option": "interpreter-allowlist",
+            "argued_by": "model",
+            "strongest_objection": "Admitting python or bash as read words lets any script, including a mutating one, read as probed"
+          },
+          {
+            "option": "append-help-to-every-command",
+            "argued_by": "model",
+            "strongest_objection": "A REMAINDER launcher forwards a --help placed after -- to its child after starting work"
+          }
+        ],
+        "chosen": "typed-ir-declarations",
+        "rationale": "A per-node probe object reviewed with the IR names how each script command is probed: read-only runs the exact command, shape runs a --help prefix that must stop before any -- separator or child program, templates are discharged only by receipted concrete instances, and data placeholders take a typed fixed dummy inside a shape only. compile-graph.py --check runs the audit's own grammar section, so the static check and the Probe phase cannot disagree. Graphs whose probed nodes run only grammar commands are unaffected.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Read issue #192 against upstream 2438d236 (fluxpoint 1.46.0): readOnlyWords admits no interpreter, so a probe over a script command is always incomplete and SOUND is unreachable",
+          "plugins/fluxpoint/scripts/longrun.py declares start's command with argparse.REMAINDER; 'longrun.py start --log L --help' printed usage, exited 0 and created no file",
+          "The audit resolved only flat {{A.key}} bindings; nested {{A._launch.root}} stayed literal and an unresolved token inside quotes passed the grammar"
+        ]
+      },
+      "costs": [
+        {
+          "option": "typed-ir-declarations",
+          "cost": "One reviewed probe entry per script command, and one node process per --check of a graph with probed nodes",
+          "basis": "measured",
+          "evidence": [
+            "compile-test.py runs --check over 26 probed nodes in one node process; the shipped templates need no declarations"
+          ]
+        },
+        {
+          "option": "interpreter-allowlist",
+          "cost": "No author work, but a mutating script reads as a probed read and the probe's receipt stops meaning anything",
+          "basis": "estimate",
+          "evidence": [
+            "readOnlyWords is the only barrier between a receipt and an arbitrary program"
+          ]
+        },
+        {
+          "option": "append-help-to-every-command",
+          "cost": "No author work, but a forwarded --help starts the child's work during an audit",
+          "basis": "measured",
+          "evidence": [
+            "longrun.py start forwards every argument after -- to the child it launches"
+          ]
+        }
+      ]
     }
   ],
   "requirements": [
@@ -358,6 +422,19 @@
         "repair-diff-tests"
       ],
       "counterexample": "A narrow original-attack PASS or forged diff receipt marks unchecked repair commits as checked"
+    },
+    {
+      "id": "typed-probe-receipts",
+      "statement": "A script command in a probed node is receipted only through a reviewed probe declaration: read-only runs the exact command, shape runs a --help prefix placed before any -- separator or child program, templates complete only through receipted concrete instances, data placeholders take a typed dummy inside a shape only, nested bindings resolve before matching, every other case leaves the probe incomplete or is refused by --check, and the verdict names each shape-only receipt",
+      "decisions": [
+        "probe-receipts"
+      ],
+      "checks": [
+        "graph-audit-tests",
+        "graph-compiler-tests",
+        "emission-tests"
+      ],
+      "counterexample": "An undeclared python command, a --help placed after -- or an unreceipted template instance completes the probe, or a shape-only receipt goes unnamed in a SOUND verdict"
     }
   ],
   "checks": [
@@ -543,6 +620,32 @@
         "GitHub transport uses fixture JSON; real git and supervised local commands execute"
       ],
       "timeoutSeconds": 180
+    },
+    {
+      "id": "graph-audit-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/audit-workflow-test.py"
+      ],
+      "scope": "Execute the graph-audit workflow's probe receipts, declarations, templates, data placeholders, bindings and verdict text under stubbed agents",
+      "assumptions": [
+        "Stubbed agents return the receipts under test; the runtime isolation hook itself is not exercised"
+      ],
+      "timeoutSeconds": 300
+    },
+    {
+      "id": "emission-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/emission-test.py"
+      ],
+      "scope": "Every accepted IR field, including probe, changes validation, plan or emission",
+      "assumptions": [
+        "Fixture execution validates enforcement; it does not establish arbitrary agent or external runtime correctness"
+      ],
+      "timeoutSeconds": 180
     }
   ],
   "challenges": [
@@ -561,6 +664,10 @@
     {
       "claim": "Installing a plugin might be mistaken for upgrading every consuming harness",
       "resolution": "New initialization requires integration; existing copied harnesses need an explicit update"
+    },
+    {
+      "claim": "A reviewed shape form could still start work in a program that ignores --help",
+      "resolution": "The grammar enforces the forwarding hazards it can see (-- separators, child programs, changed targets); the declaration is the reviewed claim that the program parses --help itself, and shape-only receipts are named in every verdict as weaker than read-only evidence"
     }
   ]
 }
