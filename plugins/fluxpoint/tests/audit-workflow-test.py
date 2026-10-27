@@ -831,6 +831,33 @@ for name, prompt, decl, rows in [
     report('#192 git identity: git spelled as a path is refused in ' + name, blocked(res, 'write it git'),
            f"{probe_report(res).get('blockers')}"[:90])
 
+# A backslash in a program word is an escape to a shell and a separator to
+# Windows, so neither reading can name the program safely.
+for name, command, decl in [
+        ('a double-quoted Windows git, read-only', r'"C:\Tools\git.exe" reset --hard', "read-only"),
+        ('a single-quoted Windows git, read-only', r"'C:\Program Files\Git\cmd\git.exe' reset --hard", "read-only"),
+        ('an unquoted Windows git, read-only', r'C:\Tools\git.exe reset --hard', "read-only"),
+        ('a Windows rm.exe, read-only', r'C:\Tools\rm.exe -rf build', "read-only"),
+        ('a Windows python with -c, as a shape', r'"C:\Py\python.exe" -c "import os"', "shape"),
+        ('a Windows docker, as a shape', r'C:\Tools\docker.exe run --rm img', "shape")]:
+    entry = {"command": command, "kind": decl}
+    if decl == "shape":
+        entry["form"] = command + ' --help'
+    res = declared_probe('Run ' + command, {"commands": [entry]},
+                         [receipt(command, entry.get("form", command))])
+    report('#192 backslash program: ' + name + ' is refused', blocked(res, 'forward slashes') and not declared_forms(res),
+           f"{(res.get('r') or {}).get('verdict')} {probe_report(res).get('blockers')}"[:90])
+escaped = declared_probe(r'Run r\m -rf build', {"commands": [{"command": r'r\m -rf build', "kind": "read-only"}]},
+                         [receipt(r'r\m -rf build')])
+report('#192 backslash program: an escaped r\\m stays refused as read-only',
+       incomplete(escaped) and not declared_forms(escaped), f"{probe_report(escaped).get('blockers')}"[:90])
+FORWARD = '"C:/Program Files/Python/python.exe" scripts/a.py'
+forward = declared_probe('Run ' + FORWARD + ' --check',
+                         {"commands": [{"command": FORWARD + ' --check', "kind": "shape", "form": FORWARD + ' --help'}]},
+                         [receipt(FORWARD + ' --check', FORWARD + ' --help')])
+report('#192 backslash program: a forward-slash Windows python shape is accepted', sound(forward),
+       f"{probe_report(forward).get('blockers')}"[:90])
+
 # The inventory must not lose an explicit instruction to run something, nor
 # invent a command out of the punctuation left beside an inline one.
 def inventoried(prompt, reason='The prompt describes work and prescribes no command.'):
@@ -866,6 +893,9 @@ report('#192 inventory: a builder prompt inventories exactly the four commands i
                    'bash "/p/scripts/py.sh" longrun.py start --log L -- python scripts/b.py g2 --suites-sha {{prev.sha}}',
                    'bash "/p/scripts/py.sh" longrun.py await --timeout 240 <token>',
                    'bash "/p/scripts/py.sh" longrun.py cancel <token>'], f"{builder}"[:90])
+windows_inline = probe_report(inventoried(r'Then `"C:\Tools\git.exe" status` reports the tree.')).get('prescribed')
+report('#192 backslash program: an inline Windows git with no verb is inventoried',
+       windows_inline == [r'"C:\Tools\git.exe" status'], f"{windows_inline}"[:90])
 
 discovered = declared_probe('Run ' + TOOL, READ_ONLY, [receipt(TOOL)], plan=True)
 report('#192 a discovered probe plan carries the node declarations',

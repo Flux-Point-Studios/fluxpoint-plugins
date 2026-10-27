@@ -269,10 +269,13 @@ const COMMAND_WORD = /^(?:git|cd|pwd|test|\[|echo|printf|cat|grep|head|tail|wc|t
 // program the grammar knows, or when an execution verb directly precedes it.
 const EXECUTE_BEFORE = /\b(?:run|execute|probe|invoke)(?:\s+(?:exactly|this command))?\s*:?\s*$/i
 const INLINE_COMMAND = '\u0000'
+// A backslash is an escape to a shell and a separator to Windows, so a
+// program counts as known under either reading and the inventory fails closed.
 function knownProgram(word) {
-  const name = programName(word)
-  return name === 'git' || READ_WORDS.includes(name) || PYTHON.test(name) || BARE_INTERPRETERS.includes(name)
-    || LAUNCHERS.includes(name) || WRITERS.includes(name) || COMMAND_WORD.test(name)
+  const unquoted = word.replace(/["']/g, '')
+  return [unquoted, unquoted.replace(/\\/g, '/')].map(programName).some(name =>
+    name === 'git' || READ_WORDS.includes(name) || PYTHON.test(name) || BARE_INTERPRETERS.includes(name)
+    || LAUNCHERS.includes(name) || WRITERS.includes(name) || COMMAND_WORD.test(name))
 }
 function prescribedCommands(prompt) {
   const commands = []
@@ -393,12 +396,24 @@ function interpreterRefusal(words) {
   }
   return ''
 }
-// Git is judged by its subcommand, so only the plain word git counts as Git:
-// a path, quotes or .exe would carry any subcommand past readOnlyGit.
-const oddGit = word => word !== 'git' && programName(word) === 'git'
-const gitSpelling = word => `spells git as ${word}; write it git, which the grammar checks by its subcommand`
+// How a program word may be spelled. A backslash has no single reading: a
+// shell takes it as an escape (r\m runs rm), Windows as a separator
+// (C:\Tools\git.exe is git). Git is judged by its subcommand, so only the
+// plain word git counts as Git; a path, quotes or .exe would carry any
+// subcommand past readOnlyGit.
+function spellingRefusal(word) {
+  if (word.includes('\\')) {
+    return `names its program as ${word}, and a shell reads a backslash as an escape while Windows reads it as a ` +
+      'separator; write the path with forward slashes'
+  }
+  if (word !== 'git' && programName(word) === 'git') {
+    return `spells git as ${word}; write it git, which the grammar checks by its subcommand`
+  }
+  return ''
+}
 function programRefusal(words, readOnly) {
-  if (oddGit(words[0])) return gitSpelling(words[0])
+  const spelling = spellingRefusal(words[0])
+  if (spelling) return spelling
   if (words[0].includes('$')) return 'takes its program from a shell expansion, so the grammar cannot tell what runs; resolve it through {{A.x}}'
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(unquote(words[0]))) return 'starts with a variable assignment, which hides the program that runs'
   const name = programName(words[0])
@@ -534,8 +549,8 @@ function probeCoverage(node, bindings, standIn) {
   const unresolved = required.filter(c => UNRESOLVED.test(c) && !declared.has(c))
   for (const c of required) {
     if (unresolved.includes(c) || named.has(c) || grammarCommand(c)) continue
-    const odd = (shellParts(c) || { parts: [] }).parts.map(words => words[0]).find(oddGit)
-    blockers.push(odd ? `${c}: ${gitSpelling(odd)}`
+    const spelling = (shellParts(c) || { parts: [] }).parts.map(words => spellingRefusal(words[0])).find(Boolean)
+    blockers.push(spelling ? `${c}: ${spelling}`
       : `no probe declaration for ${c}: it is outside the read-only grammar, so declare it in the node's probe.commands or probe.templates`)
   }
   return { prescribed, required, declared, blockers, unresolved }

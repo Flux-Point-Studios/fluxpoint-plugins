@@ -228,7 +228,8 @@
           "plugins/fluxpoint/scripts/longrun.py declares start's command with argparse.REMAINDER; 'longrun.py start --log L --help' printed usage, exited 0 and created no file",
           "The audit resolved only flat {{A.key}} bindings; nested {{A._launch.root}} stayed literal and an unresolved token inside quotes passed the grammar",
           "Review of a8f0d0f: the grammar section accepted 'python3 -c ... --help', 'node -e ... --help', 'bash -c ... --help', 'sh -c ... --help', 'python -Ic ... --help' and 'npx some-package --help' as shapes and 'rm -rf build' and 'curl -X POST ...' as read-only; all eight are refused after the fix",
-          "Review of aad99bab: read-only '/usr/bin/git reset --hard', \"'git' reset --hard\", 'git.exe push origin main' and '/usr/bin/git -C /scratch/repo reset --hard' were accepted, 'Before approving, execute `aiken check`.' and a quoted Windows python inside backticks left the inventory empty, and 'Run `git status`.' invented a '.' command"
+          "Review of aad99bab: read-only '/usr/bin/git reset --hard', \"'git' reset --hard\", 'git.exe push origin main' and '/usr/bin/git -C /scratch/repo reset --hard' were accepted, 'Before approving, execute `aiken check`.' and a quoted Windows python inside backticks left the inventory empty, and 'Run `git status`.' invented a '.' command",
+          "Review of 0ede089a: read-only '\"C:\\Tools\\git.exe\" reset --hard' passed because stripping backslashes named the program c:toolsgit; splitting on them instead would let 'r\\m -rf build' read as m"
         ]
       },
       "costs": [
@@ -427,7 +428,7 @@
     },
     {
       "id": "typed-probe-receipts",
-      "statement": "A script command in a probed node is receipted only through a reviewed probe declaration: read-only runs the exact command and refuses writers, network tools, launchers, interpreter options, assignments and expanded programs; shape runs a --help prefix, never -h, placed before any -- separator, child program or writer operand, refused on a launcher or after an interpreter option that can carry code; templates complete only through receipted concrete instances; <placeholder> and later-bound {{...}} data take a typed dummy inside a shape only; nested bindings resolve before matching; every other case leaves the probe incomplete or is refused by --check; and the verdict names each shape-only receipt; Git counts only when spelled git; and the inventory keeps every inline command whose first word names a known program or that directly follows run, execute, probe or invoke, without inventing commands from leftover punctuation",
+      "statement": "A script command in a probed node is receipted only through a reviewed probe declaration: read-only runs the exact command and refuses writers, network tools, launchers, interpreter options, assignments and expanded programs; shape runs a --help prefix, never -h, placed before any -- separator, child program or writer operand, refused on a launcher or after an interpreter option that can carry code; templates complete only through receipted concrete instances; <placeholder> and later-bound {{...}} data take a typed dummy inside a shape only; nested bindings resolve before matching; every other case leaves the probe incomplete or is refused by --check; and the verdict names each shape-only receipt; Git counts only when spelled git, and a declared program word with a backslash is refused; and the inventory keeps every inline command whose first word names a known program or that directly follows run, execute, probe or invoke, without inventing commands from leftover punctuation",
       "decisions": [
         "probe-receipts"
       ],

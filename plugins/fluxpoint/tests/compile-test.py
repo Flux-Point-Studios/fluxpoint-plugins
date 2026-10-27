@@ -1604,6 +1604,9 @@ def probe_declarations_case():
             shape("C:/Python311/python.exe scripts/tool.py report", "C:/Python311/python.exe scripts/tool.py --help")),
         run("rule-ok-rm-options", "rm -rf build", shape("rm -rf build", "rm -rf --help")),
         run("git-id-plain-read", "git status --porcelain", read_only("git status --porcelain")),
+        run("win-forward-python", '"C:/Program Files/Python/python.exe" scripts/a.py --check',
+            shape('"C:/Program Files/Python/python.exe" scripts/a.py --check',
+                  '"C:/Program Files/Python/python.exe" scripts/a.py --help')),
         node("rule-f-typed-item", "Run `" + later + "`",
              shape(later, "python scripts/check.py --key {{item.key}} --help", data={"item.key": "token"}), foreach="dims"),
     ]
@@ -1707,6 +1710,22 @@ def probe_declarations_case():
                              shape("/usr/bin/git push origin main", "/usr/bin/git push --help")), "write it git"),
         "git-id-undeclared": (run("git-id-undeclared", "/usr/bin/git status", None), "write it git"),
         "git-id-plain-reset": (run("git-id-plain-reset", "git reset --hard", read_only("git reset --hard")), "not a git read"),
+        # A backslash in a program word is an escape to a shell and a separator
+        # to Windows, so a declaration may not name its program that way.
+        "win-git-double": (run("win-git-double", r'"C:\Tools\git.exe" reset --hard',
+                               read_only(r'"C:\Tools\git.exe" reset --hard')), "forward slashes"),
+        "win-git-single": (run("win-git-single", r"'C:\Program Files\Git\cmd\git.exe' reset --hard",
+                               read_only(r"'C:\Program Files\Git\cmd\git.exe' reset --hard")), "forward slashes"),
+        "win-git-bare": (run("win-git-bare", r"C:\Tools\git.exe reset --hard", read_only(r"C:\Tools\git.exe reset --hard")),
+                         "forward slashes"),
+        "win-rm": (run("win-rm", r"C:\Tools\rm.exe -rf build", read_only(r"C:\Tools\rm.exe -rf build")), "forward slashes"),
+        "win-python-c": (run("win-python-c", r'"C:\Py\python.exe" -c "import os"',
+                             help_form(r'"C:\Py\python.exe" -c "import os"')), "forward slashes"),
+        "win-docker": (run("win-docker", r"C:\Tools\docker.exe run --rm img", help_form(r"C:\Tools\docker.exe run --rm img")),
+                       "forward slashes"),
+        "win-git-inline": (node("win-git-inline", r'Then `"C:\Tools\git.exe" status` reports the tree.'), "forward slashes"),
+        "escaped-rm": (run("escaped-rm", r"r\m -rf build", read_only(r"r\m -rf build")),
+                       r"probe.commands[0]: r\m -rf build: "),
         # F: a later-bound token is data, typed only inside a shape form.
         "rule-f-read-only": (node("rule-f-read-only", "Run `" + later + "`", read_only(later), foreach="dims"),
                              "cannot carry {{item.key}}"),

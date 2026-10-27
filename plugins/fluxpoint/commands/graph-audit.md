@@ -165,7 +165,9 @@ is for a graph run.
    probe or invoke (so "Before approving, execute `aiken check`." counts).
    Punctuation left beside an inline command is not a command. Git must be
    spelled `git`: a path, quotes or `.exe` is refused wherever it appears,
-   because the grammar judges Git by its subcommand.
+   because the grammar judges Git by its subcommand. A program word with a
+   backslash is refused too, since a shell reads the backslash as an escape
+   and Windows as a separator; write such paths with forward slashes.
 
    A declaration remains the author's reviewed assertion. A `read-only`
    program must really be read-only, and a `shape` program must act on
