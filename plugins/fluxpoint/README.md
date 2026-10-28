@@ -45,7 +45,8 @@ older design decisions are preserved in `DESIGN-NOTES.md` and `ROADMAP.md`.
     fast-check and Blaster, plus the off-session seed sweep),
     `blaster.py` (opt-in Lean/SMT checks and retained replay receipts),
     `mutation-guard.py` (mutation score), `seam-guard.py` (module/Python/HTTP doubles and provider recordings),
-    `guard-guard.py` (named guards and the tests that hold them down),
+    `guard-guard.py` (named guards, their tests and
+    [interrupted verification recovery](../../docs/guard-recovery.md)),
     `pair-guard.py` (relations: co-change, parity, differential, bite and
     `--scan`), `plutus-budget.py` (on-chain size and execution units),
     `blueprint-guard.py` (the off-chain encoder against the CIP-57 schema),

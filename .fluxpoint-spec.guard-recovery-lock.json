@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "sha256": "902440941ccbe11a8388052adcd2789cc634b471f3f416de3b88dd914adbbaa2",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/guard-recovery-test.py": "70606b0ffd362a04c073342e9e01acc89bcd15a99a204b12f7c7a6dd212ce3c7"
+  }
+}

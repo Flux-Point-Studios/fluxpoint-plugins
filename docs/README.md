@@ -27,6 +27,7 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 |---|---|
 | Audit proof strength and assumptions | [Verified work](../plugins/fluxpoint/README.md#verified-work), [proof-audit](../plugins/fluxpoint/commands/proof-audit.md) |
 | Configure pinned Lean/Z3 checks | [Blaster setup, trust and replay](../plugins/fluxpoint/references/blaster.md) |
+| Recover an interrupted guard mutation | [Guard recovery](guard-recovery.md) |
 | Check builder/validator relations | [Relations](../plugins/fluxpoint/README.md#relations-between-artifacts), [Cardano review](../plugins/fluxpoint/references/red-team-cardano.md) |
 | Require independent repair evidence | [Repair campaign](../plugins/fluxpoint/templates/WORK.repair.md), [graph repair rules](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
 | Check production dependency pins | [Deployed gates](../plugins/fluxpoint/references/deployed-gates.md) |

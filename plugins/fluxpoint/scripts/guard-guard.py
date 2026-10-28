@@ -50,16 +50,16 @@ failure needs to know what the guard was FOR, and a rule nobody understands gets
 """
 import argparse
 import atexit
+import hashlib
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 
-from process_tree import shell_argv
+from process_tree import identity, shell_argv
 
 MANIFEST = ".fluxpoint-guards.json"
 BASELINE = ".fluxpoint-guards-baseline.json"
@@ -81,51 +81,135 @@ def _python():
 
 DEFAULT_RUN = "{py} -m pytest -q {file}::{test}"
 
-# A guard is disabled on disk for the length of one proof run. `finally` covers
-# an exception and Ctrl-C; it does NOT cover SIGTERM, which is what CI
-# cancellation sends -- and a killed run left `if False:` in place of a
-# money-moving guard with no breadcrumb, since the backup was a random name in
-# the system temp dir. These two make the window survivable: the pending
-# restore is replayed from a signal handler and at interpreter exit, and while
-# it is open a sentinel sits in the repo where a human or a later --check will
-# see it.
+# Signals and atexit provide immediate restoration when the interpreter can run.
+# Native Windows termination and os._exit run neither, so a durable journal and
+# exact-byte backup are published before the atomic mutation. The next invocation
+# recovers only a dead owner's known mutation, preserving unknown edits.
 SENTINEL = ".fluxpoint-guards-restoring"
 _PENDING = {}
 
 
-def _restore_pending():
-    """Put every disabled guard back, and READ IT BACK.
+def _digest(data):
+    return hashlib.sha256(data).hexdigest()
 
-    A restore that did not restore is worse than no restore: the mutant stays
-    in place with the sentinel gone, and every later proof runs against a
-    guard that is off. So the bytes are compared after the copy; a mismatch
-    keeps the backup and the sentinel on disk and says so on stderr.
-    """
+
+def _atomic_write(path, data):
+    fd, temp = tempfile.mkstemp(prefix=".fluxpoint-guard-write-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temp, os.stat(path).st_mode)
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def _restore_pending():
     problems = []
     for target, backup in list(_PENDING.items()):
         try:
-            shutil.copyfile(backup, target)
-            with open(backup, "rb") as fh:
-                want = fh.read()
-            with open(target, "rb") as fh:
-                got = fh.read()
-            if got != want:
-                problems.append(f"{target} differs from its backup {backup} after restore")
-                continue
+            with open(backup, "rb") as stream:
+                want = stream.read()
+            _atomic_write(target, want)
+            with open(target, "rb") as stream:
+                if stream.read() != want:
+                    raise OSError("restored bytes differ from the backup")
             os.unlink(backup)
-        except OSError as e:
-            problems.append(f"{target}: restore failed ({e}); backup kept at {backup}")
-            continue
-        _PENDING.pop(target, None)
+            _PENDING.pop(target, None)
+        except OSError as exc:
+            problems.append(f"{target}: restore failed ({exc}); backup kept at {backup}")
     if not _PENDING:
         try:
             os.unlink(_PENDING_SENTINEL[0])
         except (OSError, IndexError):
             pass
         _PENDING_SENTINEL.clear()
-    for p in problems:
-        print(f"guard-guard: RESTORE DID NOT RESTORE — {p}; the sentinel stays on "
-              f"disk", file=sys.stderr)
+    for problem in problems:
+        print(f"guard-guard: RESTORE DID NOT RESTORE — {problem}; the sentinel stays on disk", file=sys.stderr)
+    return not problems
+
+
+def recover(root):
+    sentinel = os.path.join(root, SENTINEL)
+    if not os.path.lexists(sentinel):
+        return
+    try:
+        if os.path.islink(sentinel):
+            raise ValueError("restore journal cannot be a symlink")
+        with open(sentinel, encoding="utf-8") as stream:
+            raw = stream.read(16385)
+        if len(raw) > 16384:
+            raise ValueError("restore journal is too large")
+        journal = json.loads(raw)
+        if not isinstance(journal, dict) or journal.get("version") != 1:
+            raise ValueError("unsupported restore journal; preserve its backup for manual recovery")
+        target, backup = journal["target"], journal["backup"]
+        real_root = _resolve(root, ".")
+        if (not isinstance(target, str) or os.path.isabs(target)
+                or ".." in target.replace("\\", "/").split("/")
+                or os.path.commonpath([_resolve(root, target), real_root]) != real_root):
+            raise ValueError("restore target is outside the repository")
+        if (not isinstance(backup, str) or os.path.basename(backup) != backup
+                or not backup.startswith(".fluxpoint-guard-backup-")):
+            raise ValueError("invalid restore backup path")
+        target, backup = os.path.join(root, target), os.path.join(root, backup)
+        if os.path.islink(target) or os.path.islink(backup):
+            raise ValueError("restore paths cannot be symlinks")
+        if not isinstance(journal["owner"], str) or not journal["owner"]:
+            raise ValueError("restore owner identity is missing")
+        if type(journal["pid"]) is not int or journal["pid"] <= 0:
+            raise ValueError("restore owner pid is invalid")
+        if identity(journal["pid"]) == journal["owner"]:
+            raise ValueError("the guard verifier is still running")
+        with open(target, "rb") as stream:
+            current = stream.read()
+        if _digest(current) not in (journal["original"], journal["mutated"]):
+            raise ValueError("guard changed since the interrupted verification; preserve edits and backup")
+        # A kill between deleting the backup and deleting the journal is already
+        # restored; the original digest still lets the next invocation finish.
+        if not os.path.exists(backup) and _digest(current) == journal["original"]:
+            os.unlink(sentinel)
+            return
+        with open(backup, "rb") as stream:
+            original = stream.read()
+        if _digest(original) != journal["original"]:
+            raise ValueError("restore backup digest does not match the journal")
+        _PENDING[target] = backup
+        _PENDING_SENTINEL[:] = [sentinel]
+        if not _restore_pending():
+            raise ValueError("restore could not be confirmed")
+        print("guard-guard: recovered an interrupted guard verification", file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        _die(f"cannot recover {SENTINEL}: {exc}")
+
+
+def _journal_mutation(root, rel, original, mutated):
+    owner = identity(os.getpid())
+    if not owner:
+        raise OSError("cannot identify the guard verifier process")
+    fd, backup = tempfile.mkstemp(prefix=".fluxpoint-guard-backup-", dir=root)
+    sentinel = os.path.join(root, SENTINEL)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(original)
+            stream.flush()
+            os.fsync(stream.fileno())
+        journal = dict(version=1, target=rel, backup=os.path.basename(backup), pid=os.getpid(),
+                       owner=owner, original=_digest(original), mutated=_digest(mutated))
+        # Exclusive creation also prevents two verifiers publishing mutations at once.
+        with open(sentinel, "x", encoding="utf-8") as stream:
+            json.dump(journal, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        os.unlink(backup)
+        raise
+    _PENDING[os.path.join(root, rel)] = backup
+    _PENDING_SENTINEL[:] = [sentinel]
+    return backup
 
 
 _PENDING_SENTINEL = []
@@ -238,7 +322,7 @@ def verify_one(root, g, quiet=False):
     """Prove the guard bites: the proof must pass intact, then fail disabled.
 
     Two runs, because one cannot tell a guard that bites from a proof that
-    never ran. Always restores, including on SIGTERM.
+    never ran. Restores on exit where possible; a later invocation recovers abrupt termination.
     """
     rel = g["guard"]["file"]
     path = os.path.join(root, rel)
@@ -286,21 +370,11 @@ def verify_one(root, g, quiet=False):
     if not quiet:
         print("    intact   -> proof passed")
 
-    backup = tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8")
-    backup.write(original)
-    backup.close()
-    sentinel = os.path.join(root, SENTINEL)
+    with open(path, "rb") as stream:
+        exact_original = stream.read()
+    _journal_mutation(root, rel, exact_original, mutated.encode("utf-8"))
     try:
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(mutated)
-        # Registered only once the write is CLOSED, not before it: a restore that
-        # fires from the signal handler while this handle is still open is undone
-        # by the flush on close, which puts the mutation back and leaves the guard
-        # disabled. Registering after is what makes the window survivable.
-        _PENDING[path] = backup.name
-        with open(sentinel, "w", encoding="utf-8") as fh:
-            fh.write(f"{g['id']}\n{rel}\n")
-        _PENDING_SENTINEL[:] = [sentinel]
+        _atomic_write(path, mutated.encode("utf-8"))
         proc = subprocess.run(shell_argv(cmd), cwd=root, capture_output=True, text=True, timeout=900)
         out = f"{proc.stdout or ''}\n{proc.stderr or ''}"
         tail = out.strip().splitlines()[-3:]
@@ -338,13 +412,9 @@ def verify_one(root, g, quiet=False):
     except subprocess.TimeoutExpired:
         return False, f"the proof did not finish in 900s: {cmd}"
     finally:
-        # Restore unconditionally: an interrupted run must never leave a guard
-        # disabled. Routed through the same replay the signal handler uses, so a
-        # SIGTERM that already restored makes this a no-op instead of a
-        # FileNotFoundError on the deleted backup — which would mask the verdict.
-        # setdefault covers the write above failing before anything registered.
-        _PENDING.setdefault(path, backup.name)
-        _restore_pending()
+        if not _restore_pending():
+            return False, "guard restore could not be confirmed; preserve the journal and backup"
+
 
 
 def main():
@@ -358,12 +428,13 @@ def main():
     mode.add_argument("--verify", action="store_true")
     mode.add_argument("--baseline", action="store_true")
     args = ap.parse_args()
+    root = os.path.abspath(args.root)
+    recover(root)
     if args.tighten:
         from ratchet import cli
         return cli("guard", args.root)
 
 
-    root = os.path.abspath(args.root)
     guards = load_manifest(root)
 
     if args.scan:
