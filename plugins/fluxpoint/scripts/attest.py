@@ -78,6 +78,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import background as bg
 import forge_evidence as forge
 import fault_policy
+from process_tree import bash_path
 
 GATES = ".fluxpoint-gates.json"
 ATTEST = os.path.join(".claude", "fluxpoint", "attest.jsonl")
@@ -979,21 +980,6 @@ def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
         return 4
 
 
-def _bash():
-    """The bash to run a gate with, as an absolute path where one is known.
-
-    On Windows a bare "bash" is resolved by CreateProcess, which searches
-    System32 before PATH: on a machine with WSL that is WSL's bash.exe, a
-    different toolchain from the Git Bash the hooks and the Bash tool use.
-    py.sh exports the bash it runs under as FPL_BASH.
-    """
-    import shutil
-    for cand in (os.environ.get("FPL_BASH"), os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")):
-        if cand and os.path.isfile(cand):
-            return cand
-    return shutil.which("bash") or "bash"
-
-
 def _execute(root, gate, started, token, nonce="", tree=None, control_token=None,
              attempt=None, reference=None):
     import subprocess
@@ -1035,7 +1021,7 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
             raw_reference, pins_hashes = fault_attempts.reference_command(_api(), root, gates, gate, raw)
             command, cwd = fault_policy.reference_argv(gates.reference, tree, raw_reference), tree
         else:
-            command, cwd, _ = deployed_invocation(tree, gates, gate) if deployed else ([_bash(), '-c', raw], tree, [])
+            command, cwd, _ = deployed_invocation(tree, gates, gate) if deployed else ([bash_path(), '-c', raw], tree, [])
         code = bg.run_command(store, control_token or token, command, cwd, log)
     if code is None:
         bg.finish(store, token, None)

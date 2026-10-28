@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -123,6 +124,29 @@ sys.exit(7)
         self.assertIn('finished with a real failure', out)
         self.assertFalse((self.root / '.claude/fluxpoint/attest.jsonl').exists())
         self.assertEqual(self.store.read(token)['exit'], 7)
+
+    def test_bare_bash_runs_the_bash_on_path(self):
+        # CreateProcess searches System32 before PATH; on Windows a bare `bash`
+        # there is WSL's launcher, not the shell the reference tells agents to use.
+        log = self.root / 'bash.log'
+        token = self.cli('longrun.py', 'start', '--log', str(log), '--', 'bash', '-c', 'echo "bash $BASH_VERSION"').strip()
+        self.tokens.append((self.store, token))
+        self.cli('longrun.py', 'await', token, '--timeout', '30')
+        self.assertRegex(log.read_text(encoding='utf-8', errors='replace'), r'bash \d')
+
+    @unittest.skipUnless(os.name == 'nt', 'only Windows puts a bash launcher in System32')
+    def test_bash_path_passes_over_system32_to_git_bash(self):
+        # A default PowerShell lists System32 before Git; WSL installs bash.exe there.
+        git = shutil.which('git')
+        system = os.path.join(os.environ['SystemRoot'], 'System32')
+        env = {k: v for k, v in os.environ.items() if k not in ('FPL_BASH', 'CLAUDE_CODE_GIT_BASH_PATH')}
+        env['PATH'] = os.pathsep.join([system, os.path.dirname(git)])
+        with patch.dict(os.environ, env, clear=True):
+            found = process_tree.bash_path()
+        self.assertTrue(os.path.isfile(found), found)
+        self.assertNotEqual(os.path.normcase(os.path.dirname(found)), os.path.normcase(system))
+        result = subprocess.run([found, '-c', 'echo "bash $BASH_VERSION"'], capture_output=True, text=True, timeout=30)
+        self.assertRegex(result.stdout, r'bash \d')
 
     def test_unknown_invalid_regex_and_launch_error_are_explicit(self):
         self.cli('longrun.py', 'await', 'unknown', '--timeout', '0', code=2)
