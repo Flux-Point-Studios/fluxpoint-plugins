@@ -4,5 +4,6 @@
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/tests/plugin-identity-test.py": "68f1493915003155270256c694566cc36fd6025d2d667422129601d3aee488df"
-  }
+  },
+  "lockFormat": 2
 }

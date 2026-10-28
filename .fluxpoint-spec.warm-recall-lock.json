@@ -4,5 +4,6 @@
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/tests/prompt-recall-daemon-test.py": "152c41b4766e8a425b889c9f21023a4d90a9d5edb5b476b2afab6a45622f34fc"
-  }
+  },
+  "lockFormat": 2
 }

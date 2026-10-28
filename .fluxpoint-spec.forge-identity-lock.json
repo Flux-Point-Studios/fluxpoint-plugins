@@ -4,5 +4,6 @@
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/tests/forge-identity-test.py": "6abc2ec8329fb189873ddf781e959d44de5c7ec61962d68474124aabe847c099"
-  }
+  },
+  "lockFormat": 2
 }

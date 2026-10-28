@@ -2,5 +2,8 @@
   "version": 1,
   "sha256": "c10522234a6c86901178c11ad7e6613a1672df5f575da65af704c296349867ba",
   "proofBaselineSha256": null,
-  "harness": {}
+  "harness": {
+    "plugins/fluxpoint/tests/compact-taxonomy-test.py": "0e059d55421156e57b2403d965faebbc27e2c5bf9b5c686c0084ef467b9ea869"
+  },
+  "lockFormat": 2
 }

@@ -373,7 +373,9 @@ class ReplayFollowup(unittest.TestCase):
         self.assertTrue(any('irreversible ancestor' in error for error in c.validate(ir, CONTRACTS)))
 
 
-class BranchReplayFollowup(GraphReplay):
+class BranchReplayFollowup(unittest.TestCase):
+    memo_args = GraphReplay.memo_args
+    replay_graph = GraphReplay.replay_graph
     def prefix(self, result):
         import re
         rows = []

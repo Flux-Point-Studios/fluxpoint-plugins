@@ -2,5 +2,8 @@
   "version": 1,
   "sha256": "c2f30a2281526553d0aa1c533214894976744f919ea298620c6c168a2907c5b7",
   "proofBaselineSha256": null,
-  "harness": {}
+  "harness": {
+    "plugins/fluxpoint/tests/codex-memory-test.py": "ac5a50dd0e6f2c195afd1d5eb13a0e334756aeb03560c458cbb77ae29152c158"
+  },
+  "lockFormat": 2
 }

@@ -4,6 +4,7 @@
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/tests/packet-projection-test.py": "5437bf2cb4d66d0bb6df4b1f4f56658de90f6faaa585f04e7f8daec377d081c2",
-    "plugins/fluxpoint/tests/repair-proof-test.py": "e35ac8c3c72a5d7fd6c6f137d2253914e7c9e1aa3b2e7e8e6ac0b67ddda1d5c6"
-  }
+    "plugins/fluxpoint/tests/repair-proof-test.py": "3ff7dee99d734cff3764aa3c26995519f952a9f0e543e00095f9e5e120255f1f"
+  },
+  "lockFormat": 2
 }

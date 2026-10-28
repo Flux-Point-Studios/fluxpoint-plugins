@@ -4,5 +4,6 @@
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/tests/recall-shared-index-test.py": "bddae76f77f9740ef05d6a5d6efe0ce53d143277a022ab464da5a84928bd730c"
-  }
+  },
+  "lockFormat": 2
 }

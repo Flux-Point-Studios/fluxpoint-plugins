@@ -4,5 +4,6 @@
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/tests/memory-storage-test.py": "913d51289111a287452afb37c66c612629a6a26077ba19afd2d079d4ebcc0f46"
-  }
+  },
+  "lockFormat": 2
 }
