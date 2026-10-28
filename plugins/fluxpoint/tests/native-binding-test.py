@@ -72,8 +72,14 @@ class NativeBinding(unittest.TestCase):
         for mutation in ('command','output','exit','cwd','duplicate'):
             with self.subTest(mutation=mutation):
                 rows=copy.deepcopy(self.rows)
-                if mutation=='command':self.rows[0]['message']['content'][0]['input']['command']='printf other'
-                if mutation=='output':self.rows[2]['message']['content'][0]['content']='condensed'
+                if mutation=='command':
+                    for row in self.rows:
+                        for item in row['message']['content']:
+                            if item.get('type')=='tool_use' and item.get('name')=='Bash':item['input']['command']='printf other'
+                if mutation=='output':
+                    for row in self.rows:
+                        for item in row['message']['content']:
+                            if item.get('type')=='tool_result':item['content']='condensed'
                 if mutation=='exit':self.report['readings'][0]['exit']=2
                 if mutation=='cwd':self.rows[0]['cwd']=str(self.root)
                 if mutation=='duplicate':self.rows[1]['message']['content'][0]['input']['command']='printf other'
@@ -86,7 +92,10 @@ class NativeBinding(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 rows=copy.deepcopy(self.rows)
                 if mutation=='tool':self.rows.insert(0,dict(cwd=str(self.worktree),message={'content':[dict(type='tool_use',id='read',name='Read',input={'file_path':'x'})]}))
-                if mutation=='background':self.rows[0]['message']['content'][0]['input']['run_in_background']=True
+                if mutation=='background':
+                    for row in self.rows:
+                        for item in row['message']['content']:
+                            if item.get('type')=='tool_use' and item.get('name')=='Bash':item['input']['run_in_background']=True
                 if mutation=='missing':self.rows=[r for r in self.rows if r['message']['content'][0]['type']!='tool_result']
                 with self.assertRaises(native_binding.BindingError):self.bind()
                 self.rows=rows
@@ -149,6 +158,49 @@ class NativeBinding(unittest.TestCase):
         self.save()
         with self.assertRaisesRegex(native_binding.BindingError,'truncated'):
             native_binding.tool_receipts(self.run,self.agent,self.projects)
+
+    def test_compiler_and_record_run_require_native_fixed_preflight_evidence(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('native_compiler',SCRIPTS/'compile-graph.py')
+        compiler=importlib.util.module_from_spec(spec);spec.loader.exec_module(compiler)
+        contracts=compiler.load_contracts(str(SCRIPTS.parent/'contracts'))
+        ir=dict(version=1,campaign='fixed',treeGuard=False,budget={'maxNodes':4},nodes=[dict(id='fixed-check',isolation='worktree',contract='NativeReadingsV1',prompt='Run the fixed status command.')])
+        self.assertEqual(compiler.validate(ir,contracts),[])
+        self.assertIn('FIXED NATIVE READINGS',compiler.emit(ir,contracts))
+        ir['nodes'][0]['isolation']=False
+        self.assertTrue(any('NativeReadingsV1' in value for value in compiler.validate(ir,contracts)))
+        graph=self.worktree/'WORK.md'
+        graph.write_text('## Evidence\n\n| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n')
+        summary=dict(campaign='fixed',outcome='COMPLETE',contracts={'fixed-check':'NativeReadingsV1'},results={'fixed-check':self.report},provenance=[])
+        command=[sys.executable,str(SCRIPTS/'record-run.py'),'--root',str(self.worktree),'--graph',str(graph),'--run-id',self.run]
+        result=subprocess.run(command,input=json.dumps(summary),capture_output=True,text=True,
+                              env=dict(os.environ,CLAUDE_CONFIG_DIR=str(self.root),FPL_MEMORY_INDEX='0'),timeout=30)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        artifact=json.loads((self.worktree/'.claude/fluxpoint/runs'/(self.run+'.json')).read_text())
+        self.assertEqual(artifact['outcome'],'COMPLETE')
+        self.assertTrue(artifact['nativeCommandBindings'][0]['bound'])
+        self.assertIn('NATIVE-COMMAND-BOUND',(self.worktree/'WORK.md').read_text())
+
+    def test_completion_order_and_boolean_integer_aliases_refuse(self):
+        import native_binding
+        self.events.reverse();self.save()
+        with self.assertRaisesRegex(native_binding.BindingError,'earlier start'):
+            native_binding.bind(self.run,self.agent,self.projects)
+        self.events.reverse()
+        self.rows[-1]['message']['content'][0]['input']=copy.deepcopy(self.report)
+        self.rows[-1]['message']['content'][0]['input']['readings'][0]['exit']=False
+        self.save()
+        with self.assertRaisesRegex(native_binding.BindingError,'StructuredOutput'):
+            native_binding.bind(self.run,self.agent,self.projects)
+
+    def test_native_journal_without_labels_uses_the_actual_task_marker(self):
+        import native_binding
+        self.events[0].pop('label')
+        prompt='[Workflow harness — computed task]\nThe computed task text follows:\n\n  Fluxpoint-Native-Seat: fixed-check\n  Run the fixed command.\n'
+        self.rows.insert(0,dict(type='user',message={'role':'user','content':prompt}))
+        self.save()
+        summary=dict(contracts={'fixed-check':'NativeReadingsV1'},results={'fixed-check':self.report})
+        self.assertEqual(len(native_binding.verify_fixed(summary,self.run,self.projects)),1)
 
     def test_cli_reads_source_report_and_refuses_an_external_retyped_report(self):
         self.save()

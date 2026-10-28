@@ -246,7 +246,24 @@ is for a graph run.
    nothing. Report the same counts and name the executor; inline passes
    share one context, which makes them weaker evidence than independent
    subagents.
-5. Append the round to the audit log from step 3: its mode, verdict and
+5. If probes ran, their command-output evidence is still PENDING and `ready`
+   is false even when the raw workflow verdict says SOUND. Save the workflow
+   result as `audit-result.json`, then run the fixed postprocessor using the
+   Workflow tool's actual run id:
+
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" bind-native.py \
+     --run-id <actual Workflow run id> --audit audit-result.json > bound-audit.json
+   ```
+
+   Require exit 0 and `nativeCommandBinding.bound: true`; use that on-disk
+   result for the audit log and final report. Missing captures, retyped output,
+   extra tools or mismatched commands leave probes UNVERIFIED and cannot make
+   the graph READY. See [native bindings](../references/native-binding.md) for
+   the fixed normalization, artifact path/digest form and local trust boundary.
+   This binds command evidence; it does not replace the lenses/refuters.
+
+   Append the round to the audit log from step 3: its mode, verdict and
    counts, the full findings in the result's `confirmed`, titles in `unverified` and
    `refuted` lists, and an empty `fixed` list.
 6. Report the per-stage counts first, from the result's `counts`:
@@ -262,7 +279,8 @@ is for a graph run.
    then the refuted titles, and end with exactly one line:
    `VERDICT: SOUND` or `VERDICT: REWIRE — <the result's why>`. SOUND
    requires every lens to have returned, zero confirmed and zero
-   unverified findings.
+   unverified findings, and all executed probes to have a native command-output
+   binding. A raw pending SOUND is not sufficient.
 7. Treat confirmed and unverified findings as the work list, highest
    severity first. Fix the IR, recompile, and add each repaired title to
    that round's `fixed` list so the next round treats it as settled.

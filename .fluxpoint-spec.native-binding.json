@@ -106,5 +106,10 @@
       "claim": "Can a model return a certificate that the Workflow itself cannot read from disk?",
       "resolution": "No. The primitive reads native sources after completion; graph-audit surfaces pending binding and its command runs the postprocessor before accepting SOUND."
     }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/scripts/native_binding.py",
+    "plugins/fluxpoint/scripts/bind-native.py",
+    "plugins/fluxpoint/contracts/NativeReadingsV1.schema.json"
   ]
 }

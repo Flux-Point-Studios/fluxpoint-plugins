@@ -77,12 +77,17 @@ def _source(run_id, agent_id, projects):
         if event.get('type') == 'started':
             starts.append(event)
         elif event.get('type') in ('result', 'failed'):
+            if len(starts) != 1 or terminals:
+                raise BindingError('native completion has no unique earlier start')
             terminals.append(event)
         else:
             raise BindingError('unknown native agent event')
     if len(starts) != 1 or len(terminals) != 1 or terminals[0].get('type') != 'result':
         raise BindingError('native agent has no unique completed result')
     try:
+        for key in ('result', 'value', 'output'):
+            if isinstance(terminals[0].get(key), str):
+                _json(terminals[0][key].encode('utf-8'))
         report = replay_memo._result(terminals[0])
     except (ValueError, TypeError) as exc:
         raise BindingError('native completion has no unambiguous result') from exc
@@ -158,6 +163,8 @@ def _tools(rows):
                 ident = item.get('tool_use_id')
                 if not isinstance(ident, str) or not ident:
                     raise BindingError('native tool result lacks its use id')
+                if ident not in calls:
+                    raise BindingError('native tool result precedes its first use')
                 if ident in results and results[ident] != item:
                     raise BindingError('conflicting duplicate native tool result')
                 results.setdefault(ident, item)
@@ -179,8 +186,12 @@ def _artifact(worktree, artifact):
         raise BindingError('artifact path escapes the native worktree')
     try:
         digest = hashlib.sha256()
+        size = 0
         with path.open('rb') as handle:
             for block in iter(lambda: handle.read(1024 * 1024), b''):
+                size += len(block)
+                if size > LIMIT:
+                    raise BindingError('artifact exceeds the bounded capture size')
                 digest.update(block)
     except OSError as exc:
         raise BindingError('artifact cannot be read back') from exc
@@ -206,7 +217,7 @@ def _compare(source, commands, readings):
         else:
             raise BindingError('unlisted native tool: ' + str(name))
     if (len(final) != 1 or not order or order[-1] != final[0]
-            or calls[final[0]]['tool']['input'] != source['report']):
+            or replay_memo.canonical(calls[final[0]]['tool']['input']) != replay_memo.canonical(source['report'])):
         raise BindingError('one final StructuredOutput must match the native completed report')
     if len(bash) != len(commands):
         raise BindingError('native Bash call count differs from the fixed command list')
@@ -255,7 +266,7 @@ def bind(run_id, agent_id, projects=None, report=None):
     native = source['report']
     if not isinstance(native, dict) or set(native) != {'commands', 'readings'}:
         raise BindingError('native completion is not a closed fixed-reading report')
-    if report is not None and report != native:
+    if report is not None and replay_memo.canonical(report) != replay_memo.canonical(native):
         raise BindingError('caller report differs from the native completed report')
     commands = _compare(source, native['commands'], native['readings'])
     return _certificate(source, run_id, agent_id, commands)
@@ -271,6 +282,35 @@ def _certificate(source, run_id, agent_id, commands):
                          for path, raw in zip(source['paths'], source['raw'])])
 
 
+def _seat_marker(directory, agent_id, store):
+    agent_id = replay_memo._component(agent_id, 'agent id')
+    hits = {path.resolve() for parent in (directory, directory.parent, directory.parent.parent)
+            for path in parent.glob('agent-' + agent_id + '.jsonl') if path.is_file()}
+    if len(hits) != 1:
+        return None
+    for row in _rows(_read(hits.pop(), store)):
+        message = row.get('message', row)
+        if not isinstance(message, dict) or message.get('role', row.get('type')) != 'user':
+            continue
+        content = message.get('content')
+        if not isinstance(content, str):
+            if not isinstance(content, list) or not all(isinstance(item, dict) and item.get('type') == 'text' and isinstance(item.get('text'), str) for item in content):
+                continue
+            content = ''.join(item['text'] for item in content)
+        try:
+            prompt = replay_memo.normalize_workflow_prompt(content)
+        except ValueError as exc:
+            raise BindingError('unknown native task prompt frame') from exc
+        lines = prompt.splitlines()
+        if lines and re.fullmatch(r'Fluxpoint-Call-Opts-SHA256: [0-9a-f]{64}', lines[0]):
+            lines = lines[1:]
+        if lines:
+            match = re.fullmatch(r'Fluxpoint-Native-Seat: ([A-Za-z0-9_.:-]+)', lines[0])
+            return match[1] if match else None
+        return None
+    return None
+
+
 def _labels(run_id, projects):
     try:
         directory = replay_memo._run_dir(run_id, projects)
@@ -283,6 +323,8 @@ def _labels(run_id, projects):
             continue
         options = row.get('opts', row.get('options')) or {}
         label = row.get('label', options.get('label') if isinstance(options, dict) else None)
+        if label is None:
+            label = _seat_marker(directory, row['agentId'], replay_memo._projects(projects))
         if isinstance(label, str):
             labels.setdefault(label, []).append(row['agentId'])
     return labels
@@ -293,6 +335,9 @@ def bind_audit(run_id, audit, projects=None):
     if (not isinstance(audit, dict) or not isinstance(audit.get('probes'), list)
             or audit.get('mode') not in ('multi', 'single') or audit.get('verdict') not in ('SOUND', 'REWIRE')):
         raise BindingError('invalid graph-audit result')
+    directory = replay_memo._run_dir(run_id, projects)
+    store = replay_memo._projects(projects)
+    journal = _read(directory / 'journal.jsonl', store)
     labels = _labels(run_id, projects)
     probes, certificates = audit['probes'], []
     expected = {'probe:' + probe['node'] for probe in probes
@@ -307,11 +352,14 @@ def bind_audit(run_id, audit, projects=None):
         source = _source(run_id, aid, projects)
         report = source['report']
         if (not isinstance(report, dict) or not isinstance(report.get('commands'), list)
-                or report.get('completed') is not True or probe.get('completed') is not True):
+                or report.get('completed') is not True or report.get('blockers') != []
+                or probe.get('completed') is not True):
             raise BindingError('audit probe did not complete: ' + label)
         native = report['commands']
-        relayed = [{key: value for key, value in row.items() if key != 'kind'} for row in probe.get('commands', [])]
-        if native != relayed:
+        if not isinstance(probe.get('commands'), list) or any(not isinstance(row, dict) for row in probe['commands']):
+            raise BindingError('audit command receipts must be objects')
+        relayed = [{key: value for key, value in row.items() if key != 'kind'} for row in probe['commands']]
+        if replay_memo.canonical(native) != replay_memo.canonical(relayed):
             raise BindingError('audit probe receipts differ from the native StructuredOutput')
         commands, readings = [], []
         for receipt in native:
@@ -323,6 +371,8 @@ def bind_audit(run_id, audit, projects=None):
             readings.append(dict(exit=receipt['exit'], output=receipt['evidence']))
         certificate = _certificate(source, run_id, aid, _compare(source, commands, readings))
         certificates.append(dict(node=probe['node'], label=label, **certificate))
+    if _read(directory / 'journal.jsonl', store) != journal:
+        raise BindingError('native audit journal changed during binding')
     result = copy.deepcopy(audit)
     result['nativeCommandBinding'] = dict(version=1, bound=True, provenance='local-runtime-transcript',
                                          runId=run_id, probes=certificates)
@@ -336,12 +386,17 @@ def verify_fixed(summary, run_id, projects=None):
     fixed = [node for node, contract in contracts.items() if contract == 'NativeReadingsV1']
     if not fixed:
         return []
+    directory = replay_memo._run_dir(run_id, projects)
+    store = replay_memo._projects(projects)
+    journal = _read(directory / 'journal.jsonl', store)
     labels = _labels(run_id, projects)
     certificates = []
     for node in fixed:
         if len(labels.get(node, [])) != 1 or not isinstance(results.get(node), dict):
             raise BindingError('fixed reading node needs one scalar completed native call: ' + node)
         certificates.append(dict(node=node, **bind(run_id, labels[node][0], projects, results[node])))
+    if _read(directory / 'journal.jsonl', store) != journal:
+        raise BindingError('native fixed-reading journal changed during binding')
     return certificates
 
 

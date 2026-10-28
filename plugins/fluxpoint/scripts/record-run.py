@@ -747,6 +747,15 @@ def main():
         replay_problems.append(str(exc))
         outcome = "REFUSED-REPLAY"
         print("record-run: REPLAY-PROVENANCE — " + str(exc), file=sys.stderr)
+    native_bindings, native_binding_problems = [], []
+    try:
+        import native_binding as _native_binding
+        native_bindings = _native_binding.verify_fixed(summary, args.run_id)
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        native_binding_problems.append(str(exc))
+        if outcome in ('COMPLETE', 'UNKNOWN'):
+            outcome = 'INCOMPLETE'
+        print('record-run: NATIVE-COMMAND-UNBOUND — ' + str(exc), file=sys.stderr)
     repair_checkers, checked, repair_problems = repair_receipts(summary, args.graph, root=args.root)
     repair_journal = None
     if checked:
@@ -783,6 +792,8 @@ def main():
                 "checked": checked,
                 "repairCheckers": repair_checkers,
                 "repairCheckProblems": repair_problems,
+                "nativeCommandBindings": native_bindings,
+                "nativeCommandBindingProblems": native_binding_problems,
                 "repairJournal": repair_journal,
                 "repairEvidence": repair_evidence,
                 "replayChecked": replay_checked,
@@ -903,6 +914,10 @@ def main():
             parts.append(f"recall: {recall_stats['provider']}")
         claim += "; memory: " + ", ".join(parts)
     imported = summary.get("decisionsImported") or {}
+    if native_bindings:
+        claim += '; NATIVE-COMMAND-BOUND ' + ', '.join(row['node'] for row in native_bindings)
+    if native_binding_problems:
+        claim += '; NATIVE-COMMAND-UNBOUND'
     if replay_checked:
         claim += "; REPLAYED-MEMO " + ", ".join(r["node"] for r in replay_checked)
     for rejudge in rejudges:

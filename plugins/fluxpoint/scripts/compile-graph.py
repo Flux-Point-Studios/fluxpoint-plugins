@@ -985,6 +985,12 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
             f.append(f'{cid}.{field}: emitted {guard} requires this declared property (added in {version}); update the repository contract copy')
     if not nodes:
         f.append("nodes: at least one node required")
+    for node in nodes:
+        if node.get('contract') == 'NativeReadingsV1' and (
+                node.get('isolation') not in (True, 'worktree') or node.get('foreach')
+                or node.get('repeat') or node.get('reduce') or panel_size(node)
+                or judge_size(node) or node.get('actor', 'agent') != 'agent'):
+            f.append('NativeReadingsV1 requires one scalar agent with worktree isolation for native transcript binding')
     lists = ir.get("lists") or {}
     lane_graph = any('lane' in n for n in nodes)
     if lane_graph and not ir.get('treeGuard', True):
@@ -4030,6 +4036,9 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         pre += f"gateEvidencePreamble({js_str(nid)}) + "
     if n.get("contract") == "RedTeamV1" and n.get("haltWhen") and red_team_sources(n, ir):
         pre += f"redTeamPreamble({json.dumps(red_team_sources(n, ir))}) + "
+    if n.get('contract') == 'NativeReadingsV1':
+        pre = js_str('Fluxpoint-Native-Seat: ' + nid + '\n') + ' + ' + pre
+        pre += js_str('FIXED NATIVE READINGS. Use only Bash for the exact prescribed commands, including compiler base checks, once each in chronological order, then one StructuredOutput. No Read, other tools, background calls or extra inspection commands. Run from this isolated worktree. Return commands and one reading {exit,output} per command with complete literal runtime output; never condense it. A hook refusal with no readable exit uses null. For long output use an artifact {path,sha256} relative to this worktree, and have that exact command print only the sha256sum-style marker SHA256 followed by two spaces, path, and newline. The recorder independently reads the runtime journal, tool ids, cwd, output and artifact bytes; returned text is unbound until then.\n\n') + ' + '
     if n.get('cites'):
         pre += f"citesPreamble({json.dumps(n['cites'])}) + "
     if prove_gate(n):

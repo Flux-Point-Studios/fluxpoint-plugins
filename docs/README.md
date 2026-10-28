@@ -32,7 +32,9 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 | Check builder/validator relations | [Relations](../plugins/fluxpoint/README.md#relations-between-artifacts), [Cardano review](../plugins/fluxpoint/references/red-team-cardano.md) |
 | Require independent repair evidence | [Repair campaign](../plugins/fluxpoint/templates/WORK.repair.md), [graph repair rules](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
 | Check production dependency pins | [Deployed gates](../plugins/fluxpoint/references/deployed-gates.md) |
+| Bind worker readings to native tool records | [Native command bindings](../plugins/fluxpoint/references/native-binding.md) |
 | Bind CI results to commits and attempts | [Forge evidence, source pins and CI identities](../plugins/fluxpoint/references/forge-evidence.md), [fault reruns](../plugins/fluxpoint/references/fault-reruns.md) |
+| Bind worker readings to native tool records | [Native command bindings](../plugins/fluxpoint/references/native-binding.md) |
 | Bind CI results to commits and attempts | [Forge evidence](../plugins/fluxpoint/references/forge-evidence.md), [content-bound red retention and fault reruns](../plugins/fluxpoint/references/fault-reruns.md) |
 | Check captured provider shapes and counters | [Recordings](../plugins/fluxpoint/references/recordings.md) |
 | Measure and tighten deterministic limits | [Metrics, Aiken costs and plateau detection](deterministic-metrics.md), [slice calibration](../plugins/fluxpoint/README.md#calibrating-predicted-gains) |

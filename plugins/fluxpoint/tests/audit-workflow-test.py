@@ -1081,5 +1081,11 @@ invalid_root = run(dict(BASE, root=17))
 report('#158 a malformed root is rejected before dispatch', bool(invalid_root.get('err')) and not invalid_root['calls'],
        invalid_root.get('err','accepted'))
 
+report('#197 completed probe output stays pending until native binding',
+       (probed.get('r') or {}).get('nativeCommandBinding', {}).get('status') == 'PENDING'
+       and (probed.get('r') or {}).get('ready') is False
+       and 'bind-native.py' in CMD,
+       'raw SOUND cannot make the graph READY')
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

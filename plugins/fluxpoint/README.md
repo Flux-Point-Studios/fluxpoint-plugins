@@ -72,6 +72,8 @@ rows; own reruns name the claim under test. See
     `--scan`), `plutus-budget.py` (on-chain size and execution units),
     `blueprint-guard.py` (the off-chain encoder against the CIP-57 schema),
     `recurrence-guard.py` (a lesson learned twice demands a gate).
+    `bind-native.py` corroborates [fixed command readings](references/native-binding.md)
+    against completed native Workflow tool records.
     `metric-guard.py`, `loop-metric.py`, `slice-metric.py` and `aiken-metrics.py`
     measure deterministic metrics, plateaus, predicted gains and unit-test costs.
   - Graph: `compile-graph.py`, `record-run.py`, `ledger.py` (once-only
