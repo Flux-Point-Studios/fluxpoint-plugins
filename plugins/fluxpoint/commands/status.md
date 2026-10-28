@@ -34,7 +34,9 @@ nothing.
    gates, how many attested executions each has, and the newest exit. Call
    out any recorded run whose `attestation.tally` carries `mismatch` — a
    node claimed a gate exit the hook-minted log contradicts, which makes
-   that run's verdict untrustworthy regardless of what it reported.
+   that run's verdict untrustworthy regardless of what it reported — or
+   `stale`, a node citing an execution from before its run launched, on
+   another commit, or already backing another node.
 3b. If `.claude/fluxpoint/memory.jsonl` exists, add
    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" recurrence-guard.py --scan`:
    what this repo keeps re-learning, and whether each recurrence has a
@@ -43,15 +45,27 @@ nothing.
    `.fluxpoint-recurrence.json`, and filing it a third time is the
    failure rather than the remedy. Say so plainly if the recommended next
    action is writing that check.
-3c. If `runs/` holds more than one artifact, add
+3c. If `runs/` holds more than one artifact, or `.claude/fluxpoint/slices/`
+   holds slice predictions, add
    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" metrics.py` — the cross-run
    trend block: death and skip rates, agent calls spawned vs planned,
    sweep endings (dry rule / ceiling / budget-truncated / halted — only
    the dry rule is convergence), reduce compression, panel kill rate,
-   inbox pressure. These are the numbers to tune a campaign against;
+   inbox pressure, and repair origin counts with the fix-introduced share
+   per round and per run (finding observations, including repeated failures).
+   These are the numbers to tune a campaign against;
    quote them rather than characterizing them. A kill rate of 0% means
    the panels may be decoration; near 100% means the finders are badly
-   scoped — say which reading applies.
+   scoped — say which reading applies. Include gain calibration per role:
+   measured/predicted improvement, the completed-slice count and pending
+   predictions. Above 1x means estimates were conservative; below 1x means
+   gains fell short. A negative ratio records a regression. Ratios average
+   per-slice values, keeping different units comparable; quote the per-metric
+   breakdown and sample counts before generalizing a role's bias.
+3d. If `.fluxpoint-metrics.json` exists, run
+   `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" metric-guard.py --report`.
+   Quote each current integer against its ceiling or floor, and name any
+   unarmed or regressed metric.
 4. Summarize in a few lines: harness verdict and its age, gate pressure
    (blocks used out of the max, default 3), plan progress, campaign state,
    and the single most useful next action — fix what is red, work the next

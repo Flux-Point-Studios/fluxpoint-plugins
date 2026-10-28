@@ -15,6 +15,10 @@ suite notices. A test that never fails kills no mutants.
   mutation-guard.py --measure [--accept --reason "..."]   run it; enforce the ratchet
   mutation-guard.py --check                               cheap gate: is there a fresh measurement
   mutation-guard.py --report                              what was measured, for humans
+  mutation-guard.py --tighten                             measure after a green full harness
+
+External reports need --from <report> --from-head <producer-commit> with
+--measure or --tighten. The producer must equal the clean current HEAD.
 
 ## Why the work is split this way
 
@@ -792,7 +796,19 @@ def validate_measurement(rec, expected_tool=None):
             if not isinstance(reason, str) or reason != reason.strip() or len(reason) < 20:
                 findings.append("stored mutation acceptance reason must have at least 20 characters")
             origin_fields = {"score", "killed", "survived", "scored", "timeout"}
-            if not isinstance(origin, dict) or set(origin) != origin_fields:
+            if isinstance(origin, dict) and set(origin) == {"score", "survived"}:
+                # Older releases saved only these two dimensions. Preserve the
+                # historical decision without inventing counts it never recorded.
+                if (type(origin["score"]) not in (int, float)
+                        or not math.isfinite(origin["score"])
+                        or not 0 <= origin["score"] <= 1
+                        or type(origin["survived"]) is not int or origin["survived"] < 0):
+                    findings.append("stored mutation legacy acceptance origin is invalid")
+                elif (score_valid and counts_valid
+                        and origin["score"] <= rec["score"]
+                        and origin["survived"] >= rec["survived"]):
+                    findings.append("stored mutation acceptance does not describe a weaker floor")
+            elif not isinstance(origin, dict) or set(origin) != origin_fields:
                 findings.append("stored mutation acceptance origin needs exactly score, "
                                 "killed, survived, scored, and timeout")
             else:
@@ -841,7 +857,7 @@ def validate_baseline(doc, expected_tool=None):
 
 
 # ------------------------------------------------------------------ commands
-def measure(root, cfg, accept, reason, src=None, source_head=None):
+def measure(root, cfg, accept, reason, src=None, persist=True, source_head=None):
     baseline = load_baseline(root)
     prior_findings = validate_baseline(baseline, cfg.get("tool"))
     for finding in prior_findings:
@@ -884,6 +900,9 @@ def measure(root, cfg, accept, reason, src=None, source_head=None):
                          else run_cargo_mutants(root, extra))
     for f in findings:
         print(f"mutation-guard: {f}", file=sys.stderr)
+    if findings and not persist:
+        # Tightening cannot lock in a score whose parser dropped unknown data.
+        return 1
     if rec is None:
         if not findings:
             print("mutation-guard: the run produced no scored mutants — "
@@ -948,6 +967,8 @@ def measure(root, cfg, accept, reason, src=None, source_head=None):
               file=sys.stderr)
     if candidate_findings:
         return 1
+    if not persist:
+        return rec
     p = write_measurement(root, rec, baseline)
     verdict = "stronger" if prior and _ratio_rose(rec, prior) else "recorded"
     print(f"mutation-guard: {verdict} — score {rec['score']}, "
@@ -1106,15 +1127,19 @@ def main():
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--measure", action="store_true")
     g.add_argument("--check", action="store_true")
+    g.add_argument("--tighten", action="store_true")
     g.add_argument("--report", action="store_true")
     a = ap.parse_args()
-
-    if a.src and not a.measure:
-        print("mutation-guard: --from is valid only with --measure", file=sys.stderr)
+    if a.src and not (a.measure or a.tighten):
+        print("mutation-guard: --from is valid only with --measure or --tighten", file=sys.stderr)
         return 1
     if a.from_head and not a.src:
         print("mutation-guard: --from-head requires --from", file=sys.stderr)
         return 1
+
+    if a.tighten:
+        from ratchet import cli
+        return cli("mutation", a.root, a.src, source_head=a.from_head)
 
     if a.check:
         return check(a.root)
@@ -1131,7 +1156,7 @@ def main():
               f"tool first, so 'unmeasured' and 'not applicable' stay "
               f"different states.", file=sys.stderr)
         return 1
-    return measure(a.root, cfg, a.accept, a.reason, a.src, a.from_head)
+    return measure(a.root, cfg, a.accept, a.reason, a.src, source_head=a.from_head)
 
 
 if __name__ == "__main__":

@@ -6,9 +6,10 @@ argument-hint: [none]
 Report the state of the substrate registry, concisely. Read-only; change
 nothing.
 
-1. Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/substrate-graph.mjs" --check`.
-   If `${CLAUDE_PLUGIN_ROOT}` expands empty in your shell, locate the plugin
-   with `find ~/.claude/plugins ~/.codex/plugins/cache -type d -path '*substrate/scripts' 2>/dev/null | head -1`.
+1. Resolve `$ROOT` from `CLAUDE_PLUGIN_ROOT`, then `PLUGIN_ROOT`, or the
+   parent of this loaded command's `commands/` directory. Use that installation
+   throughout; the first recursive cache match may be an older version.
+   Run `node "$ROOT/scripts/substrate-graph.mjs" --check`.
    Add `--root <dir>` when the repos do not live under the current project
    directory.
 2. Interpret each line rather than pasting the raw output:

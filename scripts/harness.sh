@@ -152,6 +152,32 @@ compile_templates() {
   fi
 }
 
+# A shipped workflow is hand-written, not compiled, but the runtime wraps it
+# the same way: checked under the same async wrapper, or a syntax error
+# surfaces when someone runs the command rather than here.
+check_workflow() {
+  {
+    echo 'const agent=0,parallel=0,pipeline=0,log=0,phase=0,args=0,budget=0,workflow=0;(async () => {'
+    sed 's/^export const meta/const meta/' "$1"
+    echo '})()'
+  } >/tmp/fpl-workflow.mjs
+  node --check /tmp/fpl-workflow.mjs
+}
+
+check_workflows() {
+  local f n=0
+  for f in "$PLUGIN"/workflows/*.js; do
+    [ -f "$f" ] || continue
+    n=$((n + 1))
+    check_workflow "$f" || { echo "$f does not parse under the async wrapper" >&2; return 1; }
+  done
+  # A green that checked nothing is not a green.
+  if [ "$n" -lt 1 ]; then
+    echo "expected at least 1 shipped workflow under $PLUGIN/workflows, checked $n" >&2
+    return 1
+  fi
+}
+
 # Commands and agents are run as literal instructions, so a `python3` written
 # into one is reached by no shell resolver — and `python3` is absent from a
 # standard Windows install, which made every slash command a no-op there.
@@ -185,6 +211,16 @@ substrate_tests() {
 case "${1:---full}" in
   --changed)
     f="${2:?usage: harness.sh --changed <file>}"
+    # The per-edit hook passes the tool's file_path, which is absolute; every
+    # pattern below is relative to the repository root, so an absolute path
+    # matched none of them and the scoped checks never ran from the hook.
+    case "$f" in
+      /* | [A-Za-z]:[\\/]*)
+        rel="$("$FPL_PY" -c 'import os, sys
+p = os.path.relpath(os.path.abspath(sys.argv[1]), os.getcwd())
+print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
+        case "$rel" in "" | ../* | ..) : ;; *) f="$rel" ;; esac ;;
+    esac
     case "$f" in
       *.json) step "json: $f" check_json "$f" ;;
       *.sh)   step "bash -n: $f" check_sh "$f" ;;
@@ -216,6 +252,14 @@ case "${1:---full}" in
         step "counterexample ledger" bash "$PLUGIN/tests/cex-test.sh" ;;
       "$PLUGIN"/scripts/blueprint-guard.py)
         step "blueprint conformance" bash "$PLUGIN/tests/blueprint-test.sh" ;;
+      "$PLUGIN"/contracts/RedTeamV1.schema.json)
+        step "red-team severity reaches the gate" "$FPL_PY" "$PLUGIN/tests/redteam-contract-test.py" ;;
+      "$PLUGIN"/workflows/*.js)
+        step "node --check (async wrapper): $f" check_workflow "$f"
+        step "graph-audit workflow" "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py" ;;
+      # Reached only by hand: the per-edit hook skips *.md edits.
+      "$PLUGIN"/commands/graph-audit.md)
+        step "graph-audit workflow" "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py" ;;
     esac
     ;;
   --full)
@@ -237,14 +281,35 @@ case "${1:---full}" in
     step "manifests agree across runtimes" manifests_in_sync
     step "portable interpreter invocations" portable_invocations
     step "locked specification + executed requirements" "$FPL_PY" "$PLUGIN/scripts/specification.py" --run
+    step "Blaster locked requirements" "$FPL_PY" "$PLUGIN/scripts/specification.py" --spec .fluxpoint-spec.blaster.json --run
     step "templates compile + emit valid JS" compile_templates
+    step "shipped workflows parse under the async wrapper" check_workflows
+    step "graph-audit workflow: lenses, reduce, refutation (executed)" \
+      "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py"
     step "compiler invariants" "$FPL_PY" "$PLUGIN/tests/compile-test.py"
+    step "graph lanes, replay and rejudgment" "$FPL_PY" "$PLUGIN/tests/graph-replay-test.py"
+    step "journal and transcript replay provenance" "$FPL_PY" "$PLUGIN/tests/replay-memo-test.py"
+    step "carried resume arguments and evidence pins" "$FPL_PY" "$PLUGIN/tests/resume-test.py"
+    step "transitive packet inputs and repair preflight" "$FPL_PY" "$PLUGIN/tests/packet-inputs-test.py"
+    step "recurring classes force reframe" "$FPL_PY" "$PLUGIN/tests/recurring-class-test.py"
     step "agentType resolution + contract" "$FPL_PY" "$PLUGIN/tests/agenttype-test.py"
     step "proof verdict reaches the record (executed)" "$FPL_PY" "$PLUGIN/tests/proof-verdict-test.py"
+    step "red-team severity reaches the gate (executed)" "$FPL_PY" "$PLUGIN/tests/redteam-contract-test.py"
+    step "red-team multi-lens coverage" "$FPL_PY" "$PLUGIN/tests/redteam-workflow-test.py"
+    step "canonical run records and Evidence failures" "$FPL_PY" "$PLUGIN/tests/record-location-test.py"
+    step "unchecked repair commit windows" "$FPL_PY" "$PLUGIN/tests/unchecked-repairs-test.py"
+    step "repair sibling coverage and diff-scoped attack receipts" "$FPL_PY" "$PLUGIN/tests/repair-proof-test.py"
+    step "recorded authorization context" "$FPL_PY" "$PLUGIN/tests/authorization-context-test.py"
+    step "packet edit projection and prose pins" "$FPL_PY" "$PLUGIN/tests/packet-projection-test.py"
+    step "machine health observations" "$FPL_PY" "$PLUGIN/tests/box-health-test.py"
+    step "Windows machine health adapter" "$FPL_PY" "$PLUGIN/tests/box-health-windows-test.py"
+    step "versioned graph launch requirements" "$FPL_PY" "$PLUGIN/tests/launch-requirements-test.py"
+    step "bounded log regex matching" "$FPL_PY" "$PLUGIN/tests/regex-wait-test.py"
     step "emission coverage" "$FPL_PY" "$PLUGIN/tests/emission-test.py"
     step "cost model: estimate, ceiling, cache TTL (executed)" "$FPL_PY" "$PLUGIN/tests/cost-test.py"
     step "codegen injection + red-team regressions" "$FPL_PY" "$PLUGIN/tests/security-test.py"
     step "stop-gate regression" bash "$PLUGIN/tests/gate-test.sh"
+    step "gate regression scenarios" "$FPL_PY" "$PLUGIN/tests/gate-regression-test.py"
     step "hygiene scope (executed)" bash "$PLUGIN/tests/hygiene-scope-test.sh"
     step "gate-authored evidence" bash "$PLUGIN/tests/evidence-test.sh"
     step "hook wiring + PostToolUse" bash "$PLUGIN/tests/hooks-test.sh"
@@ -256,12 +321,21 @@ case "${1:---full}" in
     step "statement ratchet" bash "$PLUGIN/tests/spec-guard-test.sh"
     step "counterexample ledger (executed)" bash "$PLUGIN/tests/cex-test.sh"
     step "mutation ratchet (executed)" bash "$PLUGIN/tests/mutation-test.sh"
+    step "deterministic metrics + safe tightening (executed)" "$FPL_PY" "$PLUGIN/tests/metric-ratchet-test.py"
+    step "pinned Aiken execution metrics (executed)" "$FPL_PY" "$PLUGIN/tests/aiken-metrics-test.py"
+    step "Blaster result trust, freshness and concrete replay" "$FPL_PY" "$PLUGIN/tests/blaster-test.py"
     step "seam ratchet (executed)" bash "$PLUGIN/tests/seam-guard-test.sh"
+    step "provider recordings conformance (executed)" "$FPL_PY" "$PLUGIN/tests/recordings-test.py"
     step "guard ratchet (executed)" bash "$PLUGIN/tests/guard-guard-test.sh"
     step "on-chain budget gate" bash "$PLUGIN/tests/budget-test.sh"
     step "blueprint conformance (executed)" bash "$PLUGIN/tests/blueprint-test.sh"
     step "once-only ledger (executed)" "$FPL_PY" "$PLUGIN/tests/ledger-test.py"
     step "execution attestation (executed)" bash "$PLUGIN/tests/attest-test.sh"
+    step "retained crash attempts and reference reruns" "$FPL_PY" "$PLUGIN/tests/fault-attempts-test.py"
+    step "forge witness identity and coverage" "$FPL_PY" "$PLUGIN/tests/forge-evidence-test.py"
+    step "forge and local gate race preserves red attempts" "$FPL_PY" "$PLUGIN/tests/forge-fault-race-test.py"
+    step "shared long-command runner (executed)" "$FPL_PY" "$PLUGIN/tests/longrun-test.py"
+    step "deployed dependency resolution" "$FPL_PY" "$PLUGIN/tests/deployed-test.py"
     step "documented claims match the code" "$FPL_PY" "$PLUGIN/tests/doc-claims-test.py"
     step "prompt hygiene scanner (executed)" "$FPL_PY" "$PLUGIN/tests/prompt-audit-test.py"
     advise "prompt hygiene over agents, commands, skills, templates (advisory)" \
@@ -271,12 +345,16 @@ case "${1:---full}" in
     step "hybrid recall pipeline (executed)" "$FPL_PY" "$PLUGIN/tests/recall-test.py"
     step "embedder quarantine (executed)" "$FPL_PY" "$PLUGIN/tests/embedder-test.py"
     step "graph metrics aggregator (executed)" "$FPL_PY" "$PLUGIN/tests/metrics-test.py"
+    step "repair origin replay + resources + live tallies (executed)" "$FPL_PY" "$PLUGIN/tests/repair-origin-test.py"
+    step "slice gain calibration" "$FPL_PY" "$PLUGIN/tests/slice-calibration-test.py"
+    step "effort sweep: plan, split, score (executed)" "$FPL_PY" "$PLUGIN/tests/sweep-test.py"
     step "relation gate" bash "$PLUGIN/tests/pair-test.sh"
     step "relation gate: differential + bite + scan (executed)" bash "$PLUGIN/tests/pair-verify-test.sh"
     step "gate presence + resolver (executed)" bash "$PLUGIN/tests/gate-presence-test.sh"
     step "credential gate (executed)" bash "$PLUGIN/tests/secret-guard-test.sh"
     step "secret-handling skill shapes (executed)" "$FPL_PY" "$PLUGIN/tests/secret-handling-test.py"
     step "park layer (executed)" "$FPL_PY" "$PLUGIN/tests/park-test.py"
+    step "Workflow stall and kill observer" "$FPL_PY" "$PLUGIN/tests/watchdog-test.py"
     step "unified state + compatibility" bash "$PLUGIN/tests/unify-test.sh"
     step "interpreter resolution" bash "$PLUGIN/tests/interpreter-test.sh"
     step "outer runner + co-change base" bash "$PLUGIN/tests/loop-runner-test.sh"

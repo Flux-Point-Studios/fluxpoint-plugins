@@ -31,7 +31,11 @@ Costs above describe concrete work and risk, not measured time or price estimate
    evidence is nonempty, and a blocked decision prevents locking.
 3. `specification.py --lock` validates and hashes the packet and any existing
    proof baseline with LF line endings into `.fluxpoint-spec-lock.json`. It also
-   binds named obligations to statement hashes from spec-guard. This is a reviewable freeze,
+   binds named obligations to statement hashes from spec-guard and pins JSON
+   archives reached by complete text references. References resolve into binding
+   text before nodes receive the packet, with the source retained as `scopeRef`.
+   The lock separately records check files and optional `harnessInputs` as a
+   harness map outside the specification identity. This is a reviewable freeze,
    not an authorization grant or an adversarial security boundary. It runs no
    checks, allowing the tests to be RED before implementation.
 4. `--check` rejects absent, malformed, stale or blocked packets. `--run` also
@@ -55,7 +59,10 @@ Costs above describe concrete work and risk, not measured time or price estimate
 6. Mutating or irreversible graphs require a locked packet at compilation.
    Embed the packet in their node context and its digest in run summaries.
    Recording such a run checks the digest again. Read-only discovery can run
-   without a packet; an existing packet must still be valid.
+   without a packet; an existing packet must still be valid. Harness-only fixes
+   use `--lock-harness --gate <name>` after an attested pass for that declared
+   command at HEAD. This changes no spec identity or compiled bytes. Run records
+   and Evidence name the current harness digest and paths differing from its lock.
 7. Newly scaffolded WORK.md files declare `SPEC: .fluxpoint-spec.json`.
    The scaffolded harness requires the spec runner when this marker or either
    spec artifact exists. Existing loops without any marker remain legacy;
@@ -77,8 +84,9 @@ Costs above describe concrete work and risk, not measured time or price estimate
     Actual tree sentinels and deterministic reducers receive no packet.
     This is a stated estimate, not a measured tokenizer count or a context-limit guarantee.
     Template ceilings include packet headroom; recompute against each goal's
-    actual locked packet before launching. The consolidation, discovery and
-    starter example ceilings are 350,000, 2,500,000 and 200,000.
+    actual locked packet before launching. The starter, consolidation, discovery,
+    feature, verified and repair ceilings are 350,000, 600,000, 5,000,000,
+    2,500,000, 2,250,000 and 13,000,000 estimated tokens, respectively.
 
 ## Implementation validation
 

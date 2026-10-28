@@ -26,12 +26,15 @@ repo has.
 """
 import argparse
 import json
+import math
+import statistics
 import os
 import sys
 
 RUNS_DIR = os.path.join(".claude", "fluxpoint", "runs")
 MEMORY = os.path.join(".claude", "fluxpoint", "memory.jsonl")
 INBOX = os.path.join(".claude", "fluxpoint", "inbox.jsonl")
+SLICES_DIR = os.path.join(".claude", "fluxpoint", "slices")
 
 
 def read_runs(runs_dir):
@@ -307,6 +310,164 @@ def render(folded):
     return "\n".join(lines).rstrip()
 
 
+def read_slices(slices_dir):
+    records, findings = [], []
+    if not os.path.isdir(slices_dir):
+        return records, findings
+    for filename in sorted(os.listdir(slices_dir)):
+        if not filename.endswith(".json"):
+            continue
+        path = os.path.join(slices_dir, filename)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                records.append((filename[:-5], json.load(fh)))
+        except (OSError, ValueError) as e:
+            findings.append(f"UNREADABLE slice artifact {path}: {e}")
+    return records, findings
+
+
+def fold_calibration(records, campaign=None):
+    """Mean of each slice's unitless measured/predicted ratio, per role.
+
+    Averaging ratios lets a role's bytes and milliseconds coexist without
+    adding unlike units or letting a large numeric metric dominate. Pending
+    predictions are counted, never averaged as zero measured gains.
+    """
+    ratios, per_metric = {}, {}
+    pending = completed = 0
+    findings = []
+    for sid, row in records:
+        try:
+            if not isinstance(row, dict) or row.get("version") != 1 or row.get("sliceId") != sid:
+                raise ValueError("expected a version 1 slice artifact with matching sliceId")
+            name = row.get("campaign")
+            if not isinstance(name, str) or not name:
+                raise ValueError("campaign is missing")
+            if campaign and campaign != name:
+                continue
+            role, metric = row.get("role"), row.get("metric")
+            if not isinstance(role, str) or not role.strip() or not isinstance(metric, str) or not metric:
+                raise ValueError("role and metric must be nonempty strings")
+            predicted = row.get("predictedDelta")
+            if type(predicted) not in (int, float) or not math.isfinite(predicted) or predicted <= 0:
+                raise ValueError("predictedDelta must be finite and positive")
+            before = row.get("before")
+            direction = row.get("direction")
+            if type(before) is not int or direction not in ("down", "up"):
+                raise ValueError("invalid starting measurement or direction")
+            if row.get("status") == "STARTED":
+                pending += 1
+                continue
+            after = row.get("after")
+            if row.get("status") != "COMPLETE" or type(after) is not int:
+                raise ValueError("expected COMPLETE with an integer ending measurement")
+            measured = before - after if direction == "down" else after - before
+            if type(row.get("measuredDelta")) is not int or row["measuredDelta"] != measured:
+                raise ValueError("measuredDelta disagrees with recorded endpoints")
+            ratio = measured / predicted
+            if not math.isfinite(ratio):
+                raise ValueError("measured/predicted is not finite")
+            ratios.setdefault(role, []).append(ratio)
+            per_metric.setdefault(role, {}).setdefault(metric, []).append(ratio)
+            completed += 1
+        except (TypeError, ValueError, OverflowError) as e:
+            findings.append(f"MALFORMED slice artifact {sid}: {e} — excluded from calibration")
+    roles = {}
+    for role, values in sorted(ratios.items()):
+        roles[role] = dict(slices=len(values), meanRatio=statistics.mean(values), metrics={
+            metric: dict(slices=len(samples), meanRatio=statistics.mean(samples))
+            for metric, samples in sorted(per_metric[role].items())})
+    return dict(roles=roles, completedSlices=completed, pendingSlices=pending), findings
+
+
+def render_calibration(calibration):
+    lines = []
+    for role, data in sorted(calibration["roles"].items()):
+        lines.append(f"gain calibration: {role}: measured/predicted {data['meanRatio']:.2f}x "
+                     f"(mean across {data['slices']} completed slice(s))")
+        for metric, sample in sorted(data["metrics"].items()):
+            lines.append(f"  {metric}: {sample['meanRatio']:.2f}x across {sample['slices']} slice(s)")
+    if calibration["pendingSlices"]:
+        lines.append(f"gain calibration: {calibration['pendingSlices']} started slice(s) await "
+                     "ending measurements; excluded from ratios")
+    return "\n".join(lines)
+
+
+
+FIX_ORIGIN_NAMES = ("pre-existing", "incomplete-fix", "fix-introduced", "cross-slice", "spec-text")
+
+
+def fold_fix_origins(runs, campaign=None):
+    """Count observed findings per check, not unique bugs inferred from prose."""
+    reports, findings = [], []
+    for run_id, artifact in runs:
+        summary = artifact.get("summary") or {}
+        name = str(summary.get("campaign") or "<unnamed>")
+        if campaign and campaign != name or "fixOrigins" not in summary:
+            continue
+        rows = summary["fixOrigins"]
+        if not isinstance(rows, list):
+            findings.append(f"MALFORMED fixOrigins for run {run_id}: expected per-check array")
+            continue
+        total = {key: 0 for key in FIX_ORIGIN_NAMES}
+        rounds, invalid, seen = [], 0, set()
+        for index, row in enumerate(rows):
+            try:
+                if not isinstance(row, dict) or any(not isinstance(row.get(k), str) or not row[k]
+                                                   for k in ("node", "item")):
+                    raise ValueError("missing checker/item identity")
+                if type(row.get("round")) is not int or row["round"] < 1:
+                    raise ValueError("round must be a positive integer")
+                identity = (row["node"], row["item"], row["round"])
+                if identity in seen:
+                    raise ValueError("duplicate checker/item/round tally")
+                origins = row.get("origins")
+                if not isinstance(origins, dict) or set(origins) != set(FIX_ORIGIN_NAMES):
+                    raise ValueError("each origin category must be recorded explicitly")
+                if any(type(count) is not int or count < 0 for count in origins.values()):
+                    raise ValueError("origin counts must be nonnegative integers")
+                observed = {key: 0 for key in FIX_ORIGIN_NAMES}
+                if not isinstance(row.get("findings"), list):
+                    raise ValueError("findings must preserve the checked observations")
+                for finding in row["findings"]:
+                    if not isinstance(finding, dict) or finding.get("origin") not in observed:
+                        raise ValueError("finding has no known replay origin")
+                    observed[finding["origin"]] += 1
+                if observed != origins:
+                    raise ValueError("origin tally disagrees with preserved findings")
+                seen.add(identity)
+                count = sum(origins.values())
+                rounds.append(dict(node=row["node"], item=row["item"], round=row["round"],
+                                   origins=origins, findings=count,
+                                   fixIntroducedShare=origins["fix-introduced"] / count if count else None))
+                for key, value in origins.items():
+                    total[key] += value
+            except (ValueError, TypeError) as exc:
+                invalid += 1
+                findings.append(f"MALFORMED fixOrigins {run_id}[{index}]: {exc} — excluded")
+        count = sum(total.values())
+        reports.append(dict(runId=run_id, campaign=name, origins=total, rounds=rounds,
+                            findings=count, invalidRounds=invalid,
+                            fixIntroducedShare=total["fix-introduced"] / count if count else None))
+    return reports, findings
+
+
+def render_fix_origins(reports):
+    lines = []
+    for report in reports:
+        origins = report["origins"]
+        lines.append(f"repair origins: run {report['runId']}: fix-introduced "
+                     f"{origins['fix-introduced']}/{report['findings']} "
+                     f"({pct(origins['fix-introduced'], report['findings'])}) finding observations")
+        for row in report["rounds"]:
+            lines.append(f"  {row['node']} / {row['item']} round {row['round']}: fix-introduced "
+                         f"{row['origins']['fix-introduced']}/{row['findings']} "
+                         f"({pct(row['origins']['fix-introduced'], row['findings'])}); "
+                         + ", ".join(f"{key} {row['origins'][key]}" for key in FIX_ORIGIN_NAMES))
+        if report["invalidRounds"]:
+            lines.append(f"  {report['invalidRounds']} invalid round tally/tallies excluded; overall coverage is incomplete")
+    return "\n".join(lines)
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -326,13 +487,18 @@ def main():
 
     folded, ffold = fold(runs, lessons, inbox_rows)
     findings += ffold
+    slices, slice_findings = read_slices(os.path.join(args.root, SLICES_DIR))
+    calibration, calibration_findings = fold_calibration(slices, args.campaign)
+    findings += slice_findings + calibration_findings
+    origin_reports, origin_findings = fold_fix_origins(runs, args.campaign)
+    findings += origin_findings
     for f in findings:
         print(f"metrics: {f}", file=sys.stderr)
     if args.campaign:
         folded = {k: v for k, v in folded.items() if k == args.campaign}
 
     if args.as_json:
-        json.dump({"campaigns": folded, "findings": findings}, sys.stdout,
+        json.dump({"campaigns": folded, "gainCalibration": calibration, "fixOrigins": origin_reports, "findings": findings}, sys.stdout,
                   indent=2, sort_keys=True)
         print()
     elif not folded:
@@ -340,6 +506,10 @@ def main():
                                              if args.campaign else ""))
     else:
         print(render(folded))
+    if not args.as_json and (calibration["roles"] or calibration["pendingSlices"]):
+        print(render_calibration(calibration))
+    if not args.as_json and origin_reports:
+        print(render_fix_origins(origin_reports))
     return 0
 
 

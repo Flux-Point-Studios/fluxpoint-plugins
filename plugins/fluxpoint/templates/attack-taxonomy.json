@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "The known attack classes, one taxonomy per language, each class the name of a test this repo must carry. /fluxpoint:init copies this file to .fluxpoint-attacks.json; spec-guard.py --check is then red for every class with neither a test of that name nor a waiver in its own taxonomy carrying a reason of at least 20 characters. A waiver is scoped to the taxonomy it sits in, so excusing a class on one side of the chain leaves the same id on the other side still owed. A taxonomy whose language the repo does not carry gates nothing, so a validator-only repo answers for the eUTxO classes alone and a builder-only repo for the off-chain ones alone. The single-taxonomy shape that shipped in 1.38.0, with language, classes and waived at the top level, is still read as one taxonomy.",
+  "note": "The known attack classes, one taxonomy per language, each class the name of a test this repo must carry. /fluxpoint:init copies this file to .fluxpoint-attacks.json; spec-guard.py --check is then red for every class with neither a test of that name nor a waiver in its own taxonomy carrying a reason of at least 20 characters. A waiver is scoped to the taxonomy it sits in, so excusing a class on one side of the chain leaves the same id on the other side still owed. A taxonomy whose language the repo does not carry gates nothing, so a validator-only repo answers for the eUTxO classes alone and a builder-only repo for the off-chain ones alone. A language the repo does carry with no taxonomy here is the opposite case, and is named NO TAXONOMY with the classes this template holds for it: a note, or a failure once the manifest sets \"requireAllLanguages\": true. To gate only some halves on purpose, list them in \"languages\", for example [\"typescript\"]; a tracked language left out of that list is printed as excluded by declaration and never fails, and a taxonomy the manifest carries still gates whether or not the list names it. The single-taxonomy shape that shipped in 1.38.0, with language, classes and waived at the top level, is still read as one taxonomy.",
   "taxonomies": [
     {
       "language": "aiken",
@@ -102,6 +102,73 @@
           "applies": "build",
           "property": "Collateral is capped: for any transaction with a script input, the total collateral selected stays inside the ceiling computed from the fee and the collateral percentage, and a collateral return output carries the remainder. A failing script forfeits every collateral input whole, so selection with no ceiling burns the entire UTxO it happened to pick.",
           "fuzz": "wallets whose largest UTxO exceeds the required collateral by orders of magnitude, fees from the minimum to the block limit, and collateral percentages from every recent protocol parameter set"
+        },
+        {
+          "id": "attack_fee_below_ledger_minimum",
+          "applies": "build",
+          "property": "Every transaction the builder signs pays at least the ledger minimum under the current protocol parameters: calculate the encoded transaction size with its script integrity hash and final witnesses, execution-unit fees, and the tiered reference-script fee over every reference script carried by its inputs and reference inputs. Validate the fee calculation to the lovelace against landed transactions, comparing encoded size, fee and reference scripts from Koios tx_info or an equivalent ledger source.",
+          "fuzz": "transactions at and one byte past size and reference-script tier boundaries, missing script-integrity-hash bytes in fee estimates, multiple reference scripts on spent and reference inputs, witness-count changes, and fees one lovelace below the recomputed minimum"
+        },
+        {
+          "id": "attack_script_purpose_without_witness",
+          "applies": "build",
+          "property": "Every script purpose in the body, including spend, mint, withdrawal and certificate purposes, has the matching script in the witness set or on a reference input the body names. Phase-2 evaluation success does not establish that the actual submitted witness set is complete.",
+          "fuzz": "bodies with one purpose's witness removed, a zero withdrawal from a script credential, a missing observer or certificate script, a reference input without script bytes, and a script whose hash or language differs from the purpose"
+        },
+        {
+          "id": "attack_missing_collateral",
+          "applies": "build",
+          "property": "Every body with any Plutus purpose carries eligible collateral inputs within the current protocol's input-count and collateral-percentage limits, with total collateral accounted for and a valid collateral return for any excess. The hosted caller must supply collateral even when script evaluation succeeds.",
+          "fuzz": "Plutus spend, mint and zero-withdrawal bodies with no collateral, a hosted caller omitting its settler wallet, insufficient or ineligible collateral, too many collateral inputs, and missing or invalid excess collateral returns"
+        },
+        {
+          "id": "attack_batch_shares_inputs",
+          "applies": "submit",
+          "property": "Bodies produced in one builder pass spend pairwise-disjoint inputs, including fee inputs, or explicitly chain each predecessor's change into the next body and submit in dependency order. Run the batch against a mempool fake that refuses a double spend: every independent body must remain admissible after earlier bodies are accepted.",
+          "fuzz": "batches of one to many settlements using one settler wallet, repeated spent fee inputs, collateral reserved by another pending body, concurrent builds from the same UTxO snapshot, and chained bodies submitted both in and out of dependency order"
+        }
+      ],
+      "waived": {}
+    },
+    {
+      "language": "python",
+      "note": "Hosted services reading hostile provider data and sharing process resources. A tracked Python test file is test_*.py, *_test.py, or any .py under test/, tests/ or __tests__/. A pytest test function (def or async def whose name starts test_ and contains the class id) specifies a class. Files importing hypothesis are noted as properties; other matches are examples. Naming an import alone does not prove the test exercises a generator; review its assertions and bounds.",
+      "classes": [
+        {
+          "id": "attack_outsider_row_decode",
+          "applies": "decode",
+          "property": "Every provider row at an address outsiders can pay to is decoded item by item within documented byte, nesting and work bounds. A malformed or unsupported row is contained to that item and cannot crash the route or corrupt an honest row.",
+          "fuzz": "Byron-era outputs, reference scripts with bytes and with bytes null or absent, deep timelocks, and CBOR or JSON at and beyond each documented depth or size bound"
+        },
+        {
+          "id": "attack_whole_read_fail_closed",
+          "applies": "read",
+          "property": "Mixing N stranger outputs into an honest wallet or vault never makes the honest read refuse. Unsupported outsider items are isolated while valid controlled outputs remain readable; unknown items never become trusted funds.",
+          "fuzz": "honest wallets and vaults with zero to many unrelated outputs interleaved in every page and order, malformed rows among valid rows, and one hostile row at each pagination boundary"
+        },
+        {
+          "id": "attack_unbounded_literal",
+          "applies": "decode",
+          "property": "Over-long literals and over-deep nesting are refused per item within stated bounds, without failing an entire provider answer or escaping the route's controlled error handling.",
+          "fuzz": "JSON integer literals at and beyond CPython's conversion limit (including more than 4300 digits), huge strings, duplicate keys, and JSON and CBOR at the nesting limit and one level beyond it"
+        },
+        {
+          "id": "attack_read_amplification",
+          "applies": "request",
+          "property": "Provider requests per unauthenticated request stay within a documented bound as stranger rows grow. A process-wide budget also bounds the sustained provider rate over a documented time window across concurrent requests; a per-request cap alone is insufficient.",
+          "fuzz": "stranger-row and page counts at and one past each documented limit, repeated and concurrent unauthenticated requests across routes, slow providers, and retries across process-wide budget window boundaries"
+        },
+        {
+          "id": "attack_event_loop_block",
+          "applies": "async",
+          "property": "No async route performs synchronous work growing with outsider input on the event loop. Probe every async route with a slow synchronous dependency and hostile row growth; independent event-loop work must remain responsive within a documented bound.",
+          "fuzz": "every async route with a slow synchronous provider, nested-script hashing, CBOR decoding, or cache miss; increasing outsider rows; and a concurrent heartbeat or unrelated request"
+        },
+        {
+          "id": "attack_shared_pool_exhaustion",
+          "applies": "request",
+          "property": "The service names and bounds its shared threadpool tokens, caches and single-writer stores such as sqlite. Flooding one route cannot exhaust resources needed by the others; unrelated routes continue serving within documented admission and latency bounds.",
+          "fuzz": "request floods at and past threadpool capacity, distinct script keys at and past cache capacity, sqlite writer contention, cancellations while holding resources, and simultaneous requests to unrelated routes"
         }
       ],
       "waived": {}

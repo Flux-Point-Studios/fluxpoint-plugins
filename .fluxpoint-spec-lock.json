@@ -1,5 +1,24 @@
 {
   "version": 1,
-  "sha256": "b82d61826e53e854e0f49f5ac3bcb6b895847597f8624c2984672aec0d92b5e4",
-  "proofBaselineSha256": null
+  "sha256": "6faed73b1bd10cd8b53bfc18ce44d28c7da9aff0fbdf3c474a4febf52edb893c",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/attest-test.sh": "4207fdd9fed821c821b7c2cce8d1b36dd91c22edaeec1272f547a5b9d07ab75d",
+    "plugins/fluxpoint/tests/audit-workflow-test.py": "68b6c46a934f03358a9ac422f45f51c0e53f8a8072d9900a0b51406347e1a4d9",
+    "plugins/fluxpoint/tests/compile-test.py": "649aded6c41be6f06899cc0678a708e095b4e3bcb2e539c75d04ab3ce6de9311",
+    "plugins/fluxpoint/tests/cost-test.py": "b8f3c04e833d2c754bf4f5ced2f34cc6547035f1f70cff76330bb5081449f04c",
+    "plugins/fluxpoint/tests/emission-test.py": "f4ae4ffe7ce61e62e024a72e3160056b8a5c3d1dca63248ed45a0ff8f1980ffb",
+    "plugins/fluxpoint/tests/fault-attempts-test.py": "5bb7047179662ad1c0304f15627f2fa851f5fb090aa5c90d747ad11d1a69511a",
+    "plugins/fluxpoint/tests/forge-evidence-test.py": "b7561bafa2e331e10016ad3b82bce327f4154f1531153b0a999123b96f82cc30",
+    "plugins/fluxpoint/tests/forge-fault-race-test.py": "5c6c351c1f5c3cef198427aed2be9f5d010e3da1813e4d342d4b1c8c65c92fe9",
+    "plugins/fluxpoint/tests/graph-replay-test.py": "84793be771b29a7933eab2b8672db9450a0336e90e2c1d83a96836badb1db37d",
+    "plugins/fluxpoint/tests/packet-inputs-test.py": "b1f86e5b5d3a4eb14e110716ff6c13c87b70f899c5400564b6ca7e0c1f00d5a0",
+    "plugins/fluxpoint/tests/proof-verdict-test.py": "9e79a7c52c45c591dcb2d9d99e3973d12f783b04ffae5b776dbcd917c95c570f",
+    "plugins/fluxpoint/tests/repair-proof-test.py": "f8ee128517a7e5a5030b33ee099bc8070bcc8de159cbb3a80e1646bbda228ffe",
+    "plugins/fluxpoint/tests/repair_proof_fixture.py": "4f92f24d3c1b606e50704691479b459df6c599aea77be9064b4ec18e79d7f94d",
+    "plugins/fluxpoint/tests/replay-memo-test.py": "407c8f5fe378a09ba8dcf7cffc7cbd599e575a30e8f6b9d5f70bf470b28d41fb",
+    "plugins/fluxpoint/tests/resume-test.py": "90e2b7d318df25fc4ddd69059ced57b2a97c8bc8f6c83e78d1318c1f4267268e",
+    "plugins/fluxpoint/tests/specification-test.py": "6f2909ce134e399e3301da8f09d2bb92bda2bd5152264516bc445b1bca185d65",
+    "plugins/fluxpoint/tests/unchecked-repairs-test.py": "89d85457aeac2c0acaf7be46003115166a7c02ff39bf79f8653a919219ddc589"
+  }
 }

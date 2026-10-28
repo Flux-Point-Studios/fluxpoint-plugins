@@ -1,0 +1,44 @@
+{
+  "seed": 1,
+  "summary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "kind": {
+      "unit": 1,
+      "property": 1
+    }
+  },
+  "modules": [
+    {
+      "name": "cost",
+      "summary": {
+        "total": 2,
+        "passed": 2,
+        "failed": 0,
+        "kind": {
+          "unit": 1,
+          "property": 1
+        }
+      },
+      "tests": [
+        {
+          "title": "unit_twice",
+          "status": "pass",
+          "on_failure": "fail_immediately",
+          "execution_units": {
+            "mem": 200,
+            "cpu": 16100
+          }
+        },
+        {
+          "title": "property_twice",
+          "status": "pass",
+          "on_failure": "fail_immediately",
+          "iterations": 100,
+          "counterexample": null
+        }
+      ]
+    }
+  ]
+}

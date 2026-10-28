@@ -18,27 +18,21 @@ if [ "$#" -lt 1 ]; then
   exit 64
 fi
 
-if [ -z "${FPL_PY:-}" ]; then
-  # Probe each candidate by RUNNING it, rather than asking whether the name
-  # exists. Windows ships a `python3` App Execution Alias that is on PATH by
-  # default on a machine with no python3 at all: it satisfies `command -v`,
-  # then prints "Python was not found" and exits 49 for every argument.
-  for _fpl_cand in python3 python; do
-    if command -v "$_fpl_cand" >/dev/null 2>&1 &&
-       "$_fpl_cand" -c "import sys" >/dev/null 2>&1; then
-      FPL_PY="$_fpl_cand"
-      break
-    fi
-  done
-  unset _fpl_cand
-  if [ -z "${FPL_PY:-}" ]; then
-    echo "fluxpoint: no working python interpreter on PATH" >&2
-    exit 127
+here="${BASH_SOURCE[0]%/*}"
+. "$here/python-env.sh"
+# The bash this runs under, for a script that has to start one (attest.py
+# --run). On Windows a bare "bash" resolves through System32 first, which is
+# WSL's where it is installed, not the Git Bash every hook runs in.
+if [ "$1" = attest.py ] && [ -z "${FPL_BASH:-}" ] && [ -n "${BASH:-}" ]; then
+  if command -v cygpath >/dev/null 2>&1; then
+    FPL_BASH="$(cygpath -w "$BASH" 2>/dev/null || printf '%s' "$BASH")"
+  else
+    FPL_BASH="$BASH"
   fi
+  export FPL_BASH
 fi
-export PYTHONIOENCODING=utf-8
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 target="$here/$1"
 if [ ! -f "$target" ]; then
   echo "fluxpoint: no such script: $1" >&2

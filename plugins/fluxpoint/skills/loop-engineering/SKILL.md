@@ -25,6 +25,13 @@ folds it in. When the work stops being one zone with one contract and
 serial evidence, escalate per the graph-engineering skill instead of
 growing the loop.
 
+Completion certifies the scope in that file. A green merge campaign does not
+certify a deployment's field behavior. Keep deployment observation, flag
+retirement and rollback in a separate project-specific campaign whose
+Definition of Done names the deployed identity, check and observation window;
+leave it open until the observation passes or a rollback is recorded. The
+shared state vocabulary stays unchanged (design decision #105).
+
 ## Choosing the driver
 
 - **`/goal <condition>`** — the default for interactive work with a
@@ -76,13 +83,25 @@ touches at most 15 files, or stop after 30 turns and report gaps."
 
 ## Working with the DoD gate
 
-The Stop hook blocks stops while `scripts/harness.sh --full` or the hygiene
-scan is red, up to FPL_MAX_BLOCKS (default 3) consecutive times, then
+The Stop hook blocks stops while its configured harness invocation (`--full`
+unless `FPL_HARNESS_ARGS` says otherwise) or the hygiene scan is red, up to FPL_MAX_BLOCKS (default 3) consecutive times, then
 yields with a checkpoint notice. The correct responses, in order: fix what
 is red; never weaken the harness, delete tests, or edit WORK.md's
 Definition of Done to reach green; on the third block, write a checkpoint —
 what failed, what was attempted, two alternative paths — and hand control
 back to the user.
+
+`FPL_HARNESS_ARGS` chooses a gate-sized contract when `--full` exceeds the
+hook budget; keep `--full` in CI. Explicit process environment wins, then the
+resolved repo's `.claude/settings.local.json` and `.claude/settings.json`
+`env` entries. SessionStart reports the actual invocation.
+`FPL_GATE_TIMEOUT` defaults to 540 seconds and is capped at 570 to leave room
+within the 600-second hook ceiling. `FPL_MAX_BLOCKS` defaults to 3.
+
+Gate evidence defaults to the ignored local `.claude/fluxpoint/evidence.jsonl`
+and is shown at SessionStart. `FPL_GATE_EVIDENCE=work` retains shared work-file
+rows and announces the uncommitted write; `off` disables evidence recording.
+The gate reuses a pass only for the same complete tree and invocation.
 
 ## The ship pipeline
 
@@ -233,9 +252,15 @@ Record a real choice with `scripts/decision.py --record`, which validates
 against `DecisionV1` before writing: at least two options, each with the
 best case against it (including against the one that won — an option nobody
 argued against was not examined), and a rationale long enough that a lazy
-sentence cannot satisfy it. The row lands in the Decisions table, which
-SessionStart injects into every future context and the graph compiler can
-bind into a later campaign. If a slice genuinely decided nothing, say so:
+sentence cannot satisfy it. The whole record — question, every option
+with its objection, evidence — is kept in `.claude/fluxpoint/decisions.jsonl`,
+and a row indexing it lands in the Decisions table, which SessionStart
+injects into every future context. The row's cells are cut to fit; a cut
+row points at `decision.py --show <id>`, which prints the record whole, and
+a later campaign's `imports` bind the record itself, not the row. Give an
+operator's ruling an `--id` and paste their words into `evidence` verbatim:
+the condition that decides a ruling is usually the part a cell cuts. If a
+slice genuinely decided nothing, say so:
 `decision.py --none "<why>" --session <id>` makes silence a statement
 rather than an absence.
 

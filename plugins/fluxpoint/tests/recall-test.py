@@ -17,6 +17,7 @@ out. The invariants worth pinning, in order of blast radius:
     say what they are; none of them errors, and none is silent.
 """
 import io
+import datetime
 import json
 import os
 import shutil
@@ -31,6 +32,11 @@ sys.path.insert(0, SCRIPTS)
 import recall  # noqa: E402
 import embedder  # noqa: E402
 import memory as memory_mod  # noqa: E402
+
+# Retrieval deliberately decays lesson scores with age. These fixtures date
+# from August 2026; using the wall clock makes unrelated decisions overtake
+# their lessons months later and invalidates the ranking assertions below.
+recall._now = lambda: datetime.datetime(2026, 8, 11, tzinfo=datetime.timezone.utc)
 
 passed = failed = 0
 

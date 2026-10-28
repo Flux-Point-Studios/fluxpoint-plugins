@@ -14,8 +14,9 @@ reviewed, the findings table), with `haltWhen: "verdict == 'WEAKENED'"`
 making WEAKENED harness-red structurally and `record-run.py` filing the
 verdict into the Evidence row. This command is the same audit run by hand.
 
-Resolve the plugin root: `${CLAUDE_PLUGIN_ROOT}`, else
-`find ~/.claude/plugins ~/.codex/plugins/cache -type d -name fluxpoint 2>/dev/null | head -1`. Call it `$ROOT`.
+Resolve the plugin root: `CLAUDE_PLUGIN_ROOT`, then `PLUGIN_ROOT`, or the parent of this loaded
+command's `commands/` directory. Call it `$ROOT`; use that same installation
+for all scripts and agents below.
 
 1. **Mechanical pass — both ratchets.**
    `bash "$ROOT/scripts/py.sh" proof-guard.py --scan` to see the current escape
@@ -32,7 +33,9 @@ Resolve the plugin root: `${CLAUDE_PLUGIN_ROOT}`, else
    narrowed fuzzer. None of those move a hatch count, and every checker
    still exits 0. It covers Aiken, Dafny, Lean, Coq, Isabelle, TLA+ (with
    the invariants a TLC `.cfg` names) and Kani; read the `NOT COVERED`
-   lines for anything else, because that surface is the auditor's alone.
+   lines for anything else, and the `NO TAXONOMY` and `excluded by
+   declaration` lines for a tracked language whose attack classes no
+   taxonomy gates, because that surface is the auditor's alone.
    Read the rest of its output as ground already covered: a DoD line
    whose `— proof:` obligation is missing, an attack class in
    `.fluxpoint-attacks.json` with no test, and an `AXIOM AUDIT` line —

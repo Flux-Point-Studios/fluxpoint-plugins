@@ -59,17 +59,31 @@ test("duplicate ids, dangling consumes, unreadable manifests -> problems and emi
   const res = run(["--emit", "--root", ws]);
   assert.equal(res.status, 1, "emit exits 1 on manifest problems");
   has(res.stderr, "problem: unreadable manifest: bad/substrate.json");
-  has(res.stderr, "problem: duplicate primitive id: dup (r1 and r2)");
+  has(res.stderr, "problem: duplicate primitive id: dup (r1/substrate.json and r2/substrate.json)");
   has(res.stderr, "problem: unknown consumes target: x -> ghost");
   // the file is still written even when problems exist
   const md = fs.readFileSync(path.join(ws, "SUBSTRATE.md"), "utf8");
   has(md, "### Manifest problems");
-  has(md, "- duplicate primitive id: dup (r1 and r2)");
+  has(md, "- duplicate primitive id: dup (r1/substrate.json and r2/substrate.json)");
 
   const check = run(["--check", "--root", ws]);
   assert.equal(check.status, 0, "--check always exits 0, even with problems");
-  has(check.stdout, "PROBLEM: duplicate primitive id: dup (r1 and r2)");
+  has(check.stdout, "PROBLEM: duplicate primitive id: dup (r1/substrate.json and r2/substrate.json)");
   has(check.stdout, "PROBLEM: unknown consumes target: x -> ghost");
+});
+
+test("every primitive schema diagnostic identifies the manifest file despite a different repo label", () => {
+  const ws = makeWorkspace();
+  writeManifest(ws, "bad-list-dir", { repo: "label", primitives: {} });
+  writeManifest(ws, "bad-primitives-dir", { repo: "other-label", primitives: [
+    {}, prim("bad-kind", { kind: false }), prim("bad-terminal", { terminal: "yes" }),
+  ] });
+  const res = run(["--emit", "--root", ws]);
+  assert.equal(res.status, 1);
+  has(res.stderr, 'invalid manifest: bad-list-dir/substrate.json field "primitives" is not an array');
+  has(res.stderr, 'invalid primitive in bad-primitives-dir/substrate.json: each needs a string "id"');
+  has(res.stderr, 'invalid primitive bad-kind in bad-primitives-dir/substrate.json: kind/status/desc');
+  has(res.stderr, 'invalid primitive bad-terminal in bad-primitives-dir/substrate.json: "terminal" must be a boolean');
 });
 
 test("orphan and hub math: in-degree ordering in the compact summary", () => {

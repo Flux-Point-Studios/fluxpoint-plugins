@@ -65,9 +65,67 @@ array (a verified sweep, a fan-out, another reduce) is rejected — consume
 `{{prev}}` whole or reduce it first.
 
 Durable coordination rides on the executor: every run has a `runId`,
-`journal.jsonl` records each node's actual return, resume replays the
-longest unchanged prefix, and `record-run.py` writes the provenance
-artifact and the Evidence row.
+`journal.jsonl` records each node's actual return, and `record-run.py`
+writes the provenance artifact and the Evidence row. The runtime replays
+an unchanged call prefix; opt-in node replay below adds independent,
+ancestor-bound reuse after that prefix ends.
+
+## Independent lanes, replay and rejudging
+
+Declare `lane: "engine"` or `lane: "publisher"` on independent chains to
+start their bodies concurrently. Nodes inside one lane retain declaration
+order. A lane-free node joins the active lanes; irreversible nodes must be
+lane-free, and their independent `prove:` guard must be an actual `after`
+ancestor. An earlier guard in a sibling lane cannot authorize an effect.
+Use `after: ["gate-engine", "gate-publisher"]` for a consumer that needs both
+results, and consume each explicitly with `{{prev.gate-engine}}` or a
+contract field such as `{{prev.gate-publisher.exit}}`. Every listed edge is
+validated. Keep a repair loop's fixer, checker and integration nodes in the
+same lane. A halted lane stops new spawns in every lane; already running
+calls finish and are recorded before the single final outcome is returned.
+
+Every mutating lane node declares `pushes: "repository#branch"`. Lanes may
+not push the same declared repository/branch. Use one consistent repository
+identity for a shared remote; aliases are not separate write destinations.
+Lanes require the tree guard. It reads before each gate, at forks and joins,
+and at campaign end. Guards after the first fork include the launcher's
+fresh `_replayLaunchNonce`, so the Workflow call-index cache cannot replay
+an old reading. In-flight calls reserve their token floors atomically.
+
+Replay is opt-in: `replay: "inputs"` on a scalar builder, and `replay:
+"tree"` on a scalar independent gate. The gate declares `repository` and
+`branch`; it receives a fresh fixed-command sentinel's exact tip, must check
+out that commit and return it as `sha`. A missing or different `sha` halts.
+A builder replays only when its branch's live reading equals the reading
+at its recorded verifying gate. No worker-reported head admits a replay.
+Every `after` ancestor must itself have replayed in this launch. A live
+ancestor forces its descendants live, including joined consumers. Loops,
+fan-outs, councils, red-team and irreversible effects use their existing
+execution paths rather than node memo replay. `fresh: true` forces a live
+call for exchange, chain, CI and clock readings.
+
+The launcher alone loads `_memo` and fingerprinted `_prefix` entries from
+completed journal calls, transcripts and the recorded compiler receipts.
+Never hand-write either map. SHA-256 keys bind the complete resolved prompt,
+options, immutable launch stamp, gate reading and ordered ancestor keys;
+record-run independently corroborates replay provenance before appending
+Evidence. `REPLAYED-MEMO runId/agentId` names the original execution.
+
+For an explicit gate-only rerun, supply public args
+`rejudge: {"gate-engine": {"nonce": "review-2", "reason": "why the prior judgment needs review", "note": "optional gate-specific context"}}`.
+Only that gate and its preceding sentinel receive the nonce and note.
+Reasons remain record metadata, and the old verdict remains recorded.
+Whole-argument prompt tokens exclude rejudge metadata and internal launcher
+state. Unknown or unreached gates refuse the launch plan.
+
+Before resuming, run `compile-graph.py --plan WORK.md --resume RUN --args
+args.json --gates-root .`. It renders the exact generated program locally
+with verified prior results, using Node.js and no agents or network reads.
+Each node is `prefix`, `memo if the live read matches`, or `live`, with its
+cause and recorded cost (unknown values are explicit). A conditional memo
+prediction is checked against a real fresh reading during the launch.
+Graphs without these declarations or rejudge args keep their existing
+serial script and runtime keys.
 
 ## The IR is the source of truth
 
@@ -121,7 +179,36 @@ compiler rejects, at compile time:
   `foreach`/`repeat`
 
 Those are structural. `/fluxpoint:graph-audit` judges what is left:
-scoping, tier-vs-stakes, prompt quality.
+scoping, tier-vs-stakes, prompt quality. It runs as a shipped workflow
+(`workflows/graph-audit.js`): six lens-scoped auditors, a reduce that merges
+their duplicates, and verifiers told to refute each finding, three per
+finding at HIGH and above. One auditor per round read as convergence when
+it was one reader running out of path, so SOUND now means every lens
+returned and nothing survived refutation. Rounds persist under
+`.claude/fluxpoint/audits/`, and what earlier rounds fixed or refuted is
+passed back as a settled list so a round does not relitigate it. `--quick`
+keeps the single auditor for checks between repairs; it never makes a
+graph READY.
+
+Before the lenses, every `isolation: true`, `isolation: 'worktree'` or
+`mutates: true` node gets an isolated probe that tries each command its
+prompt prescribes, and SOUND needs every probe complete. The probe's own
+grammar covers Git reads and a few read-only shell words. A node that runs
+a script declares how each such command is probed, in a `probe` object
+beside its prompt: `read-only` runs the exact command, `shape` runs a
+reviewed `--help` form placed before any `--` or child program, and a
+`template` names the concrete commands behind an illustrative
+`git -C <dir> ...`. `compile-graph.py --check` runs the same grammar, so an
+undeclared script command or a refused declaration shows before a round is
+bought; it reads an `{{A.x}}` it cannot resolve as the word `A.x`, so the
+audit, with the real arguments, has the last word. A shape-only receipt proves the isolation hook admits the
+command's executable, cwd and argv prefix, and the graph's attested gates
+prove what the command does. The grammar refuses known hazards (`-h`,
+inline-code interpreter options, launchers such as `docker` or `npx`,
+writers declared read-only), but a declaration stays the author's
+assertion, and the probe runs it before any lens reads the IR, so review
+the IR diff first. `commands/graph-audit.md` holds the rules and an
+example declaration.
 
 ## Work nobody on the graph can do
 
@@ -251,7 +338,16 @@ campaign a wrong answer rather than an error:
   campaign end. Mutators run in worktrees and measurers in snapshots, so
   the shared tree must be IDENTICAL at every checkpoint: any drift halts
   the campaign as `TREE-MOVED` with the dirt named, instead of advancing
-  verdicts about a tree that is gone. The record rides out in the summary
+  verdicts about a tree that is gone. The plugin's own writes are left out
+  of the comparison: the state file (`WORK.md`, `LOOP.md`, the graph file
+  itself), where the Stop hook appends its Evidence row whenever the
+  orchestrator ends a turn, and everything under `.claude/`. The sentinel
+  is an `agent()` call, so a resume replays its first reading rather than
+  taking one; the launcher's fresh reading in `args._base` (HEAD and
+  porcelain, taken at every launch by `/fluxpoint:graph-run`) is compared
+  against it, and a resume on a tree that moved since the run it replays
+  halts `TREE-MOVED` at launch instead of handing back cached verdicts about
+  the old tree. The record rides out in the summary
   as `tree`. `treeGuard: false` in the IR turns it off, on the record.
 
 **Prove the harness in a worktree before you trust a `mutates` node.** Green
@@ -300,6 +396,17 @@ the one that matters:
 3. The gate must be *ordered before* the effect. The compiler requires an
    earlier `independent` node with a `haltWhen`, because a verifier that
    runs afterwards cannot un-mint an NFT.
+
+   `haltWhen` compares one top-level field to a literal; it cannot reach
+   into an array. A contract whose deciding fact lives only inside a list
+   needs a top-level field bound to that list, or the gate reads the wrong
+   thing. `RedTeamV1` carries one: `worstSeverity` and `worstSeverityRank`
+   are bound to `findings[]` and to the verdict, and SHIP over a HIGH or
+   CRITICAL finding is refused by the contract, re-derived by the compiled
+   graph in code (a halt, before the next node), and re-derived again by
+   `record-run.py` (`BLOCKED-REDTEAM`). So `verdict == 'BLOCK'` already
+   stops every HIGH and CRITICAL; halt on `worstSeverityRank >= 2` to stop
+   on a MEDIUM as well.
 
 Two limits, stated rather than papered over. The sandbox running the
 compiled graph has no filesystem, so the ledger row is written from the run
@@ -360,6 +467,55 @@ report clean when its own verification says its exit codes are not what
 happened. A `prove:` node citing nothing is `INCOMPLETE` instead: the
 declared verification did not run, which is not the same accusation.
 
+A citation is also bound to the run that cites it. The compiled graph
+refuses to start without the launch stamp `/fluxpoint:graph-run` passes in
+`args._launch` (`attest.py --stamp`: a `since` and a run nonce), tells each
+`prove:` node to run its gate as `FPL_ATTEST_NONCE=<nonce> <command>`, and
+carries the stamp into the summary. A cited row minted before `since`, by a
+run with another nonce, on a different commit than the one the tree guard
+read, or already backing another node is `STALE`, which files the run
+`INCOMPLETE`. Without that, any earlier row of the same gate and exit —
+another campaign's, weeks old, or an overlapping run's on the same commit —
+passed as this node's execution. A resume reuses the stamp of the run it
+resumes, since its replayed citations carry the original nonce.
+
+Two witnesses cover what one tool call cannot. A gate longer than the
+600-second cap runs through `attest.py --run <gate>` (the manifest's
+command, resolved from the gate name) started in the background, and
+`attest.py --await <token>` collects it in bounded foreground slices; the
+runner mints the row itself when the command ends, including a red exit
+the hook never sees. CI's own statuses on a commit are `prove:ci`: a
+top-level `ci` section in the manifest names the forge, contexts and pinned
+`witness.statusCreators` / `witness.checkRunApps` identities. The harness refuses
+a creator matching its own gh login. Every citation re-reads the forge at record
+time; the local log is only a pointer. A latest pinned success can green; a
+historical failure from any writer is red. See `references/forge-evidence.md`.
+For CI observation, `attest.py --ci --pr <n> [--wait]` (or `--ref <branch>`) has
+the forge name the commit and mints a row from its statuses (every page of
+them, held to the total the forge reports), and pending, unreported or
+partially listed contexts mint nothing. A `prove:ci` claim returns that `sha`
+and must match the row; a row for a sha the node chose (`--sha`) cannot
+back it, since CI on any older green commit would pass. Pin the merge after
+the gate to the same commit with `gh pr merge --match-head-commit <sha>`.
+Independent multi-step nodes of any object contract can declare `cites: [gate,...]`.
+The compiler adds structured `citations` to their result schema, starts the local
+lane and asks for CI reuse in bounded waits. A forge green can cancel local work;
+a completed red from either source dominates. Reuse coverage and a full
+`ci.packetSha` base are pinned only in the manifest, never in node arguments.
+Local hook/wrapper rows carry `dirty`; a dirty or legacy unbound row is refused.
+Each row names its witness — `hook`, `wrapper` or `forge`. A gate run from
+a linked worktree of the campaign branch is attested into the project's log
+and bound to the project's HEAD, whichever witness saw it: the launch stamp
+carries the project `root` and the prove preamble passes it as `--root`
+(under Claude Code, `CLAUDE_PROJECT_DIR` names it too). The gate runs at
+the project's place in the checkout the caller is in, never in a
+subdirectory its shell last entered, and the tree it ran on is recorded
+beside it as `treeSha`. A gate declared as `cd <dir> && ...` matches only a
+run in that directory. `attest.py --last <gate> --nonce
+<nonce>` prints the attestId a node cites. A manifest the witness refuses
+(a gate named `ci`, an unknown forge) fails every `prove:` node at compile
+time, and a run under one is filed `INCOMPLETE`.
+
 Nodes that merely happen to match a declared gate stay observed rather than
 enforced. Opting in is what earns the stricter reading, and a check that
 starts by failing runs is a check people switch off.
@@ -368,15 +524,19 @@ And where a repo declares gates, an `irreversible` node's mandatory earlier
 guard **must** use `prove:`. The ordering invariant — gate before effect —
 was always sound in structure and hollow in fidelity while the guard typed
 its own exit code. An effect nobody can undo may not rest on a number the
-node that ran it wrote by hand.
+node that ran it wrote by hand. `prove:ci` and a `--run`/`--await` gate
+qualify, so a merge guarded by CI's statuses or a long suite no longer has
+to park on a person for want of a gate that fits one call.
 
 ## Canonical shapes
 
 - **Fan-out/verify** (`templates/WORK.md`): dimensions → finders →
   per-finding refuter panel. The default review campaign.
 - **Council → build → gate** (`templates/WORK.feature.md`): independent
-  designs from stated angles → one node judges them side by side
-  (`{{prev}}`, a justified barrier) → a mutator implements → an
+  keyed designs from stated angles → a `decides` node with `verify:
+  "judges:3"` compares them side by side (`{{prev}}`, a justified barrier)
+  → a mutator implements the elected candidate's original `{{winner}}`
+  → an
   independent node re-runs the harness → the proof-auditor judges whether
   verification got weaker (`ProofV1`, halting on WEAKENED; NOT-APPLICABLE
   when the diff carries no proof surface) → red-team closes.
@@ -412,6 +572,33 @@ node that ran it wrote by hand.
   reviews whose coverage the dry rule decides rather than a fixed pass
   count. The prompt asks for findings; the budget floors and the dry rule
   enforce thoroughness, so the prompt never has to exhort it.
+- **Repair loop** (`templates/WORK.repair.md`): after a BLOCK, put
+  `repeat: {"until": "verdict == 'SHIP'", "maxRounds": 3,
+  "integrate": ["merge", "review"]}` on an independent checker that
+  `verifies` and consumes a `mutates` fixer. Both use the same static
+  `foreach` list with unique lowercase keys. The checker must use
+  `isolation: 'measure'`: it applies the current patch onto a fresh
+  `git archive HEAD` snapshot and independently attacks it. Passed slices
+  leave the loop; failed checks reach the next fixer as `{{lastCheck}}`.
+  The cap files remaining slices INCOMPLETE. FixCheckV1 names each failed
+  mechanism in `defectClass`; `classBy: ["defectClass"]` and
+  `reframeAfter: 2` force the next round to state the authoritative invariant
+  and adopt/refute a class rewire with a measurement, or remove the mechanism.
+  The fixer returns structured reframe evidence and the independent checker
+  reruns its measurement; a third narrow patch is REFRAME-REQUIRED before
+  integration. This is a feedback loop over
+  independent findings, rather than a retry on the fixer's own exit.
+  `{{roundDir}}` gives each item and round an absolute, versioned output
+  directory below `.claude/fluxpoint/rounds/<launch nonce>/`; use it for
+  scratch and complete patches and never overwrite older outputs. The
+  optional integration pair runs once per round over all passing patches.
+  Its merge lists top-level definitions across patches and its independent
+  measure review checks the merged tree, including composition; a failed
+  merged review reopens passing slices with that feedback. The compiler
+  prices both workers and integration at every allowed round and emits
+  tree checks and the normal runtime ceiling. Only one repair loop belongs
+  in a graph, so every round directory has one owner. `graph-run` stamps
+  `_launch` even without a prove tier and records the run normally.
 - **Pipeline of loops**: each mutating node works one loop slice
   — TDD, `--changed` green per edit, `--full` before returning. The graph
   sequences slices; it never replaces the gate.
@@ -453,6 +640,18 @@ every graph in cold-input-token equivalents: a shared prefix per call
 (priced at a tenth when warm), work tokens scaled by effort (`low` 0.5×,
 `medium` 1×, `high` 1.8×, `xhigh` 2.5×, `max` 3.5×), the whole call
 weighted by the model's price, refuters and tree sentinels included. The
+text the author writes is priced too, one token per UTF-8 byte like the
+packet: each node's prompt with its `{{A.<arg>}}` defaults and `{{item}}`
+values expanded as the script renders them (text as itself, a list or an
+object as JSON), and a park's release instructions in its advisor call.
+A fan-out's workers read their shared prompt prefix from cache after the
+first; a different node's prompt is never discounted, because the cache
+has not seen it. `{{prev}}`, `{{decisions.*}}`, `{{seen}}` and a launch
+argument with no `argDefault` are sized only at run time; `--check` and
+the compiled header name each one and the nodes that use it as
+`unpriced`, so the number never reads as complete when it is not. So a prompt
+that grows between audit rounds moves the estimate, and the ceiling set
+from it can refuse the growth. The
 constants are stated assumptions in `compile-graph.py`, and `metrics.py`
 folds the estimate against the runtime's own `spent` per run so they get
 corrected by evidence rather than argued. `budget.maxEstimatedTokens` is
@@ -474,15 +673,24 @@ siblings that dispatch together are, and every sequential hop is a cold
 prefill. The runtime sets the TTL per session, never per call, so the
 declaration is a requirement on the session that runs the graph —
 `/fluxpoint:graph-run` names it in preflight — and the compiled script
-logs it at launch. A resume past a parked node is a cold start whatever
-the TTL and is priced as one. Every shipped template declares `1h`.
+logs it at launch. A node that waits on a park (through `after` or a
+reduce's `from`) runs after the release, in a later run: a cold start
+whatever the TTL, and priced as one. A node that does not wait on it runs
+on in the same run and keeps what that run warmed. Every shipped template
+declares `1h`.
 
 **An effort transition is a cold prefill.** The compiler warns on every
-consecutive pair of nodes whose `(model, effort)` differs, and on an inline
+consecutive pair of nodes whose `(model, effort)` changes to a key the run
+has not warmed yet — the hops the estimate charges cold — and on an inline
 `effort` equal to what the role or defaults already give (it changes
-nothing and reads as a decision). Where a change is justified, put it
-where the cache is cold anyway — after a park, or on the first node of a
-phase — and put same-effort work together; `graph-audit` judges whether
+nothing and reads as a decision). A return to a key an earlier call
+already warmed is a cache read and is not reported. A park ends the
+relation for what waits on it: the first call after the release is priced
+cold whatever its key, so a change placed there costs nothing extra and is
+not reported; a node that does not wait on the park still runs right after
+the one before it and is judged against it. Where a change is justified,
+put it where the cache is cold anyway — on a node that waits on a park —
+and put same-effort work together; `graph-audit` judges whether
 the bump buys anything, because the compiler cannot know a task's shape.
 Whether `builder: high` is the right setting at all is a separate
 question, and it is asserted today, never measured; see DESIGN-NOTES.
@@ -493,12 +701,22 @@ A fixed fan-out finds what one pass happens to find. When the size of the
 work is unknown, add `repeat` to the finder:
 
 ```json
-"repeat": { "untilDryRounds": 2, "maxRounds": 4, "dedupeBy": ["file", "line", "claim"] }
+"repeat": { "untilDryRounds": 2, "maxRounds": 6, "dedupeBy": ["file", "line", "claim"],
+            "classBy": ["defectClass"], "reframeAfter": 2 }
 ```
 
 Rounds re-run until `untilDryRounds` consecutive rounds surface nothing
 new, bounded by `maxRounds`. Use `{{seen}}` in the prompt so each round is
 told what earlier rounds found and spends itself on new ground.
+
+`classBy` names fields of the `verifyOver` items and must agree with
+`memory.classBy` when both are declared. A class producing a new surviving
+variant in `reframeAfter` consecutive rounds (default 2) stops the sweep with
+`RECURRING-CLASS` provenance and `{class, rounds, keys}` records. Under
+`onRed: halt` that is the campaign outcome; otherwise the sweep stops and
+the campaign remains INCOMPLETE. Refuted and unresolved claims never count
+as survivors. Reframe the authoritative invariant instead of starting a
+third narrow patch. The shipped discovery template enables this rule.
 
 **`maxRounds` is a backstop, not a thoroughness dial.** The dry rule is
 what should end a healthy sweep; the ceiling exists for the loop that
@@ -524,7 +742,7 @@ fresh panel to reach verdicts that already exist — which is where the
 `memory` closes that loop:
 
 ```json
-"memory": { "seed": "defect-sweep", "emit": "defect-sweep" }
+"memory": { "seed": "defect-sweep", "emit": "defect-sweep", "classBy": ["defectClass"] }
 ```
 
 `emit` files every judged item as a `LessonV1` row in
@@ -607,10 +825,13 @@ job is to look everywhere. The compiler rejects `priors` without a `seed`
 
 `/fluxpoint:graph-run` compiles, runs, and records. Watch with
 `/workflows`; never poll with sleep. Repair is targeted: fix the one red
-node in the IR, recompile, then re-invoke with `resumeFromRunId` — the
-unchanged prefix of `agent()` calls returns its memoized results and only
-the repaired node onward re-runs. Never restart a mostly-green graph from
-zero. Before diagnosing an empty result, read `journal.jsonl`. There is
+node in the IR, then use `resume.py` to carry the recorded inputs, apply
+only named changes, recompile and print the per-node rerun plan. The
+runtime can replay an unchanged prefix; opted-in independent nodes can
+also replay after fresh tree and branch checks, while a live ancestor
+forces its descendants live. Start fresh when the judged tree moved or
+the old run lacks the required source provenance. Before diagnosing an
+empty result, read `journal.jsonl`. There is
 deliberately no per-node retry knob: recovery is memoized resume plus the
 once-only ledger, because an in-run retry loop is a second failure policy
 hiding inside the first.
@@ -658,3 +879,37 @@ Same IR, same compiled script: run its nodes as parallel subagent calls
 with the same contracts, sequencing stages yourself, then record with
 `--executor degraded-subagents`. Do not silently downgrade — the Evidence
 row says which executor ran the graph.
+
+Halt diagnostics use the same validated token renderer as prompts.
+`haltReason` supports `{{A.field}}`, `{{campaign}}`, honored decisions and
+`{{prev}}` / `{{prev.field}}`; at halt time `prev` is the result that tripped
+the condition (the first tripping result for a fan-out). Item/round tokens
+are rejected there because the halt runs after the worker scope ends.
+`--check` compiles in memory and reports UTF-8 script bytes and headroom
+against the Workflow launch limit (524,288 bytes, configurable with
+`--max-script-bytes`); below 16 KiB headroom warns. Repeat the check with
+`--check-script <compiled-file>` immediately before launch.
+
+A council's `judges:N` tier chooses among candidates; `panel:N` refutes
+claims. Use a positive odd seat count and `contract: "DecisionV1"` plus
+`decides`. Its predecessor must be an unverified `foreach` with unique
+lowercase candidate keys; `none` is reserved. The compiler attaches the
+source list's key to every returned object before filtering dead seats.
+It gives each judge a JudgmentV1 schema narrowed to the surviving keys plus
+`none`. Each ballot ranks every key exactly once and includes a rationale
+of at least 40 characters and a `strongest_objection` object keyed by every
+choice, each objection at least 20 characters. A prose winner, unknown key,
+malformed ranking or missing objection casts no vote.
+
+A winner needs more than half of all N seats, including dead seats in the
+denominator. A split or a majority for `none` halts as NO-MAJORITY and
+records the tally; an empty candidate set halts as NO-CANDIDATES. There is
+no first-candidate fallback. The compiler builds the DecisionV1 from the
+tally and judges' actual objections, with `chosen` equal to the winning
+key. The council decision is reversible (`frozen_by: "none"`) and compares
+no prior ruling (`overturned_prior: false`); a separate irreversible gate
+retains its normal authority requirements. `{{prev}}` carries that decision
+to its direct consumer, while `{{winner}}` carries the original elected
+candidate object, including plan, files and risks. The `decides`/`honors`
+record remains available to later nodes. Legacy schema-only decisions keep
+their existing free-text representation and import behavior.

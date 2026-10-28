@@ -1,0 +1,83 @@
+name: windows specification
+
+# The Linux gates (harness --full, executable bits) run on Woodpecker; see
+# .woodpecker.yaml. This job needs a Windows runner, which that agent is not.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-specification:
+    name: Windows specification (Python 3.9)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exercise specification and process cleanup
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python plugins/fluxpoint/tests/specification-test.py
+      - name: Exercise long-command process trees and run provenance
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python plugins/fluxpoint/tests/longrun-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/regex-wait-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/record-location-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/unchecked-repairs-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/authorization-context-test.py
+          exit $LASTEXITCODE
+      - name: Exercise machine-health fixtures (Linux model and Windows adapter)
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python plugins/fluxpoint/tests/box-health-test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/box-health-windows-test.py
+          exit $LASTEXITCODE
+      - name: Exercise graph replay, resume, packet closure and gate evidence
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $failed = $false
+          foreach ($suite in @(
+            'graph-replay-test.py', 'replay-memo-test.py', 'resume-test.py',
+            'packet-inputs-test.py', 'fault-attempts-test.py',
+            'forge-evidence-test.py', 'forge-fault-race-test.py', 'repair-proof-test.py'
+          )) {
+            python "plugins/fluxpoint/tests/$suite"
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+          }
+          if ($failed) { exit 1 }
+          exit 0
+      - name: Sample actual Windows machine health (read-only)
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python plugins/fluxpoint/scripts/box-health.py --json --sample-seconds 1
+          $observed = $LASTEXITCODE
+          # A loaded shared runner can be unhealthy; collection must still work.
+          # Unreadable/unsupported coverage (2) is a verification failure.
+          if ($observed -notin @(0, 1)) { exit $observed }
+          exit 0

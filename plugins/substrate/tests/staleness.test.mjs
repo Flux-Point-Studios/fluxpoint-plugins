@@ -62,7 +62,7 @@ test("undeclared non-git repo is skipped with a one-line note", () => {
   writeManifest(ws, "plain", { repo: "plain", primitives: [prim("p-core")] });
   const res = run(["--check", "--root", ws]);
   assert.equal(res.status, 0);
-  has(res.stdout, "NOTE: staleness skipped: plain is not a git repo and has no nonGitRepos entry in substrate.config.json");
+  has(res.stdout, 'NOTE: staleness skipped: plain is not a git repo; add "plain" to nonGitRepos in substrate.config.json');
   assert.ok(!res.stdout.includes("ALARM:"), `skip, not alarm:\n${res.stdout}`);
 });
 
@@ -118,4 +118,32 @@ test("deep walk is capped and says so", () => {
   assert.equal(res.status, 0);
   has(res.stdout, "NOTE: walk capped for plain4");
   assert.ok(!res.stdout.includes("ALARM:"), `files beyond the cap are honestly unseen, not guessed:\n${res.stdout}`);
+});
+
+test("non-git diagnostics name the directory key when the manifest uses a different repo label", () => {
+  const ws = makeWorkspace();
+  const mf = writeManifest(ws, "svc-dir", { repo: "svc", primitives: [prim("svc-core")] });
+  fs.mkdirSync(path.join(ws, "svc-dir", "src"));
+  fs.writeFileSync(path.join(ws, "svc-dir", "src", "code.py"), "x = 1");
+  setMtime(mf, Date.now() - 24 * HOUR);
+  writeConfig(ws, { nonGitRepos: { svc: ["src"] } });
+  const skipped = run(["--check", "--root", ws]);
+  has(skipped.stdout, 'NOTE: staleness skipped: svc (dir svc-dir) is not a git repo; add "svc-dir" to nonGitRepos in substrate.config.json');
+  writeConfig(ws, { nonGitRepos: { "svc-dir": ["src", "../outside"] } });
+  const stale = run(["--check", "--root", ws]);
+  has(stale.stdout, "ALARM: manifest may be stale: svc (dir svc-dir) changed 1 files since manifest");
+  has(stale.stdout, "NOTE: config path escaped svc (dir svc-dir)'s directory");
+  assert.ok(!stale.stdout.includes("staleness skipped:"), stale.stdout);
+});
+
+test("git failures and walk limits identify a directory different from the manifest name", () => {
+  const ws = makeWorkspace();
+  writeManifest(ws, "unborn-dir", { repo: "unborn", primitives: [] });
+  gitInit(path.join(ws, "unborn-dir"));
+  writeManifest(ws, "deep-dir", { repo: "deep", primitives: [] });
+  fs.mkdirSync(path.join(ws, "deep-dir", "src", "a", "b", "c", "d", "e", "f", "g"), { recursive: true });
+  writeConfig(ws, { nonGitRepos: { "deep-dir": ["src"] } });
+  const res = run(["--check", "--root", ws]);
+  has(res.stdout, "ALARM: staleness check failed: unborn (dir unborn-dir)");
+  has(res.stdout, "NOTE: walk capped for deep (dir deep-dir)");
 });

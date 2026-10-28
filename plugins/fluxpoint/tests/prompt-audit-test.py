@@ -141,7 +141,7 @@ report("and every allowlist entry is live (none spent)", "matched nothing" not i
 harness = open(os.path.join(REPO, "scripts", "harness.sh"), encoding="utf-8").read()
 report("harness.sh runs the audit as an advisory step",
        "prompt-audit.py" in harness and "advise " in harness, "wired")
-ci = open(os.path.join(REPO, ".github", "workflows", "harness.yml"), encoding="utf-8").read()
+ci = open(os.path.join(REPO, ".woodpecker.yaml"), encoding="utf-8").read()
 report("CI runs the audit on its own line", "prompt-audit.py" in ci, "wired")
 
 print(f"\n{passed} passed, {failed} failed")

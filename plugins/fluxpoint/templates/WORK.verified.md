@@ -40,15 +40,37 @@ Campaign section to use it.
   "version": 1,
   "name": "verified-campaign",
   "campaign": "Verified feature slice: program synthesis and proof synthesis as separate mutators, each independently gated, the proof audited before red-team",
-  "budget": { "maxNodes": 16, "verifyFloorTokens": 50000, "cacheTtl": "1h", "maxEstimatedTokens": 250000 },
-  "defaults": { "effort": "medium" },
-  "requiredArgs": ["goal"],
-  "argDefaults": { "constraints": "none beyond WORK.md" },
+  "budget": {
+    "maxNodes": 100,
+    "verifyFloorTokens": 50000,
+    "cacheTtl": "1h",
+    "maxEstimatedTokens": 2250000
+  },
+  "defaults": {
+    "effort": "medium"
+  },
+  "requiredArgs": [
+    "goal"
+  ],
+  "argDefaults": {
+    "constraints": "none beyond WORK.md"
+  },
   "roles": {
-    "builder": { "effort": "high" },
-    "prover": { "agentType": "prover", "effort": "high" },
-    "proof": { "agentType": "proof-auditor", "effort": "high" },
-    "red-team": { "agentType": "red-team-reviewer", "effort": "high" }
+    "builder": {
+      "effort": "high"
+    },
+    "prover": {
+      "agentType": "prover",
+      "effort": "high"
+    },
+    "proof": {
+      "agentType": "proof-auditor",
+      "effort": "high"
+    },
+    "red-team": {
+      "agentType": "red-team-reviewer",
+      "effort": "high"
+    }
   },
   "nodes": [
     {
@@ -56,7 +78,7 @@ Campaign section to use it.
       "phase": "Implement",
       "role": "builder",
       "mutates": true,
-      "prompt": "Implement the goal \"{{A.goal}}\" as one loop slice. Constraints: {{A.constraints}}. Work TDD strictly per WORK_PROMPT.md: failing test first, minimum code to green, scripts/harness.sh --changed <file> after each edit. Write the executable logic and the tests that exercise it; leave every specification statement — requires, ensures, invariants, property signatures — exactly as you found it, and where the prover will need an obligation you could not close, say so in diffSummary rather than weakening a statement to pass. Create and commit on a branch named claude/graph-<short-slug-of-goal>. Run scripts/harness.sh --full and report its real exit code; a red prover is an honest answer here, because the next node exists to close it. Evidence entries are command + observed result.",
+      "prompt": "Implement the goal \"{{A.goal}}\" as one loop slice. Constraints: {{A.constraints}}. Work TDD strictly per WORK_PROMPT.md: failing test first, minimum code to green, scripts/harness.sh --changed <file> after each edit. Write the executable logic and the tests that exercise it; leave every specification statement \u2014 requires, ensures, invariants, property signatures \u2014 exactly as you found it, and where the prover will need an obligation you could not close, say so in diffSummary rather than weakening a statement to pass. Create and commit on a branch named claude/graph-<short-slug-of-goal>. Run scripts/harness.sh --full and report its real exit code; a red prover is an honest answer here, because the next node exists to close it. Evidence entries are command + observed result.",
       "contract": "SliceV1",
       "verify": "schema-only",
       "onRed": "halt"
@@ -67,7 +89,7 @@ Campaign section to use it.
       "role": "prover",
       "after": "build",
       "mutates": true,
-      "prompt": "Proof synthesis for the builder's slice: {{prev}}. Fetch and check out that branch in your worktree, run scripts/harness.sh --full on it first, and close the obligations the diff opened: loop invariants, lemmas, decreases clauses, termination arguments, and on Aiken the property tests over aiken/fuzz that state the properties the logic must hold. Add obligations; never drop, widen, rename or flip one, and never discharge one with assume, {:axiom}, {:verify false}, sorry, Admitted, todo or expect — spec-guard.py and proof-guard.py run against your diff downstream. Work one obligation at a time, scripts/harness.sh --changed <file> after each edit, --full before you return, committing to the same branch. If the diff opened nothing to prove, add nothing and say so. Return the branch, the obligation ids you added as testsAdded, the harness command and its real exit.",
+      "prompt": "Proof synthesis for the builder's slice: {{prev}}. Fetch and check out that branch in your worktree, run scripts/harness.sh --full on it first, and close the obligations the diff opened: loop invariants, lemmas, decreases clauses, termination arguments, and on Aiken the property tests over aiken/fuzz that state the properties the logic must hold. Add obligations; never drop, widen, rename or flip one, and never discharge one with assume, {:axiom}, {:verify false}, sorry, Admitted, todo or expect \u2014 spec-guard.py and proof-guard.py run against your diff downstream. Work one obligation at a time, scripts/harness.sh --changed <file> after each edit, --full before you return, committing to the same branch. If the diff opened nothing to prove, add nothing and say so. Return the branch, the obligation ids you added as testsAdded, the harness command and its real exit.",
       "contract": "SliceV1",
       "verify": "schema-only",
       "onRed": "halt"
@@ -78,7 +100,7 @@ Campaign section to use it.
       "after": "prove",
       "independent": true,
       "verifies": "build",
-      "prompt": "Independently verify the branch named in this slice: {{prev}}. Check it out into a fresh worktree (git worktree add), run scripts/harness.sh --full YOURSELF, and return the real integer exit code, the exact command, and the last ~20 lines. Do not trust any prior claim about whether it passed — run it and report what you observe.",
+      "prompt": "Independently verify the branch named in this slice: {{prev}}. Check it out into a fresh worktree (git worktree add), run scripts/harness.sh --full YOURSELF, and return the real integer exit code, the exact command, and the last ~20 lines. Do not trust any prior claim about whether it passed \u2014 run it and report what you observe.",
       "contract": "HarnessCheckV1",
       "haltWhen": "exit != 0",
       "haltReason": "independent harness re-run disagrees with the implementers; the graph never argues with the harness",
@@ -102,7 +124,7 @@ Campaign section to use it.
       "phase": "Gate",
       "role": "proof",
       "after": "gate-proof",
-      "prompt": "Audit the proof synthesis on the campaign branch, starting from the attested prover run: {{prev}}. Check the branch out into a worktree of your own (git worktree add --detach) and run every experiment there; the shared checkout is guarded and must not change. Resolve the fluxpoint plugin root (${CLAUDE_PLUGIN_ROOT}, else `find ~/.claude/plugins -type d -name fluxpoint | head -1`) and run its scripts/py.sh proof-guard.py --check and spec-guard.py --check against the branch, then mutation-guard.py --report where .fluxpoint-mutation.json exists and plutus-budget.py --report where plutus.json exists. Then your checklist over the prover's diff in particular: an invariant that is trivially preserved because it says nothing, a lemma that restates its goal, a property test whose generator cannot reach the interesting case, a decreases clause on a measure that never changes, an obligation closed by an escape hatch the ratchet did not count. Name every file, obligation and suite you reviewed in surface. UNPROVEN when no checker could run; never SOUND on a static read; NOT-APPLICABLE only if the diff carries no proof surface at all.",
+      "prompt": "Audit the proof synthesis on the campaign branch, starting from the attested prover run: {{prev}}. Check the branch out into a worktree of your own (git worktree add --detach) and run every experiment there; the shared checkout is guarded and must not change. Resolve the loaded fluxpoint plugin root from CLAUDE_PLUGIN_ROOT, then PLUGIN_ROOT, or the installed agent file location and run its scripts/py.sh proof-guard.py --check and spec-guard.py --check against the branch, then mutation-guard.py --report where .fluxpoint-mutation.json exists and plutus-budget.py --report where plutus.json exists. Then your checklist over the prover's diff in particular: an invariant that is trivially preserved because it says nothing, a lemma that restates its goal, a property test whose generator cannot reach the interesting case, a decreases clause on a measure that never changes, an obligation closed by an escape hatch the ratchet did not count. Name every file, obligation and suite you reviewed in surface. UNPROVEN when no checker could run; never SOUND on a static read; NOT-APPLICABLE only if the diff carries no proof surface at all.",
       "contract": "ProofV1",
       "verify": "schema-only",
       "haltWhen": "verdict == 'WEAKENED'",
@@ -110,18 +132,85 @@ Campaign section to use it.
       "onRed": "halt"
     },
     {
-      "id": "red-team",
+      "id": "red-team-lenses",
       "phase": "Gate",
       "role": "red-team",
       "after": "proof-audit",
-      "prompt": "Red-team the diff of the campaign branch against the default branch. Apply your full adversarial checklist. The proof-auditor's verdict on the same branch, for context and never as a substitute for your own reading: {{prev}}",
+      "prompt": "Review only this adversarial lens: {{item.brief}}. Pin the campaign branch and default-branch base to exact commits before attacking, measure changed files/additions/deletions with git, and report top-level coverage for your actual lens id {{item.key}}, attackers 1 and sampled explicitly. Apply your full checklist within that lens and independent skeptical reproduction. The composition lens attacks sequences across components. Keep findings executable and include minimal-case artifact paths. Put missing work and unresolved claims in review.blockers. Prior proof verdict: {{prev}}. Return RedTeamV1. A lens may BLOCK with findings for independent refutation; never claim complete coverage for work you sampled.",
+      "contract": "RedTeamV1",
+      "verify": "schema-only",
+      "onRed": "halt",
+      "foreach": "red-team-lenses",
+      "independent": true,
+      "verifies": "build",
+      "isolation": "worktree"
+    },
+    {
+      "id": "red-team-distinct",
+      "phase": "Gate",
+      "reduce": {
+        "from": "red-team-lenses",
+        "over": "findings",
+        "dedupeBy": [
+          "finding",
+          "exploit_path"
+        ]
+      }
+    },
+    {
+      "id": "red-team-refute",
+      "phase": "Gate",
+      "after": "red-team-distinct",
+      "prompt": "Read these distinct executable claims: {{prev}}. Return them without dropping unresolved claims in findings so three independent refuters can test reproduction, reachability and scope. Preserve exact snapshot, minimal-case paths and valid controls in each exploit_path. Return BLOCK while claims remain; this is an intermediate collection, not the final gate.",
+      "contract": "RedTeamV1",
+      "verify": "panel:3",
+      "verifyOver": "findings",
+      "expectItems": 12,
+      "onRed": "halt"
+    },
+    {
+      "id": "red-team",
+      "phase": "Gate",
+      "role": "red-team",
+      "after": "red-team-refute",
+      "prompt": "Bind the final adversarial verdict after three independent refuters per claim. Surviving or unverified claims: {{prev}}. The compiler supplies raw coverage and blockers for every lens. Require every one of the six lenses (authority, value, state, input, operations, composition), exact matching repository base/head identities and measured diff counts; report completed attacker count and sampled truthfully. Inspect missing work, unresolved claims, dead or unverified refuters, inconsistent snapshots and coverage blockers; any of those means BLOCK even when findings are empty. Do not reintroduce refuted claims without contradictory executable evidence. Independently sample defended cases and check composition for false negatives, delegating the skeptic. Return RedTeamV1 with top-level coverage and a final snapshot recheck. SHIP only after the whole review is complete.",
       "contract": "RedTeamV1",
       "verify": "schema-only",
       "haltWhen": "verdict == 'BLOCK'",
       "haltReason": "red-team blocked the diff; a BLOCK verdict is harness-red and the campaign does not ship over it",
-      "onRed": "halt"
+      "onRed": "halt",
+      "independent": true,
+      "verifies": "red-team-lenses"
     }
-  ]
+  ],
+  "lists": {
+    "red-team-lenses": [
+      {
+        "key": "authority",
+        "brief": "authority and identity boundaries"
+      },
+      {
+        "key": "value",
+        "brief": "value, arithmetic and conservation"
+      },
+      {
+        "key": "state",
+        "brief": "state and provenance, replay and partial writes"
+      },
+      {
+        "key": "input",
+        "brief": "input decoding and execution boundaries"
+      },
+      {
+        "key": "operations",
+        "brief": "operations, infrastructure and resource exhaustion"
+      },
+      {
+        "key": "composition",
+        "brief": "composition across all changed components and shared resources"
+      }
+    ]
+  }
 }
 ```
 
@@ -139,16 +228,21 @@ Campaign section to use it.
 - `proof-audit` reads the prover's diff specifically. WEAKENED halts;
   UNPROVEN files the run INCOMPLETE; a SOUND with an empty surface is
   reported as vacuous by `record-run.py`.
-- `red-team` closes, as in every campaign; BLOCK is harness-red.
+- `red-team-lenses` covers six independent surfaces, including composition;
+  `red-team-distinct` deduplicates; `red-team-refute` runs three refuters per
+  claim; the separate `red-team` gate binds their results and raw coverage.
+  BLOCK, incomplete coverage and unverified claims stop the campaign.
 
 ## Failure policy
 - Any node returning nothing halts (`onRed: halt`).
 - Halt conditions a human can name: either harness gate red, a proof-audit
   verdict of WEAKENED, a red-team verdict of BLOCK.
-- Budget: 16 planned agent calls covers the six nodes with headroom; no node
-  carries a panel, so the verification floor is untouched. The cost
-  ceiling is 250k estimated tokens over an estimate of ~188k under the
-  declared 1-hour prompt-cache TTL.
+- Budget: up to 100 work seats, including the independent attack/refutation
+  calls. The cost ceiling is 2.25M estimated tokens, including the expanded
+  locked packet, prompt text and cold prefills under the declared 1-hour
+  prompt-cache TTL. Re-run `--check` with the consuming repository's packet
+  and expected findings; named unpriced runtime substitutions need their own
+  allowance beyond the printed estimate.
 
 ## Decisions
 Appended automatically by `scripts/record-run.py` — do not hand-edit.

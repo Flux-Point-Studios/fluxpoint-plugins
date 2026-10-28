@@ -6,7 +6,8 @@ drivers over the same contract.
 
 **Loop mode** makes one agent's cycle programmable: session bootstrap,
 per-edit verification, and a Stop-hook Definition-of-Done gate that blocks
-the stop while `scripts/harness.sh --full` or the hygiene scan is red.
+eligible code changes from stopping while `scripts/harness.sh --full` or the
+hygiene scan is red, up to the configured consecutive-block limit.
 
 **Graph mode** makes the organization of agents programmable: a declarative
 `graph-ir` block in `WORK.md` compiles — deterministically, no model in the
@@ -15,6 +16,10 @@ tiers, so the spec cannot drift from what executes.
 
 The rule both modes share: the agent never decides "done"; the harness
 does.
+
+See the [documentation index](../../docs/README.md) for setup, feature guides
+and operator procedures. The sections below describe the installed plugin;
+older design decisions are preserved in `DESIGN-NOTES.md` and `ROADMAP.md`.
 
 ## Layout
 
@@ -27,30 +32,45 @@ does.
   - Loop: `lib.sh`, `inject-state.sh`, `verify-changed.sh`, `dod-gate.sh`,
     `precompact.sh`, `prompt-recall.sh`, `evidence.py` (the gate authors
     its own Evidence row; this writes it and executes nothing),
-    `decision.py` (Decisions rows with the `DecisionV1` floors enforced),
+    `decision.py` (whole `DecisionV1` records kept in
+    `.claude/fluxpoint/decisions.jsonl`, indexed by a Decisions row, read
+    back with `--show`, floors enforced),
     `py.sh` (interpreter resolution and UTF-8 stdio).
+    `specification.py` and `packet_inputs.py` lock requirement packets and
+    bind their executable checks and inputs.
   - Gates and ratchets: `exec-attest.sh` with `attest.py` (hook-minted exit
     codes for declared gates), `secret-guard.py` (credential gate),
     `proof-guard.py` (escape hatches), `spec-guard.py` (statements),
     `cex.py` (counterexample ledger for Aiken, Dafny, Kani, Apalache and
-    fast-check, plus the off-session seed sweep),
-    `mutation-guard.py` (mutation score), `seam-guard.py` (module mocks),
+    fast-check and Blaster, plus the off-session seed sweep),
+    `blaster.py` (opt-in Lean/SMT checks and retained replay receipts),
+    `mutation-guard.py` (mutation score), `seam-guard.py` (module/Python/HTTP doubles and provider recordings),
     `guard-guard.py` (named guards and the tests that hold them down),
     `pair-guard.py` (relations: co-change, parity, differential, bite and
     `--scan`), `plutus-budget.py` (on-chain size and execution units),
     `blueprint-guard.py` (the off-chain encoder against the CIP-57 schema),
     `recurrence-guard.py` (a lesson learned twice demands a gate).
+    `metric-guard.py`, `loop-metric.py`, `slice-metric.py` and `aiken-metrics.py`
+    measure deterministic metrics, plateaus, predicted gains and unit-test costs.
   - Graph: `compile-graph.py`, `record-run.py`, `ledger.py` (once-only
     guard), `release.py`, `inbox.py` and `wake-check.sh` (the park layer),
-    `metrics.py` (per-campaign rates).
+    `metrics.py` (per-campaign rates), `sweep.py` (plan and score an
+    effort/model sweep: variants, a held-out split, pass-rate intervals).
+    `resume.py`, `replay_memo.py` and `run_artifacts.py` bind launch/resume and
+    replay artifacts; `repair-proof.py`, `repair-replay.py`, `repair_diff.py`
+    and `unchecked-repairs.py` track fixes and their independent evidence.
+  - Operations: `box-health.py` and `watchdog.py` (machine observations and
+    inbox wakeups); `longrun.py`, `background.py` and `process_tree.py`
+    (long commands, logs, waits, cancellation and descendant cleanup).
   - Memory: `memory.py` (lessons), `recall.py` and `embedder.py` (the
     derived graph and hybrid retrieval).
   - `prompt-audit.py` (advisory prompt hygiene) and `migrate.py` (pre-1.0
     migration: plan, apply, finalize).
 - `contracts/` — versioned schemas: `FindingsV1`, `VerdictV1`,
   `HarnessCheckV1`, `DesignV1`, `SliceV1`, `RedTeamV1`, `ProofV1`,
-  `DecisionV1`, `LessonV1`, `ExecutionV1`, `TreeCheckV1`.
-- `commands/` — `/fluxpoint:init`, `:status`, `:migrate`, `:red-team`,
+  `DecisionV1`, `LessonV1`, `ExecutionV1`, `TreeCheckV1`, `FixCheckV1`,
+  `JudgmentV1`, `BlasterVerificationV1`.
+- `commands/` — `/fluxpoint:init`, `:grill-me`, `:status`, `:migrate`, `:red-team`,
   `:proof-audit`, `:recall`, `:graph-design`, `:graph-run`, `:graph-audit`,
   `:release`. On Codex each is reached through the matching
   `skills/fluxpoint-<name>/` skill.
@@ -58,7 +78,14 @@ does.
   `proof-auditor` (did the verification get weaker; `ProofV1`, a gate node
   in the feature campaign), `prover` (proof synthesis apart from program
   synthesis; `SliceV1`, a mutator), `graph-auditor` (semantic review of a
-  campaign IR; prose, and outside the graph on purpose).
+  campaign IR; prose, and outside the graph on purpose), `fix-checker`
+  (independent repair coverage and witness review; `FixCheckV1`).
+- `workflows/` — `graph-audit.js`, the round `/fluxpoint:graph-audit` runs
+  on Claude Code: six lens-scoped `graph-auditor`s, a reduce that merges
+  their duplicates, refuting verifiers (three per finding at HIGH and
+  above), and per-stage counts. SOUND means every lens returned and
+  nothing survived refutation. `--quick` keeps the single auditor.
+  `red-team.js` runs the adversarial diff-review workflow with typed results.
 - `skills/` — `loop-engineering` (driver selection, conditions, the gate),
   `graph-engineering` (escalation rule, primitives, tiers, shapes),
   `secret-handling` (derive from a credential's path so it can be worked
@@ -67,17 +94,21 @@ does.
 - `templates/` — `harness.sh` (the repo-side contract), `WORK.md`,
   `WORK.feature.md`, `WORK.discovery.md`, `WORK.consolidate.md`,
   `WORK.verified.md` (opt-in: a `prover` node beside the builder),
+  `WORK.repair.md` (independent repair checks),
   `WORK_PROMPT.md`, `loop.sh`, `attack-taxonomy.json` (the attack classes
-  a repo must specify, eUTxO and off-chain builder, enforced by spec-guard
+  a repo must specify for Aiken, TypeScript and Python, enforced by spec-guard
   once copied to `.fluxpoint-attacks.json`), `settings.snippet.json` for Claude Code
-  and `codex.config.snippet.toml` for Codex.
-- `tests/` — one suite per mechanism, all run by the repository's
+  and `codex.config.snippet.toml` for Codex, `tighten-baselines.yml` for
+  scheduled review PRs, and `blaster/` for the bridge, manifest and model starter.
+- `tests/` — regression suites run by the repository's
   `scripts/harness.sh --full`: compiler invariants and field-effect probes,
   codegen injection, the Stop gate and hook wiring driven with both
   runtimes' payload shapes, attestation, every ratchet, the counterexample
   ledger, relations, the park layer, memory and recall, migration against
-  pre-1.0 fixtures, the outer loop under both CLIs, and the documented
-  claims the code has to keep.
+  pre-1.0 fixtures, the outer loop under both CLIs, the graph-audit
+  workflow under stub agents, and the documented claims the code has to
+  keep. The native Lean/Z3 smoke test `blaster-live.py` runs separately in
+  CI; Windows CI runs a selected platform suite and a real health sample.
 
 ## The two contracts
 
@@ -87,7 +118,34 @@ gate stays dormant in repos that lack it.
 
 **Spec side:** `WORK.md` — goal, `MODE`, Definition of Done, Plan (loop
 slices), Campaign (the graph IR), Constraints, Merge policy, and one
-Evidence table both modes append to.
+Evidence table both modes append to. Stop-gate verdicts are stored locally
+in `.claude/fluxpoint/evidence.jsonl` and shown at SessionStart, so a final
+stop leaves tracked files clean.
+
+Implementation starts with `/fluxpoint:grill-me` or `$fluxpoint-grill-me`.
+It creates the decisions and requirement packet used by `specification.py`;
+the packet must be locked before mutating graph compilation. Newly copied
+harnesses run its executable checks. See [the spec-first contract](../../docs/spec-first.md).
+
+The Stop gate can use a shorter repo-defined contract when `--full` cannot
+fit its hook budget; CI should still run the full suite.
+An unchanged passing tree reuses its verdict for the same harness invocation.
+If the harness changes source while running, the gate requires a fresh run on
+the stable result before recording PASS.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `FPL_HARNESS_ARGS` | `--full` | Harness arguments; process environment, then repo `.claude/settings.local.json`, then `.claude/settings.json` `env`. |
+| `FPL_GATE_TIMEOUT` | 540 | Harness seconds, capped at 570 within the 600-second hook ceiling. |
+| `FPL_MAX_BLOCKS` | 3 | Consecutive blocked stops before a checkpoint yield. |
+| `FPL_GATE_EVIDENCE` | `local` | Ignored JSONL verdicts; `work` opts into tracked work-file rows with an uncommitted-write notice; `off` skips recording. |
+
+The hygiene scan reads added lines and untracked source. The hedge `for now`
+is checked in comments, so Python loop variables named `now` do not match.
+`.fluxpoint-hygiene-allow` holds one Python regex per line for justified source
+lines (for example `skip\(f?"UNVERIFIED:`); blank lines and `#` comments are
+ignored. Both that policy and `.fluxpoint-hygiene-ignore` belong to the trust
+base and cannot disable the gate's code-change detection.
 
 ## Invariants worth naming
 
@@ -98,26 +156,37 @@ Evidence table both modes append to.
   hook. `verify: "prove:<gate>"` makes a node cite the attestation its run
   produced — a citation that does not exist or disagrees files the run
   `TAMPERED-EXECUTION`, and citing nothing files it `INCOMPLETE` rather
-  than accusing an executor that never touched the Bash tool.
+  than accusing an executor that never touched the Bash tool. A citation
+  older than the run's launch stamp, from another commit, or already
+  backing another node is `STALE`. A gate too long for one tool call runs
+  through `attest.py --run`/`--await`, and `prove:ci` cites CI's own
+  commit statuses on the commit the forge names for a pull request.
 - The DoD gate arms on two independent signals — the PostToolUse marker
   and dirtiness re-derived from `git` — because the marker cannot see
   source written through the Bash tool. Dirtiness is measured against the
   commit the session started from, so committing work mid-session
   is not a way to stop being judged; the hygiene scan uses the same
-  baseline. It falls back to HEAD when that commit is not an ancestor of
+  baseline. A checkout rebases the session baseline to imported history,
+  while unverified commits authored in this checkout remain judged even
+  after detaching away and back. The reflog anchor resets only on PASS.
+  It falls back to HEAD when the
+  baseline commit is not an ancestor of
   the current one (a rebase or branch switch), because a gate that fires
   spuriously gets switched off.
 - The files that decide what green means — the harness, the proof and pair
-  baselines, the gates and budget manifests, `package.json`, `Makefile` —
+  baselines, the gates, budget and metric manifests/baselines, `package.json`, `Makefile` —
   are named in the green notice when this session changed any of them.
   A verdict is only as trustworthy as the contract that produced it.
-- A gate's exit code is minted by a hook; no agent types it. Declare
+- A gate's exit code comes from a hook observation or managed runner. Declare
   the deciding commands in `.fluxpoint-gates.json`; every run of one is
-  recorded to `.claude/fluxpoint/attest.jsonl`, and `record-run.py`
+  recorded when the runtime supplies an observable result to
+  `.claude/fluxpoint/attest.jsonl`, and `record-run.py`
   cross-checks any node that claims a gate exit. Only the exact declared
   invocation attests — `|| true` or a pipe reports a different exit and is
-  credited to nothing — and a missing attestation is `UNATTESTED`, never
-  a failure.
+  credited to nothing. Missing legacy observations read `UNATTESTED` and
+  establish neither success nor failure; strict `prove:` tiers require the
+  citations described above. Local evidence is writable and remains subject
+  to review and CI.
 - Compiled `.graph.js` files are build output. Never hand-edit them; edit
   the IR and recompile.
 - Budget is enforced twice and neither check is advisory: `maxNodes` is a
@@ -132,8 +201,10 @@ Evidence table both modes append to.
   weighted by model — and `budget.maxEstimatedTokens` is the ceiling on
   that estimate. The constants are stated assumptions in one place;
   `metrics.py` holds them to the runtime's own `spent`. Effort
-  transitions between consecutive nodes are warned about as the cold
-  prefills they are.
+  transitions between consecutive nodes into a key the run has not warmed
+  are warned about as the cold prefills they are, and every expansion the
+  estimate cannot size (`{{prev}}`, a launch arg with no default) is named
+  as unpriced.
 - Ending a discovery sweep on its round ceiling is logged
   `discovery INCOMPLETE, not exhausted` — stopping early and finishing are
   different claims.
@@ -166,6 +237,33 @@ Evidence table both modes append to.
   output — it was a silent one. Unknown fields are compile errors for the
   same reason.
 
+## Concurrent execution, replay and repairs
+
+The graph IR supports named lanes and `after` dependencies with multiple
+parents. Independent branches can run concurrently and join before a later
+gate. Replay policies bind cached node results to declared inputs or source
+trees; fresh nodes rerun, and gate-only rejudging preserves the checked work.
+The [graph-engineering reference](skills/graph-engineering/SKILL.md) defines
+these fields, the accepted shapes and their compile-time restrictions.
+
+[Structured launch and resume](references/structured-resume.md) writes args
+files and pins scripts, source summaries, journals, packet inputs and artifacts.
+The same preflight checks [machine health](../../docs/box-health.md) before
+launch or resume, and the watchdog samples it on every poll.
+
+The [repair campaign](templates/WORK.repair.md) separates implementation from
+independent fix checks, replay and repair evidence. Direct repairs outside a
+graph stay unchecked until an independent run or explicit recorded acceptance
+discharges them. [Long commands](references/longrun.md),
+[deployed lanes](references/deployed-gates.md), [forge evidence](references/forge-evidence.md)
+and [fault reruns](references/fault-reruns.md) retain the execution context
+needed to assess those results.
+
+[Deterministic metrics](../../docs/deterministic-metrics.md) add task-specific
+integer floors and ceilings, safe tightening and loop plateau detection.
+They complement the correctness harness. Slice predictions and calibration
+are described below.
+
 ## Relations between artifacts
 
 Every gate above measures one artifact. The defects that cost the most are
@@ -175,7 +273,7 @@ wire format. Each side passes its own tests — the suite is green *because*
 each half is individually correct — and the pair is what breaks.
 
 `scripts/pair-guard.py` checks declared pairs from a repo-owned
-`.fluxpoint-pairs.json`, in two tiers. **Co-change** reports a diff that
+`.fluxpoint-pairs.json`, with three checks. **Co-change** reports a diff that
 moves one side and not the other; it is a smoke alarm and proves only that
 somebody touched both files. **Parity** runs a declared command whose job
 is to evaluate the two together, making the relation itself an exit code —
@@ -262,6 +360,13 @@ proved one.
 
 - **The prover runs in `--full`.** Per-file checking on edit is feedback;
   the gate that decides done must invoke the prover over the project.
+- **Optional Blaster checks** retain explicit solver trust, typed query and
+  domain-witness results, pinned dependencies and fresh input/log identities.
+  Unexpected counterexamples join the existing ledger; supported scalar inputs
+  must be replayed against the original property before a regression can be
+  pinned. The source guards also cover imported tactic use, named Prop bodies
+  and standalone solver commands. See [Blaster verification](references/blaster.md)
+  for setup, supported types, proof assumptions and the real integration fixture.
 - **`scripts/proof-guard.py` ratchets escape hatches.** `--baseline`
   records `todo`/`expect` (Aiken), `assume`/`{:axiom}` (Dafny), `sorry`
   (Lean/Isabelle), `Admitted` (Coq), `#[verifier::external_body]` (Verus),
@@ -297,7 +402,12 @@ proved one.
   the builder classes the off-chain TypeScript answers for. It is red for
   every class with neither a test of that name nor a waiver with a reason,
   each taxonomy gates only a repo that tracks its language, and a waiver
-  is scoped to its own taxonomy. Where a prover is
+  is scoped to its own taxonomy. A tracked language whose taxonomy is
+  missing from the manifest is named `NO TAXONOMY` with the classes the
+  template holds for it; that is a note until the manifest sets
+  `"requireAllLanguages": true`, and a `"languages"` list names the halves
+  a repo gates on purpose, printing any tracked language it leaves out as
+  excluded by declaration. Where a prover is
   not on PATH the axiom audit says NOT RUN rather than reading clean.
 - **`scripts/plutus-budget.py` gates submittability.** Correct and
   submittable are different properties and only one has a prover:
@@ -316,8 +426,8 @@ proved one.
   signs whatever the transaction builder constructs, and the builder is what
   an autonomous caller actually reaches, so a proof on one side of the wire
   guarantees nothing about the other. `plutus.json` is the artifact both
-  sides can be held to: `aiken build` regenerates it from the validator, so
-  it cannot drift, and CIP-57 already says what a legal datum and redeemer
+  sides can be held to: a fresh `aiken build` regenerates it from the validator,
+  and CIP-57 says what a legal datum and redeemer
   look like. `--conform` decodes PlutusData the builder produced and asks
   the blueprint whether the validator would recognise it; `--check` runs the
   corpora declared in `.fluxpoint-blueprint.json` and reds on a value the
@@ -326,6 +436,8 @@ proved one.
   `Data`, because a validator taking untyped data has no specification to
   hold anyone to and the gate is blind there. A schema the checker cannot
   read is reported UNCHECKED and never as conformant.
+  Keep that build in the full harness; checking a stale committed blueprint
+  alone does not establish conformance with the current validator source.
 - **`/fluxpoint:proof-audit`** runs the ratchet, checks the prover is
   actually in `--full`, then the `proof-auditor` agent for what a count
   cannot see: vacuity, specification drift, assumption laundering, tests
@@ -344,19 +456,52 @@ people to ignore the ratchet. The ratchet remains a floor: a
 theorem that lost a conjunct, or a `fail` test that trips an earlier guard
 than the one it is named for, still needs the semantic pass.
 
+Provider fixtures can be held to captured response shapes with
+`.fluxpoint-recordings.json` and `seam-guard.py --conform`; the manifest is
+checked inside the scaffolded `--full` even without a count baseline. See
+[provider recordings](references/recordings.md) for provenance, conformance,
+provider counters and the independent review needed for derived values.
+
+## Calibrating predicted gains
+
+For a slice targeting a declared deterministic metric, record its prediction
+before implementation and its measurement after the harness passes:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" slice-metric.py --start \
+  --slice index-lookup --role implementer --metric latency.ms --predicted-delta 20
+# Implement the slice, then run its harness.
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" slice-metric.py --end --slice index-lookup
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" metrics.py
+```
+
+A predicted delta is a positive improvement in the metric's own units.
+Both endpoints use metric-guard's repeated deterministic measurement. An
+unchanged metric definition is required. Predictions cannot be replaced;
+completion can be replayed without changing the recorded result.
+
+`metrics.py` and `/fluxpoint:status` show mean measured/predicted improvement
+per role, with a per-metric breakdown and sample counts. Above 1x means gains
+exceeded predictions; below 1x means they fell short; negative values record
+regressions. Each slice contributes one unitless ratio, so bytes and
+milliseconds are never added together. Pending slices are reported separately.
+Artifacts stay local in `.claude/fluxpoint/slices/`. Use `--campaign <name>`
+at start to include a slice in the corresponding `metrics.py --campaign` view.
+
 ## Migrating from the split plugins
 
 `/fluxpoint:migrate` folds `LOOP.md` and `GRAPH.md` into one `WORK.md`,
 moves local state under `.claude/fluxpoint/`, and rewires settings. Until
 then the hooks still honor `LOOP.md`, so nothing breaks mid-migration.
 
-Requires `git` and Python 3, reached as either `python3` or `python` — the
+Requires Bash, `git` and Python 3.9 or newer, reached as either `python3` or `python` — the
 latter is what a standard Windows install provides. Scripts are invoked
 through `scripts/py.sh`, which resolves the name and pins UTF-8 stdio. `jq`
-preferred, with a Python fallback built into the hooks. Graph execution
-additionally needs Claude Code's Workflow tool; design, compile checks and
-audits run on Codex as well.
+preferred, with a Python fallback built into the hooks. Native graph execution
+uses Claude Code's Workflow tool; the command documents a subagent fallback
+with explicit executor provenance. Design, compile checks and audits run on
+Codex as well.
 
 Installation for both runtimes, the support matrix and the tuning
-variables are in the repository README; what each runtime hands the hooks
-is in `docs/runtimes.md`.
+variables are in the [repository README](../../README.md); what each runtime
+hands the hooks is in [the runtime guide](../../docs/runtimes.md).

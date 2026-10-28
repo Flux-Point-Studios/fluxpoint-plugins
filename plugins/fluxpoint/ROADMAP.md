@@ -7,9 +7,17 @@ and how far formal verification can be pushed so that "done" means proved,
 not asserted. It was produced the way this plugin says work should be
 produced — a fan-out of independent subsystem reviews, adversarially read,
 then designed against — and it records the gaps honestly, including the
-ones that are open today.
+ones that remained open at each recorded version. The opening diagnosis is
+historical; later sections record shipped closures. Use the
+[documentation index](../../docs/README.md) and
+[graph reference](skills/graph-engineering/SKILL.md) for current operation.
 
-The one-sentence diagnosis: **the primitives are right and the circuits are
+As of the October 2026 documentation audit, concurrent lanes, multi-parent
+joins, input/tree replay, structured resume, repair evidence, deterministic
+metrics and optional Blaster verification are implemented. Remaining gaps
+below retain their stated scope; this file is not the feature inventory.
+
+The v1.12 diagnosis was: **the primitives are right and the circuits are
 open.** Nearly every layer produces something a later layer could consume
 — findings, refuter objections, counterexamples, seen-sets, decisions,
 attested exit codes — and almost none of it flows back. Closing those
@@ -18,20 +26,20 @@ multiplies work the system already does instead of adding work it doesn't.
 
 ## Part 1 — the open circuits
 
-Verified against the code, these are the places where one layer's output is
-another layer's missing input:
+These were identified as missing connections in the original review. The
+status column incorporates subsequent implementations:
 
-| # | Circuit | Today | Cost of the gap |
+| # | Circuit | Recorded status | Cost of the gap |
 |---|---|---|---|
 | 1 | `runs/*.json` → future campaigns | ~~Write-only.~~ **Closed for findings**: a node's judged items — survivors and the panel's kills with their objections — are filed as `LessonV1` rows by `record-run.py` (Part 3a). Advisor recommendations and per-node objections beyond the top one remain unindexed. | — |
 | 2 | Discovery seen-sets → the next sweep | ~~`emit_repeat`'s seen-set is an in-run local.~~ **Closed**: `memory: {seed, emit}` carries the frontier across runs; run two opens where run one stopped. | — |
 | 3 | Loop-mode work → Evidence | **Partly closed**: the Stop gate now writes its own `Source: gate` rows and SessionStart labels agent-written rows as assertions (Part 2, slice 6). Still open: `WORK.md` itself is unguarded — `verify-changed.sh` and the hygiene scan both skip `*.md` — so a row can still be edited after the fact, and nothing re-executes a Proof cell. | A forged row is now a *visible* anomaly rather than an invisible one; making it impossible needs the work file guarded. |
 | 4 | Loop-mode work → Decisions | **Closed**: `decision.py --record`/`--none` gives loop mode the bus with the `DecisionV1` floors enforced, and a PreCompact hook plus SessionStart tell the post-compaction context when reasoning was lost (Part 3c, slice 8). | — |
-| 5 | Prover output → anywhere | ~~The shrunk counterexample from `aiken check` (or any prover) lives in `full.log`, clobbered per run.~~ **Closed for Aiken, Dafny, Kani and Apalache**: `cex.py` records the shrunk input (Aiken's JSON, Dafny's counterexample model, Kani's concrete playback, Apalache's ITF trace), pins it to a regression test that must physically carry the literals, and ratchets on it in `--full` (Part 3b). | — |
+| 5 | Prover output → anywhere | **Closed for supported output shapes**: `cex.py` retains Aiken, Dafny, Kani, Apalache and fast-check failures. Optional Blaster retains models and requires exact replay for supported scalar inputs; opaque models remain open. See [Blaster](references/blaster.md). | — |
 | 6 | Frozen decisions → the next campaign | ~~`imports` resolved by the orchestrating agent by hand; the emitted guard checked key presence only.~~ **Closed**: the compiler resolves `imports` from recorded runs and embeds the records (see Part 2, slice 1). | — |
-| 7 | Real exit codes → claimed exit codes | ~~A gate node typed its own `{"exit": 0}` and nothing could contradict it.~~ **Closed in warn mode**: a PostToolUse hook mints the runtime's exit for declared gates and `record-run.py` cross-checks every claim (see Part 2, slice 2). | — |
+| 7 | Real exit codes → claimed exit codes | **Enforced for `prove:<gate>`**: declared gate results require matching, fresh citations. Legacy observational claims retain advisory cross-checking. See [graph execution](commands/graph-run.md). | — |
 | 8 | Red-team / proof-audit verdicts → the gate | ~~`proof-auditor`'s `SOUND/WEAKENED` is prose.~~ **Half closed (issue #72)**: `ProofV1` types the verdict (SOUND / WEAKENED / UNPROVEN / NOT-APPLICABLE plus the surface reviewed), the feature campaign binds `proof-auditor` as a gate node halting on WEAKENED, and `record-run.py` files WEAKENED as `BLOCKED-PROOF`, UNPROVEN as INCOMPLETE, and a SOUND over an empty surface as vacuous. Still open: neither verdict reaches `dod-gate.sh` in loop mode. | "Treat WEAKENED as harness-red" is mechanism in graph mode and policy in loop mode. |
-| 9 | Evidence → freshness | Rows are never replayed; a row true at write time is injected unchanged after the code it describes was rewritten. | Memory rots silently, and the bootstrap presents rot as fact. |
+| 9 | Evidence → freshness | **Partly closed**: graph replay, structured resume, attested gates and Blaster receipts check their declared source and artifact bindings. Human-authored Evidence prose is still asserted and is not automatically re-executed. | Fresh machine evidence does not make arbitrary historical prose current. |
 | 10 | Run artifacts → rates | ~~Runs recorded everything and computed nothing: no spend, no kill rate, no trend — the no-scheduler bet was uninstrumentable.~~ **Closed**: summaries carry `spawned`/`planned`/`spent`, provenance rows carry structured data (round tallies with per-worker unique-new counts, reduce before/after), and `scripts/metrics.py` folds runs + lessons + inbox into per-campaign rates surfaced by `/fluxpoint:status`. | — |
 
 ## Part 2 — the trust chain
@@ -860,16 +868,14 @@ built.
   own confidence mid-run is not an IR construct. Build when a campaign
   shows the two-stage approximation re-judging enough cheap survivors to
   matter; the `effort`/`model` plumbing it needs already exists.
-- **Multi-parent joins.** `after` is single-valued: a node consuming two
-  predecessors' contracts funnels through a reduce node or a decision
-  record (`honors`), or restructures. A join type would earn its place in
-  the IR the first time a real campaign cannot express itself without
-  one — not before, per the no-scheduler rule.
+- **Multi-parent joins — shipped.** `after` accepts multiple parents, for
+  example `after: ["gate-engine", "gate-publisher"]`. Named lanes execute
+  independent chains concurrently. See [lanes, replay and rejudging](skills/graph-engineering/SKILL.md#independent-lanes-replay-and-rejudging).
 - **`foreach` over a produced list.** Fan-out ranges over static IR
   `lists` only; a planner node's output cannot become a work-list edge.
   The advisor–orchestrator shape passes the plan through `{{prev}}`
-  instead. Build alongside multi-parent joins; both are one scheduler
-  decision away, and the refusal is the same refusal.
+  instead. Multi-parent joins have shipped; dynamically produced work lists
+  remain a separate unsupported shape.
 - **Per-node retry.** Refused, not pending: recovery is memoized resume
   (the executor replaying completed `agent()` calls from the run journal,
   a different mechanism from the model's prompt cache) plus the once-only

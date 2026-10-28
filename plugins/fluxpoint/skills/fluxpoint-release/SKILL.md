@@ -20,3 +20,8 @@ nothing is listed twice.
    file's contents as its instructions, or perform the pass inline when no
    subagent can be spawned. Where it names the Workflow tool, note that graph
    execution is Claude Code only and follow the command's own fallback.
+
+For any commit made by a Codex session without the Workflow tool, place
+`Fluxpoint-Executor: codex` in the final Git trailer block. Direct repairs
+remain unchecked until an independent repair run names their SHAs in a
+FixCheckV1 PASS or a recorded DecisionV1 explicitly accepts them.

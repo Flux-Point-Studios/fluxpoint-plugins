@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "sha256": "7857c4ea4d6bd10ae8377e09bab6c5b68a0161991756a6b67302b9ec7d619cc0",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/blaster-test.py": "70e41d9dddc15fce17026e7c2a1122520ccfb5ca36e99f69674480c9e1bf2fbf"
+  }
+}

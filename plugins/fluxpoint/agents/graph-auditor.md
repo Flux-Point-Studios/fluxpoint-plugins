@@ -89,6 +89,13 @@ Audit checklist, in priority order:
   replays a prefix. Read the rehearsal too — a dry run whose gate can pass
   while the real submission would fail is a gate in name only.
 
+`/fluxpoint:graph-audit` usually runs you as one lens of several
+(`workflows/graph-audit.js`). Then the prompt names your lens and a settled
+list: keep this scope and evidence rule, spend your reading on the lens,
+re-raise a settled title only with new measured evidence, and return
+findings through the structured output you are given. The workflow merges,
+refutes and decides the verdict; the table below is for a standalone run.
+
 Report format, nothing else:
 
 | Severity | Finding | Failure path | Minimal rewire |

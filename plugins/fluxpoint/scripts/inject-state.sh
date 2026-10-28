@@ -5,32 +5,6 @@
 # user instead. Runs on startup, resume, clear, and post-compaction.
 set -u
 
-# Interpreter name differs by platform: `python3` on Linux/macOS, `python` on a
-# standard Windows install. Resolve by running each candidate, because a
-# name on PATH is not evidence of an interpreter.
-if [ -z "${FPL_PY:-}" ]; then
-  # Probe each candidate by RUNNING it, rather than asking whether the name
-  # exists. Windows ships a `python3` App Execution Alias that is on PATH by
-  # default on a machine with no python3 at all: it satisfies `command -v`,
-  # then prints "Python was not found" and exits 49 for every argument.
-  for _fpl_cand in python3 python; do
-    if command -v "$_fpl_cand" >/dev/null 2>&1 &&
-       "$_fpl_cand" -c "import sys" >/dev/null 2>&1; then
-      FPL_PY="$_fpl_cand"
-      break
-    fi
-  done
-  unset _fpl_cand
-  if [ -z "${FPL_PY:-}" ]; then
-    echo "fluxpoint: no working python interpreter on PATH" >&2
-    exit 127
-  fi
-fi
-# Force UTF-8 on every embedded interpreter's stdio. Without it Windows writes
-# cp1252, so a header like "## Plan --" emitted with an em-dash comes back as
-# 0x97 and every consumer that greps for the UTF-8 bytes silently misses it.
-export PYTHONIOENCODING=utf-8
-
 [ "${FPL_DISABLE:-0}" = "1" ] && exit 0
 here="${0%/*}"; [ "$here" = "$0" ] && here=.
 . "$here/lib.sh"
@@ -49,7 +23,7 @@ mkdir -p "$sd" 2>/dev/null
 # The state dir must never be committable, including in repos that skipped
 # /fluxpoint:init — its markers carry session ids and disarm flags.
 [ -f "$sd/.gitignore" ] || printf '*\n' >"$sd/.gitignore" 2>/dev/null
-find "$sd" -maxdepth 1 \( -name '*.dirty' -o -name '*.blocks' -o -name '*.base' \
+find "$sd" -maxdepth 1 \( -name '*.dirty' -o -name '*.blocks' -o -name '*.base' -o -name '*.base.head' -o -name '*.passed' -o -name '*.yielded' \
   -o -name '*.attest-warned' -o -name '*.cwin' -o -name '*.cblock' \
   -o -name '*.nodecision' \) -mtime +3 -delete 2>/dev/null
 # The compaction-window snapshot, seeded only when absent — each allowed
@@ -107,7 +81,7 @@ else
 fi
 
 if [ -f scripts/harness.sh ]; then
-  echo "- Harness: scripts/harness.sh is present. A Stop-hook DoD gate runs '--full' plus a hygiene scan whenever code changed this session; red results block the stop, up to ${FPL_MAX_BLOCKS:-3} consecutive times, after which the gate yields with a checkpoint notice. Green is the only clean exit."
+  echo "- Harness: scripts/harness.sh is present. A Stop-hook DoD gate runs '$(fpl_harness_args)' plus a hygiene scan whenever code changed this session; red results block the stop, up to ${FPL_MAX_BLOCKS:-3} consecutive times, after which the gate yields with a checkpoint notice. Green is the only clean exit."
 else
   echo "- Harness: scripts/harness.sh is absent, so the DoD gate is dormant in this repo. The /fluxpoint:init command scaffolds it."
 fi
@@ -184,6 +158,10 @@ if [ "${FPL_RECALL_INJECT:-1}" = "1" ] && [ -f "$recall_py" ]; then
   fi
 fi
 
+# Local gate evidence is deliberately outside the tracked work file: a final
+# Stop must not leave a clean branch dirty or create parallel-branch conflicts.
+"$FPL_PY" "$here/evidence.py" --render-local "$sd/evidence.jsonl" 2>/dev/null || true
+
 state="$(fpl_state_file || true)"
 if [ -n "$state" ]; then
   # A fixed line window is the wrong shape for this file. In the shipped
@@ -193,10 +171,10 @@ if [ -n "$state" ]; then
   # it: a fresh context was re-oriented with the goal and the Definition of
   # Done but not with what was proven or what is blocking.
   echo "- ${state} (sections that matter, newest evidence first):"
-  "$FPL_PY" - "$state" <<'PY'
-import re, sys
+  "$FPL_PY" - "$state" "$here" <<'PY'
+import os, re, sys
 
-text = open(sys.argv[1], errors="replace").read()
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 lines = text.splitlines()
 out, elided = [], []
 BUDGET = 90  # lines emitted, not lines scanned
@@ -245,6 +223,37 @@ if rows:
     out.append("")
     out.append(f"## Decisions — newest {min(3, len(rows))} of {len(rows)}")
     out += [r.rstrip() for r in rows[:3]]
+    # A row is an index cut to fit a table; the condition that mattered is
+    # often the part past the cut. Point a cut row at its whole record.
+    cut = []
+    for r in rows[:3]:
+        cells = [c.strip() for c in r.strip().strip("|").split("|")]
+        if "\u2026" in r and len(cells) > 1 and re.match(r"^[a-z][a-z0-9-]*$", cells[1]):
+            cut.append(cells[1])
+    # Only where the record is actually kept: the store is local to the
+    # clone that recorded it, and a row older than 1.43 has none. A pointer
+    # that answers "no record" teaches a fresh context to stop following it.
+    kept = None
+    if cut:
+        try:
+            import importlib.util
+            _spec = importlib.util.spec_from_file_location(
+                "_fpl_decision", os.path.join(sys.argv[2], "decision.py"))
+            _dec = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_dec)
+            _root = os.path.dirname(os.path.abspath(sys.argv[1]))
+            kept = {did for did in cut if _dec.find(_root, did)}
+        except (Exception, SystemExit):  # noqa: BLE001 - a pointer is a courtesy:
+            # decision.py exits on a malformed store line, and that must not
+            # take the whole WORK.md block with it.
+            kept = set()
+    for did in cut:
+        if did in kept:
+            out.append(f"  (cut: the whole record, options, objections and evidence: "
+                       f"bash \"{sys.argv[2]}/py.sh\" decision.py --show {did})")
+        else:
+            out.append(f"  (cut: {did}'s whole record is not kept in this clone — the "
+                       f"row predates 1.43 or was recorded elsewhere; read WORK.md)")
     if len(rows) > 3:
         elided.append(f"{len(rows) - 3} older Decisions row(s)")
 

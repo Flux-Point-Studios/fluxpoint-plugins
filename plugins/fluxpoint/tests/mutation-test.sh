@@ -692,6 +692,18 @@ def origin(**values):
     return candidate
 
 
+import importlib.util
+spec = importlib.util.spec_from_file_location("mutation_guard_compatibility", guard)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+legacy = changed(acceptedWeaker={
+    "reason": "previously reviewed weakening on the old release",
+    "from": {"score": 1.0, "survived": 0}})
+assert not module.validate_measurement(legacy), module.validate_measurement(legacy)
+assert not module.validate_measurement(changed(toolVersion="99.0.0"))
+for note in module.PRIOR_MEASUREMENT_NOTES:
+    assert not module.validate_measurement(changed(note=note))
+
 variants = {
     "unknown field": changed(manualOverride=True),
     "wrong tool": changed(tool="stryker"),

@@ -7,8 +7,9 @@ Lift a park. A campaign with `actor: human` or `actor: third-party` nodes
 does not halt on them — it records what would unblock each one and keeps
 working the branches that can proceed. This is how the block is cleared.
 
-Resolve the plugin root: `${CLAUDE_PLUGIN_ROOT}`, else
-`find ~/.claude/plugins ~/.codex/plugins/cache -type d -name fluxpoint 2>/dev/null | head -1`. Call it `$ROOT`.
+Resolve the plugin root: `CLAUDE_PLUGIN_ROOT`, then `PLUGIN_ROOT`, or the parent of this loaded
+command's `commands/` directory. Call it `$ROOT`; use that same installation
+for all scripts and agents below.
 
 1. **Show what is actually waiting**, never a guess:
    `bash "$ROOT/scripts/py.sh" inbox.py --list`. With no argument, stop here —
@@ -27,9 +28,11 @@ Resolve the plugin root: `${CLAUDE_PLUGIN_ROOT}`, else
    ```
    bash "$ROOT/scripts/py.sh" release.py --record \
      --campaign "<the IR's campaign line>" --node <id> \
-     --contract <the node's release.proofContract> --by "<who>" < proof.json
+     --contract <the node's release.proofContract> --graph <the campaign's graph file> \
+     --by "<who>" < proof.json
    ```
-   The script validates the document against the contract and **refuses**
+   `--graph` lets a proof contract from the graph's `CONTRACTS:` directory
+   resolve. The script validates the document against the contract and **refuses**
    anything that does not satisfy it. A refusal is the tool working: the
    graph resumes on the strength of this file, and a run that resumes on a
    half-remembered "yeah that's done" will eventually resume on a mistake.

@@ -23,10 +23,12 @@ Two kinds of limit, kept apart on purpose:
     validator at 99% of maxTxSize leaves no room for inputs, outputs, and
     the rest of the transaction. Set it in .fluxpoint-budget.json.
 
-What this deliberately does NOT do: execution units. Mem and CPU are
+Execution units require a concrete evaluation. Mem and CPU are
 properties of *evaluating a script against a specific transaction*, not of
 the compiled artifact, so no honest number can be read out of plutus.json.
-Record measured values from your own transaction-building tests under
+Pass --aiken-output with pinned Aiken unit-test JSON to check each measured
+unit scenario; these are not a whole-transaction estimate. Alternatively, record
+measured values from your own transaction-building tests under
 `exUnits` in the budget file and they are checked against the protocol
 maximum here; absent that, this reports the limits you need to measure
 against rather than inventing a figure.
@@ -39,6 +41,7 @@ Dormant by design: no plutus.json means no build to measure, exit 0.
 import argparse
 import json
 import os
+import subprocess
 import sys
 
 BUDGET_FILE = ".fluxpoint-budget.json"
@@ -110,7 +113,7 @@ def load_budget(root):
         return json.load(fh)
 
 
-def check(root, params_path, report_only):
+def check(root, params_path, report_only, aiken_output=None):
     bp_path = os.path.join(root, "plutus.json")
     if not os.path.exists(bp_path):
         print("plutus-budget: no plutus.json — nothing built to measure")
@@ -143,8 +146,24 @@ def check(root, params_path, report_only):
                 f"{title}: {size} B > project budget {max_bytes} B")
         print(f"  {title:<{width}}  {size:>6} B  {pct:5.1f}% of maxTxSize{note}")
 
+    measured = {}
+    if aiken_output:
+        from aiken_units import check_version, parse
+        check_version(root)
+        with open(aiken_output, encoding="utf-8") as f:
+            measured, excluded = parse(f.read())
+        for name in excluded:
+            print(f"plutus-budget: property statistics excluded: {name}")
+    if measured:
+        print("plutus-budget: measured Aiken unit scenarios (not a whole-transaction budget)")
+        for name, units in sorted(measured.items()):
+            print(f"  {name}: mem {units['mem']:,}, cpu {units['cpu']:,}")
+            if units['mem'] > limits['maxTxExMem']:
+                failures.append(f"{name}: measured mem {units['mem']} > maxTxExMem {limits['maxTxExMem']}")
+            if units['cpu'] > limits['maxTxExSteps']:
+                failures.append(f"{name}: measured cpu {units['cpu']} > maxTxExSteps {limits['maxTxExSteps']}")
     ex = budget.get("exUnits")
-    if ex:
+    if ex and not measured:
         mem, steps = ex.get("mem"), ex.get("steps")
         print("plutus-budget: measured execution units")
         if mem is not None:
@@ -158,7 +177,7 @@ def check(root, params_path, report_only):
             if steps > limits["maxTxExSteps"]:
                 failures.append(
                     f"exUnits.steps {steps} > maxTxExSteps {limits['maxTxExSteps']}")
-    else:
+    elif not measured:
         # Saying nothing here would let an unmeasured budget read as a met
         # one, which is the failure mode this whole harness exists to stop.
         print("plutus-budget: execution units NOT measured — no exUnits in "
@@ -187,11 +206,16 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=".")
     ap.add_argument("--params", help="cardano-cli protocol-parameters JSON")
+    ap.add_argument("--aiken-output", help="current pinned Aiken check JSON; measured unit scenarios supersede hand-entered exUnits")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--check", action="store_true")
     g.add_argument("--report", action="store_true")
     a = ap.parse_args()
-    return check(a.root, a.params, a.report)
+    try:
+        return check(a.root, a.params, a.report, a.aiken_output)
+    except (ValueError, OSError, subprocess.SubprocessError) as e:
+        print(f"plutus-budget: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

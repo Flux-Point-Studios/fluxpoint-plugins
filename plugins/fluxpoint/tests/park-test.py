@@ -270,6 +270,23 @@ with tempfile.TemporaryDirectory() as root:
     report("another campaign's releases are not consulted", r.stdout.strip() == "{}",
            r.stdout.strip()[:20])
 
+    # A graph compiled against its CONTRACTS: header parks on a proof
+    # contract the plugin does not ship; the release must find it too.
+    os.makedirs(os.path.join(root, ".local-contracts"))
+    with open(os.path.join(root, ".local-contracts", "SignedV1.schema.json"), "w") as fh:
+        json.dump({"$id": "SignedV1", "type": "object", "required": ["txHash"],
+                   "properties": {"txHash": {"type": "string"}}}, fh)
+    with open(os.path.join(root, "GRAPH.sign.md"), "w") as fh:
+        fh.write("STATUS: READY\nCONTRACTS: .local-contracts\n")
+    r = rel("--record", "--campaign", "c", "--node", "sign2", "--contract", "SignedV1",
+            "--graph", "GRAPH.sign.md", stdin='{"txHash":"ab12"}')
+    report("a repo-local proofContract resolves through the CONTRACTS: header",
+           r.returncode == 0, (r.stderr or r.stdout).strip()[:50])
+    r = rel("--record", "--campaign", "c", "--node", "sign2", "--contract", "SignedV1",
+            "--graph", "GRAPH.sign.md", stdin='{"note":"signed"}')
+    report("  and is still validated against it", r.returncode == 1 and "txHash" in r.stderr,
+           r.stderr.strip()[-40:])
+
 # ==================== inbox ==============================================
 with tempfile.TemporaryDirectory() as root:
     def ib(*a):
@@ -405,6 +422,16 @@ with tempfile.TemporaryDirectory() as runs:
     report("latest is the newest run carrying the decision",
            not errs and resolved.get("vault-window", {}).get("runId") == "wf-new",
            str(resolved.get("vault-window", {}).get("runId")))
+    # A run that honored an IMPORTED decision carries it as provenance; it
+    # is not a newer ruling, however late the run was recorded.
+    hon = _art("wf-hon", "2026-08-09 09:00", {"vault-window": FROZEN})
+    hon["summary"]["decisionsImported"] = {"vault-window": "wf-old"}
+    put("wf-hon", hon)
+    resolved, errs = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs)
+    report("  and a run's imported copy is not a newer ruling",
+           not errs and resolved.get("vault-window", {}).get("runId") == "wf-new",
+           str(resolved.get("vault-window", {}).get("runId")))
+    os.remove(os.path.join(runs, "wf-hon.json"))
 
     imp_js = cg.emit(copy.deepcopy(IMP), CONTRACTS, resolved)
     report("the resolved record is embedded, not couriered",
@@ -434,6 +461,74 @@ with tempfile.TemporaryDirectory() as runs:
            any("missing required DecisionV1" in e for e in errs4),
            (errs4 or ["none"])[0][:60])
     os.remove(os.path.join(runs, "wf-cut.json"))
+
+    # Operator rulings are recorded with decision.py, never by a graph node,
+    # so they never reach a run artifact. The store is the other source an
+    # import resolves from (#98), and 'latest' spans both.
+    store = os.path.join(runs, "decisions.jsonl")
+    ruling = dict(FROZEN, chosen="48h", rationale="the operator ruled 48h after "
+                  "the incident review, overturning the governance default",
+                  options=FROZEN["options"] + [
+                      {"option": "48h", "argued_by": "operator",
+                       "strongest_objection": "splits the difference without new data"}])
+    with open(store, "w") as fh:
+        fh.write(json.dumps({"recordId": "dec_0123456789ab", "id": "vault-window",
+                             "when": "2026-08-09 12:00:00", "record": ruling}) + "\n")
+    resolved_s, errs_s = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs, store)
+    # A record with every field name but the wrong types or floors is not a
+    # decision either, wherever it was stored.
+    bogus = dict(FROZEN, question=1, options=[], chosen="ghost", reversible="no")
+    nested = dict(FROZEN, evidence=[1, 2], options=[
+        {"option": "24h", "argued_by": 7, "strongest_objection": 12345678901234567890},
+        FROZEN["options"][1]])
+    with open(os.path.join(runs, "wf-nested.json"), "w") as fh:
+        json.dump(_art("wf-nested", "2030-06-01 00:00", {"vault-window": nested}), fh)
+    _, errs_n = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs)
+    report("a record with numeric option fields or evidence is not a valid DecisionV1",
+           any("not a valid DecisionV1" in e for e in errs_n), (errs_n or ["none"])[0][:70])
+    os.remove(os.path.join(runs, "wf-nested.json"))
+    with open(os.path.join(runs, "wf-bogus.json"), "w") as fh:
+        json.dump(_art("wf-bogus", "2030-01-01 00:00", {"vault-window": bogus}), fh)
+    _, errs_b = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs)
+    report("a record that is not a valid DecisionV1 does not count as one",
+           any("not a valid DecisionV1" in e for e in errs_b), (errs_b or ["none"])[0][:70])
+    os.remove(os.path.join(runs, "wf-bogus.json"))
+    # ...but a record a graph node froze is judged by the schema it was held
+    # to, not decision.py's stricter chosen-among-options rule.
+    worded = dict(FROZEN, chosen="72h, matching the governance timelock")
+    with open(os.path.join(runs, "wf-worded.json"), "w") as fh:
+        json.dump(_art("wf-worded", "2031-01-01 00:00", {"vault-window": worded}), fh)
+    res_w, errs_w = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs)
+    report("  while an honest run's decision worded beside its options still imports",
+           not errs_w and res_w.get("vault-window", {}).get("runId") == "wf-worded",
+           str(errs_w or res_w.get("vault-window", {}).get("runId")))
+    os.remove(os.path.join(runs, "wf-worded.json"))
+    report("an import resolves a decision recorded with decision.py",
+           not errs_s and resolved_s.get("vault-window", {}).get("runId") == "dec_0123456789ab"
+           and resolved_s["vault-window"]["record"]["chosen"] == "48h",
+           str(resolved_s.get("vault-window", {}).get("runId")))
+    # Same minute, run recorded after the ruling: the run is the latest.
+    # Compared as text, 'HH:MM:SS' outranked 'HH:MM' whatever came first.
+    put("wf-late", dict(_art("wf-late", "2026-08-09 12:00", {"vault-window": NEWER}),
+                        recordedAt="2026-08-09 12:00:45"))
+    resolved_t, _ = cg.resolve_imports(copy.deepcopy(IMP), CONTRACTS, runs, store)
+    report("latest orders a run and a ruling from the same minute by the second",
+           resolved_t.get("vault-window", {}).get("runId") == "wf-late",
+           str(resolved_t.get("vault-window", {}).get("runId")))
+    spec_d = importlib.util.spec_from_file_location(
+        "decision", os.path.join(PLUGIN, "scripts", "decision.py"))
+    dmod = importlib.util.module_from_spec(spec_d)
+    spec_d.loader.exec_module(dmod)
+    report("  and decision.py orders the two the same way",
+           dmod.order_key("2026-08-09 12:00") < dmod.order_key("2026-08-09 12:00:30")
+           < dmod.order_key("2026-08-09T12:00:45Z"), "normalized")
+    os.remove(os.path.join(runs, "wf-late.json"))
+    pinned_s = copy.deepcopy(IMP)
+    pinned_s["imports"] = {"vault-window": "wf-new"}
+    resolved_p, _ = cg.resolve_imports(pinned_s, CONTRACTS, runs, store)
+    report("  and a pinned runId still names the run",
+           resolved_p.get("vault-window", {}).get("runId") == "wf-new", "pinned")
+    os.remove(store)
 
     with open(os.path.join(runs, "wf-bad.json"), "w") as fh:
         fh.write("{not json")
@@ -478,10 +573,11 @@ SUB["nodes"][1]["release"]["instructions"] = "check out {{A.branch}}, then merge
 emitted = cg.emit(SUB, CONTRACTS)
 
 report("a parked prompt interpolates its args",
-       "${A.branch}" in emitted and "{{A.branch}}" not in emitted,
+       "${tokenText(A.branch)}" in emitted and "{{A.branch}}" not in emitted,
        "interpolated" if "{{A.branch}}" not in emitted else "left literal")
 report("and so do its release instructions",
-       emitted.count("${A.base}") >= 2, f"{emitted.count('${A.base}')} site(s)")
+       emitted.count("${tokenText(A.base)}") >= 2,
+       f"{emitted.count('${tokenText(A.base)}')} site(s)")
 
 # The emitted script must still parse: js_template escapes backticks and ${,
 # and a release string is operator prose that can contain either.
