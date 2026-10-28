@@ -125,6 +125,12 @@ class Inputs:
         if not text or text.startswith('-'):
             return None
         path = Path(text)
+        # Win32 strips a component's trailing dots and spaces, so on Windows Go's
+        # './...' exists: it names the directory it is spelled under.
+        if os.name == 'nt' and any(p != '..' and p != p.rstrip('. ') for p in path.parts):
+            if explicit:
+                raise ValueError('check input does not exist: ' + text)
+            return None
         if path.is_absolute():
             if not path.is_relative_to(self.root):
                 if explicit:
