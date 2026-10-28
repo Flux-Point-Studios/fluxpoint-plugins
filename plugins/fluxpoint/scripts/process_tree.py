@@ -42,6 +42,17 @@ def bash_path():
     return 'bash'
 
 
+def shell_argv(cmd, platform=None):
+    """argv that runs a command string under a POSIX shell, as shell=True does on POSIX.
+
+    On Windows shell=True hands the string to cmd.exe, which reads no POSIX
+    quoting and ends the command at its first newline.
+    """
+    if (platform or os.name) == 'nt':
+        return [bash_path(), '-c', cmd]
+    return ['/bin/sh', '-c', cmd]
+
+
 def identity(pid):
     if type(pid) is not int or pid <= 0:
         return None
@@ -236,16 +247,16 @@ class WindowsJob:
 
 
 class ProcessTree:
-    def __init__(self, command, cwd, out, platform=None, shell=False):
+    def __init__(self, command, cwd, out, platform=None):
         self.job = WindowsJob(create=True) if (platform or os.name) == 'nt' else None
         self.proc = None
         self.members = []
-        if self.job and not shell and isinstance(command, list) and str(command[0]).lower() in ('bash', 'bash.exe'):
+        if self.job and isinstance(command, list) and str(command[0]).lower() in ('bash', 'bash.exe'):
             command = [bash_path()] + command[1:]
         try:
             options = {'creationflags': 0x200 | 0x4} if self.job else {'start_new_session': True}
             self.proc = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL,
-                                         stdout=out, stderr=subprocess.STDOUT, shell=shell, **options)
+                                         stdout=out, stderr=subprocess.STDOUT, **options)
             if self.job:
                 self.job.assign(self.proc)
             else:

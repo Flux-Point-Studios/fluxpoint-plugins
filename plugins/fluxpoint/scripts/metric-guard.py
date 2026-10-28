@@ -19,6 +19,8 @@ import re
 import subprocess
 import sys
 
+from process_tree import shell_argv
+
 MANIFEST = '.fluxpoint-metrics.json'
 BASELINE = '.fluxpoint-metrics-baseline.json'
 
@@ -109,7 +111,8 @@ def measure(root, m, outputs=None):
     else:
         texts = []
         for _ in range(m.get('runs', 2)):
-            r = subprocess.run(m['command'], shell=isinstance(m['command'], str), cwd=root,
+            command = m['command']
+            r = subprocess.run(shell_argv(command) if isinstance(command, str) else command, cwd=root,
                                capture_output=True, text=True, timeout=m.get('timeout', 120))
             if r.returncode:
                 raise ValueError(f'{m["name"]}: command exited {r.returncode}: {r.stderr[-600:]}')

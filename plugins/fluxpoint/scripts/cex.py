@@ -147,6 +147,8 @@ import re
 import subprocess
 import sys
 
+from process_tree import shell_argv
+
 CEX = ".fluxpoint-cex.jsonl"
 EVIDENCE = ".fluxpoint-cex"
 SCRATCH = os.path.join(".claude", "fluxpoint", "cex")
@@ -1922,7 +1924,7 @@ def sweep(root, seeds, max_success):
     for seed in range(start, start + seeds):
         cmd = template.format(seed=seed, max_success=max_success)
         try:
-            r = subprocess.run(cmd, shell=True, cwd=root, capture_output=True,
+            r = subprocess.run(shell_argv(cmd), cwd=root, capture_output=True,
                                text=True, timeout=3600)
         except (OSError, subprocess.SubprocessError) as e:
             print(f"cex: seed {seed}: could not run {cmd!r}: {e}", file=sys.stderr)
