@@ -126,6 +126,11 @@ def assemble(args):
         ir = compiler.extract_ir(handle.read())
     resuming = args.run is not None
     prior, source_sha = _artifact(root, args.run) if resuming else (None, None)
+    if resuming and (prior.get("plugin") is not None or prior.get("prove") or prior.get("cites")):
+        import plugin_identity
+        pinned = plugin_identity.verify(prior.get("plugin"))
+        if pinned != plugin_identity.current():
+            raise ValueError("PLUGIN-PIN: resume helper differs from the compiled installation; run resume.py from " + pinned["root"])
     allowances = list(args.unpinned_ok)
     if resuming:
         carried = recover(root, prior)

@@ -76,6 +76,10 @@ Workflow tool requires.
    recompile, or the spec and the executor start lying to each other.
    Repeat preflight on the exact file before invoking Workflow:
    `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> --check --check-script .claude/workflows/<name>.graph.js`.
+   The exact-script check also verifies the embedded plugin root, version and
+   witness/helper hashes. A missing installation, changed code or missing pin
+   stops launch. Keep the compiling installation unchanged for the campaign;
+   node prompts name its absolute pinned launcher.
    Both checks enforce the Workflow limit of 524,288 UTF-8 bytes and print
    headroom; below 16 KiB is a warning. `--max-script-bytes` overrides the
    limit only when the selected launcher supports the new limit.

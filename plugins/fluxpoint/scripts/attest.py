@@ -78,6 +78,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import background as bg
 import forge_evidence as forge
 import fault_policy
+import plugin_identity
+PRODUCER = plugin_identity.current()
 from process_tree import bash_path
 
 GATES = ".fluxpoint-gates.json"
@@ -868,6 +870,7 @@ def stamp(root=None):
 
 
 def append_row(root, row):
+    row["producer"] = dict(PRODUCER)
     p = path_for(root)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "a", encoding="utf-8", newline="\n") as fh:
@@ -1298,7 +1301,7 @@ def _same_commit(a, b):
     return len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a))
 
 
-def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=None, gates=None):
+def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=None, gates=None, plugin=None):
     """Hold a `prove:` node to the attestation it cited.
 
     The node names an attestId; the hook wrote that row when the command
@@ -1331,6 +1334,9 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
         return {**base, "status": "MISMATCH",
                 "detail": (f"cites attestation {cited}, which is not in the log. "
                            f"Nothing recorded that execution.")}
+    if plugin is not None and row.get("producer") != plugin:
+        return {**base, "status": "MISMATCH",
+                "detail": "citation producer differs from the graph's pinned plugin witness"}
     if row.get("gate") != gate:
         return {**base, "status": "MISMATCH",
                 "detail": (f"cites {cited}, which attests gate "
@@ -1500,6 +1506,10 @@ def verify_claims(root, summary):
         if (not isinstance(steps, list) or not steps or any(not isinstance(gate, str) or
                 gate not in gates and gate != 'ci' for gate in steps) or len(set(steps)) != len(steps)):
             return [], ['run summary cites must contain unique manifest gate lists']
+    plugin = (summary or {}).get("plugin")
+    if plugin is not None:
+        try: plugin_identity.check_shape(plugin)
+        except ValueError as exc: return [], [str(exc)]
     rows = read(root)
     results = (summary or {}).get("results") or {}
     contracts = (summary or {}).get("contracts") or {}
@@ -1529,7 +1539,7 @@ def verify_claims(root, summary):
                                        'detail': 'cited step sha must match the node exact judged sha'})
                     else:
                         check = _check_cited(rows, node + ':' + gate, gate, mine[0],
-                                             launch, head, used, root=root, gates=gates)
+                                             launch, head, used, root=root, gates=gates, plugin=plugin)
                         row = next((a for a in rows if a.get('attestId') == mine[0].get('attestId')), {})
                         _check_deployed(root, gates, gate, row, mine[0], check)
                         checks.append(check)
@@ -1543,7 +1553,7 @@ def verify_claims(root, summary):
                 # An ExecutionV1 cites its attestation directly, so the check
                 # is against the id rather than a command string it never
                 # carries.
-                check = _check_cited(rows, node, declared, r, launch, head, used, root=root, gates=gates)
+                check = _check_cited(rows, node, declared, r, launch, head, used, root=root, gates=gates, plugin=plugin)
                 row = next((a for a in rows if a.get("attestId") == r.get("attestId")), {})
                 _check_deployed(root, gates, declared, row, r, check)
                 checks.append(check)
@@ -1607,7 +1617,9 @@ def main():
     ap.add_argument("--ref", help="with --ci: the branch or tag whose tip the forge names")
     ap.add_argument("--nonce", default="",
                     help="with --run or --ci: the run nonce from args._launch")
+    ap.add_argument("--plugin-pin", default=os.environ.get("FPL_PLUGIN_PIN"), help="expected compiled plugin identity as JSON")
     g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--self-check", action="store_true", help="verify and print this execution witness identity")
     g.add_argument("--record", action="store_true")
     g.add_argument("--list", action="store_true")
     g.add_argument("--verify", action="store_true")
@@ -1623,6 +1635,19 @@ def main():
     g.add_argument("--last", metavar="GATE",
                    help="print the newest attested row of GATE (with --nonce: of this run)")
     a = ap.parse_args()
+    if a.plugin_pin:
+        try:
+            expected = json.loads(a.plugin_pin)
+            plugin_identity.verify(expected)
+            if expected != PRODUCER:
+                raise ValueError("PLUGIN-PIN: this witness was loaded from a different installation")
+            os.environ["FPL_PLUGIN_PIN"] = json.dumps(expected, sort_keys=True)
+        except (OSError, ValueError, TypeError) as exc:
+            print("attest: " + str(exc), file=sys.stderr)
+            return 2
+    if a.self_check:
+        print(json.dumps(PRODUCER, sort_keys=True))
+        return 0
     if a.root is None:
         a.root = project_root(".")
 

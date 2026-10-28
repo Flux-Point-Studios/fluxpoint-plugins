@@ -26,6 +26,11 @@ worker briefs, and refreshes its derived index in the background without embeddi
 documents. Campaign lessons survive worktree deletion in a clone-wide store. See
 [corpus configuration and durable storage](../../docs/memory-recall.md#corpus-configuration-and-safe-refresh).
 
+Compiled graphs pin the plugin witness by root, version and code hashes. Gate
+rows record their producer; launch, resume and recording detect witness drift.
+See [witness identity](../../docs/witness-identity.md).
+
+
 ## Layout
 
 - `hooks/hooks.json` — one hook set for both runtimes: `SessionStart` state

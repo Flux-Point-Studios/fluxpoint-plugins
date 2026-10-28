@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "goal": "Bind compiled gate execution to the audited plugin witness installation",
+  "asset": "Compiler provenance, attest rows and launch/record preflight",
+  "scope": [
+    "Compile-time plugin root/version/code hashes",
+    "Pinned witness commands and detached child verification",
+    "Producer identity in every new attest row",
+    "Launch and resume refusal on missing or changed pin",
+    "Citation mismatch on another witness producer"
+  ],
+  "outOfScope": [
+    "Authenticating against deliberate source or log forgery",
+    "Automatic plugin installation or update rollback",
+    "Allowing producer mismatches silently"
+  ],
+  "decisions": [
+    {
+      "id": "compiled-witness-pin",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should a graph keep its execution witness stable across plugin updates?",
+        "options": [
+          {
+            "option": "content-pin",
+            "argued_by": "model",
+            "strongest_objection": "Moving or editing the installation requires explicit recompile and re-audit"
+          },
+          {
+            "option": "latest-installed",
+            "argued_by": "model",
+            "strongest_objection": "A running graph silently changes its witness semantics on auto-update"
+          }
+        ],
+        "chosen": "content-pin",
+        "rationale": "Pin entry points and aggregate execution helpers by content, carry the producer into rows and compare it with the compiled expectation.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue #183 measured a 1.43 graph whose gate ran under 1.45 after an update",
+          "Current preamble names no root and rows omit producing code identity"
+        ]
+      },
+      "costs": [
+        {
+          "option": "content-pin",
+          "cost": "Hash the small script directory at compilation and witness startup; preserve a pinned installation for in-flight runs",
+          "basis": "estimate",
+          "evidence": [
+            "Script bytes are local files and existing compiler metadata and witness rows carry JSON"
+          ]
+        },
+        {
+          "option": "latest-installed",
+          "cost": "Unreviewed witness drift during an in-flight campaign",
+          "basis": "measured",
+          "evidence": [
+            "Issue #183 recorded attest row att_ee42302855d3 from a different installation"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "witness-identity",
+      "statement": "Compiled prove/cited gates use one content-pinned installation; changed or missing files refuse launch and execution; every new row names its loaded producer and mismatched citations refuse a clean record",
+      "decisions": [
+        "compiled-witness-pin"
+      ],
+      "checks": [
+        "plugin-identity-tests"
+      ],
+      "counterexample": "A cached graph compiled under one installation runs or records a gate from an updated installation as ATTESTED"
+    }
+  ],
+  "checks": [
+    {
+      "id": "plugin-identity-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/plugin-identity-test.py"
+      ],
+      "scope": "Real source files, emitted graph metadata, witness CLI, producer persistence and citation checks",
+      "assumptions": [
+        "The filesystem and Python interpreter are trusted; a malicious actor able to rewrite pins and logs is outside this provenance boundary"
+      ],
+      "timeoutSeconds": 120
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Are hashes of entry points alone sufficient when helpers change?",
+      "resolution": "The pin also includes an aggregate hash of every Python and shell helper in the installation scripts directory."
+    }
+  ]
+}

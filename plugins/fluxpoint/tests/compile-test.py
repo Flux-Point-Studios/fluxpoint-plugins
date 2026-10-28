@@ -1248,10 +1248,10 @@ def prove_ci_and_launch_case():
         ("  and so is a nonce that is not a plain token",
          "attest.py --stamp" in str(bad_nonce.get("err")), bad_nonce),
         ("the prove node is told to bind its gate run to this run's nonce",
-         "FPL_ATTEST_NONCE=${LAUNCH.nonce}" in js and "provePreamble(\"ci\") +" in js
+         "--nonce ${LAUNCH.nonce}" in js and "provePreamble(\"ci\") +" in js
          and "--match-head-commit" in js, "preamble"),
         ("  and to name the stamped project root to attest.py",
-         "const ROOT_ARG = " in js and "attest.py --ci${ROOT_ARG}" in js
+         "const ROOT_ARG = " in js and "${ATTEST} --ci${ROOT_ARG}" in js
          and "--last ${gate}${ROOT_ARG}" in js, "root"),
         ("  single-quoted, so no path can expand or run in the shell",
          root_arg_literal(js), "literal"),

@@ -93,3 +93,13 @@ unknown or unreached rejudge gates. For ordinary serial graphs, the plan compare
 Embedded context has the same authority as inline context. It does not extend
 the relayed user request, bypass a human confirmation, discharge a red gate or
 authorize dispatch by itself.
+
+## Witness version continuity
+
+A recorded summary names the compiling plugin root, version and witness code
+digests. Resume verifies that pin before assembling another launch. Keep the
+installation available and unchanged for the campaign; an auto-update that
+installs a different version alongside it does not change its witness. Missing
+or changed pinned files refuse resume. Legacy prove/cited runs without an
+identity need a reviewed fresh compilation and launch. See
+[compiled witness identity](../../../docs/witness-identity.md).
