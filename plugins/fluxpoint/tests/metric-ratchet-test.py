@@ -60,6 +60,15 @@ class Ratchets(unittest.TestCase):
             {'name': 'cost', 'command': 'printf 1.2', 'direction': 'down'}]})
         self.cli('metric-guard', '--baseline', ok=False)
 
+    def test_string_command_is_a_posix_command_line(self):
+        # On Windows shell=True would hand this to cmd.exe, which has no `name=value;` assignment.
+        self.json('.fluxpoint-metrics.json', {'metrics': [
+            {'name': 'cost', 'command': "n=7; printf 'cost: %s\\n' \"$n\"", 'extract': {'regex': r'cost: (\d+)'},
+             'direction': 'down'}]})
+        self.cli('metric-guard', '--baseline')
+        r = self.cli('metric-guard', '--report', '--json')
+        self.assertEqual(json.loads(r.stdout)['metrics'][0]['limit'], 7)
+
     def test_noisy_never_armed(self):
         self.put('counter', '0')
         code = 'from pathlib import Path; p=Path("counter"); n=int(p.read_text())+1; p.write_text(str(n)); print(n)'

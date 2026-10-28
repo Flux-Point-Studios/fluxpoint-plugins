@@ -25,7 +25,7 @@ import tarfile
 import tempfile
 import time
 
-from process_tree import CleanupPending, ProcessTree
+from process_tree import CleanupPending, ProcessTree, shell_argv
 
 
 def text(value):
@@ -38,7 +38,7 @@ def target_classes(value):
 
 def execute(command, cwd, timeout):
     deadline = time.monotonic() + timeout
-    tree = ProcessTree(command, cwd, subprocess.PIPE, shell=True)
+    tree = ProcessTree(shell_argv(command), cwd, subprocess.PIPE)
     try:
         tree.resume()
         stdout, _ = tree.proc.communicate(timeout=max(0, deadline - time.monotonic()))

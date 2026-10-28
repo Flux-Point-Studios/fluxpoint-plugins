@@ -148,6 +148,14 @@ sys.exit(7)
         result = subprocess.run([found, '-c', 'echo "bash $BASH_VERSION"'], capture_output=True, text=True, timeout=30)
         self.assertRegex(result.stdout, r'bash \d')
 
+    def test_shell_argv_runs_a_posix_command_on_every_platform(self):
+        # On Windows shell=True is cmd.exe, which ends the command at a newline and reads no POSIX quoting.
+        self.assertEqual(process_tree.shell_argv('true', 'posix'), ['/bin/sh', '-c', 'true'])
+        self.assertEqual(process_tree.shell_argv('true', 'nt'), [process_tree.bash_path(), '-c', 'true'])
+        result = subprocess.run(process_tree.shell_argv("printf '%s\n%s\n' a 'b c'"),
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.stdout, 'a\nb c\n')
+
     def test_unknown_invalid_regex_and_launch_error_are_explicit(self):
         self.cli('longrun.py', 'await', 'unknown', '--timeout', '0', code=2)
         token = self.start('import time; time.sleep(300)')

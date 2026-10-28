@@ -59,6 +59,8 @@ import subprocess
 import sys
 import tempfile
 
+from process_tree import shell_argv
+
 MANIFEST = ".fluxpoint-guards.json"
 BASELINE = ".fluxpoint-guards-baseline.json"
 # Resolved by RUNNING each candidate, never by name: Windows ships a `python3`
@@ -269,7 +271,7 @@ def verify_one(root, g, quiet=False):
     # itself. A proof must first be shown to PASS on a healthy tree; only then
     # does its failure under mutation testify to anything.
     try:
-        intact = subprocess.run(cmd, shell=True, cwd=root, capture_output=True,
+        intact = subprocess.run(shell_argv(cmd), cwd=root, capture_output=True,
                                 text=True, timeout=900)
     except subprocess.TimeoutExpired:
         return False, f"the proof did not finish in 900s with the guard intact: {cmd}"
@@ -299,7 +301,7 @@ def verify_one(root, g, quiet=False):
         with open(sentinel, "w", encoding="utf-8") as fh:
             fh.write(f"{g['id']}\n{rel}\n")
         _PENDING_SENTINEL[:] = [sentinel]
-        proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True, timeout=900)
+        proc = subprocess.run(shell_argv(cmd), cwd=root, capture_output=True, text=True, timeout=900)
         out = f"{proc.stdout or ''}\n{proc.stderr or ''}"
         tail = out.strip().splitlines()[-3:]
         if proc.returncode == 0:

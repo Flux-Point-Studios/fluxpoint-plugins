@@ -69,6 +69,13 @@ mkrepo good
 "$FPL_PY" "$GG" --root "$WORK/good" --verify >/dev/null 2>&1
 check "a guard held down by its proof verifies" 0 $?
 
+# `run` is a POSIX command line on every platform. On Windows shell=True would
+# hand it to cmd.exe, which has no `NAME=value cmd` prefix.
+mkrepo posix
+sed -i.bak "s#\"run\": .*#\"run\": \"PROOF=1 $FPL_PY test_fee.py\"#" "$WORK/posix/.fluxpoint-guards.json"
+"$FPL_PY" "$GG" --root "$WORK/posix" --verify >/dev/null 2>&1
+check "a proof run written as a POSIX command line verifies" 0 $?
+
 # ================= 2. a decorative proof is caught ========================
 # The proof passes even with the guard disabled: it asserts nothing about it.
 mkrepo decorative
