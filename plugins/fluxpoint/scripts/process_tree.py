@@ -67,7 +67,7 @@ def remove_tree(path):
         error = info[1] if isinstance(info, tuple) else info
         if func in (os.unlink, os.rmdir):
             try:
-                os.chmod(name, stat.S_IWRITE)
+                os.chmod(name, os.stat(name).st_mode | stat.S_IWRITE)
                 func(name)
                 return
             except OSError as exc:
