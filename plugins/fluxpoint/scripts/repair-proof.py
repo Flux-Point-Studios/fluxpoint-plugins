@@ -72,7 +72,7 @@ def materialize(root, base, patch, digest, item, round_, manifest_sha256=None):
         # Directory packet inputs use the archived-and-patched index. This
         # repository is owned scratch only; source refs and index are untouched.
         git(snapshot, 'init', '-q')
-        git(snapshot, 'add', '-A', '--', '.')
+        git(snapshot, 'add', '-f', '-A', '--', '.')
         token = secrets.token_hex(32)
         info = dict(status='READY', snapshot=str(snapshot), token=token, base=base,
                     patchSha256=digest, manifestSha256=witness['manifestSha256'], item=item, round=round_,

@@ -245,12 +245,13 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         doc = fixtures.packet()
         doc['checks'][0]['argv'] = ['{python}', 'probes/run.py']
         doc['harnessInputs'] = ['probes']
-        self.git('add', 'probes')
+        (self.root / '.gitignore').write_text('probes/\n')
+        self.git('add', '-f', 'probes')
         (self.root / specification.SPEC).write_text(json.dumps(doc))
         (self.root / 'WORK.md').write_text('SPEC: ' + specification.SPEC + '\n```json graph-ir\n' + json.dumps(fixtures.graph()) + '\n```\n')
         result = subprocess.run([sys.executable, str(SCRIPTS / 'specification.py'), '--root', str(self.root), '--lock'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.git('add', 'probes', specification.SPEC, specification.LOCK, 'WORK.md')
+        self.git('add', '.gitignore', specification.SPEC, specification.LOCK, 'WORK.md')
         self.git('commit', '-qm', 'packet inputs')
         self.base = self.git('rev-parse', 'HEAD')
         self.prepare('flag = False\n')
