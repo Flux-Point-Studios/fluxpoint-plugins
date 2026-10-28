@@ -91,7 +91,7 @@ function repairManifestDigest(measured) { return repairSHA256([...repairCanonica
 
 function repairFeedback(check) {
   if (!check || typeof check !== 'object') return check
-  return Object.fromEntries(['verdict','findings','blockers','evidence','reframe'].filter(k => check[k] !== undefined).map(k => [k,check[k]]))
+  return Object.fromEntries(['verdict','findings','blockers','evidence','reframe','exit','command','tail'].filter(k => check[k] !== undefined).map(k => [k,check[k]]))
 }
 function repairContextIssue(...values) {
   for (const value of values) {
