@@ -20,6 +20,11 @@ Build a coverage matrix before attacking. Each applicable row names an
 invariant, attacker capabilities, an attack and its evidence. Mark a surface
 not applicable only with a reason tied to inspected code. For Cardano, read
 `../references/red-team-cardano.md` and expand the relevant transaction paths.
+For Midnight targets, include transcript gas against growing live state,
+concurrent state conflicts, maintenance authority, verifier binding, lookalike
+deployments, witness egress, disclosure minimality, ledger version pins and
+replay. The `compact` attack taxonomy names their required properties. Run
+sequential and concurrent posts beyond the initial empty-state examples.
 For other systems, adapt these surfaces to the actual change. For test doubles
 and recordings, name each recording and the production behavior it stands in
 for. Compare derived identities with the recorded value instead of deriving

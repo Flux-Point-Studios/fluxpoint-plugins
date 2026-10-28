@@ -102,7 +102,7 @@ documents. Campaign lessons survive worktree deletion in a clone-wide store. See
   `WORK.verified.md` (opt-in: a `prover` node beside the builder),
   `WORK.repair.md` (independent repair checks),
   `WORK_PROMPT.md`, `loop.sh`, `attack-taxonomy.json` (the attack classes
-  a repo must specify for Aiken, TypeScript and Python, enforced by spec-guard
+  a repo must specify for Aiken, TypeScript, Python and Compact/Midnight, enforced by spec-guard
   once copied to `.fluxpoint-attacks.json`), `settings.snippet.json` for Claude Code
   and `codex.config.snippet.toml` for Codex, `tighten-baselines.yml` for
   scheduled review PRs, and `blaster/` for the bridge, manifest and model starter.
@@ -413,8 +413,11 @@ proved one.
   the builder classes the off-chain TypeScript answers for. It is red for
   every class with neither a test of that name nor a waiver with a reason,
   each taxonomy gates only a repo that tracks its language, and a waiver
-  is scoped to its own taxonomy. A tracked language whose taxonomy is
-  missing from the manifest is named `NO TAXONOMY` with the classes the
+  is scoped to its own taxonomy.
+  The Compact/Midnight taxonomy requires generator-backed tests or waivers
+  for nine contract and transaction classes, including gas against growing
+  state and witness egress. Compact source or Midnight builder imports activate it.
+  A tracked language whose taxonomy is missing from the manifest is named `NO TAXONOMY` with the classes the
   template holds for it; that is a note until the manifest sets
   `"requireAllLanguages": true`, and a `"languages"` list names the halves
   a repo gates on purpose, printing any tracked language it leaves out as
