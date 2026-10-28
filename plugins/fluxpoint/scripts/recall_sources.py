@@ -1,5 +1,7 @@
 """Read-only, bounded corpus discovery for the derived recall index."""
 import datetime
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -7,6 +9,7 @@ import posixpath
 from pathlib import Path
 import re
 import sys
+import subprocess
 
 MAX_FILE = 1024 * 1024
 
@@ -135,6 +138,52 @@ def _portable_path(path):
     return value.lower() if re.match(r'^[A-Za-z]:', value) else value
 
 
+_PROJECT_VIEWS = ContextVar('recall_project_views', default=None)
+
+
+@contextmanager
+def project_views():
+    """Deduplicate Git discovery within one query, with no cross-query staleness."""
+    if _PROJECT_VIEWS.get() is not None:
+        yield
+        return
+    token = _PROJECT_VIEWS.set({})
+    try:
+        yield
+    finally:
+        _PROJECT_VIEWS.reset(token)
+
+
+def project_view(root):
+    key = str(Path(root).resolve())
+    views = _PROJECT_VIEWS.get()
+    if views is None: return _project_view(root)
+    if key not in views: views[key] = _project_view(root)
+    return views[key]
+
+
+def _project_view(root):
+    """Canonical clone identity and checkout aliases for scoped user memory."""
+    base = Path(root).resolve()
+    view = {"identity": _portable_path(base), "roots": [_portable_path(base)], "names": [base.name]}
+    try:
+        common = subprocess.run(["git", "-C", str(base), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                capture_output=True, text=True, timeout=2)
+        if common.returncode or not common.stdout.strip(): return view
+        directory = Path(common.stdout.strip()).resolve()
+        worktrees = subprocess.run(["git", "-C", str(base), "worktree", "list", "--porcelain", "-z"],
+                                   capture_output=True, text=True, timeout=2)
+        if worktrees.returncode: return view
+        roots = [Path(entry[len("worktree "):]).resolve() for entry in worktrees.stdout.split("\0")
+                 if entry.startswith("worktree ")]
+        if not roots: return view
+        return {"identity": _portable_path(directory),
+                "roots": sorted({_portable_path(path) for path in roots}),
+                "names": sorted({path.name for path in roots})}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return view
+
+
 def _codex_scope(cwd, root, corpus):
     source = _portable_path(cwd)
     for old, local in sorted(corpus.get('pathAliases', {}).items(), key=lambda row: -len(row[0])):
@@ -142,8 +191,9 @@ def _codex_scope(cwd, root, corpus):
         if source == old or source.startswith(old + '/'):
             source = _portable_path(local) + source[len(old):]
             break
-    base = _portable_path(Path(root).resolve())
-    return source == base or source.startswith(base + '/')
+    if Path(source).is_absolute(): source = _portable_path(Path(source).resolve())
+    view = corpus.get('_projectView') or project_view(root)
+    return any(source == base or source.startswith(base + '/') for base in view['roots'])
 
 
 def _codex_passages(raw):
@@ -162,27 +212,81 @@ def _codex_passages(raw):
         yield ' / '.join(headings), '\n'.join(body).strip()
 
 
+META_LINE = re.compile(r'^(thread_id|updated_at|cwd|rollout_path):\s*(.*?)\s*$')
+
+
+def _codex_header(text):
+    """Only leading metadata owns a passage; examples in its body are text."""
+    meta, lines = {}, text.splitlines()
+    index = 0
+    for index, line in enumerate(lines):
+        match = META_LINE.fullmatch(line)
+        if match:
+            meta[match[1]] = match[2]
+        elif line.strip():
+            break
+    else:
+        return meta, ''
+    return meta, '\n'.join(lines[index:]).strip()
+
+
+def _codex_sections(raw):
+    """Each leaf passage inherits only its own heading ancestors' metadata."""
+    frames, body, global_meta, fence = [], [], {}, None
+    def section():
+        own, content = _codex_header('\n'.join(body))
+        target = frames[-1]['meta'] if frames else global_meta
+        target.update(own)
+        meta = dict(global_meta)
+        for frame in frames: meta.update(frame['meta'])
+        return ' / '.join(frame['title'] for frame in frames), content, meta
+    for line in raw.splitlines():
+        marker = re.match(r'^ {0,3}(`{3,}|~{3,})', line)
+        if fence:
+            body.append(line)
+            if re.fullmatch(r' {0,3}' + re.escape(fence[0]) + r'{' + str(len(fence)) + r',}[ \t]*', line): fence = None
+            continue
+        if marker:
+            fence = marker[1]
+            body.append(line)
+            continue
+        match = re.match(r'^(#{1,6})\s+(.+?)\s*#*$', line)
+        if match:
+            name, content, meta = section()
+            if content: yield name, content, meta
+            level = len(match[1])
+            while frames and frames[-1]['level'] >= level: frames.pop()
+            frames.append({'level': level, 'title': match[2], 'meta': {}})
+            body = []
+        else:
+            body.append(line)
+    name, content, meta = section()
+    if content: yield name, content, meta
+
+
 def _codex_nodes(root, corpus, p, raw, when):
-    meta = dict(re.findall(r'^(thread_id|updated_at|cwd|rollout_path):\s*(.*?)\s*$', raw, re.M))
     relative = p.relative_to(corpus['path']).as_posix()
     filekey = corpus['origin'] + '/' + relative
     rollout = relative.startswith('rollout_summaries/')
     if rollout:
+        meta, content = _codex_header(raw)
         if not meta.get('cwd') or not _codex_scope(meta['cwd'], root, corpus): return {}
-        raw = re.sub(r'^(?:thread_id|updated_at|cwd|rollout_path):.*\n?', '', raw, flags=re.M).strip()
-        passages = [(next((line.lstrip('# ') for line in raw.splitlines() if line.startswith('#')), p.stem), raw)]
+        name = next((line.lstrip('# ') for line in content.splitlines() if line.startswith('#')), p.stem)
+        passages = [(name, content, meta)]
     else:
-        passages = list(_codex_passages(raw))
+        passages = _codex_sections(raw)
     out = {}
-    project = re.compile(r'\b(?:project|repo|repository):\s*' + re.escape(Path(root).resolve().name) + r'(?=\s|/|$)', re.I)
-    for num, (name, passage) in enumerate(passages, 1):
+    view = corpus.get('_projectView') or project_view(root)
+    labels = view['names'] + view['roots']
+    project = re.compile(r'\b(?:project|repo|repository):\s*(?:' + '|'.join(re.escape(label) for label in labels) + r')(?=\s|/|$)', re.I)
+    project_header = re.compile(r'\b(?:project|repo|repository):\s*', re.I)
+    for num, (name, passage, meta) in enumerate(passages, 1):
         if not rollout and not corpus.get('allowUnscoped'):
+            if project_header.search(name) and not project.search(name): continue
             if meta.get('cwd'):
                 if not _codex_scope(meta['cwd'], root, corpus): continue
             elif not project.search(name):
                 continue
-        # Keep all text through bounded passages; a large MEMORY section cannot
-        # crowd out the rest of the corpus with one giant ranked document.
         for part, start in enumerate(range(0, len(passage), 1200), 1):
             nid = f'note:{filekey}#{num}.{part}'
             out[nid] = {'kind': 'note', 'text': passage[start:start + 1200] + ' || ' + name,
@@ -195,7 +299,9 @@ def _codex_nodes(root, corpus, p, raw, when):
 def notes(root):
     nodes, diagnostics = {}, []
     names = {}
+    view = project_view(root)
     for corpus in corpus_roots(root):
+        if corpus['format'] == 'codex-memories': corpus = dict(corpus, _projectView=view)
         for p in files(corpus):
             try:
                 if p.stat().st_size > MAX_FILE: raise ValueError('larger than 1 MiB')

@@ -210,3 +210,23 @@ python plugins/fluxpoint/scripts/memory.py --root /path/to/checkout --adopt /pat
 
 Adoption is idempotent and leaves the original files in place. Recall unions
 shared and local source artifacts and invalidates its cache when either changes.
+
+
+### Scoped reader and warm-process identity
+
+Codex aggregate sections inherit metadata only from their own heading ancestors.
+A later section's `cwd`, timestamp or thread ID cannot relabel earlier sections,
+and metadata quoted in a rollout body cannot override its leading header. Fenced
+Markdown examples do not create scope boundaries. Local cwd paths resolve links
+before comparison, so a link into another project cannot widen a project view.
+
+Git sibling worktrees use their common repository identity and known checkout
+paths when scoping Codex memory. They can read the canonical repository's
+headings and rollouts and share one corpus cache when their corpus configuration
+agrees. Unrelated repositories retain distinct scoped slots. Reader-policy
+changes use a new schema namespace, including helper and configuration code.
+
+Warm prompt workers also distinguish default configuration, cache and home path
+environments. Relative path selectors are resolved for the process key while
+retaining their original spelling, so a fixed daemon state directory cannot
+make a new configuration inherit an older worker's corpus environment.

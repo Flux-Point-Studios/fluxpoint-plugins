@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "sha256": "66460737d3d25eb934e29ca2ce88bae4f6788cdb9ad2952568743da3ef1a0fa4",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/recall-isolation-test.py": "028c9ef091903c5d8d923b620a3570bcdedcef47b8e0ecff4ee8ac2dfceb3531"
+  },
+  "lockFormat": 2
+}

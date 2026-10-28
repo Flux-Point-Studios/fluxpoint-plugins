@@ -177,7 +177,7 @@ def shared_index_dir(root):
     # Codex has a user-wide store but its reader applies a project cwd policy.
     # Different policy views must never reuse each other's private passages.
     if any(c["format"] == "codex-memories" for c in corpora):
-        identity["scope"] = os.path.normcase(os.path.realpath(root))
+        identity["scope"] = recall_sources.project_view(root)["identity"]
     key = hashlib.sha256(_dumps(identity).encode()).hexdigest()
     cache = os.environ.get("XDG_CACHE_HOME") or (os.path.join(os.environ["LOCALAPPDATA"], "Cache") if os.name == "nt" and os.environ.get("LOCALAPPDATA") else os.path.join(os.path.expanduser("~"), ".cache"))
     return os.path.abspath(os.path.join(cache, "fluxpoint", "recall", INDEX_SCHEMA, key))
@@ -311,7 +311,10 @@ def _corpus_fingerprints(root):
             except OSError:
                 files.append([str(path), "unreadable"])
         rows.append({**corpus, "files": files})
-    return hashlib.sha256(_dumps(rows).encode()).hexdigest()
+    scoped = {"corpora": rows}
+    if any(row["format"] == "codex-memories" for row in rows):
+        scoped["projectView"] = recall_sources.project_view(root)
+    return hashlib.sha256(_dumps(scoped).encode()).hexdigest()
 
 
 # Schema identity describes everything needed to interpret derived files. Older
@@ -320,7 +323,7 @@ INDEX_SCHEMA = hashlib.sha256(_dumps({
     "format": 2, "docs": sorted(DOC_KINDS), "nodes": sorted(NODE_KINDS),
     "edges": sorted(EDGE_KINDS), "tokenizer": inspect.getsource(tokenize),
     "fingerprints": inspect.getsource(_source_fingerprints) + inspect.getsource(_corpus_fingerprints),
-    "corpusReader": inspect.getsource(recall_sources.notes),
+    "corpusReader": inspect.getsource(recall_sources),
 }).encode()).hexdigest()[:20]
 INDEX_DIR = os.path.join(INDEX_BASE, INDEX_SCHEMA)
 

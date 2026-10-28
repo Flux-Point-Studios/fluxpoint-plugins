@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "goal": "Keep recall project and configuration views isolated across shared caches and warm processes",
+  "asset": "Scoped corpus reads, schema namespaces and authenticated warm recall",
+  "scope": [
+    "Per-section Codex metadata and immutable rollout header scope",
+    "Clone-wide worktree project view without unrelated repository mixing",
+    "Reader implementation changes isolate schema slots",
+    "Warm process keys include default configuration and cache environment"
+  ],
+  "outOfScope": [
+    "Cross-host automatic synchronization",
+    "Inferring project ownership from arbitrary prose without scope metadata"
+  ],
+  "decisions": [
+    {
+      "id": "recall-view-isolation",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "What identifies the source policy view cached or served to a recall caller?",
+        "options": [
+          {
+            "option": "scope-and-configuration-identity",
+            "argued_by": "model",
+            "strongest_objection": "Git project views and parser/configuration changes must invalidate the corresponding caches"
+          },
+          {
+            "option": "checkout-and-file-stat-only",
+            "argued_by": "model",
+            "strongest_objection": "Aggregated metadata and daemon environment reuse can return another project or configuration corpus"
+          }
+        ],
+        "chosen": "scope-and-configuration-identity",
+        "rationale": "Bind each passage to its own metadata scope, each clone view to its common repository identity and each warm process to all source-configuring environment; namespace reader policy revisions.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Executed reproduction: raw_memories first unrelated section is indexed under the last section cwd",
+          "Focused regression counterexamples cover warm config crossover and worktree exclusion"
+        ]
+      },
+      "costs": [
+        {
+          "option": "scope-and-configuration-identity",
+          "cost": "One Git view discovery per source build and explicit cache keys for source-affecting configuration",
+          "basis": "estimate",
+          "evidence": [
+            "Existing readers and warm cache already collect source metadata and environment keys"
+          ]
+        },
+        {
+          "option": "checkout-and-file-stat-only",
+          "cost": "Cross-project memory leakage and stale policy cache reuse",
+          "basis": "measured",
+          "evidence": [
+            "Counterexample raw_memories indexed OTHER_PROJECT_SECRET for report-service"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "isolated-recall-views",
+      "statement": "Unrelated aggregate or rollout sections never enter a project view; sibling worktrees share canonical project knowledge; reader policy revisions and default config roots cannot reuse a stale incompatible cache or daemon",
+      "decisions": [
+        "recall-view-isolation"
+      ],
+      "checks": [
+        "recall-isolation-tests"
+      ],
+      "counterexample": "The last cwd scopes all sections, an XDG_CONFIG_HOME change returns the prior daemon corpus, or a sibling worktree loses canonical repo knowledge"
+    }
+  ],
+  "checks": [
+    {
+      "id": "recall-isolation-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/recall-isolation-test.py"
+      ],
+      "scope": "Actual parser, Git sibling worktree, alternate reader installation and warm hook with two configurations",
+      "assumptions": [
+        "Explicit allowUnscoped and configured peer path aliases remain user-controlled corpus policy"
+      ],
+      "timeoutSeconds": 90
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Can shared caches use one key for every checkout of the same clone?",
+      "resolution": "Only when corpus configuration and canonical project scope agree; unrelated repositories retain distinct scope identities and source readers apply the full project view."
+    }
+  ]
+}

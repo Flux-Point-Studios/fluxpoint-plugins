@@ -103,8 +103,17 @@ async function warm(payload) {
   // Configuration affects corpus scope; interpreter selection does not. The
   // second warm request can succeed even if Python is no longer on PATH.
   const ignored = new Set(['FPL_PY', 'FPL_MEM_PROMPT', 'FPL_DISABLE', 'FPL_RECALL_DAEMON_DIR', 'FPL_RECALL_DAEMON_IDLE']);
+  const defaultPaths = new Set(['XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'HOME', 'USERPROFILE',
+    'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA']);
+  const resolvedPaths = new Set(['XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'HOME', 'USERPROFILE',
+    'LOCALAPPDATA', 'FPL_RECALL_CONFIG', 'FPL_MEMORY_HOME', 'FPL_RECALL_QUERY_FILE',
+    'CLAUDE_CONFIG_DIR', 'CLAUDE_PROJECT_DIR', 'CODEX_HOME', 'GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE']);
+  const normalize = (name, value) => resolvedPaths.has(name) && value
+    ? path.resolve(value === '~' ? os.homedir() : value.startsWith('~/') || value.startsWith('~\\')
+      ? path.join(os.homedir(), value.slice(2)) : value) : value;
   const context = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
-    !ignored.has(name) && /^(?:FPL_|GIT_|CODEX_|CLAUDE_)/.test(name)).sort());
+    !ignored.has(name) && (/^(?:FPL_|GIT_|CODEX_|CLAUDE_)/.test(name) || defaultPaths.has(name)))
+    .map(([name, value]) => [name, resolvedPaths.has(name) ? { raw: value, resolved: normalize(name, value) } : value]).sort());
   const files = fs.readdirSync(here).filter(name => name.endsWith('.py')).sort().map(name => {
     const stat = fs.statSync(path.join(here, name), { bigint: true });
     return [name, String(stat.size), String(stat.mtimeNs)];

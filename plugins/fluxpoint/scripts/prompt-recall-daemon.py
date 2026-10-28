@@ -150,7 +150,7 @@ def query(payload, project, cwd):
         previous = sys.stdin
         try:
             sys.stdin = io.StringIO(payload)
-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()), recall.recall_sources.project_views():
                 recall.for_prompt(root)
         finally:
             sys.stdin = previous
