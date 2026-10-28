@@ -5,7 +5,7 @@
   "harness": {
     "plugins/fluxpoint/tests/metric-ratchet-test.py": "8adac59c0e40643289557c9dbf02552a368f651779e50bd56c68e672709bf724",
     "plugins/fluxpoint/tests/packet-inputs-test.py": "9f8829c21a1021ac33fa1495a214f3ee30442a72ba8d404460bd561031a9a8fb",
-    "plugins/fluxpoint/tests/python-hatches-test.py": "6e4eff1128cd38080b0f357614bb1ff6ed2e6c0bb635430aed94c7af07000c5a"
+    "plugins/fluxpoint/tests/python-hatches-test.py": "f8e4f7b9fc440886863b0b361c8ac107a5057ce1d0f6d2fe32d93ef1e381a211"
   },
   "lockFormat": 2
 }

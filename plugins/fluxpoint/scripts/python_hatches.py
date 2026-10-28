@@ -81,6 +81,15 @@ def scan(name, text):
             if self.qualified(node) in ('typing.Any', 'typing_extensions.Any'):
                 self.hit('py.any', original or node)
                 return
+            if isinstance(node, ast.Subscript):
+                constructor = self.qualified(node.value)
+                if constructor in ('typing.Literal', 'typing_extensions.Literal'):
+                    return  # Literal parameters are values, including quoted strings.
+                if constructor in ('typing.Annotated', 'typing_extensions.Annotated'):
+                    types = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+                    if types:
+                        self.annotation(types[0], original)
+                    return  # Remaining Annotated operands are metadata, not type expressions.
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 try:
                     self.annotation(ast.parse(node.value, mode='eval').body, original or node)

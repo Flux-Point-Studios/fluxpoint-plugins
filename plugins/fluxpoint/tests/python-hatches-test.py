@@ -31,6 +31,9 @@ def f(x: dict[str, A], *args: t.Any, **kwargs: A) -> "t.Any":
     local: A = x
 ''').count('py.any'), 5)
 
+    def test_literal_values_and_annotation_metadata_are_not_types(self):
+        self.assertEqual(self.scan('from typing import Any, Literal, Annotated\nx: Literal["Any"]\ny: Annotated[int, "Any", Any]\nz: Annotated[Any, "metadata"]\n'), ['py.any'])
+
     def test_casts_resolve_imports(self):
         self.assertEqual(self.scan('''from mylib import cast
 cast(int, value)
