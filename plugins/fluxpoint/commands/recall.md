@@ -16,7 +16,7 @@ source of truth.
    presence from stats. `--embed` backfills
    vectors only when an embedder key is present (`VOYAGE_API_KEY`,
    `OPENAI_API_KEY`, or `GEMINI_API_KEY`, in that order; `FPL_EMBEDDER`
-   overrides) — keyless is a supported mode, not a failure, and the
+   overrides; external note documents require explicit `FPL_EMBEDDER` selection) — keyless is a supported mode, not a failure, and the
    output says which mode ran.
 
 2. If the argument is `stats`, run
@@ -30,6 +30,8 @@ source of truth.
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" recall.py --query "<argument>" --k 12
    ```
    Add `--files <comma-separated paths>` when the question is about
+   Ordinary queries rebuild keyless when needed; they never backfill document vectors.
+   Add `--files` for
    specific files (the identifier leg is exact-match strong there), and
    `--tag <t>` to anchor a tag. For history questions, `--as-of <ISO
    timestamp>` serves the version that held then, and
@@ -44,3 +46,6 @@ source of truth.
 5. If the output names a degradation — dense leg absent, index stale,
    nothing indexed yet — repeat it to the user verbatim rather than
    smoothing it over, and name the fix it suggests.
+
+Corpus roots, refresh controls and worker brief settings are documented in
+[the memory recall guide](../../../docs/memory-recall.md#corpus-configuration-and-safe-refresh).

@@ -54,3 +54,6 @@ The [proof-strength ratchet](../plugins/fluxpoint/README.md) includes Python
 typing suppressions and checker configuration; its module help lists categories.
 The [documentation audit](documentation-audit.md) records the checked surfaces,
 corrections and verification limits of the October 2026 review.
+
+Recall corpus configuration, detached refresh, embedding consent, worker briefs and
+shared worktree memory are described in [memory recall](memory-recall.md#corpus-configuration-and-safe-refresh).

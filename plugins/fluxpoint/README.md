@@ -21,6 +21,11 @@ See the [documentation index](../../docs/README.md) for setup, feature guides
 and operator procedures. The sections below describe the installed plugin;
 older design decisions are preserved in `DESIGN-NOTES.md` and `ROADMAP.md`.
 
+Recall reads Claude Code topic notes and configured peer Markdown corpora, supports
+worker briefs, and refreshes its derived index in the background without embedding
+documents. Campaign lessons survive worktree deletion in a clone-wide store. See
+[corpus configuration and durable storage](../../docs/memory-recall.md#corpus-configuration-and-safe-refresh).
+
 ## Layout
 
 - `hooks/hooks.json` — one hook set for both runtimes: `SessionStart` state

@@ -237,8 +237,9 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
         step "substrate suites" substrate_tests ;;
     esac
     case "$f" in
-      "$PLUGIN"/scripts/recall.py | "$PLUGIN"/scripts/embedder.py)
+      "$PLUGIN"/scripts/recall.py | "$PLUGIN"/scripts/recall_sources.py | "$PLUGIN"/scripts/embedder.py)
         step "hybrid recall pipeline" "$FPL_PY" "$PLUGIN/tests/recall-test.py"
+        step "recall source maintenance" "$FPL_PY" "$PLUGIN/tests/recall-maintenance-test.py"
         step "embedder quarantine" "$FPL_PY" "$PLUGIN/tests/embedder-test.py" ;;
       "$PLUGIN"/scripts/inject-state.sh | "$PLUGIN"/scripts/prompt-recall.sh)
         step "hybrid recall pipeline" "$FPL_PY" "$PLUGIN/tests/recall-test.py" ;;
@@ -345,6 +346,8 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     step "lessons across runs (executed)" "$FPL_PY" "$PLUGIN/tests/memory-test.py"
     step "recurrence gate (executed)" "$FPL_PY" "$PLUGIN/tests/recurrence-test.py"
     step "hybrid recall pipeline (executed)" "$FPL_PY" "$PLUGIN/tests/recall-test.py"
+    step "recall source maintenance (executed)" "$FPL_PY" "$PLUGIN/tests/recall-maintenance-test.py"
+    step "durable memory storage (executed)" "$FPL_PY" "$PLUGIN/tests/memory-storage-test.py"
     step "embedder quarantine (executed)" "$FPL_PY" "$PLUGIN/tests/embedder-test.py"
     step "graph metrics aggregator (executed)" "$FPL_PY" "$PLUGIN/tests/metrics-test.py"
     step "repair origin replay + resources + live tallies (executed)" "$FPL_PY" "$PLUGIN/tests/repair-origin-test.py"

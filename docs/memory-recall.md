@@ -89,3 +89,92 @@ local models); graph databases, bundled MCP servers, daemons; new writers
 to `memory.jsonl`; and retrieval-driven suppression of any kind — ranking
 decides what reaches a prompt first, never what gets judged.
 
+
+## Corpus configuration and safe refresh
+
+Recall discovers every Claude Code auto-memory folder on the path from the
+repository root to the filesystem root, under `CLAUDE_CONFIG_DIR` (default
+`~/.claude`). An empty child folder never hides an ancestor's notes. It reads
+Markdown topic files with optional `name`, `description` and `metadata` front
+matter, and indexes passages of at most 1,200 characters. `MEMORY.md`, dotfiles,
+symlinks and backups are skipped. Unreadable, invalid UTF-8 and files over 1 MiB
+are skipped with a named diagnostic. Results include at most one passage per
+origin and file.
+
+Settings survive plugin upgrades in
+`$XDG_CONFIG_HOME/fluxpoint/recall.json` (default
+`~/.config/fluxpoint/recall.json`), or the file named by `FPL_RECALL_CONFIG`:
+
+```json
+{
+  "refresh": true,
+  "corpora": [
+    {
+      "path": "/srv/mirror/host-b/memory",
+      "origin": "host-b",
+      "format": "claude-automemory",
+      "weight": 0.8
+    }
+  ]
+}
+```
+
+`markdown` is also accepted for ordinary topic folders. Corpus paths are read
+only; recall does not synchronize them. Each origin must be unique and use
+letters, numbers, dots, underscores or dashes. IDs include the origin, so files
+with the same basename in two corpora remain distinct. `weight` defaults to 1
+and must be greater than zero and at most 2. This version does not implement a
+Codex-memory format or split shared indexes for user-level corpora.
+
+A note's `metadata.modified` supplies its date (file mtime is the fallback), and
+`metadata.originSessionId` preserves the session. `metadata.supersededBy` or
+`status: superseded` hides an obsolete note unless `--include-superseded` is
+requested. Among notes with the same `name`, the newest timestamp wins across
+origins. Dates with offsets are compared as instants. Recall prints the source
+origin, date and session and applies the same recency decay used for lessons.
+Lesson histories are ordered by their establishment time and run ID, so merging
+JSONL files does not let a later file position replace newer knowledge.
+
+SessionStart now runs recall in non-git roots too. It requests a detached,
+keyless refresh when sources exist and the index is absent or stale. The hook
+returns immediately; the next session can use the completed index. One refresh
+lock per root expires after five minutes if a worker dies. Set
+`FPL_RECALL_REFRESH=0`, or `"refresh": false` in the configuration, to disable
+this launch. Plain `recall.py --for-session` only reads; pass `--refresh` to
+request the same background behavior explicitly. Concurrent builds serialize;
+cache files are replaced atomically, metadata is published last, and a reader
+refuses mixed generations.
+
+An ordinary query may rebuild the lexical index, but never backfills document
+embeddings. Document backfill requires `--build --embed`; external notes also
+require an explicit provider in `FPL_EMBEDDER`. A provider key exported for some
+other tool is insufficient consent to embed external notes. Detached refresh
+and session/prompt hooks use no embedding calls.
+
+Workers can rank context against a supplied brief: set `FPL_RECALL_QUERY` to
+query text, or `FPL_RECALL_QUERY_FILE` to a UTF-8 brief path. Text takes priority;
+the file has front matter removed and is capped at 512 UTF-8 bytes. Without
+either setting, recall uses WORK.md or LOOP.md. The section names its query
+source. The opt-in prompt hook now counts distinct meaningful input words,
+excluding English stopwords, so a single `DataLoader` cannot clear its
+two-word precision floor through tokenizer pieces.
+
+## Durable lessons across worktrees
+
+Lessons and copies of their run artifacts live under
+`<git-common-dir>/fluxpoint/{memory.jsonl,runs/}`. Every worktree of a clone reads
+that store, and deleting the originating worktree preserves its lessons and
+decisions. Non-git roots retain `.claude/fluxpoint/`. `FPL_MEMORY_HOME` overrides
+the store location for an explicitly shared or externally synchronized home.
+Appends hold a cross-process lock across history inspection and writing; readers
+use the same lock.
+
+The current checkout's old `.claude/fluxpoint/memory.jsonl` and run artifacts
+remain readable. Before removing an older worktree, import its legacy store:
+
+```
+python plugins/fluxpoint/scripts/memory.py --root /path/to/checkout --adopt /path/to/old-worktree
+```
+
+Adoption is idempotent and leaves the original files in place. Recall unions
+shared and local source artifacts and invalidates its cache when either changes.
