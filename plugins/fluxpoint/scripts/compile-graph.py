@@ -2653,6 +2653,8 @@ def opts(n, ir, phase, label, schema_expr=None):
     roles = ir.get("roles") or {}
     role = roles.get(n.get("role"), {})
     schema = schema_expr or 'C[' + js_str(n['contract']) + ']'
+    if prove_gate(n):
+        schema = 'judgedSchema(' + schema + ')'
     if n.get('cites'):
         schema = 'citationSchema(' + schema + ', ' + json.dumps(n['cites']) + ')'
     parts = [f"label: {label}", f"phase: {js_str(phase)}", f"schema: {schema}"]
@@ -3061,12 +3063,13 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("function provePreamble(gate) {")
         a("  return longPreamble() + (gate === 'ci'")
         a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run ${ATTEST} --ci${ROOT_ARG} --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
-        a("    : `PROVE GATE ${gate} — use the pinned witness command, which verifies the compiler identity before executing the declared gate: ${ATTEST} --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground ${ATTEST} --await <token>${ROOT_ARG}. A red whose wrapper row carries fault can be settled only by ${ATTEST} --rerun-fault <attestId>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}; await its one sequential native/reference pair and cite the pair. Every other red stays red. Never rerun until green: a later pass does not erase any unsettled red at the same tree and nonce. Return gate '${gate}', the exit, and the attestId the witness recorded (${ATTEST} --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
+        a("    : `PROVE GATE ${gate} — use the pinned witness command, which verifies the compiler identity before executing the declared gate: ${ATTEST} --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground ${ATTEST} --await <token>${ROOT_ARG}. A red whose wrapper row carries fault can be settled only by ${ATTEST} --rerun-fault <attestId>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}; await its one sequential native/reference pair and cite the pair. Every other red stays red. Never rerun until green: a later pass does not erase any unsettled red at the same tree and nonce. Return gate '${gate}', the exit, the full judged commit sha, and the attestId the witness recorded (${ATTEST} --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
         a("}")
         a("const CITES = " + json.dumps({n['id']: n['cites'] for n in cited_nodes}, sort_keys=True))
         a("function citesPreamble(gates) {")
         a("  return `INDEPENDENT STEP CITATIONS: for gate ci use ${ATTEST} --ci with the forge target directly; no local alias exists. For each other gate of ${JSON.stringify(gates)}, start the manifest's local lane with ${ATTEST} --run <gate>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}. Concurrently poll ${ATTEST} --reuse <gate>${ROOT_ARG} --pr <PR> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), in foreground slices of at most 570 seconds. Coverage, witness pins and packet base come only from the manifest. Undecided (3) means continue/collect the local lane, never pass. A completed failure from either source is red even if the other is green. Only a green forge result may cancel the local token with ${ATTEST} --cancel${ROOT_ARG} <token>; collect/await cancellation and inspect whether the local lane already completed red. Never end your turn with a local lane running. Return your normal contract plus sha (the full judged commit) and citations: exactly one {gate, exit, attestId, sha, target} per declared step, with full judged SHA and target pr:N or ref:branch. For a local winner retain sha and target as well, so record-run checks the other source for red. Never cite a builder's local row.\\n\\n`")
         a("}")
+        a("function judgedSchema(schema) { return { ...schema, required: [...new Set([...(schema.required || []), 'sha'])], properties: { ...schema.properties, sha: {type:'string', pattern:'^[0-9a-f]{40}$'} } } }")
         a("function citationSchema(schema, gates) {")
         a("  return { ...schema, required: [...new Set([...(schema.required || []), 'sha', 'citations'])], properties: { ...schema.properties, sha: { ...((schema.properties || {}).sha || {}), type: 'string', pattern: '^[0-9a-f]{40}$' }, citations: { type: 'array', minItems: gates.length, maxItems: gates.length, items: { type: 'object', additionalProperties: false, required: ['gate', 'exit', 'attestId', 'sha', 'target'], properties: { gate: { type: 'string', enum: gates }, exit: { type: 'integer' }, attestId: { type: 'string', minLength: 1 }, sha: { type: 'string', pattern: '^[0-9a-f]{40}$' }, target: { type: 'string', minLength: 1 } } } } } }")
         a("}")
@@ -3083,6 +3086,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  if (typeof r.exit !== 'number') return `${id}: no integer exit`")
         a("  if (!r.attestId) return `${id}: no attestId — an exit code nothing witnessed`")
         a("  if (gate === 'ci' && !r.sha) return `${id}: CI verdict names no commit — the merge cannot be pinned to it`")
+        a("  if (!/^[0-9a-f]{40}$/.test(r.sha || '')) return `${id}: verdict names no exact judged commit (sha)`")
         a("  return null")
         a("}")
         a("")

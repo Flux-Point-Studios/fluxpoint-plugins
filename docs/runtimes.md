@@ -39,14 +39,16 @@ payload's `cwd`. The per-edit verify hook and the prose-smell hook both go
 through it. A deletion arms the Stop gate and checks nothing.
 
 **Shell results.** Claude Code's `PostToolUse` for `Bash` fires on success
-and hands the hook an object with `stdout` and `stderr`; a failure arrives as
-a string beginning `Error: Exit code N`. Codex fires for every completed
+and hands the hook an object with `stdout` and `stderr`. The separate
+`PostToolUseFailure` event invokes the same attestation hook and carries
+`error: "Command failed with exit code N"`; legacy failure response strings
+beginning `Error: Exit code N` remain accepted. Codex fires for every completed
 command and hands the hook one string whose header carries
 `Process exited with code N` (the classic shell tool writes `Exit code: N`).
 `attest.py` reads the exit from that header and only from the header, so a
 command that prints a header-shaped line cannot mint its own exit. A
-response with no readable exit is recorded as nothing. The practical
-difference: Codex attests red gate runs as well as green ones.
+response with no readable exit is recorded as nothing. Both configured
+runtimes retain readable red and green gate observations.
 
 **Project directory.** Claude Code sets `CLAUDE_PROJECT_DIR` for hooks; Codex
 does not. `fpl_cd_project` in `scripts/lib.sh` already resolves the project
@@ -116,9 +118,8 @@ name, and nothing in it is specific to Claude Code.
 - **Memory lint.** The substrate memory lint reads Claude Code's per-project
   memory directory under `~/.claude/projects`. Codex keeps no such
   directory, so the lint is silent there.
-- **Attestation of failures.** Recorded on Codex, and on Claude Code only
-  once a hook runs on the runtime's failure event; today the log binds
-  passes there and is silent about reds.
+- **Attestation of failures.** Claude Code uses `PostToolUseFailure`; Codex
+  supplies the completed shell header. Both feed the same strict exit parser.
 
 ## Verifying a change against both runtimes
 

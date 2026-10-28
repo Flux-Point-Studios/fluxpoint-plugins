@@ -138,21 +138,28 @@ def _under_tree(path, tree, windows):
     return path.startswith(tree + '/') or path == tree or not re.match(r'^(?:[A-Za-z]:)?/', path)
 
 
-def floor(log, tree, host):
+def floor(log, tree, host, inline_program=False):
     """Plugin-fixed exclusions cannot be removed by a repository signature."""
     lines = log.splitlines()
     if not any(marker in line for marker in MARKERS for line in lines) or 'AssertionError' in log:
         return False
+    crash_items = set(re.findall(r"worker ['\"]gw\d+['\"] crashed while running ['\"]([^'\"]+)['\"]", log))
+    worker_down = bool(re.search(r"\[gw\d+\] node down:|replacing crashed worker gw\d+", log))
     current, frames = False, 0
     for line in lines:
         if re.search(r'(^|\s)(FAILED|ERROR)(\s|:|$)', line):
             if not re.search(r"worker ['\"]gw\d+['\"] crashed", line):
-                return False
+                summary = re.search(r"(?:FAILED|ERROR)\s+(\S+)", line)
+                if not worker_down or not summary or summary.group(1) not in crash_items:
+                    return False
         if re.search(r'^\s*Current thread\b', line):
             current = True
             continue
         if current:
             match = re.search(r'\bFile "([^"]+)"', line)
+            if match and (re.fullmatch(r'<frozen [^>]+>', match.group(1))
+                          or match.group(1) == '<string>' and not inline_program):
+                continue
             if match:
                 frames += 1
             test_frame = match and re.search(r'(?:^|/)(?:tests?/|test_[^/]*\.py$|[^/]*_test\.py$)', match.group(1).replace('\\', '/'), re.I)
@@ -181,13 +188,31 @@ def _search(pattern, lines, deadline=None):
     return bounded_regex.search_lines(pattern, batch, deadline - time.monotonic())
 
 
+def inline_gate(command):
+    """Identify the program operand, without confusing pytest's -c config flag."""
+    try:
+        words = shlex.split(command)
+        index = 1
+        while index < len(words):
+            word = words[index]
+            if word in ('-m', '-c'):
+                return word == '-c'
+            if not word.startswith('-'):
+                return False
+            index += 2 if word in ('-W', '-X', '--check-hash-based-pycs') else 1
+    except (ValueError, TypeError):
+        pass
+    return True  # An unparseable inline boundary never exempts <string>.
+
+
 def classify(gates, row, log, launch):
     host = row.get('host')
     if (row.get('witness') != 'wrapper' or type(row.get('exit')) is not int or row['exit'] == 0 or row['exit'] in UNCLASSIFIABLE_EXITS
             or row.get('dirty') is not False or row.get('cancelled') or row.get('cancelRequested') or row.get('timedOut') or row.get('attempt') or row.get('faultPair')
             or not isinstance(host, dict) or not isinstance(launch, dict)
             or not row.get('manifestSha256') or row['manifestSha256'] != launch.get('manifestSha256')
-            or row.get('nonce') != launch.get('nonce') or not floor(log, row.get('tree', ''), host)):
+            or row.get('nonce') != launch.get('nonce')
+            or not floor(log, row.get('tree', ''), host, inline_program=inline_gate(gates.get(row.get('gate'), '')))):
         return None
     deadline = time.monotonic() + 5
     for fault in getattr(gates, 'faults', []):

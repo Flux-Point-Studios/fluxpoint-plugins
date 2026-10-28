@@ -321,10 +321,11 @@ check "the run artifact records the attestation tally" 1 "$t"
 # everyone who did not opt in.
 prove_summary() { # $1 = claimed exit, $2 = cited attestId
   "$FPL_PY" - "$1" "$2" <<'PYEOF'
-import json, sys
+import json, subprocess, sys
 print(json.dumps({
     "campaign": "c", "outcome": "COMPLETE",
     "results": {"gate": {"gate": "harness", "exit": int(sys.argv[1]),
+                         "sha": subprocess.run(["git","rev-parse","HEAD"],capture_output=True,text=True).stdout.strip(),
                          "attestId": sys.argv[2]}},
     "contracts": {"gate": "ExecutionV1"},
     "prove": {"gate": "harness"},
@@ -483,7 +484,15 @@ s = {"campaign": "c", "outcome": "COMPLETE",
 s.update(ast.literal_eval(sys.argv[1]))
 # The cited id arrives through the environment, so a literal placeholder
 # can stand in for it anywhere in the override.
-print(json.dumps(s).replace('"ATT"', json.dumps(os.environ.get("ATT", ""))))
+s = json.loads(json.dumps(s).replace('"ATT"', json.dumps(os.environ.get("ATT", ""))))
+try:
+    rows = {r['attestId']: r for r in (json.loads(line) for line in open('.claude/fluxpoint/attest.jsonl'))}
+except OSError:
+    rows = {}
+for claim in s.get('results', {}).values():
+    if isinstance(claim, dict) and claim.get('gate') != 'ci' and claim.get('attestId') in rows:
+        claim.setdefault('sha', rows[claim['attestId']].get('treeSha'))
+print(json.dumps(s))
 PYEOF
 }
 runbound() { ATT="$ATT" bound "$1" | "$FPL_PY" "$RECORD" --run-id "$2" --graph WORK.md \
@@ -504,10 +513,10 @@ out="$(runbound "{'launch': None}" wf-f2)"
 case "$out" in *"[STALE]"*"launch stamp"*)
   ok "a run carrying no launch stamp binds nothing" "stale" ;;
   *) bad "a run carrying no launch stamp binds nothing" "${out:0:70}" ;; esac
-out="$(runbound "{'tree': {'baseline': {'head': '0000000000000000000000000000000000000000'}}}" wf-f3)"
-case "$out" in *"[STALE]"*"commit"*)
-  ok "a citation from another commit than the campaign's is STALE" "stale" ;;
-  *) bad "a citation from another commit than the campaign's is STALE" "${out:0:70}" ;; esac
+out="$(runbound "{'results': {'gate': {'gate':'harness','exit':0,'attestId':'ATT','sha':'0000000000000000000000000000000000000000'}}}" wf-f3)"
+case "$out" in *"[MISMATCH]"*"commit"*)
+  ok "a citation from a different judged commit is refused" "stale" ;;
+  *) bad "a citation from a different judged commit is refused" "${out:0:70}" ;; esac
 out="$(runbound "{'tree': {'baseline': {'head': '$HEAD_SHA'}}}" wf-f4)"
 case "$out" in *"[ATTESTED]"*"| COMPLETE |"*)
   ok "the same commit and a fresh row stay ATTESTED" "attested" ;;

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "sha256": "1a08527e7a80c07c4a5eeb53da5fbf425ea530a19eb365d562bf40631a9646e9",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/fault-attempts-test.py": "4fe5d02f69b839d95bf41c317d886d0a4abff6c22fa4b5b9bec5b21a1b59f75a",
+    "plugins/fluxpoint/tests/fault-retention-test.py": "a995fb4830f87c392ade320fa026987e7d779d7a2d7e16d232dff20913de67eb"
+  }
+}

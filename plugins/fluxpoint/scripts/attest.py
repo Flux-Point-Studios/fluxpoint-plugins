@@ -44,15 +44,11 @@ what a command exited with, not whether the command was worth running: a
 declared gate that is itself weakened is `fpl_harness_modified`'s problem
 and the proof-guard ratchet's, not this file's.
 
-The third bounds everything above it: PostToolUse has been measured NOT to
-fire when a Bash call fails, so in practice this log may contain only passes.
-The reader below handles every failure shape the runtime can send, and that
-branch is currently exercised by fixtures rather than by observed payloads.
-Read the consequence carefully — UNATTESTED on a `prove:` node carries no
-information about whether the gate passed, so the binding between a claimed
-exit and the runtime's own holds for zeros and is silent about reds. A node
-claiming green with no row is therefore the shape worth suspecting, and
-record-run.py reports it separately for that reason.
+Claude Code uses PostToolUseFailure for a failed Bash call; hooks.json routes
+that event to this reader too. Its error field reports "Command failed with
+exit code N". Codex supplies a completed-shell header for either outcome.
+Unreadable exits remain unattested. Compiled prove nodes use the managed
+wrapper so every pending, failed and completed execution is retained.
 
 What this is not: a boundary against an agent that sets out to forge. The
 log is a file in the working tree, and an agent with a shell can append a
@@ -241,7 +237,7 @@ def _unbash(n):
     return s[2:] if s.startswith("./") else s
 
 
-EXIT_RE = re.compile(r"\A\s*Error: Exit code (\d+)")
+EXIT_RE = re.compile(r"\A\s*(?:Error: Exit code|Command failed with exit code) (-?\d+)")
 # Codex hands every completed Bash call to the hook as one string: a header
 # of `Wall time: …` and `Process exited with code N` (the classic shell tool
 # writes `Exit code: N`), then `Output:` and the output itself.
@@ -703,6 +699,12 @@ def head_sha(root):
         return ""
 
 
+def content_oid(root, commit="HEAD"):
+    if commit != "HEAD" and (not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit)):
+        return ""
+    return _git(root, "rev-parse", commit + "^{tree}")
+
+
 def dirty_paths(root, harness=True):
     """Classify observed dirt, retaining the paths at execution time."""
     import subprocess
@@ -757,10 +759,9 @@ def dirty(root):
 
 
 def _execution_dirt(root, tree, reference=False):
-    paths = dirty_paths(root)
-    if not reference and os.path.realpath(tree) != os.path.realpath(root):
-        paths.extend(dirty_paths(tree, harness=False))
-    return paths
+    # The manifest is independently bound by its byte hash. Unrelated edits
+    # in the coordinator checkout do not change a linked gate's execution.
+    return dirty_paths(tree, harness=os.path.realpath(tree) == os.path.realpath(root))
 
 
 def _merge_dirt(*snapshots):
@@ -894,7 +895,8 @@ def record(root, payload):
     if not gate or not cd_in_project(root, command, payload.get("cwd"),
                                      (getattr(gates, "cds", None) or {}).get(gate, "")):
         return None, []
-    resp = payload.get("tool_response")
+    resp = (payload.get("error") if payload.get("hook_event_name") == "PostToolUseFailure"
+            else payload.get("tool_response"))
     # A backgrounded launch returns IMMEDIATELY with a success-shaped payload
     # — stdout/stderr/interrupted and no exit code — before the gate has done
     # anything, and completion later arrives as a task notification, never as
@@ -934,6 +936,9 @@ def record(root, payload):
         "logSha256": sha(log),
         "headSha": head_sha(root),
         "treeSha": _tree_sha(root, payload, command),
+        "treeOid": content_oid(_hook_tree(root, payload, command)),
+        "tree": os.path.abspath(_hook_tree(root, payload, command)),
+        "manifestSha256": fault_policy.manifest_sha(root),
         "dirty": any(p["kind"] == "content" for p in observed_dirt),
         "dirtyPaths": observed_dirt,
         "when": when,
@@ -979,6 +984,7 @@ def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
     """
     root = os.path.abspath(root)
     tree = os.path.abspath(tree or root)
+    nonce = nonce or os.environ.get("FPL_ATTEST_NONCE", "")
     gates, findings = load_gates(root)
     for f in findings:
         print(f"attest: {f}", file=sys.stderr)
@@ -1010,7 +1016,9 @@ def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
         # moment this returns finds it. No pid yet: the child writes its own
         # when it starts, and never after this line could overwrite a DONE.
         _bg_write(root, {"token": token, "gate": gate, "status": "RUNNING",
-                         "pid": None, "started": started})
+                         "pid": None, "started": started, "nonce": nonce,
+                         "treeSha": head_sha(tree), "treeOid": content_oid(tree),
+                         "dirty": any(p["kind"] == "content" for p in _execution_dirt(root, tree))})
         # Absolute paths: the child starts in `tree`, and a relative root
         # resolved a second time from there named a directory that does not
         # exist — the child exited on a missing manifest, silently.
@@ -1047,6 +1055,7 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
     initial_dirt = _execution_dirt(root, tree, reference)
     if reference:
         tree_head = reference['treeSha']
+    tree_content = content_oid(tree, tree_head)
     manifest_hash = fault_policy.manifest_sha(root)
     if attempt:
         import fault_attempts
@@ -1056,7 +1065,8 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
     log = os.path.join(_bg_dir(root), f"{token}.log")
     _bg_write(root, {"token": token, "gate": gate, "status": "RUNNING",
                      "pid": os.getpid(), "started": started, "headSha": head,
-                     "log": log, "nonce": nonce, "treeSha": tree_head,
+                     "log": log, "nonce": nonce, "treeSha": tree_head, "treeOid": tree_content,
+                     "dirty": any(p["kind"] == "content" for p in initial_dirt),
                      "manifestSha256": manifest_hash, "attempt": attempt})
     print(f"attest: running {gate} as {token} — collect it with "
           f"attest.py --await {token}", flush=True)
@@ -1073,6 +1083,9 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
         if reference:
             import fault_attempts
             raw_reference, pins_hashes = fault_attempts.reference_command(_api(), root, gates, gate, raw)
+            if reference.get('projectPrefix'):
+                import shlex
+                raw_reference = 'cd ' + shlex.quote(reference['projectPrefix']) + ' && ' + raw_reference
             command, cwd = fault_policy.reference_argv(gates.reference, tree, raw_reference), tree
         else:
             command, cwd, _ = deployed_invocation(tree, gates, gate) if deployed else ([bash_path(), '-c', raw], tree, [])
@@ -1085,12 +1098,13 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
         log_bytes = fh.read()
     text = log_bytes.decode("utf-8", "replace")
     observed_dirt = _merge_dirt(initial_dirt, _execution_dirt(root, tree, reference))
-    if head_sha(root) != head or (not reference and head_sha(tree) != tree_head):
+    if head_sha(tree) != tree_head or fault_policy.manifest_sha(root) != manifest_hash:
         observed_dirt.append({'path': '<HEAD moved during execution>', 'kind': 'content', 'root': os.path.realpath(root)})
     row = {
         "attestId": "att_" + sha(f"{started}|{norm}|{code}|{token}")[:12],
         "gate": gate, "command": norm, "commandSha": sha(norm), "exit": code,
         "logSha256": hashlib.sha256(log_bytes).hexdigest(), "headSha": head, "treeSha": tree_head,
+        "treeOid": tree_content,
         "started": started, "when": now(), "sessionId": "", "agent": "",
         "witness": "wrapper", "token": token, "nonce": nonce, "tree": os.path.abspath(tree),
         "host": host, "manifestSha256": manifest_hash,
@@ -1135,7 +1149,7 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
     if not completed.get('attestId'):
         print(f"attest: {gate} cancelled; command exit {code}; nothing attested", flush=True)
         return 130
-    print(f"attest: {gate} exit {code} -> {row['attestId']}", flush=True)
+    print(f"attest: {gate} exit {code} -> {row['attestId']} sha {tree_head}", flush=True)
     return code
 
 
@@ -1401,17 +1415,11 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
     elif row.get('dirty') is not False or any(p.get('kind') == 'content' for p in (row.get('dirtyPaths') or []) if isinstance(p, dict)):
         paths = ', '.join(p.get('path', '?') for p in (row.get('dirtyPaths') or []) if isinstance(p, dict) and p.get('kind') == 'content')
         return {**base, "status": "STALE", "detail": "local row is dirty or predates content binding; rerun on a clean tree" + (": " + paths if paths else "")}
-    if (head and row.get("witness") not in ("forge", "reuse") and row.get("headSha")
-            and not _same_commit(row["headSha"], head)):
-        return {**base, "status": "STALE",
-                "detail": (f"cites {cited}, which ran on commit "
-                           f"{str(row['headSha'])[:12]}, but this campaign ran on "
-                           f"{str(head)[:12]}")}
-    if (row.get("witness") not in ("forge", "reuse") and r.get("sha") is not None
-            and (not isinstance(r["sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", r["sha"])
-                 or r["sha"] != row.get("treeSha"))):
+    if row.get("witness") not in ("forge", "reuse") and (
+            not isinstance(r.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", r["sha"])
+            or r["sha"] != row.get("treeSha")):
         return {**base, "status": "MISMATCH",
-                "detail": "local claim sha differs from the exact commit the gate judged"}
+                "detail": "local claim must name the exact commit the gate judged (sha)"}
     if row.get('cancelled'):
         return {**base, "status": "STALE", "detail": "cancelled execution is not a gate verdict"}
     if row.get('witness') not in ('forge', 'reuse') and root:
@@ -1681,7 +1689,8 @@ def main():
             return 1
         r = mine[-1]
         print(f"{r['attestId']} gate {r['gate']} exit {r['exit']} when {r.get('when')} "
-              f"witness {r.get('witness') or 'hook'} nonce {r.get('nonce') or '-'}")
+              f"witness {r.get('witness') or 'hook'} nonce {r.get('nonce') or '-'} "
+              f"sha {r.get('treeSha') or r.get('headSha') or 'unknown'}")
         return 0
     if a.await_:
         return await_gate(a.root, a.await_, a.timeout, a.until)

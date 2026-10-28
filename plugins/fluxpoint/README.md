@@ -203,7 +203,10 @@ base and cannot disable the gate's code-change detection.
   invocation attests — `|| true` or a pipe reports a different exit and is
   credited to nothing. Missing legacy observations read `UNATTESTED` and
   establish neither success nor failure; strict `prove:` tiers require the
-  citations described above. Local evidence is writable and remains subject
+  citations described above, including the full judged commit `sha`. Both
+  success and failure hook events are recorded. Retained reds follow Git tree
+  content across empty commits; unfinished runners block later passes. Local
+  evidence is writable and remains subject
   to review and CI.
 - Compiled `.graph.js` files are build output. Never hand-edit them; edit
   the IR and recompile.

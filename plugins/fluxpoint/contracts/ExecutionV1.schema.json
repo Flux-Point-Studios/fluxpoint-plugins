@@ -2,7 +2,12 @@
   "$id": "ExecutionV1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["gate", "exit", "attestId"],
+  "required": [
+    "gate",
+    "exit",
+    "attestId",
+    "sha"
+  ],
   "properties": {
     "gate": {
       "type": "string",
@@ -11,7 +16,7 @@
     },
     "exit": {
       "type": "integer",
-      "description": "The exit code the gate produced. Still typed by the node — what makes it worth anything is that record-run.py refuses it unless the attest log, written by a hook the agent does not mediate, agrees."
+      "description": "The exit code the gate produced. Still typed by the node \u2014 what makes it worth anything is that record-run.py refuses it unless the attest log, written by a hook the agent does not mediate, agrees."
     },
     "attestId": {
       "type": "string",
@@ -20,7 +25,8 @@
     },
     "sha": {
       "type": "string",
-      "description": "The commit the gate judged. Required when citing prove:ci: record-run.py checks it against the commit the forge named in the cited row, and the merge the gate guards should pin it (gh pr merge --match-head-commit)."
+      "description": "The full commit the gate judged. Required for every local or forge citation; checked against the actual gate tree or forge target.",
+      "pattern": "^[0-9a-f]{40}$"
     },
     "logSha256": {
       "type": "string",

@@ -82,14 +82,24 @@ class Cleanup(unittest.TestCase):
         ir = {'version': 1, 'name': 'gate', 'campaign': 'gate', 'treeGuard': False, 'budget': {'maxNodes': 20},
               'nodes': [{'id': 'gate', 'contract': 'ExecutionV1', 'verify': 'prove:harness', 'prompt': 'Run gate'}]}
         script = cg.emit(ir, CONTRACTS)
-        self.assertIn('attest.py --await <token>${ROOT_ARG}', script)
+        self.assertIn('${ATTEST} --await <token>${ROOT_ARG}', script)
+        declarations = '\n'.join(line for line in script.splitlines()
+                                 if line.startswith(('const PLUGIN =', 'const quoteShell =', 'const ATTEST =')))
+        emitted = subprocess.run(['node', '-e', declarations + '\nconsole.log(ATTEST)'],
+                                 capture_output=True, text=True, check=True).stdout.strip()
         for root in ['', " --root '/tmp/project with space'"]:
             import shlex
-            argv = shlex.split('--await bg_0123' + root)
+            command = shlex.split(emitted + ' --await bg_0123' + root)
+            self.assertEqual(command[0], 'bash')
+            self.assertTrue(command[1].endswith('/scripts/py.sh'))
+            self.assertEqual(command[2], 'attest.py')
+            argv = command[3:]
             parser = "import argparse,json,runpy,sys; p=argparse.ArgumentParser.parse_args; argparse.ArgumentParser.parse_args=lambda self,*a,**k:(print(json.dumps(vars(p(self,*a,**k)))),sys.exit(0))[0]; runpy.run_path(sys.argv.pop(1),run_name='__main__')"
             run = subprocess.run([sys.executable, '-c', parser, str(SCRIPTS / 'attest.py'), *argv], text=True, capture_output=True)
             self.assertEqual(run.returncode, 0, run.stderr)
-            self.assertEqual(json.loads(run.stdout)['await_'], 'bg_0123')
+            parsed = json.loads(run.stdout)
+            self.assertEqual(parsed['await_'], 'bg_0123')
+            self.assertEqual(json.loads(parsed['plugin_pin'])['root'], str(SCRIPTS.parent))
 
     def test_local_citation_must_match_judged_commit(self):
         head, tree = 'a' * 40, 'b' * 40

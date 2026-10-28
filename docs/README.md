@@ -32,6 +32,7 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 | Require independent repair evidence | [Repair campaign](../plugins/fluxpoint/templates/WORK.repair.md), [graph repair rules](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
 | Check production dependency pins | [Deployed gates](../plugins/fluxpoint/references/deployed-gates.md) |
 | Bind CI results to commits and attempts | [Forge evidence, source pins and CI identities](../plugins/fluxpoint/references/forge-evidence.md), [fault reruns](../plugins/fluxpoint/references/fault-reruns.md) |
+| Bind CI results to commits and attempts | [Forge evidence](../plugins/fluxpoint/references/forge-evidence.md), [content-bound red retention and fault reruns](../plugins/fluxpoint/references/fault-reruns.md) |
 | Check captured provider shapes and counters | [Recordings](../plugins/fluxpoint/references/recordings.md) |
 | Measure and tighten deterministic limits | [Metrics, Aiken costs and plateau detection](deterministic-metrics.md), [slice calibration](../plugins/fluxpoint/README.md#calibrating-predicted-gains) |
 | Retrieve lessons and decisions | [Memory and recall](memory-recall.md), [recall command](../plugins/fluxpoint/commands/recall.md) |
