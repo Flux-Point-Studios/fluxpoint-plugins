@@ -1392,8 +1392,8 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
                 raise ValueError("forge PR/ref head moved since the gate judged it")
             if facts['exit'] is None or facts['exit'] != claimed:
                 raise ValueError("current forge verdict disagrees with the claim or is undecided")
-            if gate != 'ci' and (row.get('packetSha') != ci.get('packetSha') or
-                                  row.get('configBlobs') != facts['configBlobs']):
+            if (row.get('packetSha') != ci.get('packetSha') or
+                    row.get('configBlobs') != facts['configBlobs']):
                 raise ValueError("reuse pointer disagrees with current pinned config blobs")
             fresh_forge_green = claimed == 0 and facts['exit'] == 0
         except (OSError, RuntimeError, ValueError, KeyError, TypeError) as e:

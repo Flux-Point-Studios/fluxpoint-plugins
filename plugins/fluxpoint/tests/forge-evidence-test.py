@@ -49,6 +49,7 @@ def fixture():
         api[PREFIX + '/git/blobs/' + oid] = body
     for sha in (HEAD, BASE):
         api[PREFIX + '/git/trees/' + sha + '?recursive=1'] = {'truncated': False, 'tree': copy.deepcopy(tree)}
+    ci['config'] = list(ci['covers']['suite']['config'])
     return ci, api
 
 
