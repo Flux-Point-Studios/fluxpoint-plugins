@@ -175,6 +175,44 @@ class UncheckedRepairsTests(unittest.TestCase):
                                '--root', str(self.root), '--json'], text=True,
                               capture_output=True, timeout=20)
 
+    def test_recorded_repair_keeps_patch_evidence_after_round_cleanup(self):
+        artifact = self.record_repair([self.first])
+        patch = artifact['summary']['fixOrigins'][0]['context']['current']['patch']
+        Path(patch).unlink()
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual([r['commit'] for r in json.loads(result.stdout)['unchecked']], [self.second])
+
+    def test_retained_bytes_stay_bound_and_old_window_receipts_are_skipped(self):
+        artifact = self.record_repair([self.first])
+        self.assertTrue(artifact['repairEvidence']['files'])
+        patch = artifact['summary']['fixOrigins'][0]['context']['current']['patch']
+        Path(patch).unlink()
+        digest = artifact['repairEvidence']['files'][patch]
+        retained = self.runs / 'evidence' / digest
+        retained.write_bytes(b'changed retained bytes')
+        result = self.run_check()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('digest mismatch', result.stderr)
+        self.artifact('new-block', {'recordedAt': '2026-10-16 12:00:00', 'redTeam': 'BLOCK',
+            'summary': {'tree': {'baseline': {'head': self.first}}}})
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual([r['commit'] for r in json.loads(result.stdout)['unchecked']], [self.second])
+
+    def test_recorded_series_is_retained_separately_from_a_rotating_source(self):
+        import repair_checks
+        import hashlib
+        summary = self.pass_summary([self.first])
+        series = self.root / 'series.json'
+        series.write_bytes(b'[0,1,2]')
+        row = summary['fixOrigins'][0]
+        row['check']['diffCoverage']['operational'] = {'alarmRate': {'seriesPath': str(series), 'seriesSha256': hashlib.sha256(series.read_bytes()).hexdigest()}}
+        saved = repair_checks.retain_evidence(self.root, summary)
+        series.write_bytes(b'[0,1,2,3]')
+        original = repair_checks._evidence_file(self.root, str(series), saved)
+        self.assertEqual(original.read_bytes(), b'[0,1,2]')
+
     def test_any_producer_is_checked_and_only_final_trailers_are_reported(self):
         p = self.run_check()
         self.assertEqual(p.returncode, 1, p.stderr)

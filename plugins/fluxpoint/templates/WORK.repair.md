@@ -146,7 +146,12 @@ Before marking commits checked, the recorder requires one completed runtime
 journal seat for every checker, attacker, refuter and fixed witness and
 compares their returned values with the repair receipt. A fabricated summary
 without those seats cannot discharge a commit. The recorded journal
-certificate identifies the matched agents and result hashes. Command output
+certificate identifies the matched agents and result hashes. The recorder
+retains verified patch and production-series bytes under
+`.claude/fluxpoint/runs/evidence/<sha256>`, separate from disposable round
+directories and rotating source logs. Preflight validates these retained
+bytes and ignores receipts outside the current BLOCK commit window. Keep
+the run evidence directory with the run artifacts. Command output
 inside a seat still crosses the model relay; this certificate does not
 establish that an arbitrary narrated command actually ran.
 `graph-run` supplies a stamped launch identity and the graph retains it in

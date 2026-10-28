@@ -125,8 +125,13 @@ def inspect(root, ir):
 
     import repair_checks
     for path, art in artifacts:
+        claimed = art.get('checked')
+        if isinstance(claimed, list) and claimed and not any(
+                isinstance(name, str) and SHA.fullmatch(name) and any(commit.startswith(name.lower()) for commit in window)
+                for name in claimed):
+            continue  # Old receipts outside this BLOCK window cannot discharge it.
         try:
-            values = repair_checks.corroborated(art)
+            values = repair_checks.corroborated(art, root=root)
         except (ValueError, TypeError, AttributeError) as e:
             raise ValueError(str(path) + ': ' + str(e))
         for value in values:

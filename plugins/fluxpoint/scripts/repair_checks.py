@@ -5,6 +5,10 @@ corroborates `checked` against those descriptors and full PASS receipts, rather
 than treating an arbitrary top-level list as evidence.
 """
 import json
+import copy
+import hashlib
+import os
+import tempfile
 from pathlib import Path
 import re
 
@@ -130,7 +134,63 @@ def _patch_key(patch):
     return (patch.get('item'), patch.get('round'), patch.get('patch')) if isinstance(patch, dict) else None
 
 
-def receipt_issue(row, descriptor, summary):
+def _evidence_file(root, original, archive):
+    if archive is None:
+        return Path(original)
+    if not isinstance(archive, dict) or archive.get('version') != 1 or not isinstance(archive.get('files'), dict):
+        raise ValueError('invalid retained repair evidence map')
+    digest = archive['files'].get(original)
+    if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+        raise ValueError('retained repair evidence missing: ' + original)
+    base = Path(root).resolve() / '.claude/fluxpoint/runs/evidence'
+    target = base / digest
+    if target.is_symlink() or base.resolve() != base or not target.is_file():
+        raise ValueError('retained repair evidence is not a regular canonical file: ' + digest)
+    if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+        raise ValueError('retained repair evidence digest mismatch: ' + digest)
+    return target
+
+
+def retain_evidence(root, summary):
+    """Copy verified patch/series bytes beside immutable run attempts."""
+    base = Path(root).resolve() / '.claude/fluxpoint/runs/evidence'
+    base.mkdir(parents=True, exist_ok=True)
+    if base.resolve() != base:
+        raise ValueError('retained repair evidence directory must be canonical')
+    sources = {}
+    for row in summary.get('fixOrigins') or []:
+        if row.get('verdict') != 'PASS':
+            continue
+        current = row['context'].get('integrated') or row['context']['current']
+        sources[current['patch']] = current['patchSha256']
+        alarm = ((row['check'].get('diffCoverage') or {}).get('operational') or {}).get('alarmRate')
+        if isinstance(alarm, dict):
+            sources[alarm['seriesPath']] = alarm['seriesSha256']
+    for original, expected in sources.items():
+        data = Path(original).read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != expected:
+            raise ValueError('repair evidence changed before retention: ' + original)
+        target = base / digest
+        if target.is_symlink():
+            raise ValueError('retained repair evidence cannot be a symlink')
+        if not target.exists():
+            fd, temporary = tempfile.mkstemp(prefix='.repair-', dir=base)
+            try:
+                with os.fdopen(fd, 'wb') as out:
+                    out.write(data)
+                try:
+                    os.link(temporary, target)
+                except FileExistsError:
+                    pass
+            finally:
+                os.unlink(temporary)
+        if target.read_bytes() != data:
+            raise ValueError('immutable retained repair evidence changed: ' + digest)
+    return dict(version=1, files=sources)
+
+
+def receipt_issue(row, descriptor, summary, retained=None, root=None):
     if not isinstance(row, dict) or row.get('verdict') != 'PASS':
         return 'receipt is not a PASS object'
     check = row.get('check')
@@ -191,7 +251,8 @@ def receipt_issue(row, descriptor, summary):
     if row.get('origins') is not None and (not isinstance(row['origins'], dict) or any(type(v) is not int or v != 0 for v in row['origins'].values())):
         return 'PASS contradicts recorded defect origins'
     try:
-        data = Path(current['patch']).read_bytes()
+        evidence_root = root or launch['root']
+        data = _evidence_file(evidence_root, current['patch'], retained).read_bytes()
         measured = manifest(data)
         from repair_diff import compact_manifest, manifest_digest
         expected_manifest = manifest_digest(compact_manifest(data))
@@ -211,11 +272,20 @@ def receipt_issue(row, descriptor, summary):
         return 'DIFF-ATTACK-UNPROVEN: receipt lacks its fresh launch read identity'
     if not classes(check.get('targetClasses')) or set(check['targetClasses']) != expected_targets:
         return 'SIBLINGS-UNPROVEN: checker target classes differ from frozen slice targets'
+    coverage = check.get('diffCoverage')
+    if retained is not None and isinstance(coverage, dict):
+        coverage = copy.deepcopy(coverage)
+        alarm = (coverage.get('operational') or {}).get('alarmRate')
+        if isinstance(alarm, dict):
+            try:
+                alarm['seriesPath'] = str(_evidence_file(evidence_root, alarm['seriesPath'], retained))
+            except (OSError, ValueError) as exc:
+                return 'DIFF-UNPROVEN: retained alarm series unavailable: ' + str(exc)
     issue = (sibling_issue(check.get('siblings'), sorted(expected_targets), row.get('fixerSiblings') or [])
-             or coverage_issue(check.get('diffCoverage'), measured, row.get('sharedResources') or [], live_series=True)
+             or coverage_issue(coverage, measured, row.get('sharedResources') or [], live_series=True)
              or checker_evidence_issue(check, context, measured, row['node'], integration, summary['repairReadNonce'])
              or diff_receipt_issue(proof, context, measured)
-             or checked_commits_issue(launch['root'], context['base'], data, check.get('commits') or []))
+             or checked_commits_issue(root or launch['root'], context['base'], data, check.get('commits') or []))
     if issue:
         return issue
     witness = check['checkerWitness']
@@ -224,7 +294,7 @@ def receipt_issue(row, descriptor, summary):
     return None
 
 
-def checked(summary, frozen):
+def checked(summary, frozen, retained=None, root=None):
     """Return only individually corroborated PASS commit names and problems."""
     result, problems = set(), []
     if not isinstance(summary, dict) or not isinstance(frozen, dict):
@@ -235,7 +305,7 @@ def checked(summary, frozen):
         node = row.get('node')
         descriptor = frozen.get(node)
         issue = ('PASS is not from a frozen independent repair checker' if not descriptor_valid(node, descriptor)
-                 else receipt_issue(row, descriptor, summary))
+                 else receipt_issue(row, descriptor, summary, retained=retained, root=root))
         if issue:
             problems.append(str(node) + ': ' + issue)
         else:
@@ -243,7 +313,7 @@ def checked(summary, frozen):
     return sorted(result), problems
 
 
-def corroborated(artifact):
+def corroborated(artifact, root=None):
     """Do not upgrade historical nonpositive artifacts or trust bare checked[]."""
     names = artifact.get('checked', [])
     if not isinstance(names, list):
@@ -255,7 +325,7 @@ def corroborated(artifact):
     frozen = artifact.get('repairCheckers')
     if not isinstance(frozen, dict) or not frozen:
         raise ValueError('checked has no frozen independent repair checker descriptors')
-    observed, problems = checked(artifact.get('summary'), frozen)
+    observed, problems = checked(artifact.get('summary'), frozen, retained=artifact.get('repairEvidence'), root=root)
     if problems or sorted(c.lower() for c in names) != observed:
         raise ValueError('checked is not corroborated by coherent independent PASS receipts: ' + '; '.join(problems))
     return observed

@@ -754,6 +754,14 @@ def main():
         except (ValueError, OSError, TypeError, KeyError) as exc:
             repair_problems.append('REPAIR-JOURNAL-UNPROVEN: ' + str(exc))
             checked = []
+    repair_evidence = None
+    if checked:
+        try:
+            import repair_checks as _repair_checks
+            repair_evidence = _repair_checks.retain_evidence(args.root, summary)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            repair_problems.append('REPAIR-EVIDENCE-UNRETAINED: ' + str(exc))
+            checked = []
     for issue in repair_problems:
         print("record-run: checked commit refused — " + issue, file=sys.stderr)
     if repair_problems and outcome in ("COMPLETE", "UNKNOWN"):
@@ -774,6 +782,7 @@ def main():
                 "repairCheckers": repair_checkers,
                 "repairCheckProblems": repair_problems,
                 "repairJournal": repair_journal,
+                "repairEvidence": repair_evidence,
                 "replayChecked": replay_checked,
                 "rejudges": rejudges,
                 "replayProblems": replay_problems,
