@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "sha256": "76a6f11049e24fadc1ab679ad4036147717f5586251eb00463a9c854ea5344a3",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/native-binding-test.py": "3d87e6cff62f81e55d9a05d25923f908aabc5b5b1af0b067089f117ed61e193d"
+  },
+  "lockFormat": 2
+}
