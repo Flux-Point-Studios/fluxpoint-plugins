@@ -7,6 +7,7 @@ import ast
 import base64
 import hashlib
 import json
+import os
 import re
 import subprocess
 import time
@@ -212,16 +213,74 @@ class GitHub:
             raise RuntimeError(p.stderr.strip() or 'GitHub API failed')
         return json.loads(p.stdout)
 
+    def _identity_command(self, argv, env):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('forge identity observation deadline expired')
+        try:
+            return subprocess.run(argv, cwd=self.root, env=env, capture_output=True,
+                                  text=True, encoding='utf-8', timeout=min(30, remaining))
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError('GitHub identity observation timed out') from exc
+
+    def stored_logins(self):
+        # Removing both token variables makes this an inventory of gh's stored
+        # accounts, including inactive accounts hidden by an environment token.
+        env = {key: value for key, value in os.environ.items()
+               if key not in ('GH_TOKEN', 'GITHUB_TOKEN')}
+        result = self._identity_command(
+            ['gh', 'auth', 'status', '--json', 'hosts', '--jq',
+             '{hosts: {"github.com": [.hosts["github.com"][]? | {login, state}]}}'], env)
+        try:
+            inventory = json.loads(result.stdout)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError('cannot inventory stored gh accounts; JSON auth status support is required') from exc
+        hosts = inventory.get('hosts') if isinstance(inventory, dict) else None
+        if not isinstance(hosts, dict):
+            raise PolicyError('malformed stored gh account inventory')
+        accounts = hosts.get('github.com', [])
+        if (not isinstance(accounts, list) or any(not isinstance(row, dict)
+                or not isinstance(row.get('login'), str) or not row['login'] for row in accounts)):
+            raise PolicyError('malformed stored gh account login')
+        if (result.returncode and not accounts
+                and 'not logged into any GitHub hosts' not in (result.stderr or '')):
+            raise RuntimeError('stored gh account inventory failed')
+        # gh may exit nonzero when there are no stored accounts, or an expired
+        # account. The valid inventory still names every available stored login.
+        return {row['login'] for row in accounts}
+
     def identity(self, ci):
-        creators = ci['witness']['statusCreators']
+        creators = {login.lower() for login in ci['witness']['statusCreators']}
         if not creators:
             return
         got = self.api('user')
         login = got.get('login') if isinstance(got, dict) else None
         if not isinstance(login, str) or not login:
             raise PolicyError('cannot establish the harness token login')
-        if login.lower() in {x.lower() for x in creators}:
+        if login.lower() in creators:
             raise PolicyError('ci.witness.statusCreators pins the harness own gh login: ' + login)
+        # Injected API fixtures are the complete observation boundary in tests.
+        if self._api is not None:
+            return
+        available = {login.lower() for login in self.stored_logins()}
+        if available & creators:
+            raise PolicyError('ci.witness.statusCreators pins a gh account available on this host: '
+                              + ', '.join(sorted(available & creators)))
+        if os.environ.get('GH_TOKEN') and os.environ.get('GITHUB_TOKEN'):
+            env = dict(os.environ)
+            env.pop('GH_TOKEN', None)
+            result = self._identity_command(['gh', 'api', 'user', '--hostname', 'github.com'], env)
+            if result.returncode:
+                raise RuntimeError('cannot establish the shadowed GITHUB_TOKEN login')
+            try:
+                got = json.loads(result.stdout)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError('cannot read the shadowed GITHUB_TOKEN login') from exc
+            login = got.get('login') if isinstance(got, dict) else None
+            if not isinstance(login, str) or not login:
+                raise PolicyError('cannot establish the shadowed GITHUB_TOKEN login')
+            if login.lower() in creators:
+                raise PolicyError('ci.witness.statusCreators pins the shadowed GITHUB_TOKEN login: ' + login)
 
     def target(self, target):
         if re.fullmatch(r'pr:[1-9][0-9]*', str(target)):

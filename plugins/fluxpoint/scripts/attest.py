@@ -1470,15 +1470,21 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
 def _check_deployed(root, gates, gate, row, claim, check):
     lanes = {name: lane for name, lane in getattr(gates, "deployed", {}).items()
              if lane["gate"] == gate}
-    if not lanes or check['status'] != 'ATTESTED' or row.get('faultPair') or row.get('witness') in ('forge', 'reuse'):
+    if not lanes or check['status'] != 'ATTESTED':
+        return
+    if row.get('witness') != 'wrapper':
+        check.update(status='MISMATCH', detail='deployed gate requires a wrapper run with a checked dependency resolution')
+        return
+    if row.get('faultPair'):
+        return  # Its retained wrapper executions were checked by verify_pair.
+    if claim.get('exit') == 0 and not row.get('resolutionChecked'):
+        check.update(status='MISMATCH', detail='deployed gate requires a wrapper run with a checked dependency resolution')
         return
     current = {}
     for name, lane in lanes.items():
         with open(os.path.join(root, lane['pins']), 'rb') as fh:
             current[name] = hashlib.sha256(fh.read()).hexdigest()
-    if row.get('witness') != 'wrapper' or (claim.get('exit') == 0 and not row.get('resolutionChecked')):
-        check.update(status='MISMATCH', detail='deployed gate requires a wrapper run with a checked dependency resolution')
-    elif row.get('pinsSha256') != current:
+    if row.get('pinsSha256') != current:
         check.update(status='STALE', detail='deployed pins changed since the attested execution')
     elif row.get('commandSha') != sha(gates[gate]) or row.get('deployedLaneSha256') != deployed_lane_sha(gates, gate):
         check.update(status='STALE', detail='deployed gate command or lane changed since the attested execution')
@@ -1697,7 +1703,7 @@ def main():
         except (OSError, RuntimeError, ValueError) as e:
             print('attest: cannot establish CI identity: ' + str(e), file=sys.stderr)
             return 3
-        print('attest: CI identity policy checked')
+        print('attest: CI identity policy checked for gh stored accounts and GH_TOKEN/GITHUB_TOKEN; other credential stores are outside this check')
         return 0
     if a.ci or a.reuse:
         return attest_ci(a.root, a.sha, a.wait, a.timeout, a.pr, a.ref, a.nonce, a.reuse)
