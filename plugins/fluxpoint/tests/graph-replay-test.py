@@ -32,7 +32,9 @@ def node(nid, **extra):
 
 
 def execute(ir, args=None, setup='', body=''):
-    source = c.emit(ir, CONTRACTS).replace('export const meta =', 'const meta =')
+    args = dict(args or {})
+    state = {key: args.pop(key) for key in ('_memo', '_prefix') if key in args}
+    source = c.emit(ir, CONTRACTS, replay_state=state).replace('export const meta =', 'const meta =')
     harness = r'''
 const fs = require('fs'); const input = JSON.parse(fs.readFileSync(0,'utf8'));
 const events = []; const rawCalls = []; let active=0, maximum=0;
@@ -293,6 +295,8 @@ class GraphReplay(unittest.TestCase):
             self.assertNotIn('operator attribution only',call['prompt'])
             if 'new-judgment' in call['prompt']:
                 self.assertIn(call['opts']['label'],['a-gate','tree-check:before a-gate'])
+            if call['opts']['label'].startswith('tree-check:'):
+                self.assertNotIn('faulty test fixture now corrected', call['prompt'])
         row=out['result']['rejudges'][0]
         self.assertEqual(row['reason'],'operator attribution only'); self.assertEqual(row['priorVerdict'],first['results']['a-gate'])
 
@@ -319,5 +323,48 @@ class GraphReplay(unittest.TestCase):
         self.assertEqual(c.emit(ir,CONTRACTS),scope['emit'](ir,CONTRACTS))
         ir['argDefaults']={'configuration':'default'}; ir['nodes'][0]['prompt']='Read {{A.configuration}}'
         self.assertEqual(c.emit(ir,CONTRACTS),scope['emit'](ir,CONTRACTS))
+
+class ReplayFollowup(unittest.TestCase):
+    def test_mixed_targeted_and_untargeted_builders_do_not_claim_unusable_readings(self):
+        ir = graph([node('a', mutates=True), node('a-gate', after='a', verifies='a', independent=True, prompt='Judge {{prev}}'),
+                    node('b', after='a-gate', mutates=True, pushes='repo-a#main', replay='inputs', prompt='Build {{prev}}'),
+                    node('b-gate', after='b', verifies='b', independent=True, repository='repo-a', branch='main', replay='tree', prompt='Judge {{prev}}')])
+        records = execute(ir)['result']['memoRecords']
+        self.assertNotIn('verifiedReading', next(r for r in records if r['node'] == 'a'))
+        self.assertIn('verifiedReading', next(r for r in records if r['node'] == 'b'))
+
+    def test_lone_surrogates_have_a_defined_raw_hash_encoding(self):
+        helpers = (SCRIPTS / 'graph-replay.js').read_text().split('const CALL_RECORDS')[0]
+        run = subprocess.run(['node', '-e', helpers + '\nprocess.stdout.write(sha256("a\\ud800b"))'], capture_output=True, text=True, check=True)
+        self.assertEqual(run.stdout, hashlib.sha256('a\ufffdb'.encode()).hexdigest())
+
+    def test_inline_memo_is_rejected_when_state_is_compiled(self):
+        ir = graph([node('a', fresh=False)])
+        source = c.emit(ir, CONTRACTS, replay_state={})
+        harness = 'const f=new (Object.getPrototypeOf(async function(){}).constructor)("args","agent","budget","parallel","phase","log",JSON.parse(process.argv[1]));f(JSON.parse(process.argv[2]),async()=>({}),{total:0},async()=>[],()=>{},()=>{}).catch(e=>{console.log(String(e))})'
+        run = subprocess.run(['node', '-e', harness, json.dumps(source.replace('export const meta =', 'const meta =')), json.dumps(dict(BASE, _memo={'forged': {'result': {'exit': 0}}}))], text=True, capture_output=True, check=True)
+        self.assertIn('compiled replay state cannot be overridden inline', run.stdout)
+
+    def test_ledger_uses_sha256_and_replays_prior_fnv_key(self):
+        ir = graph([node('effect', irreversible=True)])
+        first = execute(ir, args={'_ledger': {}, 'confirm': 'effect'})
+        written = first['result']['ledger'][0]
+        prompt = next(call['prompt'] for call in first['rawCalls'] if call['opts']['label'] == 'effect')
+        self.assertEqual(written['key'], ir['campaign'] + '|effect|sha256:' + hashlib.sha256(prompt.encode('utf-8')).hexdigest())
+        old = 2166136261
+        units = prompt.encode('utf-16-le')
+        for index in range(0, len(units), 2):
+            old = ((old ^ int.from_bytes(units[index:index + 2], 'little')) * 16777619) & 0xffffffff
+        oldkey = ir['campaign'] + '|effect|' + format(old, 'x')
+        replayed = execute(ir, args={'_ledger': {oldkey: {'result': written['result']}}, 'confirm': ''})
+        self.assertNotIn('start:effect', replayed['events'])
+        self.assertEqual(replayed['result']['results']['effect'], written['result'])
+
+    def test_replay_ancestors_of_irreversible_effect_are_refused(self):
+        ir = graph([node('a', mutates=True, pushes='repo-a#main', replay='inputs'),
+                    node('gate', after='a', verifies='a', independent=True, repository='repo-a', branch='main', replay='tree', prompt='Judge {{prev}}'),
+                    node('effect', after='gate', irreversible=True, prompt='Act {{prev}}')])
+        self.assertTrue(any('irreversible ancestor' in error for error in c.validate(ir, CONTRACTS)))
+
 
 if __name__=='__main__': unittest.main()

@@ -99,7 +99,9 @@ Workflow tool requires.
    `references/structured-resume.md` for evidence pins and exact argument carry.
 4. Load whatever state the graph refuses to start without.
    `resume.py` supplies these readings and a fresh 32-byte
-   `_replayLaunchNonce` automatically. Treat `_memo`, `_prefix`,
+   `_replayLaunchNonce` automatically. The verified `_memo` and `_prefix`
+   are embedded into the compiled source, and are never copied into the
+   Workflow arguments. Treat
    `_resumeFromRunId` and `_replayLaunchNonce` as script-produced provenance;
    never manufacture a memo from model-written arguments or old verdict text.
    Record the launch reading, fresh at every launch including a resume:

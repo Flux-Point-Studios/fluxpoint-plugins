@@ -84,9 +84,7 @@ Windows path cannot be resolved by a Linux launcher.
 
 Resume keeps the recorded `_launch` stamp intact. `_base` is read fresh from
 Git; required irreversible ledgers and actor release maps are freshly loaded.
-Every invocation gets a fresh `_replayLaunchNonce`. `_memo` and `_prefix`
-come from the harness rereading completed journal calls and transcripts, never
-from the input JSON. The compiler's `--plan` owns replay decisions and rejects
+Every invocation gets a fresh `_replayLaunchNonce`. The harness rereads completed journal calls and transcripts to build `_memo` and `_prefix`, then embeds that compact replay state in the compiled source behind `REPLAY_STATE_SHA256`. The Workflow object carries neither map; compiled scripts refuse an inline replacement. Memo transport carries prompt/payload hashes, results and source identities, without repeating the resolved prompts. A local compiler input file supplies state through `--replay-state`; it is a harness input, outside public arguments. The compiler's `--plan` owns replay decisions and rejects
 unknown or unreached rejudge gates. For ordinary serial graphs, the plan compares the actual rendered call prompts and options with the recorded prefix, marks calls before the first change as `prefix`, and marks later calls `live`. The plan is retained under `.claude/fluxpoint/plans/`; the launch and run summary carry its path and SHA-256, and recording verifies both the retained bytes and their argument digest. A tree-moving repair still halts
 `TREE-MOVED`; start a fresh run after reviewing the changed tree.
 
@@ -103,3 +101,7 @@ installs a different version alongside it does not change its witness. Missing
 or changed pinned files refuse resume. Legacy prove/cited runs without an
 identity need a reviewed fresh compilation and launch. See
 [compiled witness identity](../../../docs/witness-identity.md).
+
+Native Workflow computed-task frames are parsed before transcript comparison; unknown frames refuse explicitly. Journal rows without timestamps use observed transcript timestamps for duration. Untargeted gates do not attach branch-replay evidence to builders. Rejudge from a legacy source without the replay call protocol refuses explicitly, because introducing its options header would invalidate every cached call. Rejudge note text reaches the named gate; its fixed-command tree sentinel receives the nonce only. Graph path aliases resolve before tree comparisons. Hashes use a defined UTF-8 representation even for lone surrogate code units.
+
+New irreversible ledger keys use SHA-256 of the rendered prompt. The compiler retains a lookup alias for prior FNV keys during migration so an effect already recorded under the old key cannot re-arm on upgrade. Memo replay is refused on declared ancestors of an irreversible effect.

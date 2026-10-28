@@ -191,6 +191,7 @@ def assemble(args):
 
     # Read the base before writing local state. Never make a fresh launch stamp
     # for a resume: proofs and repair patch identity stay bound to the old one.
+    replay_state = {}
     launch_args = {"_base": fresh_base(root), "_replayLaunchNonce": secrets.token_hex(32)}
     requirements = compiler.launch_requirements(ir, embedded_args=assembled)["args"]
     needs_launch = any(item["name"] == "_launch" and item["required"] for item in requirements)
@@ -208,6 +209,8 @@ def assemble(args):
         if not isinstance(prior_results, dict):
             raise ValueError("RESUME-RESULTS-INVALID: recorded results must be an object")
         rejudge = assembled.get("rejudge")
+        if rejudge and 'memoRecords' not in prior:
+            raise ValueError('RESUME-LEGACY-REJUDGE: source has no replay call protocol; adding rejudge changes every runtime key. Start a fresh reviewed launch with replay enabled first.')
         if isinstance(rejudge, dict) and rejudge:
             launch_args["_priorResults"] = {key: prior_results[key] for key in rejudge if key in prior_results}
         memo = _module("replay_memo").build_memo(root, args.run, launch,
@@ -215,7 +218,7 @@ def assemble(args):
                       artifact_sha256=source_sha)
         if not isinstance(memo, dict) or set(memo) - {"_memo", "_prefix"}:
             raise ValueError("RESUME-MEMO: loader returned unsupported launch fields")
-        launch_args.update(memo)
+        replay_state = memo
     else:
         launch_args["_launch"] = _module("attest").stamp(root)
     for name, script in (("_ledger", "ledger"), ("_releases", "release")):
@@ -229,6 +232,9 @@ def assemble(args):
     staging_dir = Path(root) / ".claude/fluxpoint/launch-args"
     staging_dir.mkdir(parents=True, exist_ok=True)
     descriptor, staged = tempfile.mkstemp(prefix="args-", suffix=".json", dir=str(staging_dir))
+    state_descriptor, staged_state = tempfile.mkstemp(prefix="replay-", suffix=".json", dir=str(staging_dir))
+    with os.fdopen(state_descriptor, 'w', encoding='utf-8', newline='\n') as handle:
+        json.dump(replay_state, handle, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(canonical(assembled))
@@ -254,16 +260,17 @@ def assemble(args):
                     handle.write(plan_raw)
             launch_args['_rerunPlan'] = {'path': str(plan_path), 'sha256': plan_digest}
         diagnostics = _run([sys.executable, str(HERE / "compile-graph.py"), graph,
-                            "--args", staged, "--gates-root", root, "--out", output], root)
+                            "--args", staged, "--gates-root", root, "--out", output, "--replay-state", staged_state], root)
         if diagnostics.strip():
             print(diagnostics.rstrip(), file=sys.stderr)
         exact = _run([sys.executable, str(HERE / "compile-graph.py"), graph,
                       "--args", staged, "--gates-root", root, "--check",
-                      "--check-script", output], root)
+                      "--check-script", output, "--replay-state", staged_state], root)
         if exact.strip():
             print(exact.rstrip(), file=sys.stderr)
     finally:
         os.unlink(staged)
+        os.unlink(staged_state)
     workflow = {"scriptPath": output, "args": launch_args}
     if resuming:
         workflow["resumeFromRunId"] = args.run

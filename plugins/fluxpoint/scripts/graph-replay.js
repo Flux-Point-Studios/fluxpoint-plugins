@@ -11,6 +11,10 @@ function canonical(value) {
   return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}'
 }
 function sha256(text) {
+  text = String(text).replace(/[\uD800-\uDFFF]/g, (ch, i, source) => {
+    const code = ch.charCodeAt(0), before = source.charCodeAt(i - 1), after = source.charCodeAt(i + 1)
+    return code <= 0xDBFF && after >= 0xDC00 && after <= 0xDFFF || code >= 0xDC00 && before >= 0xD800 && before <= 0xDBFF ? ch : '\uFFFD'
+  })
   const bytes = encodeURIComponent(text).replace(/%([0-9A-F]{2})/g, (_, value) => String.fromCharCode(parseInt(value, 16))), words = [], len = bytes.length
   for (let i = 0; i < len; i++) words[i >> 2] = (words[i >> 2] || 0) | bytes.charCodeAt(i) << (24 - (i % 4) * 8)
   words[len >> 2] = (words[len >> 2] || 0) | 0x80 << (24 - (len % 4) * 8)
@@ -42,9 +46,9 @@ let HALT = null, FORKED = false, RESERVED = 0, PREFIX_OPEN = true, PREFIX_INDEX 
 function halt(outcome) { if (!HALT) HALT = { outcome }; return null }
 function replayAncestorKeys(n) { return n.after.map(id => NODE_STATE[id] && NODE_STATE[id].key || sha256(canonical({ missing: id }))) }
 function allAncestorsReplayed(n) { return n.after.every(id => NODE_STATE[id] && NODE_STATE[id].replayed) }
-function rejudgeText(id) {
+function rejudgeText(id, includeNote = true) {
   const row = (A.rejudge || {})[id]
-  return row ? '\nREJUDGE NONCE: ' + row.nonce + '\nREJUDGE LAUNCH NONCE: ' + A._replayLaunchNonce + (row.note === undefined ? '' : '\nOPERATOR REJUDGE NOTE (verbatim):\n' + row.note) : ''
+  return row ? '\nREJUDGE NONCE: ' + row.nonce + '\nREJUDGE LAUNCH NONCE: ' + A._replayLaunchNonce + (!includeNote || row.note === undefined ? '' : '\nOPERATOR REJUDGE NOTE (verbatim):\n' + row.note) : ''
 }
 function promptArg(path) {
   // Reasons are attribution metadata, never part of a gate's reasoning input.
@@ -91,7 +95,7 @@ function readingValue(reading) {
 }
 function sameReading(a, b) { return !!a && !!b && canonical(readingValue(a)) === canonical(readingValue(b)) }
 function annotateBuilder(n, reading) {
-  if (!n.verifies || !reading) return
+  if (!n.verifies || !reading || !n.target || !reading.branch) return
   const record = MEMO_RECORDS.find(x => x.node === n.verifies)
   if (record && record.verifiedBy.includes(n.id)) {
     record.verifiedReading = readingValue(reading)
@@ -139,7 +143,7 @@ async function replaySpawn(prompt, options, invoke) {
       eligible = sameReading(reading, entry.verifiedReading)
     }
   }
-  if (eligible && entry && entry.prompt === prompt && canonical(entry.payload) === canonical(payload) && entry.result !== null && entry.result !== undefined) {
+  if (eligible && entry && (entry.promptSha256 || sha256(entry.prompt)) === sha256(prompt) && (entry.payloadSha256 || sha256(canonical(entry.payload))) === key && entry.result !== null && entry.result !== undefined) {
     NODE_STATE[n.id] = { key, replayed: true }
     MEMO_RECORDS.push({ node: n.id, key, payload, prompt, result: entry.result, mode: 'memo', source: { runId: entry.runId, artifactSha256: entry.artifactSha256, agentId: entry.agentId }, verifies: n.verifies, verifiedBy: n.verifiedBy, reading: readingValue(reading), readingCallIndex: LIVE_READING_CALLS[n.id], replay: n.replay, fresh: n.fresh, irreversible: n.irreversible, contract: n.contract, ...(n.mutates ? { verifiedReading: entry.verifiedReading, verifiedByNode: entry.verifiedByNode } : {}) })
     note(n.id, 'REPLAYED-MEMO', entry.runId + '/' + entry.agentId, { key, head: entry.verifiedReading ? entry.verifiedReading.tip : reading && reading.tip })

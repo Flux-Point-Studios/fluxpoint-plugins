@@ -258,6 +258,7 @@ class Assembly(Fixture):
         self.args = argparse.Namespace(root=str(self.root), graph="WORK.md", run="wf_previous", args=None,
                     set=[], set_json=[], unpinned_ok=[], out=None, projects="runtime-projects")
         self.compiled_inputs = None
+        self.compiled_replay = None
         real_module = resume._module
         self.compiler = real_module("compile-graph")
         self.memo_builder = mock.Mock(return_value={"_memo": {"checked": "receipt"}, "_prefix": []})
@@ -271,6 +272,8 @@ class Assembly(Fixture):
         def commands(command, root):
             if str(command[0]) == sys.executable and str(command[1]).endswith("compile-graph.py"):
                 self.compiled_inputs = json.loads(Path(command[command.index("--args") + 1]).read_text())
+                if '--replay-state' in command:
+                    self.compiled_replay = json.loads(Path(command[command.index('--replay-state') + 1]).read_text())
                 return "rerun plan: live repair\n" if "--plan" in command else "compiled fixture\n"
             return real_run(command, root)
         mock.patch.object(resume, "_run", side_effect=commands).start()
@@ -294,7 +297,8 @@ class Assembly(Fixture):
         self.assertEqual(first["args"]["_base"]["sha"], subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root).decode().strip())
         self.assertNotEqual(first["args"]["_replayLaunchNonce"], second["args"]["_replayLaunchNonce"])
         self.assertEqual(len(first["args"]["_replayLaunchNonce"]), 64)
-        self.assertEqual(first["args"]["_memo"], {"checked": "receipt"})
+        self.assertNotIn('_memo', first['args'])
+        self.assertEqual(self.compiled_replay['_memo'], {'checked': 'receipt'})
         self.assertNotIn("_priorResults", first["args"])
         self.assertFalse(any(not key.startswith("_") for key in first["args"]))
 
@@ -350,6 +354,7 @@ class Assembly(Fixture):
                 resume._safe_run(value)
         path = self.file("rejudge.json", '{"gate":{"nonce":"retry-2","reason":"operator request"}}')
         self.summary["results"] = {"gate": {"verdict": "BLOCK"}, "unrelated": {"huge": "x" * 40000}}
+        self.summary['memoRecords'] = []
         self.save()
         self.args.set_json = ["rejudge=@" + str(path)]
         workflow = resume.assemble(self.args)
@@ -418,6 +423,9 @@ const agent=async(prompt,opts)=>({findings:[]});
         second = json.loads(resumed.stdout)
         self.assertIn("review", resumed.stderr)
         self.assertEqual(second["resumeFromRunId"], "wf_integration")
+        self.assertNotIn('_memo', second['args'])
+        self.assertNotIn('_prefix', second['args'])
+        self.assertIn('const REPLAY_STATE = ', Path(second['scriptPath']).read_text())
         inputs = self.execute(second)["summary"]["inputs"]
         self.assertEqual(inputs, {"note": "reviewed repair\r\n", "zero": 0, "unchanged": "default"})
 
@@ -462,6 +470,12 @@ class ResumeCleanup(Assembly):
         self.args.set = ['defaultNote=@' + str(value)]
         resume.assemble(self.args)
         self.assertEqual(self.compiled_inputs['defaultNote'], 'new default')
+
+    def test_rejudge_adoption_from_legacy_source_is_explicitly_refused(self):
+        path = self.file('rejudge.json', '{"gate":{"nonce":"new","reason":"operator request"}}')
+        self.args.set_json = ['rejudge=@' + str(path)]
+        with self.assertRaisesRegex(ValueError, 'RESUME-LEGACY-REJUDGE'):
+            resume.assemble(self.args)
 
     def test_new_defaults_are_embedded_and_unset_removes_stray_key(self):
         self.set_defaults({'added': 'value'})

@@ -945,6 +945,15 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
     if lane_graph and not ir.get('treeGuard', True):
         f.append('lanes require treeGuard: the fresh fork sentinel also prevents call-index cache replay after the fork')
     by_id = {n.get('id'): n for n in nodes}
+    for effect in nodes:
+        if effect.get('irreversible'):
+            protected = ancestors(effect, by_id)
+            # Legacy declaration order also orders effects with no after edge.
+            if not after_ids(effect):
+                protected.update(n.get('id') for n in nodes[:nodes.index(effect)])
+            for node_id in sorted(protected):
+                if by_id.get(node_id, {}).get('replay'):
+                    f.append(f"node '{node_id}': irreversible ancestor cannot use memo replay; guards must execute in the current launch")
     pushes_lanes = {}
     roles = ir.get("roles") or {}
     seen = {}
@@ -2791,7 +2800,7 @@ def launch_requirements_note(ir):
 
 
 def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=None,
-         project_prefix="", embedded_args=None):
+         project_prefix="", embedded_args=None, replay_state=None):
     if embedded_args is not None:
         embedded_args = dict({key: value for key, value in (ir.get('argDefaults') or {}).items() if not key.startswith('_')}, **embedded_args)
     nodes = ir["nodes"]
@@ -2872,6 +2881,13 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("    : typeof args === 'string' && args.trim()")
     a("    ? (() => { try { return JSON.parse(args) } catch { return { target: args } } })()")
     a("    : {}")
+    if modern or replay_state is not None:
+        import hashlib
+        packed_state = json.dumps(replay_state or {}, ensure_ascii=True, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        a('const REPLAY_STATE = ' + packed_state + ';')
+        a('const REPLAY_STATE_SHA256 = ' + json.dumps(hashlib.sha256(packed_state.encode('utf-8')).hexdigest()) + ';')
+        a("for (const key of ['_memo', '_prefix']) if (Object.prototype.hasOwnProperty.call(A, key)) throw new Error('compiled replay state cannot be overridden inline: ' + key)")
+        a("Object.assign(A, REPLAY_STATE)")
     if embedded_args is not None:
         a("for (const key of Object.keys(A)) if (!key.startsWith('_')) throw new Error('embedded launch argument cannot be overridden inline: ' + key)")
         a("Object.assign(A, ARGS)")
@@ -3197,11 +3213,12 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("// could, since it has no filesystem.")
         a("const LEDGER = A._ledger")
         a("const LEDGER_WRITES = []")
-        a("// FNV-1a over the resolved prompt. A change-detector, not a security")
-        a("// boundary: a different prompt is a different operation and earns a")
-        a("// new key, which is also why editing a ceremony prompt re-arms it.")
-        a("// The confirm gate is what backstops that.")
-        a("function ledgerKey(id, prompt) {")
+        if not modern:
+            with open(os.path.join(os.path.dirname(__file__), 'graph-replay.js'), encoding='utf-8') as helpers:
+                a(helpers.read().split('const CALL_RECORDS')[0])
+        a("function ledgerKey(id, prompt) { return `${campaign}|${id}|sha256:${sha256(prompt)}` }")
+        a("// Read prior FNV keys during migration so an already-fired effect never re-arms.")
+        a("function legacyLedgerKey(id, prompt) {")
         a("  let h = 2166136261")
         a("  for (let i = 0; i < prompt.length; i++) {")
         a("    h ^= prompt.charCodeAt(i); h = Math.imul(h, 16777619)")
@@ -3274,6 +3291,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     extra = f", compilerVersion: {js_str(version)}, plugin: PLUGIN"
     if embedded_args is not None:
         extra += ", argDefaults: " + json.dumps(ir.get('argDefaults') or {}, ensure_ascii=True) + ", rerunPlan: A._rerunPlan || null"
+    if modern or replay_state is not None:
+        extra += ", replayStateSha256: REPLAY_STATE_SHA256"
     if any((n.get("repeat") or {}).get("classBy") for n in nodes):
         extra += ", recurringClasses: RECURRING_CLASSES"
     if specification:
@@ -3573,7 +3592,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             a("  const gateId = point.startsWith('before ') ? point.slice(7) : null")
             a("  target = target || (gateId && REPLAY_NODES[gateId] && REPLAY_NODES[gateId].target) || null")
             a("  const unique = FORKED || forceLive || !!target || !!(gateId && (A.rejudge || {})[gateId]) || !!(gateId && REPLAY_NODES[gateId] && REPLAY_NODES[gateId].fresh)")
-            a("  const extra = (unique ? '\\nLIVE TREE READING NONCE: ' + A._replayLaunchNonce + ' point ' + point : '') + (gateId ? rejudgeText(gateId) : '')")
+            a("  const extra = (unique ? '\\nLIVE TREE READING NONCE: ' + A._replayLaunchNonce + ' point ' + point : '') + (gateId ? rejudgeText(gateId, false) : '')")
             a("  const branchPrompt = target ? '\\nAlso run exactly: git -C ' + JSON.stringify(target.repository) + ' ls-remote origin ' + JSON.stringify('refs/heads/' + target.branch) + '. Return the sole full hexadecimal commit in tip, and the exact declared repository and branch as repository and branch. No matches or multiple matches means tip must be empty. Never use a worker-reported sha.' : ''")
             a("  const treeSchema = target ? { ...C.TreeCheckV1, required: [...new Set([...(C.TreeCheckV1.required || []), 'root','repository','branch','tip'])], properties: { ...C.TreeCheckV1.properties, repository: { type: 'string' }, branch: { type: 'string' }, tip: { type: 'string' } } } : C.TreeCheckV1")
         a("  const r = await agent(longPreamble() + 'Run exactly three commands in the repository at "
@@ -4045,13 +4064,15 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
             # A replayed node must not also be filed 'OK'. Reporting a
             # ceremony that did not happen the same way as one that did is
             # the whole failure this is here to prevent.
-            a(f"const replayed_{var} = {key} in LEDGER")
+            a(f"const old_{key} = legacyLedgerKey({js_str(nid)}, {prompt})")
+            a(f"const hit_{key} = {key} in LEDGER ? {key} : old_{key} in LEDGER ? old_{key} : null")
+            a(f"const replayed_{var} = hit_{key} !== null")
             a(f"let {raw}")
             a(f"if (replayed_{var}) {{")
             a(f"  log(`REPLAYED-FROM-LEDGER at {nid}: already recorded against this "
               f"campaign — the effect is not performed again`)")
             a(f"  note({js_str(nid)}, 'REPLAYED', 'once-only ledger hit; effect not repeated')")
-            a(f"  {raw} = LEDGER[{key}].result")
+            a(f"  {raw} = LEDGER[hit_{key}].result")
             a("} else {")
             a(f"  if (!confirmed({js_str(nid)})) {{")
             a(f"    note({js_str(nid)}, 'REFUSED', 'irreversible node not named in confirm')")
@@ -4772,10 +4793,12 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     if source.get('ledger'):
         runtime_args['_ledger'] = {r['key']: r for r in source['ledger'] if isinstance(r, dict) and 'key' in r}
     readings = [r.get('verifiedReading') for r in replay.get('_memo', {}).values()]
-    readings += [(r.get('payload') or {}).get('tree') for r in replay.get('_memo', {}).values()]
+    readings += [r.get('tree', (r.get('payload') or {}).get('tree')) for r in replay.get('_memo', {}).values()]
     readings += [r for r in (source.get('tree') or {}).get('checks', []) if isinstance(r, dict) and r.get('tip')]
     readings = [r for r in readings if isinstance(r, dict)]
-    compiled = emit(ir, contracts, imports_resolved, specification=specification, embedded_args=public_args)
+    runtime_args.pop('_memo', None)
+    runtime_args.pop('_prefix', None)
+    compiled = emit(ir, contracts, imports_resolved, specification=specification, embedded_args=public_args, replay_state=replay)
     try:
         result = subprocess.run(['node', os.path.join(os.path.dirname(__file__), 'graph-plan.js')],
                                 input=json.dumps(dict(source=compiled, args=runtime_args, results=source.get('results') or {}, readings=readings), ensure_ascii=False),
@@ -4801,7 +4824,7 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
         if not prefix:
             try:
                 prior_calls = helper._journal_calls(run_id, projects)
-                prefix = [dict(promptSha256=hashlib.sha256(c['prompt'].encode('utf-8')).hexdigest(),
+                prefix = [dict(promptSha256=hashlib.sha256(helper.utf8_bytes(c['prompt'])).hexdigest(),
                                optsSha256=helper.memo_key(c['start'].get('opts', c['start'].get('options'))),
                                label=c['start'].get('label', (c['start'].get('opts') or {}).get('label')))
                           for c in prior_calls if c.get('prompt') is not None and (c.get('done') or {}).get('type') == 'result']
@@ -4810,7 +4833,7 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
         open_prefix, first_changed = True, None
         for index, call in enumerate(calls):
             prior = prefix[index] if index < len(prefix) else None
-            match = bool(open_prefix and prior and prior['promptSha256'] == hashlib.sha256(call['prompt'].encode('utf-8')).hexdigest()
+            match = bool(open_prefix and prior and prior['promptSha256'] == hashlib.sha256(helper.utf8_bytes(call['prompt'])).hexdigest()
                          and prior['optsSha256'] == helper.memo_key(call['opts']))
             label = call['opts'].get('label')
             if not match:
@@ -4850,7 +4873,7 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
                         if effective.get(key) != old_inputs.get(key):
                             changed.append(key)
                 cause = ('live ancestor ' + ', '.join(live) if live else 'arg changed: ' + ', '.join(sorted(set(changed))) if changed else 'no matching verified memo/prefix entry')
-        entries = [e for e in replay.get('_memo', {}).values() if e.get('payload', {}).get('id') == nid]
+        entries = [e for e in replay.get('_memo', {}).values() if e.get('node', e.get('payload', {}).get('id')) == nid]
         entries += [e for e in replay.get('_prefix', []) if e.get('label') == nid]
         cost = next((e['cost'] for e in entries if isinstance(e.get('cost'), dict)), {'minutes': None, 'tokens': None})
         rows.append(dict(node=nid, status=status, cause=cause, minutes=cost.get('minutes'), tokens=cost.get('tokens')))
@@ -4861,6 +4884,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("graph", nargs="?", default="WORK.md", help="path to WORK.md (or any file with a graph-ir block)")
     ap.add_argument("-o", "--out", help="path to write the compiled .graph.js")
+    ap.add_argument('--replay-state', help='embed harness-verified _memo/_prefix JSON into immutable compiled source')
     ap.add_argument("--args", help="embed non-underscore args from JSON; none explicitly removes embedded args")
     ap.add_argument("--check", action="store_true", help="validate and measure the compiled script")
     ap.add_argument('--plan', action='store_true', help='render a deterministic rerun plan using verified prior results, without agents')
@@ -4895,7 +4919,13 @@ def main():
 
     projection = None
     embedded_args = None
+    replay_state = None
     try:
+        if args.replay_state:
+            with open(args.replay_state, encoding='utf-8') as fh:
+                replay_state = json.load(fh, object_pairs_hook=spec_mod.unique_keys)
+            if not isinstance(replay_state, dict) or set(replay_state) - {'_memo', '_prefix'}:
+                raise ValueError('--replay-state must contain only harness _memo and _prefix fields')
         if args.args and args.args != "none":
             with open(args.args, encoding="utf-8") as fh:
                 embedded_args = json.load(fh, object_pairs_hook=spec_mod.unique_keys)
@@ -5036,7 +5066,7 @@ def main():
         graph_rel = "../"
     js = emit(ir, contracts, resolved, specification,
               graph_file=None if graph_rel.startswith("../") else graph_rel,
-              project_prefix=git_prefix(args.gates_root), embedded_args=embedded_args)
+              project_prefix=git_prefix(args.gates_root), embedded_args=embedded_args, replay_state=replay_state)
     script_bytes = len(js.encode("utf-8"))
     headroom = args.max_script_bytes - script_bytes
     size_line = ("projected " if projection is not None else "") + f"script {script_bytes:,} bytes, headroom {headroom:,} of {args.max_script_bytes:,} bytes"

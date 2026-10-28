@@ -9,7 +9,8 @@
     "Execution citation commit identity and pre-start journal failures",
     "Single-copy irreversible prompt and parseable await preamble",
     "Structured resume default reconciliation, explicit removals, immutable inputs, persisted rerun plans and UTF-8 child diagnostics",
-    "Attestation classifies exact harness STATUS and inserted Evidence/Decisions edits without exempting content changes"
+    "Attestation classifies exact harness STATUS and inserted Evidence/Decisions edits without exempting content changes",
+    "Replay provenance frames, compact compiled replay authority, live irreversible guards, defined Unicode hashing and SHA-256 ledger migration"
   ],
   "outOfScope": [
     "External workflow runtime cache redesign",
@@ -96,6 +97,18 @@
         "harness-dirt-tests"
       ],
       "counterexample": "An ordinary STATUS edit makes all gates stale, or a content edit is hidden by a broad Markdown exemption"
+    },
+    {
+      "id": "replay-followups",
+      "statement": "Runtime transcript frames normalize exactly, mixed readings stay recordable, replay state is compiled and compact, irreversible ancestors cannot memo, legacy rejudge refuses, sentinel notes stay isolated, path aliases and Unicode hash consistently, and new once-only keys use SHA-256 with legacy replay migration",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "replay-followup-tests",
+        "graph-replay-tests"
+      ],
+      "counterexample": "Wrapped native prompts refuse, a memo supplied inline turns red green, the operator carries two full prompt copies, a sentinel follows a note, or a malformed surrogate crashes hashing"
     }
   ],
   "checks": [
@@ -137,6 +150,32 @@
         "The root graph is tracked and Git supplies its committed baseline"
       ],
       "timeoutSeconds": 120
+    },
+    {
+      "id": "replay-followup-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/replay-memo-test.py"
+      ],
+      "scope": "Native journal and transcript fixtures, source corroboration, compact replay state and canonical hash parity",
+      "assumptions": [
+        "The versioned Workflow frame parser accepts only supported computed-task wrappers"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "graph-replay-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/graph-replay-test.py"
+      ],
+      "scope": "Execute actual emitted graph programs under local Workflow stubs to exercise replay, lanes, rejudge and irreversible validation",
+      "assumptions": [
+        "Local agent fixtures model the supported Workflow call ordering"
+      ],
+      "timeoutSeconds": 180
     }
   ],
   "challenges": [

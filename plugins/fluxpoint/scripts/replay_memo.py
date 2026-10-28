@@ -24,7 +24,8 @@ def canonical(value):
     """Sorted UTF-8 JSON, shared with the compiler's JavaScript serializer."""
     def encode(v):
         if v is None or type(v) is bool or isinstance(v, str):
-            return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+            text = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+            return re.sub(r'[\ud800-\udfff]', lambda m: '\\u%04x' % ord(m.group()), text)
         if type(v) in (int, float):
             if not math.isfinite(v):
                 raise ReplayError("non-finite memo number")
@@ -49,6 +50,33 @@ def canonical(value):
             return "{" + ",".join(encode(k) + ":" + encode(v[k]) for k in keys) + "}"
         raise ReplayError("memo payload contains a non-JSON value")
     return encode(value)
+
+
+def utf8_bytes(text):
+    # Match JavaScript well-formed UTF-8: lone UTF-16 surrogates become U+FFFD.
+    return text.encode('utf-16-le', 'surrogatepass').decode('utf-16-le', 'replace').encode('utf-8')
+
+
+def normalize_workflow_prompt(text):
+    """Version 1: the runtime computed-task frame and optional worktree note."""
+    if not text.startswith('[Workflow harness'):
+        return text
+    computed = '[Workflow harness — computed task]'
+    user = '[Workflow harness — user request]'
+    if not text.startswith((computed, user)) or text.count(computed) != 1:
+        raise ReplayError('unknown Workflow prompt frame')
+    start = text.find(computed)
+    marker = re.search(r'\r?\nThe computed task text follows:\r?\n(?:\r?\n)?', text[start:])
+    if marker is None:
+        raise ReplayError('unknown Workflow prompt frame')
+    task = text[start + marker.end():]
+    suffix = '\n\n---\nYou are running in an isolated git worktree at '
+    if suffix in task:
+        task = task.split(suffix, 1)[0]
+    lines = task.splitlines(keepends=True)
+    if any(line.strip('\r\n') and not line.startswith('  ') for line in lines):
+        raise ReplayError('unknown Workflow prompt frame: task indentation')
+    return ''.join(line[2:] if line.startswith('  ') else line for line in lines)
 
 
 def memo_key(payload):
@@ -119,10 +147,10 @@ def _prompt(path):
             continue
         content = msg.get("content")
         if isinstance(content, str):
-            return content
+            return normalize_workflow_prompt(content)
         if isinstance(content, list) and all(isinstance(x, dict) and x.get("type") == "text"
                                              and isinstance(x.get("text"), str) for x in content):
-            return "".join(x["text"] for x in content)
+            return normalize_workflow_prompt("".join(x["text"] for x in content))
         raise ReplayError("source transcript first user message is not text")
     raise ReplayError("source transcript has no user prompt")
 
@@ -195,7 +223,16 @@ def _journal_calls(run_id, projects):
                 return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
             minutes = max(0, clock(call["done"]) - clock(call["start"])) / 60
         except (ValueError, TypeError, AttributeError):
-            pass
+            # Current Workflow journals omit timestamps; native agent
+            # transcript timestamps still bound the observed wall time.
+            stamps = []
+            for row in _rows(path):
+                try:
+                    stamps.append(clock(row))
+                except (ValueError, TypeError, AttributeError):
+                    continue
+            if len(stamps) >= 2:
+                minutes = max(0, max(stamps) - min(stamps)) / 60
         call["cost"] = {"minutes": minutes, "tokens": usage if known else None}
     return calls
 
@@ -277,7 +314,7 @@ def _porcelain(value, root, checkout, graph):
     graph = str(graph or 'WORK.md').replace('\\', '/')
     if Path(graph).is_absolute():
         try:
-            graph = Path(graph).relative_to(root).as_posix()
+            graph = Path(graph).resolve().relative_to(Path(root).resolve()).as_posix()
         except ValueError:
             raise ReplayError('tree ignore graph escapes project')
     if '..' in Path(graph).parts:
@@ -360,15 +397,14 @@ def _sentinel(root, summary, calls, index, reading, point, graph=None):
         request = (summary.get('inputs') or {}).get('rejudge', {}).get(point[7:])
         if request:
             expected += '\nREJUDGE NONCE: ' + request['nonce'] + '\nREJUDGE LAUNCH NONCE: ' + nonce
-            if 'note' in request:
-                expected += '\nOPERATOR REJUDGE NOTE (verbatim):\n' + request['note']
+
     if reading['branch'] is not None:
         expected += ('\nAlso run exactly: git -C ' + json.dumps(reading['repository'], ensure_ascii=False)
                      + ' ls-remote origin ' + json.dumps('refs/heads/' + reading['branch'], ensure_ascii=False)
                      + '. Return the sole full hexadecimal commit in tip, and the exact declared repository and branch as repository and branch. '
                      'No matches or multiple matches means tip must be empty. Never use a worker-reported sha.')
     if rest != expected:
-        raise ReplayError('tree sentinel command target or rejudge note differs')
+        raise ReplayError('tree sentinel command target or rejudge nonce differs')
     return dict(call, readingNonce=nonce)
 
 
@@ -538,14 +574,16 @@ def build_memo(root, run_id, launch, compiler_version, projects=None, artifact_s
     for entry in entries:
         if not _memo_eligible(entry):
             continue
-        if entry["key"] in memo and canonical(memo[entry["key"]]) != canonical(entry):
+        compact = {key: value for key, value in entry.items() if key not in ('prompt', 'payload')}
+        compact.update(node=entry['payload']['id'], tree=entry['payload']['tree'], promptSha256=hashlib.sha256(utf8_bytes(entry['prompt'])).hexdigest(), payloadSha256=entry['key'])
+        if entry["key"] in memo and canonical(memo[entry["key"]]) != canonical(compact):
             raise ReplayError("conflicting source memo entries")
-        memo[entry["key"]] = entry
+        memo[entry["key"]] = compact
     prefix = []
     for c in calls:
         if not c or c.get('result') is None:
             break
-        prefix.append(dict(promptSha256=hashlib.sha256(c["prompt"].encode("utf-8")).hexdigest(),
+        prefix.append(dict(promptSha256=hashlib.sha256(utf8_bytes(c["prompt"])).hexdigest(),
                    optsSha256=memo_key(c["opts"]), resultSha256=memo_key(c["result"]),
                    label=c["opts"].get("label"), runId=c["runId"], artifactSha256=c.get('artifactSha256'),
                    agentId=c["agentId"], cost=c.get("cost")))
@@ -617,7 +655,9 @@ def verify_replays(root, summary, projects=None, graph=None, run_id=None, valida
         original = data["_memo"].get(record.get("key"))
         if (not original or original["agentId"] != source.get("agentId")
                 or original.get('artifactSha256') != identity[1]
-                or any(canonical(original.get(k)) != canonical(record.get(k)) for k in ("prompt", "result", "payload"))):
+                or canonical(original.get('result')) != canonical(record.get('result'))
+                or original.get('promptSha256') != hashlib.sha256(utf8_bytes(record['prompt'])).hexdigest()
+                or original.get('payloadSha256') != memo_key(record['payload'])):
             raise ReplayError("REPLAYED-MEMO source does not corroborate result")
         expected_reading = payload["tree"] if payload["tree"] is not None else original.get("verifiedReading")
         if not isinstance(expected_reading, dict) or canonical(record.get("reading")) != canonical(expected_reading):
