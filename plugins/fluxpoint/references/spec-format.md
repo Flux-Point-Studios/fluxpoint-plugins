@@ -141,9 +141,11 @@ It includes repository files named in `argv`/`witness`, including `file::node`
 selectors and `--option=file`, plus every `harnessInputs` file. A directory
 expands to its Git-tracked files; an empty or untracked-only directory refuses
 to freeze. Explicit inputs must exist inside the repository. Package cwd
-flags (`--prefix`, `--dir`, `--cwd`, `-C`, `--project`) resolve package-relative
-paths; a path without that context may resolve against a unique repository
-package root. Ambiguous package paths refuse rather than choosing one.
+flags (`--prefix`, `--dir`, `--cwd`, and a directory-valued `-C` or `--project`)
+resolve package-relative paths. A `--project` file is pinned as configuration;
+its parent guides local module resolution. Non-directory `-C` values and Jest
+`--testPathPattern(s)` regexes do not become input paths. A path without that
+context may resolve against a unique repository package root. Ambiguous package paths refuse rather than choosing one.
 Deleting a frozen input does not alter the specification identity; its next run
 record names the missing file with a null hash. Both lock operations compute
 the same additive support closure: Python conftest ancestry, package
@@ -155,12 +157,23 @@ is parsed, never imported or executed. A Python support parse failure refuses
 freezing. Production imports guide reach but do not freeze production code.
 Keep `harnessInputs` for opaque commands, dynamic imports, resources outside a
 test package, generated loaders and dependencies no static walk can see.
+Known Python dynamic loaders and computed or template-literal JS imports emit
+warnings in lock and preflight output; a known target explicitly covered by
+`harnessInputs` discharges its warning. Static closure still cannot enumerate
+arbitrary resource paths computed by repository programs.
 Every path in a previous harness map is retained as a closure root, even after
 an argv or import is removed. A missing retained file refuses re-locking; no
 path can silently leave the locked set.
 The harness map stays outside the compared identity, so editing check code
 changes neither the graph's IR nor its compiled script and does not stale its
 specification. It remains reviewed code, with its own recorded identity.
+`--check --strict-harness` and `--run --strict-harness` refuse changed, missing
+or newly discovered harness inputs in the exact checkout being judged, naming
+them before running checks and checking again afterwards. Newly scaffolded
+harnesses use strict mode, including when executed in builder worktrees.
+Existing copied harnesses need that flag added explicitly. Review intended
+harness edits and re-lock them before allowing that tree to certify a packet;
+plain `--check` remains an identity diagnostic for migration and review.
 
 After reviewing and committing a harness fix, run its declared gate through
 `attest.py --run <name>`, then run
@@ -177,6 +190,8 @@ the run artifact; its Evidence row names the digest and changed paths. Missing
 locked files are recorded with a null hash. These describe the tree at recording
 time; record from the executed tree before further edits. The Stop gate also
 names edited check files from declared packets' harness maps as trust-base edits.
+It reads frozen maps directly and only walks legacy locks lacking a map, so
+recording a green Stop does not repeat the live closure walk.
 
 Before a repair, `specification.py --inputs --closure` reports JSON paths,
 hashes, holding check ids and reasons, including packet/lock, proof baseline,
@@ -189,7 +204,9 @@ or re-locks anything. Use `--spec` or `--graph` for a sibling packet.
 `--touches <path>...` always includes closure and exits 4 if a planned file or
 directory overlaps locked inputs, naming the checks that hold them. Exit 0
 only describes the declared list, never grants edit permission or proves the
-live tree unchanged. `--reach <production-path-or-module>...` reports holding
+live tree unchanged. Planned ambient files such as a new `conftest.py`, package
+initializer or test-runner configuration also conflict when locked inputs lie
+under their directory, even before the ambient file exists. `--reach <production-path-or-module>...` reports holding
 check commands, reached test files and statically discovered pytest node ids.
 Unresolved targets refuse; dynamic imports may be missed. Module/package-level
 imports conservatively reach every test in the file, so this is an early probe

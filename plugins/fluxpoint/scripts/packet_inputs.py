@@ -13,23 +13,25 @@ import tokenize
 
 TEST_DIRS = {'test', 'tests', 'testing', 'test_support', 'fixtures'}
 JS_SUFFIXES = ('.js', '.ts', '.mjs', '.cjs', '.mts', '.cts', '.jsx', '.tsx')
-PATH_FLAGS = {'--path', '--config', '-c', '--testPathPattern', '--testPathPatterns'}
-CWD_FLAGS = {'--prefix', '--dir', '--cwd', '-C', '--project'}
+PATH_FLAGS = {'--path', '--config', '-c'}
+PATTERN_FLAGS = {'--testPathPattern', '--testPathPatterns'}
+CWD_FLAGS = {'--prefix', '--dir', '--cwd'}
 IGNORED_DIRS = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', '.tox'}
 
 
-def trust_paths(root, doc, frozen=()):
+def trust_paths(root, doc, frozen=None):
     """Best-effort live warning paths; freezing and recording use strict parsing."""
+    if frozen is not None:
+        return set(frozen)  # The frozen map already holds the complete closure.
     inputs = Inputs(root, doc, closure=False, allow_missing=True)
     try:
         inputs.closure = True
         inputs._expand()
-        inputs.include_locked(frozen)
     except (OSError, ValueError, TypeError):
         # Already discovered files still count, especially the file that failed
         # to parse. Previously frozen paths never depend on successful parsing.
         pass
-    return set(inputs.reasons) | set(frozen)
+    return set(inputs.reasons)
 
 
 def sha(path):
@@ -70,7 +72,7 @@ def js_tokens(text):
                 templates.append(0)
                 i = j + 2
             else:
-                tokens.append(('template', ''))
+                tokens.append(('template', text[i + 1:j] if c == '`' else ''))
                 i = j + 1
         elif c.isspace():
             i += 1
@@ -135,7 +137,7 @@ def js_specifiers(text):
 
 
 class Inputs:
-    def __init__(self, root, doc, closure=True, allow_missing=False):
+    def __init__(self, root, doc, closure=True, allow_missing=False, frozen=()):
         self.root = resolved(root)
         self.doc, self.closure, self.allow_missing = doc, closure, allow_missing
         self.reasons, self.owners, self.seeds, self.edges, self.trees = {}, {}, {}, {}, {}
@@ -144,9 +146,17 @@ class Inputs:
         self._tracked = None
         self._packages = None
         self._queue = deque()
+        self._expanded = set()
+        self._module_cache, self._config_cache, self._ambient_cache = {}, {}, {}
         self._seed()
+        # Infer live ownership first; only genuinely retained orphan roots
+        # belong to every check. Seeding all frozen files up front would make
+        # unrelated checks appear to reach each other's transitive fixtures.
+        self._retained = set(frozen) if closure else set()
         if closure:
             self._expand()
+        else:
+            self.include_locked(frozen, expand=False)
 
     def path(self, rel):
         if not isinstance(rel, str) or not rel.strip():
@@ -281,6 +291,17 @@ class Inputs:
                 pytest = any(Path(arg).name in ('pytest', 'pytest.exe') for arg in argv)
                 for i, arg in enumerate(argv):
                     flag, sep, value = arg.partition('=')
+                    if flag in ('--project', '-C'):
+                        value = value if sep else (argv[i + 1] if i + 1 < len(argv) else '')
+                        candidate = self.locate(value)
+                        if candidate is not None and candidate.is_dir():
+                            cwd = candidate
+                            self.search.add(cwd)
+                        elif flag == '--project' and candidate is not None:
+                            self._seed_path(candidate, kind, cid)
+                            self.search.add(candidate.parent)
+                        else:
+                            self.warnings.add('unplaced command option ' + flag + ' ' + value + '; declare real inputs with harnessInputs')
                     if flag in CWD_FLAGS:
                         value = value if sep else (argv[i + 1] if i + 1 < len(argv) else '')
                         cwd = self.path(value)
@@ -289,7 +310,8 @@ class Inputs:
                         self.search.add(cwd)
                 for i, arg in enumerate(argv):
                     flag, sep, value = arg.partition('=')
-                    if flag in CWD_FLAGS or (i and argv[i - 1] in CWD_FLAGS):
+                    skip = CWD_FLAGS | PATTERN_FLAGS | {'--project', '-C'}
+                    if flag in skip or (i and argv[i - 1] in skip):
                         continue
                     if i and argv[i - 1] == '-c' and not pytest:
                         continue  # Python -c code is not pytest's configuration path.
@@ -314,8 +336,12 @@ class Inputs:
                 or path.name.endswith('_test.py'))
 
     def module(self, parts, bases=None, parents=True):
+        bases = tuple(sorted(bases if bases is not None else self.search))
+        key = (tuple(parts), bases, parents)
+        if key in self._module_cache:
+            return set(self._module_cache[key])
         found = set()
-        for base in bases if bases is not None else self.search:
+        for base in bases:
             current = base
             for part in parts:
                 current = current / part
@@ -327,6 +353,7 @@ class Inputs:
                 if candidate.is_relative_to(self.root) and candidate.is_file():
                     self.rel(candidate)
                     found.add(self.rel(candidate))
+        self._module_cache[key] = frozenset(found)
         return found
 
     def parse(self, rel, strict):
@@ -353,7 +380,40 @@ class Inputs:
         file = self.path(rel)
         bases = set(self.search) | {file.parent}
         result = set()
+        aliases = {}
+        for imported in ast.walk(tree):
+            if isinstance(imported, ast.Import):
+                aliases.update({name.asname or name.name.split('.')[0]:
+                                (name.name if name.asname else name.name.split('.')[0])
+                                for name in imported.names})
+            elif isinstance(imported, ast.ImportFrom) and imported.module:
+                aliases.update({name.asname or name.name: imported.module + '.' + name.name for name in imported.names})
+        def call_name(node):
+            if isinstance(node, ast.Name):
+                return aliases.get(node.id, node.id)
+            if isinstance(node, ast.Attribute):
+                return call_name(node.value) + '.' + node.attr
+            return ''
         for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = call_name(node.func)
+                if name in ('importlib.import_module', '__import__', 'importlib.util.spec_from_file_location',
+                            'runpy.run_module', 'runpy.run_path'):
+                    arg = node.args[1] if name.endswith('spec_from_file_location') and len(node.args) > 1 else (node.args[0] if node.args else None)
+                    targets = set()
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        if name.endswith(('spec_from_file_location', 'run_path')):
+                            try:
+                                path = self.local(file.parent / arg.value)
+                                if path.is_file():
+                                    targets.add(self.rel(path))
+                            except ValueError:
+                                pass  # An opaque external loader warns; it is not a static import.
+
+                        else:
+                            targets = self.module(arg.value.split('.'), bases, parents=False)
+                    if not targets or not all(self.explicitly_covered(target) for target in targets):
+                        self.warnings.add('dynamic loader ' + name + ' needs explicit harnessInputs: ' + rel)
             if isinstance(node, ast.Import):
                 for name in node.names:
                     result.update(self.module(name.name.split('.'), bases))
@@ -386,7 +446,16 @@ class Inputs:
                             result.update(self.module(plugin.split('.'), bases))
         return result - {rel}
 
+    def explicitly_covered(self, rel):
+        return any(rel == path.rstrip('/') or rel.startswith(path.rstrip('/') + '/')
+                   for path in self.doc.get('harnessInputs', []))
+
     def config(self, path):
+        if path not in self._config_cache:
+            self._config_cache[path] = self._config(path)
+        return self._config_cache[path]
+
+    def _config(self, path):
         """Pin pytest tables and use literal pythonpath entries for local resolution."""
         text = path.read_text(encoding='utf-8-sig')
         values = {}
@@ -433,6 +502,11 @@ class Inputs:
         return True
 
     def ambient(self, rel):
+        if rel not in self._ambient_cache:
+            self._ambient_cache[rel] = self._ambient(rel)
+        return self._ambient_cache[rel]
+
+    def _ambient(self, rel):
         path, result = self.path(rel), set()
         for parent in path.parents:
             if not parent.is_relative_to(self.root):
@@ -462,6 +536,22 @@ class Inputs:
     def js_imports(self, rel):
         text, result = self.path(rel).read_text(encoding='utf-8'), set()
         # Literal imports only; dynamic loaders remain explicit harnessInputs.
+        tokens = js_tokens(text)
+        for k, token in enumerate(tokens[:-2]):
+            if (token in (('word', 'import'), ('word', 'require')) and tokens[k + 1] == ('punct', '(')
+                    and tokens[k + 2][0] != 'string'):
+                targets = set()
+                kind, value = tokens[k + 2]
+                if kind == 'template' and value.startswith('.'):
+                    try:
+                        base = self.local(self.path(rel).parent / value)
+                        candidates = [base] + [Path(str(base) + suffix) for suffix in JS_SUFFIXES]
+                        candidates += [base / ('index' + suffix) for suffix in JS_SUFFIXES]
+                        targets = {self.rel(path) for path in candidates if path.is_file()}
+                    except ValueError:
+                        pass
+                if not targets or not all(self.explicitly_covered(target) for target in targets):
+                    self.warnings.add('dynamic JS import/require needs explicit harnessInputs: ' + rel)
         for specifier in js_specifiers(text):
             base = self.local(self.path(rel).parent / specifier)
             candidates = [base] + [Path(str(base) + suffix) for suffix in JS_SUFFIXES]
@@ -476,8 +566,13 @@ class Inputs:
                 for cid in list(self.owners[rel]):
                     self.add(self.path(ambient), kind, cid, rel)
                     self._queue.append((ambient, cid, True))
-        seen = set()
-        while self._queue:
+        seen = self._expanded
+        while self._queue or self._retained:
+            if not self._queue:
+                self.include_locked(self._retained, expand=False)
+                self._retained.clear()
+                if not self._queue:
+                    break
             rel, cid, locked = self._queue.popleft()
             if (rel, cid, locked) in seen:
                 continue
@@ -505,14 +600,14 @@ class Inputs:
                     self.add(self.path(dep), 'test-import', cid, rel)
                 self._queue.append((dep, cid, is_locked))
 
-    def include_locked(self, paths):
+    def include_locked(self, paths, expand=True):
         """Retained paths remain roots, even when the new argv no longer names them."""
         for rel in paths:
             if rel not in self.reasons:
                 for check in self.doc['checks']:
                     self.add(self.path(rel), 'locked-harness', check['id'])
                     self._queue.append((rel, check['id'], True))
-        if self.closure:
+        if self.closure and expand and self._queue:
             self._expand()
 
     def hashes(self):

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "sha256": "ba90fcb4fdf159724a15ef461f715950ff96e5e75cd27d7556074922480fe77a",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/packet-inputs-test.py": "070fb67c5e5a545f1bfc759a6e9b20ab5a2ca939d13f902a16361f5b0fb3cd28"
+  }
+}

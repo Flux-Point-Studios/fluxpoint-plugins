@@ -231,6 +231,7 @@ PY
 proof="harness ${harness_desc} exit ${hrc} @${head_sha} tree:${tree_sha} dirty:${dirty_n} log:${log_sha}"
 
 if [ -z "$findings" ]; then
+  touched="$(fpl_trust_base_modified | sort -u | tr '\n' ' ')"
   printf 'PASS %s\n' "$ts" >"$sd/last-harness"
   rm -f "$dirty" "$counter" "$yielded"
   fpl_record_evidence PASS \
@@ -239,7 +240,6 @@ if [ -z "$findings" ]; then
   # This tree passed, so it is what the next verdict should be measured
   # against. Refreshed only on green: a red or timed-out run has not
   # established anything worth inheriting as a starting point.
-  touched="$(fpl_trust_base_modified | sort -u | tr '\n' ' ')"
   fpl_set_base "$sid"
   [ "$tree_sha" = unknown ] || gate_verdict_key "$tree_sha" >"$passed"
   if [ -n "${touched// /}" ]; then

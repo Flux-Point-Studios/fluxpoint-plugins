@@ -427,16 +427,18 @@ Makefile"
 # agent that re-records a proof baseline to absorb a rise, or edits the
 # harness to exit 0, and then commits it, would otherwise show a clean tree.
 fpl_trust_base_modified() {
-  local f base="${FPL_DIFF_BASE:-HEAD}" hit
-  { printf '%s\n' "$FPL_TRUST_BASE"; fpl_packet_trust_paths; } | sort -u | while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    hit=""
-    if git rev-parse --verify -q HEAD >/dev/null 2>&1; then
-      hit="$(git diff "$base" --name-only -- "$f" 2>/dev/null)"
-    fi
-    [ -n "$hit" ] || hit="$(git ls-files --others --exclude-standard -- "$f" 2>/dev/null)"
-    [ -n "$hit" ] && printf '%s\n' "$hit"
-  done
+  local f base="${FPL_DIFF_BASE:-HEAD}"
+  local paths=()
+  while IFS= read -r f; do
+    [ -n "$f" ] && paths+=("$f")
+  done < <({ printf '%s\n' "$FPL_TRUST_BASE"; fpl_packet_trust_paths; } | sort -u)
+  [ "${#paths[@]}" -gt 0 ] || return 0
+  # Git accepts all pathspecs together: two queries replace two subprocesses
+  # for each closure file, which is costly in a Windows Stop hook.
+  if git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    git diff "$base" --name-only -- "${paths[@]}" 2>/dev/null
+  fi
+  git ls-files --others --exclude-standard -- "${paths[@]}" 2>/dev/null
 }
 
 # Locked packets can name repo-defined harness checks in addition to the
@@ -455,8 +457,9 @@ for packet in specification.declared_packets(root):
             continue
         paths = set(data.get("harness", {}))
         try:
-            doc = json.loads(packet_file.read_text(encoding="utf-8"))
-            paths.update(specification.packet_inputs.trust_paths(root, doc, paths))
+            if "harness" not in data:
+                doc = json.loads(packet_file.read_text(encoding="utf-8"))
+                paths.update(specification.packet_inputs.trust_paths(root, doc))
         except (OSError, ValueError, TypeError, KeyError):
             pass
         for path in sorted(paths):
