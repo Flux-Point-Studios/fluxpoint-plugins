@@ -301,6 +301,18 @@ class PacketInputsTests(unittest.TestCase):
         self.assertIn('frontend/tests/support/helper.ts',
                       {row['path'] for row in self.report('--inputs', '--closure')['inputs']})
 
+    def test_regex_after_control_condition_does_not_hide_following_import(self):
+        self.frontend()
+        self.write('frontend/tests/landing/sign.test.ts',
+                   "if ((true)) /[/*]/.test('x');\n"
+                   "while (false) /[/*]/.test('x');\n"
+                   "import { value } from '../support/helper'\n")
+        self.write('frontend/tests/support/helper.ts', 'export const value = 1\n')
+        self.commit()
+        self.assertIn('frontend/tests/support/helper.ts', self.lock()['harness'])
+        self.assertIn('frontend/tests/support/helper.ts',
+                      {row['path'] for row in self.report('--inputs', '--closure')['inputs']})
+
     def test_dots_only_segment_under_an_existing_directory_is_not_an_import(self):
         self.frontend()
         self.write('frontend/tests/landing/helper.ts', "export { p } from './.../provider'\nexport const value = 1\n")

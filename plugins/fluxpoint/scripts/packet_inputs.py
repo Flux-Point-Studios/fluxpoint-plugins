@@ -56,7 +56,8 @@ def js_tokens(text):
     """Words, punctuation and string literals of JS/TS source. Comments are dropped,
     so prose that quotes an import is never read as one; template and regex
     literals become opaque tokens, so a '/*' or quote inside them hides no code."""
-    tokens, templates, i, n = [], [], 0, len(text)
+    tokens, templates, parens, i, n = [], [], [], 0, len(text)
+    control_end = -1
     while i < n:
         c = text[i]
         if c == '`' or (c == '}' and templates and templates[-1] == 0):
@@ -85,7 +86,7 @@ def js_tokens(text):
                 j += 2 if text[j] == '\\' else 1
             tokens.append(('string', text[i + 1:j]))
             i = j + 1
-        elif c == '/' and (not tokens or tokens[-1] in REGEX_AFTER):
+        elif c == '/' and (not tokens or tokens[-1] in REGEX_AFTER or len(tokens) - 1 == control_end):
             j, klass = i + 1, False
             while j < n and text[j] != '\n' and (klass or text[j] != '/'):
                 klass = (klass or text[j] == '[') and text[j] != ']'
@@ -103,6 +104,15 @@ def js_tokens(text):
             tokens.append(('word', text[i:j]))
             i = j
         else:
+            if c == '(':
+                # A regex can start a statement after if/while/etc. conditions,
+                # but a slash after a function call still means division.
+                control = (bool(tokens) and tokens[-1] in
+                           {('word', w) for w in ('if', 'while', 'for', 'with', 'switch', 'catch')}
+                           and (len(tokens) < 2 or tokens[-2] != ('punct', '.')))
+                parens.append(control)
+            elif c == ')' and parens and parens.pop():
+                control_end = len(tokens)
             if templates and c == '{':
                 templates[-1] += 1
             elif templates and c == '}':
