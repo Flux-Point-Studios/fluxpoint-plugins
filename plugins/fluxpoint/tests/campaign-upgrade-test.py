@@ -94,6 +94,16 @@ class CampaignUpgrade(unittest.TestCase):
                 self.assertEqual(artifact['specificationCoverage']['references'], 'uncovered-legacy')
                 self.assertIn('LEGACY reference files not covered', (root / 'WORK.md').read_text())
 
+    def test_legacy_claim_cannot_downgrade_a_changed_modern_reference_lock(self):
+        root, identity, old = self.fixture()
+        (root / '.fluxpoint-spec-lock.json').write_text(json.dumps(identity))
+        (root / 'archive.json').write_text('{"scope":"changed after locking"}')
+        with self.assertRaisesRegex(ValueError, 'reference.*changed since lock'):
+            specification.recording_identity(root, old)
+        result = self.record(root, old, '--unpinned-ok', '/srv/notes/old-plan.txt')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((root / '.claude/fluxpoint/runs/legacy.json').exists())
+
     def test_legacy_compatibility_cannot_hide_packet_change(self):
         root, _, old = self.fixture()
         doc = json.loads((root / '.fluxpoint-spec.json').read_text())

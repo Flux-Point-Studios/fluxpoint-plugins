@@ -59,6 +59,31 @@ def f(): pass
         self.assertEqual(cats.count('py.type_ignore'), 4)
         self.assertEqual(cats.count('py.no_type_check'), 1)
 
+    def test_methods_resolve_outer_imports_after_class_shadowing(self):
+        text = """from typing import cast, no_type_check
+@no_type_check
+class C:
+    cast = staticmethod(lambda value: value)
+    def method(self, value):
+        return cast(int, value)
+"""
+        self.assertEqual(self.scan(text).count('py.cast'), 1)
+        self.assertEqual(self.scan(text).count('py.no_type_check'), 1)
+
+    def test_comprehension_and_lambda_bindings_do_not_escape_their_scope(self):
+        for body, wanted in [('values = [fn(value) for cast in callbacks]\ncast(str, value)\n', 1),
+                             ('values = [cast(int, value) for cast in callbacks]\n', 0),
+                             ('f = lambda cast: cast(int, 1)\n', 0)]:
+            with self.subTest(body=body):
+                self.assertEqual(self.scan('from typing import cast\n' + body).count('py.cast'), wanted)
+
+    def test_typing_star_imports_resolve_the_known_hatches(self):
+        self.assertEqual(self.scan('from typing import *\nx: Any = cast(int, value)\n'), ['py.any', 'py.cast'])
+
+    def test_pyright_jsonc_comments_and_multiline_values(self):
+        self.assertEqual(self.scan('/* "typeCheckingMode": "off" */\n{"typeCheckingMode": "strict"}', 'pyrightconfig.json'), [])
+        self.assertEqual(self.scan('{"typeCheckingMode":\n"off"}', 'pyrightconfig.json'), ['flags.types_off'])
+
     def test_checker_configs_only(self):
         for name, text in [('mypy.ini', '[mypy]\nignore_errors = true\n'),
                            ('setup.cfg', '[mypy-app.*]\nignore_errors = True\n'),
