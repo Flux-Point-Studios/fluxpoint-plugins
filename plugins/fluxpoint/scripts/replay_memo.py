@@ -513,6 +513,12 @@ def _validate_summary(root, summary, run_id, digest, launch, compiler, projects,
         origin = candidates[0]
         if canonical(origin.get("result")) != canonical(record.get("result")):
             raise ReplayError("memo result differs from source")
+        if record['mode'] == 'memo':
+            expected = record['payload']['tree'] or origin.get('sourceFinalReading', origin.get('verifiedReading'))
+            if canonical(record.get('reading')) != canonical(expected):
+                raise ReplayError('memo live reading differs from corroborated source branch')
+            if record.get('sourceFinalReading') is not None and record['payload']['tree'] is None and canonical(record['sourceFinalReading']) != canonical(expected):
+                raise ReplayError('builder source-final reading differs from corroborated source branch')
         if record['mode'] == 'prefix':
             source = record.get('source') or {}
             if origin.get('live') or any(origin.get(k) != source.get(k) for k in ('runId', 'artifactSha256', 'agentId')):
@@ -555,6 +561,24 @@ def _validate_summary(root, summary, run_id, digest, launch, compiler, projects,
             entry["verifiedReading"] = reading
             entry["verifiedByNode"] = verifier
         verified.append(entry)
+    final_readings = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        observations = [(record.get('readingCallIndex'), record.get('reading') or (record.get('payload') or {}).get('tree')),
+                        (record.get('verifiedReadingCallIndex'), record.get('verifiedReading'))]
+        for index, reading in observations:
+            if (type(index) is int and 0 <= index < len(validated) and validated[index]
+                    and isinstance(reading, dict) and reading.get('branch')):
+                identity = reading.get('repository'), reading['branch']
+                if identity not in final_readings or index > final_readings[identity][0]:
+                    final_readings[identity] = index, reading
+    for entry in verified:
+        reading = entry['payload'].get('tree') or entry.get('verifiedReading')
+        if isinstance(reading, dict) and reading.get('branch'):
+            final = final_readings.get((reading.get('repository'), reading['branch']))
+            if final:
+                entry['sourceFinalReading'] = copy.deepcopy(final[1])
     return summary, validated, verified
 
 
@@ -583,10 +607,15 @@ def build_memo(root, run_id, launch, compiler_version, projects=None, artifact_s
     for c in calls:
         if not c or c.get('result') is None:
             break
-        prefix.append(dict(promptSha256=hashlib.sha256(utf8_bytes(c["prompt"])).hexdigest(),
-                   optsSha256=memo_key(c["opts"]), resultSha256=memo_key(c["result"]),
-                   label=c["opts"].get("label"), runId=c["runId"], artifactSha256=c.get('artifactSha256'),
-                   agentId=c["agentId"], cost=c.get("cost")))
+        entry = dict(promptSha256=hashlib.sha256(utf8_bytes(c["prompt"])).hexdigest(),
+                     optsSha256=memo_key(c["opts"]), resultSha256=memo_key(c["result"]),
+                     label=c["opts"].get("label"), runId=c["runId"], artifactSha256=c.get('artifactSha256'),
+                     agentId=c["agentId"], cost=c.get("cost"))
+        if str(entry['label']).startswith('tree-check:'):
+            nonce = re.search(r'\nLIVE TREE READING NONCE: ([A-Za-z0-9_-]{1,64}) point ', c['prompt'])
+            if nonce:
+                entry['readingNonce'] = nonce.group(1)
+        prefix.append(entry)
     return {"_memo": memo, "_prefix": prefix}
 
 
@@ -659,7 +688,9 @@ def verify_replays(root, summary, projects=None, graph=None, run_id=None, valida
                 or original.get('promptSha256') != hashlib.sha256(utf8_bytes(record['prompt'])).hexdigest()
                 or original.get('payloadSha256') != memo_key(record['payload'])):
             raise ReplayError("REPLAYED-MEMO source does not corroborate result")
-        expected_reading = payload["tree"] if payload["tree"] is not None else original.get("verifiedReading")
+        expected_reading = payload["tree"] if payload["tree"] is not None else original.get('sourceFinalReading', original.get("verifiedReading"))
+        if payload['tree'] is None and record.get('sourceFinalReading') is not None and canonical(record['sourceFinalReading']) != canonical(expected_reading):
+            raise ReplayError('builder source-final reading differs from corroborated source branch')
         if not isinstance(expected_reading, dict) or canonical(record.get("reading")) != canonical(expected_reading):
             raise ReplayError("memo has no matching live tree/branch sentinel reading")
         checked.append({"node": record["node"], "key": record["key"], "source": source})

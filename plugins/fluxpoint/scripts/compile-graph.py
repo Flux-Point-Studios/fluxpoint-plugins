@@ -657,6 +657,29 @@ def _remote_syntax(value):
                              and bool(re.fullmatch(r'(?:[^/@:]+@)?(?:\[[^]]+\]|[^/:]+):.+', value)))
 
 
+def _forge_host(host):
+    host = host.lower()
+    return host[4:] if host in ('www.github.com', 'www.gitlab.com', 'www.bitbucket.org') else host
+
+
+def _ssh_host(host, port=None, user=None):
+    """Read OpenSSH's effective local configuration without connecting."""
+    import subprocess
+    command = ['ssh', '-G']
+    if port is not None:
+        command += ['-p', str(port)]
+    if user:
+        command += ['-l', user]
+    try:
+        run = subprocess.run(command + ['--', host], capture_output=True, text=True, encoding='utf-8', timeout=5)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError('cannot resolve effective SSH destination; use an unambiguous remote URL') from exc
+    facts = dict(line.split(None, 1) for line in run.stdout.splitlines() if len(line.split(None, 1)) == 2)
+    if run.returncode or not facts.get('hostname') or not facts.get('port', '').isdigit():
+        raise ValueError('cannot resolve effective SSH destination; use an unambiguous remote URL')
+    return _forge_host(facts['hostname']), int(facts['port'])
+
+
 def _destination_identity(repo, branch):
     import posixpath
     from urllib.parse import urlsplit, unquote
@@ -669,24 +692,27 @@ def _destination_identity(repo, branch):
             elif re.match(r'^/[A-Za-z]:', repo):
                 repo = repo[1:]
         else:
-            host = (url.hostname or '').lower()
+            host = _forge_host(url.hostname or '')
+            port = url.port
+            if url.scheme == 'ssh':
+                host, port = _ssh_host(host, port, url.username)
             path = unquote(url.path).strip('/')
             if host in ('github.com', 'gitlab.com', 'bitbucket.org'):
                 path = path.lower()
             path = path.removesuffix('.git')
-            port = url.port
             if (url.scheme, port) in (('http', 80), ('https', 443), ('ssh', 22)):
                 port = None
             return ('remote:' + host + (':' + str(port) if port else '') + '/' + path, branch)
     scp = re.fullmatch(r'(?:[^/@:]+@)?(\[[^]]+\]|[^/:]+):(.+)', repo) if not re.match(r'^[A-Za-z]:', repo) else None
     if scp:
         host, path = scp.groups()
-        host = host.strip('[]')
+        user = repo.split('@', 1)[0] if '@' in repo.split(':', 1)[0] else None
+        host, port = _ssh_host(host.strip('[]'), user=user)
         path = path.strip('/')
         if host.lower() in ('github.com', 'gitlab.com', 'bitbucket.org'):
             path = path.lower()
         path = path.removesuffix('.git')
-        return ('remote:' + host.lower() + '/' + path, branch)
+        return ('remote:' + host.lower() + (':' + str(port) if port != 22 else '') + '/' + path, branch)
     repo = repo.replace('\\', '/')
     if re.match(r'^[A-Za-z]:', repo) and not re.match(r'^[A-Za-z]:/', repo):
         raise ValueError('drive-relative repository paths have no stable push identity')
@@ -2056,8 +2082,19 @@ def warnings(ir, agents=None, specification=None, gates=None):
         cur = nodes[i]
         if is_reduce(cur) or cur.get("actor", "agent") != "agent":
             continue
+        previous = nodes[i - 1]
+        if previous.get('lane') and cur.get('lane') and previous['lane'] != cur['lane']:
+            continue
         if not (cur.get("after") or cur.get("honors") or cur.get("verifies")):
             serial.append((nodes[i - 1].get("id", "?"), cur.get("id", "?")))
+    shared_branches = {}
+    for node in nodes:
+        target = branch_target(node, {x.get('id'): x for x in nodes}) if node.get('mutates') else None
+        if target:
+            shared_branches.setdefault((target['repository'], target['branch']), []).append(node['id'])
+    for (repository, branch), builders in shared_branches.items():
+        if len(builders) > 1:
+            w.append(f"builders {', '.join(builders)} share {repository}#{branch}: replay compares with the source run's final tip; intermediate gates whose judged tip differs must execute live, so opt-ins can cost more than serial prefix replay")
     if serial:
         pairs = ", ".join(f"'{a}' -> '{b}'" for a, b in serial[:3])
         more = f" (+{len(serial) - 3} more)" if len(serial) > 3 else ""
@@ -3675,12 +3712,19 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             a("  const extra = (unique ? '\\nLIVE TREE READING NONCE: ' + A._replayLaunchNonce + ' point ' + point : '') + (gateId ? rejudgeText(gateId, false) : '')")
             a("  const branchPrompt = target ? '\\nAlso run exactly: git -C ' + JSON.stringify(target.repository) + ' ls-remote origin ' + JSON.stringify('refs/heads/' + target.branch) + '. Return the sole full hexadecimal commit in tip, and the exact declared repository and branch as repository and branch. No matches or multiple matches means tip must be empty. Never use a worker-reported sha.' : ''")
             a("  const treeSchema = target ? { ...C.TreeCheckV1, required: [...new Set([...(C.TreeCheckV1.required || []), 'root','repository','branch','tip'])], properties: { ...C.TreeCheckV1.properties, root: { type: 'string' }, repository: { type: 'string' }, branch: { type: 'string' }, tip: { type: 'string' } } } : C.TreeCheckV1")
-        a("  const r = await agent(longPreamble() + 'Run exactly three commands in the repository at "
-          "the current working directory and return their output verbatim in the "
-          "schema, nothing else: `git rev-parse --show-toplevel` as root, `git rev-parse HEAD` as head, and `git status "
-          "--porcelain` as porcelain (empty string when clean). Do not fix, clean, "
-          "or explain anything.'" + (" + extra + branchPrompt, " if modern else ", ") +
-          "{ label: `tree-check:${point}`, phase, schema: " + ("treeSchema" if modern else "C['TreeCheckV1']") + ", effort: 'low' })")
+        sentinel_base = ("longPreamble() + 'Run exactly three commands in the repository at "
+                         "the current working directory and return their output verbatim in the "
+                         "schema, nothing else: `git rev-parse --show-toplevel` as root, `git rev-parse HEAD` as head, and `git status "
+                         "--porcelain` as porcelain (empty string when clean). Do not fix, clean, or explain anything.'")
+        if modern:
+            a("  const treeOptions = { label: `tree-check:${point}`, phase, schema: treeSchema, effort: 'low' }")
+            a("  let request = " + sentinel_base + " + extra + branchPrompt")
+            a("  const canPrefix = !forceLive && !(gateId && ((A.rejudge || {})[gateId] || REPLAY_NODES[gateId].fresh))")
+            a("  const stable = canPrefix ? prefixTreePrompt(request, treeOptions) : request")
+            a("  const usedPrefixNonce = stable !== request")
+            a("  const r = await agent(stable, treeOptions)")
+        else:
+            a("  const r = await agent(" + sentinel_base + ", { label: `tree-check:${point}`, phase, schema: C['TreeCheckV1'], effort: 'low' })")
         a("  if (!r) {")
         a("    note('tree-check', 'DEAD', `${point}: sentinel died — tree state unknown`)")
         a("    INCOMPLETE = true; TREE.unknown = true")
@@ -3693,7 +3737,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             a("    Object.assign(rec, { repository: target.repository, branch: target.branch, tip: r.tip.trim().toLowerCase() })")
             a("  } else Object.assign(rec, { repository: rec.root, branch: null, tip: rec.head })")
             a("  const readingId = gateId || (point.startsWith('replay ') ? point.slice(7) : null)")
-            a("  if (readingId) { LIVE_READINGS[readingId] = readingValue(rec); LIVE_READING_CALLS[readingId] = CALL_RECORDS.indexOf(CALL_STATE['tree-check:' + point]) }")
+            a("  if (readingId) { const call = CALL_STATE['tree-check:' + point]; LIVE_READINGS[readingId] = readingValue(rec); LIVE_READING_CALLS[readingId] = CALL_RECORDS.indexOf(call); LIVE_READING_FRESH[readingId] = !usedPrefixNonce && call && call.mode === 'live' }")
         a("  TREE.checks.push(rec)")
         a("  if (!TREE.baseline) { TREE.baseline = rec; return true }")
         a("  if (rec.head === TREE.baseline.head && rec.porcelain === TREE.baseline.porcelain) return true")
@@ -4959,6 +5003,14 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
         entries += [e for e in replay.get('_prefix', []) if e.get('label') == nid]
         cost = next((e['cost'] for e in entries if isinstance(e.get('cost'), dict)), {'minutes': None, 'tokens': None})
         rows.append(dict(node=nid, status=status, cause=cause, minutes=cost.get('minutes'), tokens=cost.get('tokens')))
+    shared = {}
+    for node in ir['nodes']:
+        if node.get('mutates'):
+            target = branch_target(node, {x.get('id'): x for x in ir['nodes']})
+            if target:
+                shared.setdefault((target['repository'], target['branch']), []).append(node['id'])
+    if rows and any(len(ids) > 1 for ids in shared.values()):
+        rows[0]['warning'] = 'shared-branch opt-ins can execute more work than serial prefix replay: builders require the source-final tip, while each gate retains its exact judged tip'
     return rows
 
 
@@ -5127,6 +5179,8 @@ def main():
             return 1
         print('Rerun plan (no agents; branch memo hits remain conditional on a fresh live reading):')
         for row in rows:
+            if row.get('warning'):
+                print('Plan warning: ' + row['warning'])
             minutes = 'unknown' if row['minutes'] is None else str(row['minutes'])
             tokens = 'unknown' if row['tokens'] is None else str(row['tokens'])
             print(f"{row['node']}: {row['status']} — {row['cause']}; recorded minutes={minutes}, tokens={tokens}")

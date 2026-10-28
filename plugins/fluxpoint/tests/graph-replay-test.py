@@ -367,4 +367,89 @@ class ReplayFollowup(unittest.TestCase):
         self.assertTrue(any('irreversible ancestor' in error for error in c.validate(ir, CONTRACTS)))
 
 
+class BranchReplayFollowup(GraphReplay):
+    def prefix(self, result):
+        import re
+        rows = []
+        digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+        for call in result['callRecords']:
+            nonce = re.search(r'\nLIVE TREE READING NONCE: ([A-Za-z0-9_-]+) point ', call['prompt'])
+            row = dict(promptSha256=hashlib.sha256(call['prompt'].encode()).hexdigest(), optsSha256=digest(call['opts']), resultSha256=digest(call['result']), runId='source-run', artifactSha256='f'*64, agentId='p'+str(len(rows)))
+            if nonce: row['readingNonce'] = nonce.group(1)
+            rows.append(row)
+        return rows
+
+    def test_targeted_reading_preserves_prefix_before_first_fork(self):
+        ir = self.replay_graph()
+        for n in ir['nodes']: n.pop('lane', None)
+        ir['argDefaults'] = {'repairA':'same', 'repairB':'old'}
+        body = "if(opts.label.startsWith('b')) result.sha='c'.repeat(40);"
+        first = execute(ir, body=body)['result']
+        args = self.memo_args(first)
+        args['_prefix'] = self.prefix(first)
+        args['repairB'] = 'changed'
+        second = execute(ir, args=args, body=body)['result']
+        self.assertEqual(next(r for r in second['memoRecords'] if r['node']=='a-gate')['mode'], 'prefix')
+        self.assertEqual(next(r for r in second['memoRecords'] if r['node']=='b')['mode'], 'live')
+
+    def test_gate_falling_out_of_prefix_refreshes_cached_reading(self):
+        ir = self.replay_graph()
+        for n in ir['nodes']: n.pop('lane', None)
+        ir['argDefaults'] = {'repairA':'same', 'repairB':'same', 'gateNote':'old'}
+        ir['nodes'][1]['prompt'] += ' Note {{A.gateNote}}'
+        body = "if(opts.label.startsWith('b')) result.sha='c'.repeat(40);"
+        first = execute(ir, body=body)['result']
+        args = self.memo_args(first)
+        args['_prefix'] = self.prefix(first)
+        args['gateNote'] = 'changed'
+        second = execute(ir, args=args, body=body)['result']
+        readings = [r for r in second['callRecords'] if r['opts']['label']=='tree-check:before a-gate']
+        self.assertEqual(len(readings), 2)
+        self.assertEqual(readings[0]['mode'], 'prefix')
+        self.assertEqual(readings[1]['mode'], 'live')
+        self.assertIn('new-fresh', readings[1]['prompt'])
+
+    def test_builder_compares_live_branch_with_source_final_tip(self):
+        ir = graph([node('a', mutates=True, pushes='repo-a#main', replay='inputs'),
+                    node('a-gate', after='a', verifies='a', independent=True, repository='repo-a', branch='main', replay='tree', prompt='Judge {{prev}}'),
+                    node('b', after='a-gate', mutates=True, pushes='repo-a#main', replay='inputs', prompt='Build {{prev}}'),
+                    node('b-gate', after='b', verifies='b', independent=True, repository='repo-a', branch='main', replay='tree', prompt='Judge {{prev}}')])
+        body = "if(opts.label==='a') tips['repo-a']='d'.repeat(40); if(opts.label==='b') tips['repo-a']='e'.repeat(40); result.sha=tips['repo-a'];"
+        self.assertTrue(any('share repo-a#main' in text for text in c.warnings(ir)))
+        first = execute(ir, body=body)['result']
+        args = self.memo_args(first)
+        final = next(r for r in reversed(first['tree']['checks']) if r.get('repository')=='repo-a')
+        final = {k:final[k] for k in ['root','head','porcelain','repository','branch','tip']}
+        for entry in args['_memo'].values(): entry['sourceFinalReading'] = final
+        second = execute(ir, args=args, setup="tips['repo-a']='e'.repeat(40);", body=body)
+        self.assertNotIn('start:a', second['events'])
+        # The old gate judged d, so it must execute against current e.
+        self.assertIn('start:a-gate', second['events'])
+        replay = next(r for r in second['result']['memoRecords'] if r['node']=='a')
+        self.assertEqual(replay['reading']['tip'], 'e'*40)
+        self.assertEqual(replay['verifiedReading']['tip'], 'd'*40)
+
+    def test_separate_lanes_do_not_emit_serial_adjacency_warning(self):
+        ir = graph([node('a', lane='one'), node('b', lane='two')])
+        self.assertFalse(any('run serially in declaration order' in text for text in c.warnings(ir)))
+        ir['nodes'][1]['lane'] = 'one'
+        self.assertTrue(any('run serially in declaration order' in text for text in c.warnings(ir)))
+
+    def test_plan_uses_latest_corroborated_source_branch_reading(self):
+        source = 'return {read:await agent(\'git -C "repo-a" ls-remote origin "refs/heads/main"\',{label:"tree-check:before gate"})}'
+        query = dict(source=source, args={'_base':BASE['_base']}, results={}, readings=[dict(repository='repo-a', branch='main', tip='b'*40), dict(repository='repo-a', branch='main', tip='c'*40)])
+        result = subprocess.run(['node', str(SCRIPTS/'graph-plan.js')], input=json.dumps(query), text=True, capture_output=True, check=True)
+        self.assertEqual(json.loads(result.stdout)['summary']['read']['tip'], 'c'*40)
+
+    def test_ssh_and_known_forge_www_aliases_share_push_identity(self):
+        with patch.object(subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='hostname github.com\nport 22\n')):
+            alias = c._destination_identity('git@forge-alias:org/repo.git', 'main')
+            normal = c._destination_identity('https://github.com/org/repo.git', 'main')
+            self.assertEqual(alias, normal)
+        self.assertEqual(c._destination_identity('https://www.github.com/org/repo.git', 'main'), normal)
+        with patch.object(subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout='')):
+            with self.assertRaisesRegex(ValueError, 'cannot resolve effective SSH'):
+                c._destination_identity('git@unknown-alias:org/repo.git', 'main')
+
+
 if __name__=='__main__': unittest.main()

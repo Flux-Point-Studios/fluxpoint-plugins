@@ -10,7 +10,8 @@
     "Single-copy irreversible prompt and parseable await preamble",
     "Structured resume default reconciliation, explicit removals, immutable inputs, persisted rerun plans and UTF-8 child diagnostics",
     "Attestation classifies exact harness STATUS and inserted Evidence/Decisions edits without exempting content changes",
-    "Replay provenance frames, compact compiled replay authority, live irreversible guards, defined Unicode hashing and SHA-256 ledger migration"
+    "Replay provenance frames, compact compiled replay authority, live irreversible guards, defined Unicode hashing and SHA-256 ledger migration",
+    "Safe targeted-prefix reuse, source-final branch readings, lane warnings and effective SSH/forge identities"
   ],
   "outOfScope": [
     "External workflow runtime cache redesign",
@@ -109,6 +110,18 @@
         "graph-replay-tests"
       ],
       "counterexample": "Wrapped native prompts refuse, a memo supplied inline turns red green, the operator carries two full prompt copies, a sentinel follows a note, or a malformed surrogate crashes hashing"
+    },
+    {
+      "id": "branch-replay-followup",
+      "statement": "Targeted prefix slots remain stable until a changed gate demands a fresh read, builders compare fresh tips with source final branch state, gates keep their exact judged tip, different lanes avoid serial warnings and effective SSH identities prevent alias races",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "graph-replay-tests",
+        "replay-followup-tests"
+      ],
+      "counterexample": "A declaration alone closes the prefix, a cached read authorizes a memo after a fork, a source-intermediate tip forces all builders live, or a remote alias bypasses lane exclusivity"
     }
   ],
   "checks": [

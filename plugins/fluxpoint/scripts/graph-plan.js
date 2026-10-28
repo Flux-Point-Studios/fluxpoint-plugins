@@ -18,7 +18,7 @@ async function agent(prompt, opts) {
     const m = /git -C ("(?:[^"\\]|\\.)*") ls-remote origin ("(?:[^"\\]|\\.)*")/.exec(prompt)
     if (m) {
       reading.repository = JSON.parse(m[1]); reading.branch = JSON.parse(m[2]).replace(/^refs\/heads\//, '')
-      const known = input.readings.find(r => r.repository === reading.repository && r.branch === reading.branch)
+      const known = input.readings.filter(r => r.repository === reading.repository && r.branch === reading.branch).slice(-1)[0]
       reading.tip = known ? known.tip : '0'.repeat(40)
     }
     return reading

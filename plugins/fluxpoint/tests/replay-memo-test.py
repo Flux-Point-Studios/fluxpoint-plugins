@@ -519,6 +519,23 @@ class ReplayFollowup(ReplayMemoTests):
         restored, _ = run_artifacts.read(self.root, 'wf_surrogate', digest)
         self.assertEqual(restored['summary']['value'], value)
 
+    def test_final_branch_reading_is_derived_from_last_corroborated_gate(self):
+        latest = dict(self.tree, tip='c' * 40)
+        sentinel = self.sentinel('before gate2', tree=latest)
+        call = dict(prompt='Judge the combined branch', opts={'label':'gate2', 'effort':'high'}, result={'sha':'c' * 40, 'exit':0})
+        for index, value in [(3, sentinel), (4, call)]:
+            aid = 'a' + str(index)
+            self.calls.append(value)
+            self.events += [dict(type='started', agentId=aid, opts=value['opts']), dict(type='result', agentId=aid, result=value['result'])]
+            self.write_rows(self.directory / ('agent-' + aid + '.jsonl'), [dict(type='user', message=dict(role='user', content=value['prompt']))])
+        payload = dict(campaign='test', compiler=self.compiler, launch=self.launch, id='gate2', prompt=call['prompt'], opts=call['opts'], tree=latest, ancestors=[self.records[1]['key']])
+        self.records.append(dict(node='gate2', key=rm.memo_key(payload), payload=payload, prompt=call['prompt'], result=call['result'], mode='live', replay='tree', reading=latest, readingCallIndex=3, callIndex=4))
+        self.summary['results']['gate2'] = call['result']
+        self.save()
+        entry = self.build()['_memo'][self.records[0]['key']]
+        self.assertEqual(entry['verifiedReading']['tip'], 'b' * 40)
+        self.assertEqual(entry['sourceFinalReading']['tip'], 'c' * 40)
+
     def test_absolute_graph_alias_resolves_to_project(self):
         alias = self.root / 'alias'
         try:

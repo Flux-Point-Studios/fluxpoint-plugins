@@ -40,7 +40,7 @@ function sha256(text) {
   return h.map(v => (v >>> 0).toString(16).padStart(8,'0')).join('')
 }
 const CALL_RECORDS = [], MEMO_RECORDS = [], REJUDGES = []
-const NODE_STATE = {}, LIVE_READINGS = {}, LIVE_READING_CALLS = {}, CALL_STATE = {}
+const NODE_STATE = {}, LIVE_READINGS = {}, LIVE_READING_CALLS = {}, LIVE_READING_FRESH = {}, CALL_STATE = {}
 const REJUDGE_REACHED = new Set()
 let HALT = null, FORKED = false, RESERVED = 0, PREFIX_OPEN = true, PREFIX_INDEX = 0
 function halt(outcome) { if (!HALT) HALT = { outcome }; return null }
@@ -72,6 +72,16 @@ function auditedPrompt(prompt, options) {
   const header = 'Fluxpoint-Call-Opts-SHA256: ' + sha256(canonical(options)) + '\n'
   return prompt.startsWith(header) ? prompt : header + prompt
 }
+function prefixTreePrompt(prompt, options) {
+  const previous = (A._prefix || [])[PREFIX_INDEX]
+  if (FORKED || !PREFIX_OPEN || !previous || !previous.readingNonce) return prompt
+  const candidate = prompt.replace('\nLIVE TREE READING NONCE: ' + A._replayLaunchNonce + ' point ', '\nLIVE TREE READING NONCE: ' + previous.readingNonce + ' point ')
+  return previous.promptSha256 === sha256(auditedPrompt(candidate, options)) && previous.optsSha256 === sha256(canonical(options)) ? candidate : prompt
+}
+function prefixMatches(prompt, options) {
+  const previous = (A._prefix || [])[PREFIX_INDEX]
+  return !FORKED && PREFIX_OPEN && previous && previous.promptSha256 === sha256(prompt) && previous.optsSha256 === sha256(canonical(options))
+}
 agent = async function(prompt, options) {
   if (HALT) return null
   prompt = auditedPrompt(prompt, options)
@@ -97,11 +107,21 @@ function sameReading(a, b) { return !!a && !!b && canonical(readingValue(a)) ===
 function annotateBuilder(n, reading) {
   if (!n.verifies || !reading || !n.target || !reading.branch) return
   const record = MEMO_RECORDS.find(x => x.node === n.verifies)
-  if (record && record.verifiedBy.includes(n.id)) {
+  if (record && record.mode !== 'memo' && record.verifiedBy.includes(n.id)) {
     record.verifiedReading = readingValue(reading)
     record.verifiedByNode = n.id
     record.verifiedReadingCallIndex = LIVE_READING_CALLS[n.id]
   }
+}
+function nodePrompt(prompt, options, n, reading) {
+  if (n.gate && reading && n.target) {
+    prompt += '\nPINNED GATE TREE: repository ' + JSON.stringify(reading.repository) + ', branch ' + JSON.stringify(reading.branch) + ', commit ' + reading.tip + '. Fetch and check out exactly this commit before executing checks. Return sha equal to this commit; a different or missing sha halts the run.'
+    options = { ...options, schema: { ...options.schema, properties: { ...options.schema.properties, sha: { type: 'string', pattern: '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' } }, required: [...new Set([...(options.schema.required || []), 'sha'])] } }
+  }
+  prompt += rejudgeText(n.id)
+  if (n.fresh) prompt += '\nFRESH NODE LAUNCH NONCE: ' + A._replayLaunchNonce
+  prompt = auditedPrompt(prompt, options)
+  return { prompt, options }
 }
 async function replaySpawn(prompt, options, invoke) {
   if (HALT) return null
@@ -121,13 +141,13 @@ async function replaySpawn(prompt, options, invoke) {
       priorVerdict: (A._priorResults || {})[n.id] === undefined ? null : A._priorResults[n.id], sourceRunId: A._resumeFromRunId || null, sourceArtifactSha256: A._resumeArtifactSha256 || null }
     REJUDGES.push(rejudgeRecord)
   }
-  if (n.gate && reading && n.target) {
-    prompt += '\nPINNED GATE TREE: repository ' + JSON.stringify(reading.repository) + ', branch ' + JSON.stringify(reading.branch) + ', commit ' + reading.tip + '. Fetch and check out exactly this commit before executing checks. Return sha equal to this commit; a different or missing sha halts the run.'
-    options = { ...options, schema: { ...options.schema, properties: { ...options.schema.properties, sha: { type: 'string', pattern: '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$' } }, required: [...new Set([...(options.schema.required || []), 'sha'])] } }
+  const originalPrompt = prompt, originalOptions = options
+  ;({ prompt, options } = nodePrompt(originalPrompt, originalOptions, n, reading))
+  if (n.gate && n.target && !LIVE_READING_FRESH[n.id] && !prefixMatches(prompt, options)) {
+    if (!await treeCheck('before ' + n.id, options.phase, n.target, true)) { halt(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED'); return null }
+    reading = LIVE_READINGS[n.id]
+    ;({ prompt, options } = nodePrompt(originalPrompt, originalOptions, n, reading))
   }
-  prompt += rejudgeText(n.id)
-  if (n.fresh) prompt += '\nFRESH NODE LAUNCH NONCE: ' + A._replayLaunchNonce
-  prompt = auditedPrompt(prompt, options)
   const payload = { campaign, compiler: REPLAY_COMPILER, launch: A._launch,
     id: n.id, prompt, opts: options, tree: n.gate ? readingValue(reading) : null, ancestors: replayAncestorKeys(n) }
   const key = sha256(canonical(payload))
@@ -140,12 +160,12 @@ async function replaySpawn(prompt, options, invoke) {
     if (eligible) {
       if (!await treeCheck('replay ' + n.id, options.phase, n.target, true)) { halt(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED'); return null }
       reading = LIVE_READINGS[n.id]
-      eligible = sameReading(reading, entry.verifiedReading)
+      eligible = sameReading(reading, entry.sourceFinalReading || entry.verifiedReading)
     }
   }
   if (eligible && entry && (entry.promptSha256 || sha256(entry.prompt)) === sha256(prompt) && (entry.payloadSha256 || sha256(canonical(entry.payload))) === key && entry.result !== null && entry.result !== undefined) {
     NODE_STATE[n.id] = { key, replayed: true }
-    MEMO_RECORDS.push({ node: n.id, key, payload, prompt, result: entry.result, mode: 'memo', source: { runId: entry.runId, artifactSha256: entry.artifactSha256, agentId: entry.agentId }, verifies: n.verifies, verifiedBy: n.verifiedBy, reading: readingValue(reading), readingCallIndex: LIVE_READING_CALLS[n.id], replay: n.replay, fresh: n.fresh, irreversible: n.irreversible, contract: n.contract, ...(n.mutates ? { verifiedReading: entry.verifiedReading, verifiedByNode: entry.verifiedByNode } : {}) })
+    MEMO_RECORDS.push({ node: n.id, key, payload, prompt, result: entry.result, mode: 'memo', source: { runId: entry.runId, artifactSha256: entry.artifactSha256, agentId: entry.agentId }, verifies: n.verifies, verifiedBy: n.verifiedBy, reading: readingValue(reading), readingCallIndex: LIVE_READING_CALLS[n.id], replay: n.replay, fresh: n.fresh, irreversible: n.irreversible, contract: n.contract, ...(n.mutates ? { verifiedReading: entry.verifiedReading, verifiedByNode: entry.verifiedByNode, sourceFinalReading: entry.sourceFinalReading || entry.verifiedReading } : {}) })
     note(n.id, 'REPLAYED-MEMO', entry.runId + '/' + entry.agentId, { key, head: entry.verifiedReading ? entry.verifiedReading.tip : reading && reading.tip })
     return entry.result
   }
