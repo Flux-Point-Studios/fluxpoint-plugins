@@ -117,3 +117,10 @@ copy a proposed commit list without verifying those exact changes.
 The diff tier's reproduce refuter must rerun the claim's exact recorded
 attack command and valid control on the current patch before REFUTED can
 count. A different command that happens to pass cannot discharge the claim.
+
+Use the slice's pinned operationalBounds for latency, alarm allowance and
+provider pools. Do not choose your own acceptance thresholds. Alarm counts
+and window duration come from the helper's frozen RepairAlarmSeriesV1 data.
+Below-floor and out-of-scope pre-existing findings remain recorded follow-ups;
+other residuals require an imported operator decision naming this finding
+and the exact complete patch digest. Missing coverage stays INCOMPLETE.

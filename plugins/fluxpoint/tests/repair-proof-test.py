@@ -95,7 +95,16 @@ class RepairProof(unittest.TestCase):
                 {'id': 'merge', 'after': 'check', 'mutates': True, 'contract': 'SliceV1', 'prompt': 'merge {{prev}}'},
                 {'id': 'review', 'after': 'merge', 'independent': True, 'verifies': 'merge',
                  'isolation': 'measure', 'contract': 'FixCheckV1', 'prompt': 'review {{prev}}', 'haltWhen': "verdict != 'PASS'"}]
-        js = CG.emit(ir, CONTRACTS, specification=specification).replace('export const meta', 'const meta')
+        imports_resolved = None
+        if mode in ('claim-residual', 'claim-residual-wrong-patch'):
+            import decision
+            fixtures = module('residual_decision_fixture', Path(__file__).with_name('specification-test.py'))
+            record = fixtures.packet()['decisions'][0]['record']
+            record['acceptedRepairClaims'] = [{'finding': 'unchecked sibling field in repaired invariant', 'patchSha256': manifest(self.data)['patchSha256'] if mode == 'claim-residual' else '0' * 64, 'reason': 'The operator retains this named claim as an explicitly reviewed residual.'}]
+            kept = decision.keep(str(self.root), 'accept-residual', record, 'WORK.md')
+            ir['imports'] = {'accept-residual': kept['recordId']}
+            imports_resolved = {'accept-residual': {'record': record, 'recordId': kept['recordId'], 'runId': kept['recordId'], 'when': kept['when']}}
+        js = CG.emit(ir, CONTRACTS, imports_resolved=imports_resolved, specification=specification).replace('export const meta', 'const meta')
         prefix = r'''
 import {writeFileSync,readFileSync,appendFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
@@ -168,6 +177,8 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
    r.findings=[{finding:'unchecked sibling field in repaired invariant',severity:'HIGH',defectClass:'decode',invariant:'all sibling fields are guarded',classRewire:'guard the class at the shared boundary',measurement:'sibling_attack.py executed: harm observed',origin:'fix-introduced',introducedIn:1,
     originEvidence:{base:{snapshot:c.base,...observed(false)},targetClasses:c.targetClasses,rounds:c.patches.map(x=>({...x,...observed(!c.integrated)})),...(c.integrated?{integrated:{...c.integrated,...observed(true)}}:{})}}];
   }
+  if(mode==='claim-low'&&r.findings.length)r.findings[0].severity='LOW';
+  if(mode==='claim-outside'&&r.findings.length){r.findings[0].origin='pre-existing';r.findings[0].defectClass='other-class';r.findings[0].originEvidence.base.reproduces=true;}
   return r;
  }
  if(label.includes(':refute:')){
@@ -203,6 +214,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
                 'mode': mode, 'outcome': result.get('r', {}).get('outcome'),
                 'provenance': result.get('r', {}).get('provenance', []),
             }), file=sys.stderr)
+        result['ir'] = ir
         return result
 
     def test_fixed_packet_runner_binds_red_and_green_to_patched_snapshot(self):
@@ -369,6 +381,44 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         self.assertEqual(result['r']['outcome'], 'INCOMPLETE')
         self.assertTrue(any(p['status'] == 'CONTEXT-LIMIT' for p in result['r']['provenance']))
         self.assertFalse(any(c['label'].startswith('check:') for c in result['calls']))
+
+    def test_low_outside_scope_and_named_residual_claims_become_followups(self):
+        for mode in ('claim-low', 'claim-outside', 'claim-residual'):
+            with self.subTest(mode=mode):
+                result = self.run_graph(mode)
+                self.assertEqual(result['r']['outcome'], 'COMPLETE')
+                followups = result['r']['repairDiffReviews'][0]['followups']
+                self.assertEqual(len(followups), 1)
+                self.assertFalse(any(':refute:' in c['label'] for c in result['calls']))
+                checked, problems = repair_checks.checked(result['r'], repair_checks.descriptors(result['ir']))
+                self.assertEqual((checked, problems), ([self.head], []))
+        wrong = self.run_graph('claim-residual-wrong-patch')
+        self.assertEqual(wrong['r']['outcome'], 'INCOMPLETE')
+
+    def test_residual_records_cannot_be_fabricated_or_retargeted(self):
+        import decision
+        from repair_policy import verified_rulings
+        fixtures = module('residual_validation_fixture', Path(__file__).with_name('specification-test.py'))
+        record = fixtures.packet()['decisions'][0]['record']
+        claim = {'finding': 'Known retained defect', 'patchSha256': manifest(self.data)['patchSha256'], 'reason': 'The operator explicitly accepts this narrowly named residual.'}
+        record['acceptedRepairClaims'] = [claim]
+        self.assertEqual(decision.validate(record, decision.load_schema(str(PLUGIN))), [])
+        kept = decision.keep(str(self.root), 'residual', record, 'WORK.md')
+        advertised = [dict(claim, decisionId='residual', recordId=kept['recordId'])]
+        imports = {'residual': kept['recordId']}
+        self.assertEqual(verified_rulings(self.root, imports, advertised), advertised)
+        with self.assertRaisesRegex(ValueError, 'frozen decision import'):
+            verified_rulings(self.root, {}, advertised)
+        changed = copy.deepcopy(advertised)
+        changed[0]['patchSha256'] = '0' * 64
+        with self.assertRaisesRegex(ValueError, 'accepted claim'):
+            verified_rulings(self.root, imports, changed)
+        path = self.root / decision.STORE
+        data = json.loads(path.read_text())
+        data['record']['rationale'] += ' changed after the ruling'
+        path.write_text(json.dumps(data) + '\n')
+        with self.assertRaisesRegex(ValueError, 'record id'):
+            verified_rulings(self.root, imports, advertised)
 
     def test_terminal_partial_round_skips_integration_spend(self):
         result = self.run_graph('partial', integration=True)

@@ -31,8 +31,9 @@ def expected_calls(summary):
         calls.append((label, raw_check))
         proof = row['diffAttack']
         for attacker in proof['attackers']:
-            findings = [{k: v for k, v in f.items() if k not in ('id', 'source', 'votes')}
-                        for f in proof['findings'] if f.get('source') == attacker['spawnId']]
+            raw_findings = [f for f in [*proof['findings'], *proof.get('followups', [])] if f.get('source') == attacker['spawnId']]
+            raw_findings.sort(key=lambda f: int(f['id'][1:]) if re.fullmatch(r'P[0-9]+', str(f.get('id'))) else 0)
+            findings = [{k: v for k, v in f.items() if k not in ('id', 'source', 'votes', 'disposition', 'ruling')} for f in raw_findings]
             calls.append((attacker['spawnId'], dict(base=attacker['base'], patchSha256=attacker['patchSha256'],
                 completed=True, evidence=attacker.get('evidence', []), blockers=[], findings=findings)))
         for vote in proof['refuters']:
@@ -60,6 +61,8 @@ def _same(expected, actual, key=''):
         return isinstance(actual, dict) and all(k in actual and _same(v, actual[k], k) for k, v in expected.items())
     if isinstance(expected, list):
         return isinstance(actual, list) and len(expected) == len(actual) and all(_same(a, b) for a, b in zip(expected, actual))
+    if type(expected) in (int, float) and type(actual) in (int, float):
+        return expected == actual
     return type(expected) is type(actual) and expected == actual
 
 

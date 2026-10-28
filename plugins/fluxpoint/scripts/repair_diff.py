@@ -175,7 +175,7 @@ def coverage_issue(coverage, measured, resources=(), live_series=False, bounds=N
     return None
 
 
-def diff_receipt_issue(receipt, context, measured):
+def diff_receipt_issue(receipt, context, measured, rulings=()):
     def executed(rows):
         return (isinstance(rows, list) and bool(rows)
                 and all(isinstance(o, dict) and o.get('base') == context['base']
@@ -197,6 +197,22 @@ def diff_receipt_issue(receipt, context, measured):
             or len({a['spawnId'] for a in attackers}) != len(attackers)
             or not isinstance(refuters, list) or not isinstance(findings, list)):
         return 'DIFF-ATTACK-UNPROVEN: complete independent attacker identities are required'
+    from repair_policy import disposition, origin_issue
+    followups = receipt.get('followups', [])
+    if not isinstance(followups, list):
+        return 'DIFF-ATTACK-UNPROVEN: followups must be an array'
+    identifiers = {f.get('id') for f in findings if isinstance(f, dict)}
+    for finding in followups:
+        if not isinstance(finding, dict) or finding.get('id') in identifiers or not text(finding.get('id')):
+            return 'DIFF-ATTACK-UNPROVEN: followups need unique finding identities'
+        identifiers.add(finding['id'])
+        problem = origin_issue(finding, context)
+        if problem:
+            return 'RESIDUAL-UNPROVEN: ' + problem
+        expected = disposition(finding, context, measured['patchSha256'], rulings)
+        if (expected is None or finding.get('disposition') != expected['disposition'] or finding.get('ruling') != expected.get('ruling')
+                or finding.get('source') not in {a['spawnId'] for a in attackers}):
+            return 'RESIDUAL-UNPROVEN: followup is outside the pinned severity, scope or recorded operator ruling'
     surfaces = set(measured['changedSurfaces'])
     expected = {'state', 'composition'}
     prefix = 'repair-diff:' + context['item'] + ':r' + str(context['round'])
@@ -223,7 +239,7 @@ def diff_receipt_issue(receipt, context, measured):
             if observed['reproduces'] is not True:
                 continue
             represented = False
-            for finding in findings:
+            for finding in [*findings, *followups]:
                 if not isinstance(finding, dict) or finding.get('source') != attacker['spawnId']:
                     continue
                 evidence = finding.get('originEvidence')

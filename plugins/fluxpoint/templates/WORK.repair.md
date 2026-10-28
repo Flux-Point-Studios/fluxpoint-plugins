@@ -87,7 +87,8 @@ the repository's normal merge policy after the final gate passes.
         "classBy": [
           "defectClass"
         ],
-        "reframeAfter": 2
+        "reframeAfter": 2,
+        "severityFloor": "MEDIUM"
       },
       "verifyOver": "findings",
       "expectItems": 1
@@ -302,3 +303,21 @@ the window and event identities, computes its duration and false-positive
 count from the frozen data, and ignores statistics printed by the attack
 command. The operator's event adjudications remain the data assumption; the
 helper does not establish that an event label is true.
+
+`repeat.severityFloor` defaults to `MEDIUM` and may be `LOW`, `MEDIUM`,
+`HIGH` or `CRITICAL`. A finding below that pinned floor, or a replay-proven
+pre-existing finding outside the slice's pinned target classes, is retained
+in the diff receipt's `followups` and does not start a refuter tier. It is
+still an open follow-up, never a claim that the defect was fixed. Missing
+attacker coverage remains INCOMPLETE because its severity is unknown.
+
+An operator can retain one other named claim as a residual by recording a
+normal DecisionV1 through `decision.py --record` with
+`acceptedRepairClaims: [{finding, patchSha256, reason}]`. Use the exact
+finding title, complete patch digest and explicit residual rationale. Import
+the returned `dec_...` record under its decision id in this repair graph.
+The compiler embeds only recorded decision-store rulings; the recorder
+checks the exact record id, content digest, import and accepted claim again.
+A changed patch or another finding needs another explicit ruling. Recording
+a whole-commit acceptance and accepting a named residual remain distinct
+operations. No ruling is inferred from a finding title or from silence.

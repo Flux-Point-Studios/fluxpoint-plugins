@@ -355,6 +355,7 @@ probe("repeat", "untilDryRounds", REPEAT_BASE, setrepeat(untilDryRounds=3))
 probe("repeat", "maxRounds", REPEAT_BASE, setrepeat(maxRounds=9))
 probe("repeat", "dedupeBy", REPEAT_BASE, setrepeat(dedupeBy=["file", "line"]))
 probe("repeat", "classBy", REPEAT_BASE, setrepeat(classBy=["defectClass"]))
+probe("repeat", "severityFloor", REPEAT_BASE, setrepeat(severityFloor="INVALID"))
 probe("repeat", "reframeAfter", REPEAT_BASE, setrepeat(classBy=["defectClass"], reframeAfter=3))
 # Repair rules cannot silently degrade into discovery rules.
 probe("repeat", "until", REPEAT_BASE, setrepeat(until="verdict == 'SHIP'"))
@@ -412,7 +413,7 @@ probed = {
         "decides", "honors", "memory", "reduce", "cites", "lane", "fresh", "repository", "branch", "pushes", "replay",
         "probe",
     },
-    "repeat": {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter"},
+    "repeat": {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter", "severityFloor"},
     "reduce": {"from", "over", "dedupeBy", "sortBy", "order", "topK"},
     "memory": {"seed", "emit", "key", "priors", "classBy"},
     "release": {"instructions", "proofContract", "whyNotAgent"},

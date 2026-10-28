@@ -70,7 +70,8 @@ def descriptors(ir):
                 'verifies': fixer['id'], 'after': fixer['id'],
                 'fixer': {'id': fixer['id'], 'mutates': True}, 'loop': loop['id'],
                 'maxRounds': limit, 'items': keys, 'targetClasses': targets, 'integration': False,
-                'operationalBounds': {item['key']: item.get('operationalBounds') for item in items}}
+                'operationalBounds': {item['key']: item.get('operationalBounds') for item in items},
+                'severityFloor': repeat.get('severityFloor', 'MEDIUM'), 'residualImports': dict(ir.get('imports') or {})}
         integration = repeat.get('integrate')
         if not isinstance(integration, list) or len(integration) != 2 or not all(isinstance(k, str) for k in integration):
             continue
@@ -85,7 +86,8 @@ def descriptors(ir):
                 'fixer': {'id': merge['id'], 'mutates': True}, 'loop': loop['id'],
                 'integrationNodes': integration, 'maxRounds': limit,
                 'items': keys, 'targetClasses': targets, 'integration': True,
-                'operationalBounds': {item['key']: item.get('operationalBounds') for item in items}}
+                'operationalBounds': {item['key']: item.get('operationalBounds') for item in items},
+                'severityFloor': repeat.get('severityFloor', 'MEDIUM'), 'residualImports': dict(ir.get('imports') or {})}
     return result
 
 
@@ -108,6 +110,12 @@ def from_graph(path, root=None):
 
 def descriptor_valid(node, value):
     if not isinstance(value, dict):
+        return False
+    from repair_metrics import bounds_issue
+    bounds = value.get('operationalBounds')
+    if value.get('severityFloor', 'MEDIUM') not in ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL'):
+        return False
+    if bounds is not None and (not isinstance(bounds, dict) or any(bounds_issue(v) for v in bounds.values())):
         return False
     fixer = value.get('fixer') or {}
     keys = value.get('items')
@@ -246,6 +254,13 @@ def receipt_issue(row, descriptor, summary, retained=None, root=None):
     from repair_metrics import combine_bounds
     bounds_map = descriptor.get('operationalBounds') or {}
     expected_bounds = combine_bounds([bounds_map.get(key) for key in target_items]) if integration else bounds_map.get(item)
+    if context.get('severityFloor', 'MEDIUM') != descriptor.get('severityFloor', 'MEDIUM'):
+        return 'DIFF-UNPROVEN: severity floor differs from the frozen repair policy'
+    from repair_policy import verified_rulings
+    try:
+        rulings = verified_rulings(root or launch['root'], descriptor.get('residualImports') or {}, summary.get('repairResidualRulings') or [])
+    except (ValueError, OSError, SystemExit) as exc:
+        return 'RESIDUAL-UNPROVEN: ' + str(exc)
     if context.get('operationalBounds') != expected_bounds:
         return 'DIFF-UNPROVEN: operational bounds differ from the frozen repair inputs'
     if not classes(context.get('targetClasses')) or set(context['targetClasses']) != expected_targets:
@@ -291,7 +306,7 @@ def receipt_issue(row, descriptor, summary, retained=None, root=None):
     issue = (sibling_issue(check.get('siblings'), sorted(expected_targets), row.get('fixerSiblings') or [])
              or coverage_issue(coverage, measured, row.get('sharedResources') or [], live_series=True, bounds=expected_bounds)
              or checker_evidence_issue(check, context, measured, row['node'], integration, summary['repairReadNonce'])
-             or diff_receipt_issue(proof, context, measured)
+             or diff_receipt_issue(proof, context, measured, rulings=rulings)
              or checked_commits_issue(root or launch['root'], context['base'], data, check.get('commits') or []))
     if issue:
         return issue

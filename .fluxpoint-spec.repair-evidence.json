@@ -8,7 +8,8 @@
     "Executable snapshot packet checks",
     "Projected contract overlays",
     "Bounded repair integration input",
-    "Pinned operational thresholds and data-derived alarm measurements"
+    "Pinned operational thresholds and data-derived alarm measurements",
+    "Pinned severity/scope policy and explicit named residual decisions"
   ],
   "outOfScope": [
     "Semantic proof that an arbitrary checker is complete",
@@ -133,6 +134,9 @@
     "plugins/fluxpoint/scripts/repair_metrics.py",
     "plugins/fluxpoint/scripts/compile-graph.py",
     "plugins/fluxpoint/scripts/record-run.py",
-    "plugins/fluxpoint/scripts/unchecked-repairs.py"
+    "plugins/fluxpoint/scripts/unchecked-repairs.py",
+    "plugins/fluxpoint/scripts/repair_policy.py",
+    "plugins/fluxpoint/scripts/decision.py",
+    "plugins/fluxpoint/contracts/DecisionV1.schema.json"
   ]
 }

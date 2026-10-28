@@ -65,7 +65,7 @@ ISOLATION = {True, "worktree", "measure"}
 ACTORS = {"agent", "human", "third-party"}
 RELEASE_FIELDS = {"instructions", "proofContract", "whyNotAgent"}
 WAKE_FIELDS = {"check", "everyMinutes", "deadline"}
-REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter"}
+REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter", "severityFloor"}
 # A reduce node is deterministic code between agents: dedupe, rank, cut.
 # Use models for ambiguity and code for plumbing — a synthesis node that
 # receives every raw fan-out item pays a reasoning model to do a Set's job.
@@ -936,6 +936,8 @@ def validate_repair(n, seen, ir, contracts):
             f.append(f"{where}: repair repeat.classBy must name fields of the checker findings")
         if isinstance(n.get("memory"), dict) and n["memory"].get("classBy") != classes:
             f.append(f"{where}: memory.classBy must agree with repeat.classBy")
+    if rep.get('severityFloor', 'MEDIUM') not in ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL'):
+        f.append(f"{where}: repeat.severityFloor must be LOW, MEDIUM, HIGH or CRITICAL")
     threshold = rep.get("reframeAfter", 2)
     if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 2:
         f.append(f"{where}: repeat.reframeAfter must be an integer >= 2")
@@ -1467,6 +1469,8 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
             elif "until" in rep:
                 f += validate_repair(n, seen, ir, contracts)
             else:
+                if "severityFloor" in rep:
+                    f.append(f"{where}: repeat.severityFloor requires repeat.until")
                 if "integrate" in rep:
                     f.append(f"{where}: repeat.integrate requires repeat.until")
                 dry = rep.get("untilDryRounds")
@@ -3364,6 +3368,11 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     if repair_loops(ir):
         a("const REPAIR_LAUNCH = A._launch")
         a("const REPAIR_PACKET = " + json.dumps(specification.get("path") if specification else None))
+        residuals = [dict(claim, decisionId=did, recordId=value['recordId'])
+                     for did, value in (imports_resolved or {}).items()
+                     if str(value.get('recordId', '')).startswith('dec_')
+                     for claim in value.get('record', {}).get('acceptedRepairClaims', [])]
+        a("const REPAIR_RESIDUAL_RULINGS = " + json.dumps(residuals, ensure_ascii=True))
         a("const REPAIR_CONTEXT_BYTES = " + str((ir.get("budget") or {}).get("repairContextBytes", REPAIR_CONTEXT_BYTES)))
         a("function repairRoundDir(key, round) { return REPAIR_LAUNCH.root.replace(/[/\\\\]$/, '') + '/.claude/fluxpoint/rounds/' + REPAIR_LAUNCH.nonce + '/' + A._replayLaunchNonce + '/' + key + '/r' + round + '/'; }")
         a("const FIX_ORIGINS = []")
@@ -3442,7 +3451,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     elif repair_loops(ir):
         extra += ", launch: REPAIR_LAUNCH"
     if repair_loops(ir):
-        extra += ", fixOrigins: FIX_ORIGINS, repairDiffReviews: REPAIR_DIFF_REVIEWS, repairReadNonce: A._replayLaunchNonce"
+        extra += ", fixOrigins: FIX_ORIGINS, repairDiffReviews: REPAIR_DIFF_REVIEWS, repairReadNonce: A._replayLaunchNonce, repairResidualRulings: REPAIR_RESIDUAL_RULINGS, repairFollowups: REPAIR_DIFF_REVIEWS.flatMap(r => r.followups || [])"
     if tree_guard:
         extra += ", tree: TREE"
     if modern:
@@ -4436,7 +4445,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     a("    const contextIssue = repairContextIssue(fixed)")
     a(f"    if (contextIssue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'CONTEXT-LIMIT', contextIssue); return {{ ...state, fixed, roundDir }} }}")
     a(f"    const patches = [...(state.patches || []), {{ item: item.key, round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: fixed.patchSha256 }}]")
-    a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: [...state.targetClasses], operationalBounds: state.operationalBounds }}")
+    a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: [...state.targetClasses], operationalBounds: state.operationalBounds, severityFloor: {js_str(rep.get("severityFloor", "MEDIUM"))} }}")
     a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay the reproduction and its valid control on the bare launch base and EACH listed complete patch in a fresh base archive, not cumulatively. Use repair-replay.py to obtain originEvidence. New code location or identifier age is not origin evidence. Missing replay/control means INCOMPLETE. Attack every sharedResources writer and reader supplied by the fixer, including existing writers reached by a new reader.\\n'")
 
     a(f"    if (requiredClasses.length && !validReframe_{var}(fixed.reframe, requiredClasses)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: third narrow patch refused`, {{ classes: requiredClasses }}); return {{ ...state, fixed, roundDir }} }}")
@@ -4518,7 +4527,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
             a(f"    if (resourceIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: '_integration', round: round_{var} }}); return summary('HALTED') }}")
         a("    const mergedIssue = repairContextIssue(merged)")
         a(f"    if (mergedIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'CONTEXT-LIMIT', mergedIssue); return summary('INCOMPLETE') }}")
-        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: merged.patchSha256 }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))], operationalBounds: repairCombineBounds(passed_{var}.map(state => state.operationalBounds)) }}")
+        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: merged.patchSha256 }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))], operationalBounds: repairCombineBounds(passed_{var}.map(state => state.operationalBounds)), severityFloor: {js_str(rep.get("severityFloor", "MEDIUM"))} }}")
         a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay bare base and EVERY component patch separately on fresh base archives, then the complete integrated patch. Only a harm absent from base and all component patches but reproduced on the integrated patch is cross-slice. Attack the complete sharedResources writer/reader list from the integration result.\\n'")
 
         a(f"    if (requiredClasses.length && !validReframe_{var}(merged.reframe, requiredClasses)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'third narrow integration patch refused'); return summary('REFRAME-REQUIRED') }}")

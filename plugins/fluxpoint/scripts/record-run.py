@@ -779,6 +779,9 @@ def main():
         outcome = "INCOMPLETE"
     os.makedirs(args.state_dir, exist_ok=True)
     art = os.path.join(args.state_dir, f"{args.run_id}.json")
+    repair_followups = [dict(finding, item=review.get('item'), round=review.get('round'), patchSha256=review.get('patchSha256'))
+                        for review in summary.get('repairDiffReviews') or [] if isinstance(review, dict)
+                        for finding in review.get('followups') or [] if isinstance(finding, dict)]
     artifact_data = {
                 "runId": args.run_id,
                 "when": ts,
@@ -796,6 +799,7 @@ def main():
                 "nativeCommandBindingProblems": native_binding_problems,
                 "repairJournal": repair_journal,
                 "repairEvidence": repair_evidence,
+                "repairFollowups": repair_followups,
                 "replayChecked": replay_checked,
                 "rejudges": rejudges,
                 "replayProblems": replay_problems,
@@ -958,6 +962,8 @@ def main():
              f"executor {args.executor}")
     if specification_coverage and specification_coverage['references'] == 'uncovered-legacy':
         proof += '; LEGACY reference files not covered: ' + ', '.join(cell(p, 500) for p in specification_coverage['paths'])
+    if repair_followups:
+        proof += f'; repair followups {len(repair_followups)} (retained in artifact)'
     if harness_identity:
         proof += f"; harness sha256 {harness_identity['sha256']}"
         if harness_identity['changedPaths']:

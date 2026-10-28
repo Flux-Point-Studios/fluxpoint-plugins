@@ -219,9 +219,18 @@ function repairOriginalTitles() {
   const f = Array.isArray(A.findings?.findings) ? A.findings.findings : A.findings
   return Array.isArray(f) ? f.map(x => typeof x === 'string' ? x : x?.finding || x?.title).filter(repairText) : repairText(f) ? [f] : []
 }
+function repairDisposition(finding, context, digest) {
+  const ruling = REPAIR_RESIDUAL_RULINGS.find(r => r.finding === finding.finding && r.patchSha256 === digest)
+  if (ruling) return {disposition:'OPERATOR-RESIDUAL',ruling:{decisionId:ruling.decisionId,recordId:ruling.recordId}}
+  const ranks = ['LOW','MEDIUM','HIGH','CRITICAL']
+  if (ranks.indexOf(finding.severity) >= 0 && ranks.indexOf(finding.severity) < ranks.indexOf(context.severityFloor || 'MEDIUM')) return {disposition:'BELOW-SEVERITY-FLOOR'}
+  if (finding.origin === 'pre-existing' && !context.targetClasses.includes(finding.defectClass)) return {disposition:'OUTSIDE-TARGET-CLASSES'}
+  return null
+}
+
 async function repairDiffAttack(context, measured, phaseName) {
   const prefix = 'repair-diff:'+context.item+':r'+context.round
-  const receipt = {version:1,...repairIdentity(context),patchSha256:measured.patchSha256,manifestSha256:measured.manifestSha256,readNonce:A._replayLaunchNonce,settled:repairOriginalTitles(),attackers:[],refuters:[],findings:[],snapshots:[],blockers:[],clean:false}
+  const receipt = {version:1,...repairIdentity(context),patchSha256:measured.patchSha256,manifestSha256:measured.manifestSha256,readNonce:A._replayLaunchNonce,settled:repairOriginalTitles(),attackers:[],refuters:[],findings:[],followups:[],snapshots:[],blockers:[],clean:false}
   const attackSchema = {type:'object',required:['base','patchSha256','completed','evidence','blockers','findings'],properties:{base:{type:'string'},patchSha256:{type:'string'},completed:{type:'boolean'},evidence:{type:'array',minItems:1,items:{type:'string'}},blockers:{type:'array',items:{type:'string'}},findings:C.FixCheckV1.properties.findings}}
   const voteSchema = {type:'object',required:['resolution','attack','control','contradiction'],properties:{resolution:{enum:['REFUTED','CONFIRMED','UNRESOLVED']},attack:{type:'object'},control:{type:'object'},contradiction:{type:'string'}}}
   const subject = 'PINNED PATCH SUBJECT: '+JSON.stringify(measured)+'\nORIGIN REPLAY CONTEXT: '+JSON.stringify(context)+'\nORIGINAL FINDINGS: '+JSON.stringify(A.findings || [])+'\nSETTLED ORIGINAL FINDINGS (context, never evidence): '+JSON.stringify(repairOriginalTitles())
@@ -268,8 +277,10 @@ async function repairDiffAttack(context, measured, phaseName) {
     }
   }
   await parallel(lenses.map(lens => () => attack(lens)))
-  if (!raw.length && !receipt.blockers.length) await attack({id:'coverage-skeptic',focus:'Independently sample representative defended sibling and added-hunk cases for false negatives. Inspect all six sibling axes and new operational behavior; report concrete claims through findings or incomplete coverage through blockers.'})
+  if (!raw.some(f => !repairDisposition(f,context,measured.patchSha256)) && !receipt.blockers.length) await attack({id:'coverage-skeptic',focus:'Independently sample representative defended sibling and added-hunk cases for false negatives. Inspect all six sibling axes and new operational behavior; report concrete claims through findings or incomplete coverage through blockers.'})
   await parallel(raw.map(f => async () => {
+    const residual = repairDisposition(f,context,measured.patchSha256)
+    if (residual) { receipt.followups.push({...f,...residual}); return }
     const votes = await parallel(REPAIR_REVIEW_REFUTERS.map(lens => async () => {
       const spawnId = prefix+':refute:'+f.id+':'+lens.id
       const r = await runSeat(spawnId,'Read '+REPAIR_REVIEW_AGENT+'. Independently test this claim, never the fixer/checker reasoning: '+JSON.stringify(f)+'\nREFUTER '+lens.id+': '+lens.focus+'\nReturn the supplied refutation schema. REFUTED requires contradictory EXECUTED attack and valid-control command/results plus the specific contradiction. The reproduce seat must rerun the exact claim originEvidence command and controlCommand on the current patch; an unrelated defended command cannot refute it. Missing/null/uncertain observations are UNRESOLVED. Never refute from a settled title or inference.',voteSchema)
@@ -285,6 +296,7 @@ async function repairDiffAttack(context, measured, phaseName) {
   const open = receipt.findings.filter(f => f.votes.some(v => v.resolution !== 'REFUTED'))
   const reread = await repairReadPatch(context,'after-review')
   if (reread.issue || reread.patchSha256 !== measured.patchSha256) receipt.blockers.push('patch changed or fresh post-review read unavailable')
+  for (const finding of receipt.followups) note(prefix,'FOLLOWUP',finding.finding,{severity:finding.severity,origin:finding.origin,disposition:finding.disposition,patchSha256:measured.patchSha256,...(finding.ruling?{ruling:finding.ruling}:{})})
   receipt.clean = !receipt.blockers.length && !open.length
   REPAIR_DIFF_REVIEWS.push(receipt)
   return {receipt,findings:open,issue:receipt.blockers.length ? receipt.blockers.join('; ') : null}
