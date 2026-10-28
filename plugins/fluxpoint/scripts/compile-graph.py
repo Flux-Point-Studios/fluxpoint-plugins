@@ -234,11 +234,15 @@ def resolve_contracts(shipped_dir, header=None, explicit=None, root=".", snapsho
             f"under {root or '.'} — the header is honored, so a missing set is an "
             f"error rather than a silent fallback to the shipped contracts")
     replaced = sorted(set(local) & set(shipped))
+    missing = [cid + '.' + prop for cid in replaced
+               for prop in sorted(set(shipped[cid].get('properties', {})) - set(local[cid].get('properties', {})))]
     merged = dict(shipped)
     merged.update(local)
     desc = (f"shipped + {header} ({len(local) - len(replaced)} added"
             + (f", {len(replaced)} overriding: {', '.join(replaced)}" if replaced else "")
             + ")")
+    if missing:
+        desc += '; repository copies omit shipped properties: ' + ', '.join(missing)
     return merged, desc
 
 
@@ -925,6 +929,13 @@ def validate_repair(n, seen, ir, contracts):
     return f
 
 
+GUARD_FIELDS = {
+    'RedTeamV1': ('coverage', 'red-team coverage coherence', '1.44.0'),
+    'SliceV1': ('packetConflict', 'locked-packet conflict halt', '1.46.0'),
+    'TreeCheckV1': ('root', 'checkout identity sentinel', '1.45.0'),
+}
+
+
 def validate(ir, contracts, gates=None, agents=None, specification=None, embedded_args=None, repository_root=None):
     """Return a list of findings. Empty list means the graph may compile."""
     f = []
@@ -940,6 +951,12 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
         f.append("campaign: required, one line naming the goal")
 
     nodes = ir.get("nodes") or []
+    effective = {n.get('contract') for n in nodes}
+    if ir.get('treeGuard', True): effective.add('TreeCheckV1')
+    for cid in sorted(effective & set(GUARD_FIELDS)):
+        field, guard, version = GUARD_FIELDS[cid]
+        if field not in (contracts.get(cid) or {}).get('properties', {}):
+            f.append(f'{cid}.{field}: emitted {guard} requires this declared property (added in {version}); update the repository contract copy')
     if not nodes:
         f.append("nodes: at least one node required")
     lists = ir.get("lists") or {}
@@ -3626,7 +3643,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             a("  const unique = FORKED || forceLive || !!target || !!(gateId && (A.rejudge || {})[gateId]) || !!(gateId && REPLAY_NODES[gateId] && REPLAY_NODES[gateId].fresh)")
             a("  const extra = (unique ? '\\nLIVE TREE READING NONCE: ' + A._replayLaunchNonce + ' point ' + point : '') + (gateId ? rejudgeText(gateId, false) : '')")
             a("  const branchPrompt = target ? '\\nAlso run exactly: git -C ' + JSON.stringify(target.repository) + ' ls-remote origin ' + JSON.stringify('refs/heads/' + target.branch) + '. Return the sole full hexadecimal commit in tip, and the exact declared repository and branch as repository and branch. No matches or multiple matches means tip must be empty. Never use a worker-reported sha.' : ''")
-            a("  const treeSchema = target ? { ...C.TreeCheckV1, required: [...new Set([...(C.TreeCheckV1.required || []), 'root','repository','branch','tip'])], properties: { ...C.TreeCheckV1.properties, repository: { type: 'string' }, branch: { type: 'string' }, tip: { type: 'string' } } } : C.TreeCheckV1")
+            a("  const treeSchema = target ? { ...C.TreeCheckV1, required: [...new Set([...(C.TreeCheckV1.required || []), 'root','repository','branch','tip'])], properties: { ...C.TreeCheckV1.properties, root: { type: 'string' }, repository: { type: 'string' }, branch: { type: 'string' }, tip: { type: 'string' } } } : C.TreeCheckV1")
         a("  const r = await agent(longPreamble() + 'Run exactly three commands in the repository at "
           "the current working directory and return their output verbatim in the "
           "schema, nothing else: `git rev-parse --show-toplevel` as root, `git rev-parse HEAD` as head, and `git status "

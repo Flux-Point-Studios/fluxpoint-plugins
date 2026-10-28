@@ -50,6 +50,8 @@ its accepted CLI options.
 [Design notes](../plugins/fluxpoint/DESIGN-NOTES.md) and the
 [roadmap](../plugins/fluxpoint/ROADMAP.md) preserve historical reasoning and
 remaining gaps. Use the operational guides above for current instructions.
+See [campaign upgrades](campaign-upgrades.md) for schema migrations and the
+explicit coverage limits when recording an in-flight legacy run.
 The [proof-strength ratchet](../plugins/fluxpoint/README.md) includes Python
 typing suppressions and checker configuration; its module help lists categories.
 The [initialization guide](../plugins/fluxpoint/commands/init.md) describes

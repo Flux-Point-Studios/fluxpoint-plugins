@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "goal": "Make campaign schema and record upgrades explicit without inventing legacy reference coverage",
+  "asset": "Existing packet input closure and shared safe tightening precondition",
+  "scope": [
+    "Effective guard field compatibility (#181)",
+    "Legacy reference lock diagnostics and record compatibility",
+    "Explicit recorder unpinned allowances"
+  ],
+  "outOfScope": [
+    "Changing legacy run provenance",
+    "Silently adding reference coverage to historical identities",
+    "Packet reference projection (separate compiler change)"
+  ],
+  "decisions": [
+    {
+      "id": "backlog-runner-inputs",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should runner configuration and check input paths be distinguished?",
+        "options": [
+          {
+            "option": "explicit-inputs",
+            "argued_by": "model",
+            "strongest_objection": "Unrecognized directory-valued options need --path or harnessInputs to bind actual inputs"
+          },
+          {
+            "option": "all-existing-paths",
+            "argued_by": "model",
+            "strongest_objection": "Runner root settings silently lock unrelated repository files"
+          }
+        ],
+        "chosen": "explicit-inputs",
+        "rationale": "Skip directory option values unless explicitly declared as input paths. Resolve harness bash through the existing cross-platform helper.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue #208 reproduction seeds unrelated files through --rootdir=.",
+          "Issue #217 identifies CreateProcess System32 search before PATH"
+        ]
+      },
+      "costs": [
+        {
+          "option": "explicit-inputs",
+          "cost": "Small option classification and regression coverage",
+          "basis": "estimate",
+          "evidence": [
+            "Existing PATH_FLAGS distinguishes explicit input options"
+          ]
+        },
+        {
+          "option": "all-existing-paths",
+          "cost": "Whole repository input drift and Windows failures",
+          "basis": "measured",
+          "evidence": [
+            "Issue #208 minimal reproduction"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "upgrade-compatibility",
+      "statement": "Old schema fields required by emitted guards fail compilation with migration context; genuine legacy identities can be recorded with explicit missing-reference coverage and explicit unpinned allowances",
+      "decisions": [
+        "backlog-runner-inputs"
+      ],
+      "checks": [
+        "upgrade-tests"
+      ],
+      "counterexample": "Missing TreeCheckV1.root compiles or unchanged archive is reported edited after lock format upgrade"
+    }
+  ],
+  "checks": [
+    {
+      "id": "upgrade-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/campaign-upgrade-test.py"
+      ],
+      "scope": "Actual compiler validation and spec/record CLIs exercise legacy formats and unchanged/changed packet bytes",
+      "assumptions": [
+        "Historical references were unbound and cannot be reconstructed retroactively"
+      ],
+      "timeoutSeconds": 60
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Should positional directories also be skipped?",
+      "resolution": "No, positional paths and PATH_FLAGS remain explicit inputs; only option values naming directories are skipped."
+    }
+  ]
+}

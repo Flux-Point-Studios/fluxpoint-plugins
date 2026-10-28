@@ -407,6 +407,8 @@ def main():
     ap.add_argument("--state-dir", default=None,
                     help="must resolve to <root>/.claude/fluxpoint/runs")
     ap.add_argument("--root", default=".", help="repo root holding .claude/fluxpoint")
+    ap.add_argument('--unpinned-ok', action='append', default=[], metavar='ABSOLUTE_PATH',
+                    help='explicitly record an input path without a byte pin (repeatable; retained in artifact)')
     args = ap.parse_args()
     args.root = os.path.realpath(args.root)
     canonical_runs = os.path.realpath(os.path.join(args.root, ".claude", "fluxpoint", "runs"))
@@ -478,6 +480,8 @@ def main():
     # this after the once-only ledger append, but before any run/Evidence row.
     try:
         import evidence_pins as _pins
+        if args.unpinned_ok:
+            summary['evidenceUnpinned'] = sorted(set(summary.get('evidenceUnpinned') or []) | set(args.unpinned_ok))
         _pins.validate_pinned_inputs(args.root, summary.get("inputs") or {},
                                      summary.get("evidenceUnpinned") or [])
     except (OSError, ValueError, TypeError) as e:
@@ -486,6 +490,7 @@ def main():
 
     import specification as _spec
     harness_identity = None
+    specification_coverage = None
     try:
         # The graph file's SPEC: header names the packet this campaign is
         # held to; a repository can carry one per campaign.
@@ -499,9 +504,7 @@ def main():
             if ran and spec_path and ran != spec_path:
                 raise ValueError(f"the run was compiled against {ran}, but {args.graph} "
                                  f"declares SPEC: {spec_path}")
-            _, identity = _spec.load(args.root, spec=spec_path or ran)
-            if summary.get("specification") != identity:
-                raise ValueError("run specification differs from the locked packet")
+            identity, specification_coverage = _spec.recording_identity(args.root, summary.get('specification'), spec=spec_path or ran)
             harness_identity = _spec.harness_record(args.root, spec=spec_path or ran)
         except (OSError, ValueError, TypeError) as e:
             print(f"record-run: spec verification failed: {e}", file=sys.stderr)
@@ -771,6 +774,8 @@ def main():
                 "findings": findings,
                 "harnessExit": harness,
                 "harness": harness_identity,
+                "specificationCoverage": specification_coverage,
+                "recordingUnpinnedAllowances": args.unpinned_ok,
                 "redTeam": red_team,
                 "redTeamCoverage": red_team_coverage,
                 "proofAudit": proof_audit,
@@ -915,6 +920,8 @@ def main():
         proof_cell = proof_audit
     proof = (f"harness exit {harness}; red-team {red_team}; proof-audit {proof_cell}; "
              f"executor {args.executor}")
+    if specification_coverage and specification_coverage['references'] == 'uncovered-legacy':
+        proof += '; LEGACY reference files not covered: ' + ', '.join(cell(p, 500) for p in specification_coverage['paths'])
     if harness_identity:
         proof += f"; harness sha256 {harness_identity['sha256']}"
         if harness_identity['changedPaths']:

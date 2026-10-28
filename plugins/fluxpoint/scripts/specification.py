@@ -493,6 +493,8 @@ def strict_harness(root, spec=None):
 
 
 def validate_lock_maps(lock):
+    if 'lockFormat' in lock and (type(lock['lockFormat']) is not int or lock['lockFormat'] != 2):
+        raise ValueError('unsupported specification lock format')
     for key in ('references', 'harness'):
         values = lock.get(key, {})
         if (not isinstance(values, dict)
@@ -650,7 +652,7 @@ def required(root):
                                            work.read_text(encoding='utf-8'), re.M)))
 
 
-def load(root, locked=True, spec=None, snapshots=None):
+def load(root, locked=True, spec=None, snapshots=None, allow_missing_inputs=False):
     root = Path(root)
     packet_file, lock_file = packet_paths(root, spec)
     if locked and snapshots is not None:
@@ -665,7 +667,7 @@ def load(root, locked=True, spec=None, snapshots=None):
         if references:
             identity['references'] = references
         # Validate explicit dependencies even before a harness is frozen.
-        harness_inputs(root, doc, allow_missing=locked, closure=False)
+        harness_inputs(root, doc, allow_missing=locked or allow_missing_inputs, closure=False)
         ids = {oid for check in doc['checks'] for oid in check.get('obligations', [])}
         if ids:
             module = importlib.util.spec_from_file_location('spec_guard', Path(__file__).with_name('spec-guard.py'))
@@ -680,14 +682,43 @@ def load(root, locked=True, spec=None, snapshots=None):
         if not isinstance(lock, dict):
             raise ValueError('spec lock must be an object')
         validate_lock_maps(lock)
-        for rel in sorted(set(lock.get('references', {})) | set(identity.get('references', {}))):
-            if lock.get('references', {}).get(rel) != identity.get('references', {}).get(rel):
-                errors.append(f'a file the packet points into changed since lock: {rel}')
-        if {k: v for k, v in lock.items() if k != 'harness'} != identity:
+        if identity.get('references') and 'references' not in lock:
+            errors.append('lock has no references map (written before 1.44.0); review '
+                          + ', '.join(sorted(identity['references'])) + ' and re-lock')
+        else:
+            for rel in sorted(set(lock.get('references', {})) | set(identity.get('references', {}))):
+                if lock.get('references', {}).get(rel) != identity.get('references', {}).get(rel):
+                    errors.append(f'a file the packet points into changed since lock: {rel}')
+        if {k: v for k, v in lock.items() if k not in ('harness', 'lockFormat')} != identity:
             errors.append('spec, obligation or proof baseline changed since lock; review the change and re-lock')
     if errors:
         raise ValueError('; '.join(errors))
     return doc, identity
+
+
+def recording_identity(root, claimed, spec=None):
+    """Verify a record's packet without inventing coverage absent from old locks.
+
+    Legacy acceptance requires exact packet, baseline and obligation identities.
+    Reference bytes were never bound by that format; retain that limitation in
+    both the artifact and Evidence instead of claiming a modern identity.
+    """
+    _, current = load(root, locked=False, spec=spec, allow_missing_inputs=True)
+    _, lock_file = packet_paths(root, spec)
+    lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
+    if not isinstance(lock, dict): raise ValueError('spec lock must be an object')
+    validate_lock_maps(lock)
+    locked_identity = {k: v for k, v in lock.items() if k not in ('harness', 'lockFormat')}
+    old_current = {k: v for k, v in current.items() if k != 'references'}
+    legacy_lock = 'references' not in lock and bool(current.get('references')) and locked_identity == old_current
+    if locked_identity != current and not legacy_lock:
+        raise ValueError('spec, obligation, reference or proof baseline changed since lock; review and re-lock')
+    if claimed == current and not legacy_lock:
+        return current, {'references': 'bound', 'lockFormat': lock.get('lockFormat', 1)}
+    if current.get('references') and isinstance(claimed, dict) and 'references' not in claimed and claimed == old_current:
+        return current, {'references': 'uncovered-legacy', 'paths': sorted(current['references']),
+                         'lockFormat': lock.get('lockFormat', 1)}
+    raise ValueError('run specification differs from the locked packet')
 
 
 def run_checks(root, doc, stack):
@@ -853,7 +884,7 @@ def main():
         if args.lock:
             frozen = freeze_harness(root, doc, lock_path, identity.get('references', {}))
             with lock_path.open('w', encoding='utf-8', newline='\n') as lock_file:
-                lock_file.write(json.dumps(dict(identity, harness=frozen), indent=2) + '\n')
+                lock_file.write(json.dumps(dict(identity, harness=frozen, lockFormat=2), indent=2) + '\n')
             print(f"specification: locked {name} {identity['sha256']}; checks have not run")
             return 0
         if args.strict_harness:
