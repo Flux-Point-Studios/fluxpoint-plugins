@@ -9,6 +9,23 @@ def each(value):
     return [row for row in (value if isinstance(value, list) else [value]) if isinstance(row, dict)]
 
 
+def declared(summary):
+    """Typed review suite claims opt into execution-source enforcement."""
+    if not isinstance(summary, dict):
+        return False
+    contracts, results = summary.get('contracts'), summary.get('results')
+    if not isinstance(contracts, dict) or not isinstance(results, dict):
+        return False
+    for node, value in results.items():
+        if contracts.get(node) != 'RedTeamV1':
+            continue
+        for result in each(value):
+            coverage = result.get('coverage')
+            if isinstance(coverage, dict) and any(coverage.get(field) for field in ('suites', 'citedGates', 'executedGates')):
+                return True
+    return False
+
+
 def offered(summary):
     """Only declared prove/cited-step outputs are candidate reusable evidence."""
     pointers = {}

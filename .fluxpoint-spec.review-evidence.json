@@ -72,6 +72,17 @@
         "review-gate-tests"
       ],
       "counterexample": "A reviewer claims suite coverage with no execution or silently reruns a covered suite with no named claim"
+    },
+    {
+      "id": "review-manifest-presence",
+      "statement": "Review-only suite claims require a valid manifest and source verification; absent or refused policy cannot file suite coverage clean",
+      "decisions": [
+        "reuse-gate-witness"
+      ],
+      "checks": [
+        "review-gate-tests"
+      ],
+      "counterexample": "A RedTeamV1-only summary claims fabricated executedGates and records COMPLETE after its gate manifest is absent"
     }
   ],
   "checks": [
@@ -94,5 +105,10 @@
       "claim": "Does reusing one suite row make two verification gates independent?",
       "resolution": "No. This reuse applies only to review evidence; independent prove nodes retain the one-execution-per-node rule."
     }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/scripts/compile-graph.py",
+    "plugins/fluxpoint/scripts/record-run.py",
+    "plugins/fluxpoint/contracts"
   ]
 }

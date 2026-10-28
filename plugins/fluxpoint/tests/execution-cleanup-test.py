@@ -101,6 +101,19 @@ class Cleanup(unittest.TestCase):
             self.assertEqual(parsed['await_'], 'bg_0123')
             self.assertEqual(json.loads(parsed['plugin_pin'])['root'], str(SCRIPTS.parent))
 
+    def test_cancel_command_in_emitted_citation_preamble_parses(self):
+        ir = {'version': 1, 'name': 'gate', 'campaign': 'gate', 'treeGuard': False,
+              'nodes': [{'id': 'gate', 'contract': 'ExecutionV1', 'cites': ['harness'], 'prompt': 'Run gate'}]}
+        script = cg.emit(ir, CONTRACTS)
+        self.assertIn(' --cancel <token>${ROOT_ARG}', script)
+        for root in ['', " --root '/tmp/project with space'"]:
+            import shlex
+            argv = shlex.split('--cancel bg_0123' + root)
+            parser = "import argparse,json,runpy,sys; p=argparse.ArgumentParser.parse_args; argparse.ArgumentParser.parse_args=lambda self,*a,**k:(print(json.dumps(vars(p(self,*a,**k)))),sys.exit(0))[0]; runpy.run_path(sys.argv.pop(1),run_name='__main__')"
+            run = subprocess.run([sys.executable, '-c', parser, str(SCRIPTS / 'attest.py'), *argv], text=True, capture_output=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(json.loads(run.stdout)['cancel'], 'bg_0123')
+
     def test_local_citation_must_match_judged_commit(self):
         head, tree = 'a' * 40, 'b' * 40
         row = dict(attestId='att_test', gate='harness', exit=0, dirty=False, witness='wrapper', headSha=head, treeSha=tree, started='2026-10-28T01:00:00Z', nonce='n')

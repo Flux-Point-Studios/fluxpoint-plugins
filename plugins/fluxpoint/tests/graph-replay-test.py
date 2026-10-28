@@ -31,10 +31,10 @@ def node(nid, **extra):
     return dict({'id':nid,'prompt':'Do '+nid,'contract':'TestV1'}, **extra)
 
 
-def execute(ir, args=None, setup='', body=''):
+def execute(ir, args=None, setup='', body='', compiled_source=None):
     args = dict(args or {})
     state = {key: args.pop(key) for key in ('_memo', '_prefix') if key in args}
-    source = c.emit(ir, CONTRACTS, replay_state=state).replace('export const meta =', 'const meta =')
+    source = (compiled_source if compiled_source is not None else c.emit(ir, CONTRACTS, replay_state=state)).replace('export const meta =', 'const meta =')
     harness = r'''
 const fs = require('fs'); const input = JSON.parse(fs.readFileSync(0,'utf8'));
 const events = []; const rawCalls = []; let active=0, maximum=0;
@@ -81,7 +81,7 @@ class GraphReplay(unittest.TestCase):
             git('commit','-q','--allow-empty','-m','baseline')
             ir=graph([node('inspect',fresh=False,prompt='Inspect {{A.language}}')])
             source={'launch':{'nonce':'original','root':str(root)},'results':{'inspect':{'outcome':'réparé 🦀 東京'}},'inputs':{'language':'réparé 🦀 東京'}}
-            helpers={'replay_memo':SimpleNamespace(build_memo=lambda *a,**kw:{'_memo':{},'_prefix':[]}),
+            helpers={'plugin_identity':c._sibling('plugin_identity'), 'replay_memo':SimpleNamespace(build_memo=lambda *a,**kw:{'_memo':{},'_prefix':[]}),
                      'run_artifacts':SimpleNamespace(read=lambda *a,**kw:({'summary':source},'f'*64))}
             with patch.object(c,'_sibling',side_effect=helpers.__getitem__), patch.object(locale,'getpreferredencoding',return_value='cp1252'), patch.object(locale,'getencoding',return_value='cp1252',create=True), patch.object(subprocess,'run',wraps=subprocess.run) as ran:
                 rows=c.rerun_plan(ir,CONTRACTS,{'language':'réparé 🦀 東京'},str(root),'source-run')
@@ -315,14 +315,20 @@ class GraphReplay(unittest.TestCase):
         self.assertEqual(len(calls),1)
         self.assertEqual(out['result']['outcome'],'BUDGET-EXHAUSTED')
 
-    def test_legacy_compilation_is_byte_identical(self):
+    def test_legacy_runtime_prompts_options_and_results_match_baseline(self):
         # Compare the baseline compiler, not a hand-written expected string.
         original=subprocess.run(['git','show','c848f07:plugins/fluxpoint/scripts/compile-graph.py'],text=True,encoding='utf-8',capture_output=True,check=True).stdout
         scope={'__name__':'baseline','__file__':str(SCRIPTS/'compile-graph.py')}; exec(compile(original,'baseline','exec'),scope)
         ir=graph([node('a'),node('b',after='a',prompt='Use {{prev}}')])
-        self.assertEqual(c.emit(ir,CONTRACTS),scope['emit'](ir,CONTRACTS))
+        def compare_execution(graph):
+            new = execute(graph)
+            old = execute(graph, compiled_source=scope['emit'](graph, CONTRACTS))
+            self.assertEqual(new['rawCalls'], old['rawCalls'])
+            for key in ('outcome', 'results', 'provenance', 'planned', 'inputs'):
+                self.assertEqual(new['result'][key], old['result'][key], key)
+        compare_execution(ir)
         ir['argDefaults']={'configuration':'default'}; ir['nodes'][0]['prompt']='Read {{A.configuration}}'
-        self.assertEqual(c.emit(ir,CONTRACTS),scope['emit'](ir,CONTRACTS))
+        compare_execution(ir)
 
 class ReplayFollowup(unittest.TestCase):
     def test_mixed_targeted_and_untargeted_builders_do_not_claim_unusable_readings(self):

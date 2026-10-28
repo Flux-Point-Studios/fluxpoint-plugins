@@ -147,6 +147,41 @@ class ReviewEvidence(unittest.TestCase):
         self.assertTrue(any(c.get('reviewEvidence') and c['node'].startswith('lens1') and c['status'] == 'MISMATCH' for c in checks))
         self.assertTrue(any(c.get('reviewEvidence') and c['node'].startswith('lens2') and c['status'] == 'ATTESTED' for c in checks))
 
+    def review_only(self):
+        summary = self.summary()
+        summary.pop('prove')
+        summary['contracts'].pop('gate')
+        summary['results'].pop('gate')
+        for result in summary['results'].values():
+            result['coverage']['citedGates'] = []
+            result['coverage']['executedGates'] = [dict(self.citation, attestId='att_fabricated', reason='Test the named parser regression with its valid control.')]
+        return summary
+
+    def test_review_only_suite_claim_requires_a_valid_manifest(self):
+        for manifest in (None, {'version': 999, 'gates': {'suite': 'true'}}):
+            path = self.root / '.fluxpoint-gates.json'
+            if manifest is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(json.dumps(manifest))
+            checks, findings = attest.verify_claims(str(self.root), self.review_only())
+            self.assertTrue(findings or any(c['status'] != 'ATTESTED' for c in checks), (manifest, checks, findings))
+
+    def test_recorder_refuses_review_only_suite_when_manifest_is_missing(self):
+        (self.root / 'WORK.md').write_text('## Evidence\n\n| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n')
+        (self.root / '.fluxpoint-gates.json').unlink()
+        (self.root / '.gitignore').write_text('.claude/\n')
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        subprocess.run(['git', '-C', str(self.root), 'add', '-A'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'fixture'], check=True)
+        summary = self.review_only()
+        result_path = self.root / 'summary.json'; result_path.write_text(json.dumps(summary))
+        result = subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'), '--root', str(self.root), '--graph', 'WORK.md', '--run-id', 'wf_review_only', '--result', str(result_path)], cwd=self.root, capture_output=True, text=True)
+        artifact = self.root / '.claude/fluxpoint/runs/wf_review_only.json'
+        self.assertTrue(artifact.exists(), result.stderr)
+        recorded = json.loads(artifact.read_text())
+        self.assertEqual(recorded['outcome'], 'INCOMPLETE', result.stdout + result.stderr)
+
     def test_malformed_subject_cannot_crash_the_source_crosscheck(self):
         for subjects in (None, [{'head': []}], 'invalid'):
             summary = self.summary(); summary['results']['lens1']['coverage']['subject'] = subjects

@@ -36,3 +36,5 @@ One execution can support several review lenses. The existing rule that two
 independent prove nodes need independent executions remains intact. Historical
 reviews without typed suite claims retain their historical behavior; the new
 fields make suite claims explicit rather than interpreting prose as evidence.
+
+A review-only graph also opts into witness validation when it claims suite coverage. Its gate manifest must exist and validate; a missing or refused manifest files the run INCOMPLETE. An ordinary review with no suite claims keeps the existing dormant-manifest behavior.

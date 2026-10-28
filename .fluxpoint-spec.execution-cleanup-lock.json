@@ -1,12 +1,21 @@
 {
   "version": 1,
+<<<<<<< HEAD
   "sha256": "d38fcbc115cbb25a5185656f0d4767d1bb89032c9df6f9a2c737cbc25b4bcd05",
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/tests/execution-cleanup-test.py": "04072e5e97b8c01e17acd3726bce7dc7031223e7c338b488e86e9928bef800d3",
     "plugins/fluxpoint/tests/graph-replay-test.py": "685a74a3b4bd7a0d4ddeae193191455325689c09eb8e8410a4658788c32139ee",
+=======
+  "sha256": "9599018634dd2cf2f5a689bdc7d71ac9af0e4896385a406b5aebe1cbf8963ae6",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/execution-cleanup-test.py": "3f9eb9b15bce73d9767ab36cd5d3feaf9f83ef8b9e058dc3b2d7b7a415953d72",
+    "plugins/fluxpoint/tests/graph-replay-test.py": "dc4195f01a700b8403d99d76d134206269915d6855dd2ffb45cc5bf090ececac",
+>>>>>>> ab631c6 (Enforce review-only suite witnesses and repair emitted cancellation arguments)
     "plugins/fluxpoint/tests/harness-dirt-test.py": "46b375352366e769b0812d9c4a6b6a1d982eb90ee25ad085310c0d0e451dd504",
     "plugins/fluxpoint/tests/replay-memo-test.py": "8de1bb96ff13f7ba2411aa01127648f8c8f110b8629d68e1461ee1e4f7f7a980",
     "plugins/fluxpoint/tests/resume-test.py": "e6815d8e8e05cb5075c56b560535c3f9639b75c00865333d04d41279cc76cf47"
-  }
+  },
+  "lockFormat": 2
 }

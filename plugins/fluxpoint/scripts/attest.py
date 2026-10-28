@@ -1514,8 +1514,13 @@ def verify_claims(root, summary):
     gates, findings = load_gates(root)
     # A CI-only manifest ({"gates": {}, "ci": ...}) still has a witness to
     # hold prove:ci citations to; returning early filed them unchecked.
-    if findings or (not gates and not load_ci(root)):
+    if findings:
         return [], findings
+    if not gates and not load_ci(root):
+        import review_gates
+        if review_gates.declared(summary):
+            return [], ['review suite claims require a valid gate manifest and execution witnesses']
+        return [], []
     for field in ('results', 'contracts', 'prove', 'cites'):
         value = (summary or {}).get(field)
         if value is not None and not isinstance(value, dict):

@@ -122,6 +122,17 @@
         "replay-followup-tests"
       ],
       "counterexample": "A declaration alone closes the prefix, a cached read authorizes a memo after a fork, a source-intermediate tip forces all builders live, or a remote alias bypasses lane exclusivity"
+    },
+    {
+      "id": "cited-cancel-command",
+      "statement": "The emitted cancellation command keeps its token next to --cancel before optional --root and parses with the pinned native witness",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "execution-cleanup-tests"
+      ],
+      "counterexample": "A stamped launch tells its cite seat to invoke --cancel --root ROOT TOKEN and cannot stop the local lane"
     }
   ],
   "checks": [
