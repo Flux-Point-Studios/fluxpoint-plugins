@@ -89,6 +89,20 @@ function repairCanonical(value) {
 }
 function repairManifestDigest(measured) { return repairSHA256([...repairCanonical(measured)].map(c => c.charCodeAt(0))) }
 
+function repairFeedback(check) {
+  if (!check || typeof check !== 'object') return check
+  return Object.fromEntries(['verdict','findings','blockers','evidence','reframe'].filter(k => check[k] !== undefined).map(k => [k,check[k]]))
+}
+function repairContextIssue(...values) {
+  for (const value of values) {
+    const text = tokenText(value)
+    let bytes = 0
+    for (const c of text) { const n = c.codePointAt(0); bytes += n <= 127 ? 1 : n <= 2047 ? 2 : n <= 65535 ? 3 : 4 }
+    if (bytes > REPAIR_CONTEXT_BYTES) return 'repair context is '+bytes+' UTF-8 bytes, exceeding budget.repairContextBytes '+REPAIR_CONTEXT_BYTES+'; narrow the slice or raise the explicitly priced bound'
+  }
+  return null
+}
+
 function repairSiblingIssue(check, context, fixed) {
   if (!repairTargets(check.targetClasses) || JSON.stringify([...check.targetClasses].sort()) !== JSON.stringify([...context.targetClasses].sort())) return 'SIBLINGS-UNPROVEN: checker targetClasses differ from pinned slice'
   const rows = check.siblings, claims = fixed.siblings === undefined ? [] : fixed.siblings

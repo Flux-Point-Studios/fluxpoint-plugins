@@ -72,7 +72,7 @@ REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate"
 REDUCE_FIELDS = {"from", "over", "dedupeBy", "sortBy", "order", "topK"}
 MEMORY_FIELDS = {"seed", "emit", "key", "priors", "classBy"}
 BUDGET_FIELDS = {"maxNodes", "verifyFloorTokens", "nodeFloorTokens",
-                 "maxEstimatedTokens", "cacheTtl"}
+                 "maxEstimatedTokens", "cacheTtl", "repairContextBytes"}
 ROLE_FIELDS = {"agentType", "effort", "model"}
 DEFAULTS_FIELDS = {"effort", "model"}
 # The prompt-cache time-to-live the graph is written for. The runtime sets
@@ -110,14 +110,15 @@ MODEL_MULT = (("haiku", 0.25), ("sonnet", 0.5))
 # identical. Only author-controlled text is priced here; the fixed harness
 # wording each call carries is what PREFIX_TOKENS already stands for.
 PROMPT_TOKENS_PER_BYTE = 1
+REPAIR_CONTEXT_BYTES = 32768  # enforced UTF-8 ceiling for each dynamic repair value
 # Expansions whose size is only known at run time. They are named in the
 # estimate's assumptions rather than guessed, so a reader knows which part
 # of a prompt the number cannot see.
-UNPRICED_EXPANSIONS = ("prev", "decisions", "seen", "winner")
+UNPRICED_EXPANSIONS = ("prev", "lastCheck", "decisions", "seen", "winner")
 # Tokens whose value differs between calls of ONE node. The prompt cache is
 # prefix-keyed, so a fan-out's workers share the text before the first of
 # these and nothing after it.
-VARYING_ROOTS = {"item", "i", "seen"}
+VARYING_ROOTS = {"item", "i", "seen", "prev", "lastCheck"}
 LONG_PREAMBLE = (
     "LONG COMMANDS — a command that may run past 600 seconds must use the fluxpoint plugin's "
     'scripts/py.sh longrun.py start --log <file> -- <command> <args>, or attest.py --run <gate> --detach '
@@ -1834,6 +1835,9 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
             f"budget.cacheTtl must be one of {', '.join(sorted(CACHE_TTLS))} — "
             f"'{ttl}' names no prompt-cache lifetime the runtime offers, and an "
             f"unknown value would price every hop as warm while nothing is")
+    context_cap = budget.get('repairContextBytes', REPAIR_CONTEXT_BYTES)
+    if type(context_cap) is not int or not 1 <= context_cap <= 1048576:
+        f.append('budget.repairContextBytes must be an integer from 1 to 1048576 UTF-8 bytes')
     cap = budget.get("maxEstimatedTokens")
     if cap is not None:
         if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
@@ -1876,6 +1880,8 @@ def warnings(ir, agents=None, specification=None, gates=None):
     refusing to build."""
     w = []
     for node in ir.get('nodes') or []:
+        if SUBST.findall(str(node.get("prompt", ""))).count("prev") > 1:
+            w.append(f"node '{node.get('id', '?')}': whole {{{{prev}}}} expands more than once; project only the needed fields")
         if node.get('verify', 'schema-only') != 'schema-only' or not re.match(r'^exit\s', str(node.get('haltWhen', ''))):
             continue
         for name, command in getattr(gates, 'commands', {}).items():
@@ -2102,7 +2108,7 @@ def plan_groups(ir):
                                        "park": False, "kind": "work", "node": work, "track": frozenset()})
                         groups.append({"calls": [(work.get("id", "?") + ":diff-refute", ("", "medium"))] * (count * refuters),
                                        "park": False, "kind": "refute", "track": frozenset()})
-                        groups.append({"calls": [("repair-witness", sentinel)] * (count * (4 + 2 * (seats + refuters))),
+                        groups.append({"calls": [("repair-witness", sentinel)] * (count * (5 + 2 * (seats + refuters))),
                                        "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()})
                 if tree_guard:
                     groups.extend([{"calls": [("tree-check", sentinel)], "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()} for _ in range(2 if repair_integrations(n) else 1)])
@@ -2216,10 +2222,12 @@ def _item_value(item, tok):
     return "undefined" if v is _MISSING else _js_text(v)
 
 
-def _expansion_bytes(tok, ir, item=None, index=0):
+def _expansion_bytes(tok, ir, item=None, index=0, bounds=None):
     """Bytes one {{token}} is estimated to render to. 0 when unknowable —
     unpriced_expansions() names those."""
     root = tok.split(".")[0].split("[")[0]
+    if bounds and root in bounds:
+        return bounds[root]
     if root == "A":
         defaults = ir.get("argDefaults") or {}
         if "." not in tok:
@@ -2235,7 +2243,7 @@ def _expansion_bytes(tok, ir, item=None, index=0):
     return 0
 
 
-def prompt_bytes(texts, ir, item=None, index=0):
+def prompt_bytes(texts, ir, item=None, index=0, bounds=None):
     """(shared, varying) UTF-8 bytes of the author text one call carries.
 
     `shared` is everything before the first token whose value differs
@@ -2252,11 +2260,11 @@ def prompt_bytes(texts, ir, item=None, index=0):
             if not split and tok.split(".")[0].split("[")[0] in VARYING_ROOTS:
                 shared += lit
                 split = True
-                varying += _expansion_bytes(tok, ir, item, index)
+                varying += _expansion_bytes(tok, ir, item, index, bounds)
             elif split:
-                varying += lit + _expansion_bytes(tok, ir, item, index)
+                varying += lit + _expansion_bytes(tok, ir, item, index, bounds)
             else:
-                shared += lit + _expansion_bytes(tok, ir, item, index)
+                shared += lit + _expansion_bytes(tok, ir, item, index, bounds)
             pos = m.end()
         tail = _utf8(text[pos:])
         if split:
@@ -2325,7 +2333,10 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
                     texts = [str(n.get("prompt", ""))]
                     items = g.get("items") or [None]
                     item = items[ci % len(items)]
-                shared, varying = prompt_bytes(texts, ir, item, ci)
+                repair_ids = repair_owned(ir) | {node.get('id') for node in repair_loops(ir)}
+                context_cap = budget.get('repairContextBytes', REPAIR_CONTEXT_BYTES)
+                bounds = {'prev': context_cap, 'lastCheck': context_cap} if n.get('id') in repair_ids and nid == n.get('id') and type(context_cap) is int and context_cap > 0 else None
+                shared, varying = prompt_bytes(texts, ir, item, ci, bounds)
                 shared += literal
                 seen_text = is_warm and (key, nid) in warm_prompts
                 text = (shared * (CACHED_PREFIX_FRACTION if seen_text else 1.0)
@@ -2353,6 +2364,7 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
         "assumptions": {"prefixTokens": PREFIX_TOKENS,
                         "specificationInputTokens": spec_input,
                         "promptTokensPerByte": PROMPT_TOKENS_PER_BYTE,
+                        "repairContextBytes": budget.get("repairContextBytes", REPAIR_CONTEXT_BYTES),
                         "unpricedExpansions": list(UNPRICED_EXPANSIONS),
                         "cachedPrefixFraction": CACHED_PREFIX_FRACTION,
                         "workTokens": WORK_TOKENS, "effortMult": EFFORT_MULT,
@@ -2381,7 +2393,8 @@ def unpriced_expansions(ir, embedded_args=None):
             for tok in SUBST.findall(text):
                 root = tok.split(".")[0].split("[")[0]
                 label = None
-                if root in UNPRICED_EXPANSIONS:
+                bounded_repair = n.get("id") in (repair_owned(ir) | {node.get("id") for node in repair_loops(ir)}) and root in ("prev", "lastCheck")
+                if root in UNPRICED_EXPANSIONS and not bounded_repair:
                     label = "{{" + (root + ".*" if root == "decisions" else root) + "}}"
                 elif root == "A":
                     arg = tok.split(".")[1].split("[")[0] if "." in tok else None
@@ -3206,6 +3219,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     if repair_loops(ir):
         a("const REPAIR_LAUNCH = A._launch")
         a("const REPAIR_PACKET = " + json.dumps(specification.get("path") if specification else None))
+        a("const REPAIR_CONTEXT_BYTES = " + str((ir.get("budget") or {}).get("repairContextBytes", REPAIR_CONTEXT_BYTES)))
         a("function repairRoundDir(key, round) { return REPAIR_LAUNCH.root.replace(/[/\\\\]$/, '') + '/.claude/fluxpoint/rounds/' + REPAIR_LAUNCH.nonce + '/' + A._replayLaunchNonce + '/' + key + '/r' + round + '/'; }")
         a("const FIX_ORIGINS = []")
         with open(os.path.join(os.path.dirname(__file__), "repair-origins.js"), encoding="utf-8") as helpers:
@@ -4218,7 +4232,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
             for token in SUBST.findall(work["prompt"]):
                 if token.startswith("prev."):
                     mapping[token] = f"tokenText(({prev} || {{}})[{js_str(token.split('.', 1)[1])}] ?? null)"
-        mapping.update(roundDir="roundDir", lastCheck="tokenText(lastCheck)")
+        mapping.update(roundDir="roundDir", lastCheck="tokenText(repairFeedback(lastCheck))")
         checker_snapshot = work.get("contract") == "FixCheckV1" and work.get("isolation") == "measure"
         pre = "" if checker_snapshot else "measurePreamble() + " if work.get("isolation") == "measure" else "basePreamble() + " if work.get("mutates") or work.get("isolation") else ""
         if ir.get("authorizedBy") and (work.get("mutates") or work.get("irreversible")):
@@ -4245,6 +4259,8 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     a(f"  const batch_{var} = await parallel(pending_{var}.map(state => async () => {{")
     a("    const { item, i, lastCheck } = state")
     a("    const requiredClasses = state.recurring || []")
+    a(f"    const feedbackIssue = repairContextIssue(repairFeedback(lastCheck))")
+    a(f"    if (feedbackIssue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'CONTEXT-LIMIT', feedbackIssue); return state }}")
     a("    const reframeBrief = requiredClasses.length ? 'REFRAME REQUIRED: two or more consecutive checks failed on ' + JSON.stringify(requiredClasses) + '. State the authoritative system-of-record invariant. Adopt or refute a class-level rewire with a command and observed measurement, or remove the mechanism. Return structured reframe {classes,invariant,classRewire,disposition:adopt|refute|remove,measurement:{command,result}}. Another narrow patch is refused.\\n' : ''")
     a(f"    const roundDir = repairRoundDir(item.key, round_{var})")
     a(f"    if (!affordable(`{fixer['id']}:${{item.key}}`)) {{ abort_{var} = 'BUDGET-EXHAUSTED'; return {{ ...state, roundDir }} }}")
@@ -4254,6 +4270,8 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
         a(f"    if (Object.prototype.hasOwnProperty.call(fixed, 'packetConflict')) {{ abort_{var} = 'HALTED'; note({js_str(fixer['id'])}, 'PACKET-CONFLICT', 'Locked-check conflict requires a recorded operator ruling'); return {{ ...state, fixed, roundDir }} }}")
         a(f"    const resourceIssue = repairResourcesIssue(fixed)")
         a(f"    if (resourceIssue) {{ abort_{var} = 'HALTED'; note({js_str(nid)}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: item.key, round: round_{var} }}); return {{ ...state, fixed, roundDir }} }}")
+    a("    const contextIssue = repairContextIssue(fixed)")
+    a(f"    if (contextIssue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'CONTEXT-LIMIT', contextIssue); return {{ ...state, fixed, roundDir }} }}")
     a(f"    const patches = [...(state.patches || []), {{ item: item.key, round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: fixed.patchSha256 }}]")
     a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: [...state.targetClasses] }}")
     a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay the reproduction and its valid control on the bare launch base and EACH listed complete patch in a fresh base archive, not cumulatively. Use repair-replay.py to obtain originEvidence. New code location or identifier age is not origin evidence. Missing replay/control means INCOMPLETE. Attack every sharedResources writer and reader supplied by the fixer, including existing writers reached by a new reader.\\n'")
@@ -4326,6 +4344,8 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
         a("    const reframeBrief = requiredClasses.length ? 'REFRAME REQUIRED for merged-tree classes ' + JSON.stringify(requiredClasses) + ': state the authoritative invariant and adopt/refute the class rewire with a command and measured result, or remove the mechanism. Return structured reframe evidence; the independent review must validate it.\\n' : ''")
         a(f"    if (!affordable({js_str(merge['id'])})) {{ INCOMPLETE = true; return summary('BUDGET-EXHAUSTED') }}")
         a(f"    const integrationInputs = passed_{var}.map(s => ({{ item: s.item.key, patches: s.patches, packetEdits: s.fixed.packetEdits || [], siblings: s.fixed.siblings || [], sharedResources: s.fixed.sharedResources || [] }}))")
+        a("    const inputIssue = repairContextIssue(integrationInputs, repairFeedback(lastCheck))")
+        a(f"    if (inputIssue) {{ INCOMPLETE = true; note({js_str(merge['id'])}, 'CONTEXT-LIMIT', inputIssue); return summary('INCOMPLETE') }}")
         a(f"    const merged = await spawn(reframeBrief + {prompt(merge, 'integrationInputs')}, {opts(merge, ir, merge.get('phase', phase_name), '`' + merge['id'] + ':r${round_' + var + '}`')})")
         a(f"    RESULTS[{js_str(merge['id'])}] = merged")
         a("    if (!merged) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
@@ -4333,6 +4353,8 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
             a(f"    if (Object.prototype.hasOwnProperty.call(merged, 'packetConflict')) {{ INCOMPLETE = true; note({js_str(merge['id'])}, 'PACKET-CONFLICT', 'Locked-check conflict requires a recorded operator ruling'); return summary('HALTED') }}")
             a("    const resourceIssue = repairResourcesIssue(merged)")
             a(f"    if (resourceIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: '_integration', round: round_{var} }}); return summary('HALTED') }}")
+        a("    const mergedIssue = repairContextIssue(merged)")
+        a(f"    if (mergedIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'CONTEXT-LIMIT', mergedIssue); return summary('INCOMPLETE') }}")
         a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: merged.patchSha256 }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))] }}")
         a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay bare base and EVERY component patch separately on fresh base archives, then the complete integrated patch. Only a harm absent from base and all component patches but reproduced on the integrated patch is cross-slice. Attack the complete sharedResources writer/reader list from the integration result.\\n'")
 

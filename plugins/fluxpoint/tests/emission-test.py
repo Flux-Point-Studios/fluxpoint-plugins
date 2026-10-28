@@ -373,6 +373,8 @@ probe("budget", "maxEstimatedTokens", NODE_BASE,
 # The TTL changes what the estimate prices as warm, and the emitted script
 # says which TTL it was written for; a field that changed neither would let
 # a graph declare a cache it never priced.
+probe("budget", "repairContextBytes", NODE_BASE,
+      lambda ir: ir["budget"].update(repairContextBytes=0))
 probe("budget", "cacheTtl", NODE_BASE,
       lambda ir: ir["budget"].update(cacheTtl="1h"))
 
@@ -415,7 +417,7 @@ probed = {
     "release": {"instructions", "proofContract", "whyNotAgent"},
     "wake": {"check", "everyMinutes", "deadline"},
     "budget": {"maxNodes", "verifyFloorTokens", "nodeFloorTokens",
-               "maxEstimatedTokens", "cacheTtl"},
+               "maxEstimatedTokens", "cacheTtl", "repairContextBytes"},
     "IR": {
         "version", "name", "campaign", "budget", "defaults", "roles", "lists",
         "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard", "authorizedBy",

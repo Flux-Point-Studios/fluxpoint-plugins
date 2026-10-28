@@ -120,6 +120,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
  }
  if(label.startsWith('fix:')||label.startsWith('merge:')){
   const r=structuredClone(slice);
+  if(mode==='context-overflow')r.diffSummary='x'.repeat(40000);
   if(mode==='fixer-digest-drift')r.patchSha256='0'.repeat(64);
   if(mode==='packet-conflict-fix'&&label.startsWith('fix:'))r.packetConflict=null;
   if(mode==='packet-conflict-merge'&&label.startsWith('merge:'))r.packetConflict={checks:['locked'],nodes:['fix'],counterexample:'counterexample executed'};
@@ -354,6 +355,20 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         fix_round2 = next(c for c in result['calls'] if c['label'] == 'fix:slice:r2')
         self.assertIn('unchecked sibling field', fix_round2['p'])
         self.assertTrue(any(p['status'] == 'RECURRING-CLASS' for p in result['r']['provenance']))
+
+    def test_repair_context_bound_is_priced_and_enforced_before_spawning(self):
+        ir = copy.deepcopy(self.ir)
+        ir['budget']['repairContextBytes'] = 4096
+        priced = CG.estimate_tokens(ir, CONTRACTS)
+        ir['nodes'][1]['prompt'] += ' another {{prev}}'
+        twice = CG.estimate_tokens(ir, CONTRACTS)
+        self.assertGreaterEqual(twice['total'] - priced['total'], 4096)
+        self.assertFalse(any(token == '{{prev}}' for token, _ in twice['unpriced']))
+        self.assertTrue(any('whole {{prev}}' in w for w in CG.warnings(ir)))
+        result = self.run_graph('context-overflow')
+        self.assertEqual(result['r']['outcome'], 'INCOMPLETE')
+        self.assertTrue(any(p['status'] == 'CONTEXT-LIMIT' for p in result['r']['provenance']))
+        self.assertFalse(any(c['label'].startswith('check:') for c in result['calls']))
 
     def test_terminal_partial_round_skips_integration_spend(self):
         result = self.run_graph('partial', integration=True)

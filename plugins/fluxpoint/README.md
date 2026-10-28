@@ -265,7 +265,8 @@ launch or resume, and the watchdog samples it on every poll.
 The [repair campaign](templates/WORK.repair.md) separates implementation from
 independent fix checks, replay and repair evidence. Compact manifests bind
 review scope to patch bytes, each resume writes fresh artifacts, and a fixed
-helper runs packet checks in the reviewed snapshot before PASS counts. Direct repairs outside a
+helper runs packet checks in the reviewed snapshot before PASS counts. Repair
+context values have an enforced, explicitly priced `budget.repairContextBytes` bound. Direct repairs outside a
 graph stay unchecked until an independent run or explicit recorded acceptance
 discharges them. [Long commands](references/longrun.md),
 [deployed lanes](references/deployed-gates.md), [forge evidence](references/forge-evidence.md)

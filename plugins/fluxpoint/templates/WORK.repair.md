@@ -17,6 +17,7 @@ the repository's normal merge policy after the final gate passes.
   "budget": {
     "maxNodes": 256,
     "cacheTtl": "1h",
+    "repairContextBytes": 32768,
     "maxEstimatedTokens": 13000000
   },
   "requiredArgs": [
@@ -133,6 +134,13 @@ Never reuse or overwrite old outputs; return `patchSha256` for the exact
 complete bytes produced by this attempt. The read witness relays the patch
 digest and a compact hunk inventory; source lines remain in the patch file.
 Materialization and recording recompute this inventory from the actual bytes.
+Each dynamic `prev` or compact `lastCheck` value is limited to
+`budget.repairContextBytes` UTF-8 bytes (default 32768, at most 1048576).
+Every occurrence is priced at that bound with no prefix-cache discount. An
+oversized value ends INCOMPLETE before the next seat spawns; split the slice
+or raise the declared bound and review the new estimate. Integration receives
+patch paths, packet proposals, sibling claims and resource declarations.
+Detailed checker and reviewer logs stay in the recorded results.
 `graph-run` supplies a stamped launch identity and the graph retains it in
 the run summary. Tree sentinels, the runtime node ceiling and run recording
 apply just as they do to every compiled campaign. Use `/fluxpoint:graph-run`
