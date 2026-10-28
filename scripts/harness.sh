@@ -242,7 +242,10 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
         step "recall source maintenance" "$FPL_PY" "$PLUGIN/tests/recall-maintenance-test.py"
         step "embedder quarantine" "$FPL_PY" "$PLUGIN/tests/embedder-test.py" ;;
       "$PLUGIN"/scripts/inject-state.sh | "$PLUGIN"/scripts/prompt-recall.sh)
-        step "hybrid recall pipeline" "$FPL_PY" "$PLUGIN/tests/recall-test.py" ;;
+        step "hybrid recall pipeline" "$FPL_PY" "$PLUGIN/tests/recall-test.py"
+        step "warm prompt recall" "$FPL_PY" "$PLUGIN/tests/prompt-recall-daemon-test.py" ;;
+      "$PLUGIN"/scripts/prompt-recall-daemon.py | "$PLUGIN"/scripts/prompt-recall-client.mjs)
+        step "warm prompt recall" "$FPL_PY" "$PLUGIN/tests/prompt-recall-daemon-test.py" ;;
       "$PLUGIN"/scripts/memory.py | "$PLUGIN"/scripts/recurrence-guard.py)
         step "recurrence gate" "$FPL_PY" "$PLUGIN/tests/recurrence-test.py"
         step "lessons across runs" "$FPL_PY" "$PLUGIN/tests/memory-test.py" ;;
@@ -356,6 +359,7 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     step "packet reference context (executed)" "$FPL_PY" "$PLUGIN/tests/specification-reference-test.py"
     step "compiled witness identity (executed)" "$FPL_PY" "$PLUGIN/tests/plugin-identity-test.py"
     step "hybrid recall pipeline (executed)" "$FPL_PY" "$PLUGIN/tests/recall-test.py"
+    step "warm prompt recall (executed)" "$FPL_PY" "$PLUGIN/tests/prompt-recall-daemon-test.py"
     step "recall source maintenance (executed)" "$FPL_PY" "$PLUGIN/tests/recall-maintenance-test.py"
     step "durable memory storage (executed)" "$FPL_PY" "$PLUGIN/tests/memory-storage-test.py"
     step "embedder quarantine (executed)" "$FPL_PY" "$PLUGIN/tests/embedder-test.py"

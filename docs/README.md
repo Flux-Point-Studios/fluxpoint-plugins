@@ -19,6 +19,7 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 | Launch or resume with pinned artifacts | [Structured resume](../plugins/fluxpoint/references/structured-resume.md), [graph-run](../plugins/fluxpoint/commands/graph-run.md) |
 | Diagnose a busy or unhealthy machine | [Machine health and watchdog](box-health.md) |
 | Run long commands and manage cancellation | [Long-command lifecycle](../plugins/fluxpoint/references/longrun.md) |
+| Keep armed per-prompt recall warm | [Warm prompt recall](warm-prompt-recall.md) |
 | Inspect status, blockers and metrics | [Status command](../plugins/fluxpoint/commands/status.md) |
 
 ## Verification and evidence

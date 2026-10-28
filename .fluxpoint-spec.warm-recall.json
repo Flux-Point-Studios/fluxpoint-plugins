@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "goal": "Keep the armed per-prompt recall query process and index warm (#153)",
+  "asset": "The existing offline recall search and precision floor",
+  "scope": [
+    "Authenticated bounded localhost query process",
+    "Node warm hook client and detached startup",
+    "Index cache invalidation and idle cleanup",
+    "Existing root selection and offline hook behavior"
+  ],
+  "outOfScope": [
+    "Automatically arming prompt recall",
+    "Index rebuilds or embedding network calls in the query process"
+  ],
+  "decisions": [
+    {
+      "id": "warm-prompt-recall",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should decisions and requirements constrain implementation?",
+        "options": [
+          {
+            "option": "locked-packet",
+            "argued_by": "model",
+            "strongest_objection": "Adds a manifest and lock that must be revised when requirements change"
+          },
+          {
+            "option": "advisory-prose",
+            "argued_by": "model",
+            "strongest_objection": "The existing compiler accepts mutating graphs with no spec or decisions"
+          },
+          {
+            "option": "universal-proof",
+            "argued_by": "model",
+            "strongest_objection": "Would require new models and checker support for every implementation language"
+          }
+        ],
+        "chosen": "locked-packet",
+        "rationale": "Use an authenticated loopback query process and a portable Node hook client while preserving existing offline precision-floored recall. Keep source/index caches in memory with file-stat invalidation, bound requests and idle lifetime, and detach standard handles at startup.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue #153 measured 2.6 second armed prompts from repeated Python/index cold starts. Read prompt-recall.sh, lib.sh project jurisdiction, recall.for_prompt and ensure_index."
+        ]
+      },
+      "costs": [
+        {
+          "option": "locked-packet",
+          "cost": "Two tracked artifacts and requirement-specific check maintenance",
+          "basis": "estimate",
+          "evidence": [
+            "Design scope; no elapsed implementation time estimate claimed"
+          ]
+        },
+        {
+          "option": "advisory-prose",
+          "cost": "No new runtime checks; unmet requirements can remain invisible",
+          "basis": "measured",
+          "evidence": [
+            "Mutating graph without spec compiled with exit 0"
+          ]
+        },
+        {
+          "option": "universal-proof",
+          "cost": "Per-language proof and conformance work with unmeasured maintenance cost",
+          "basis": "unknown",
+          "evidence": [
+            "Existing proof integrations have different semantics; no universal adapter exists in this repository"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "warm-recall",
+      "statement": "An armed warm prompt reuses Python and index state, honors root containment and the precision floor, detects replaced index files, authenticates requests and responses, bounds input/output and idle lifetime, and inherits no hook pipes; failures retain bounded cold fallback.",
+      "decisions": [
+        "warm-prompt-recall"
+      ],
+      "checks": [
+        "warm-recall-tests"
+      ],
+      "counterexample": "A second prompt starts Python again, serves replaced index content, accepts an unauthenticated request, or waits forever on a detached child holding hook stdout."
+    }
+  ],
+  "checks": [
+    {
+      "id": "warm-recall-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/prompt-recall-daemon-test.py"
+      ],
+      "scope": "Execute daemon protocol, warm hook reuse, cache invalidation, limits and idle cleanup",
+      "assumptions": [
+        "Local same-user processes and the existing recall search are trusted; tests exercise actual loopback requests and hook scripts."
+      ],
+      "timeoutSeconds": 120
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "A stale port may belong to a different local process",
+      "resolution": "Requests and responses use nonce-bound HMAC authentication; the bearer secret is never transmitted."
+    }
+  ]
+}

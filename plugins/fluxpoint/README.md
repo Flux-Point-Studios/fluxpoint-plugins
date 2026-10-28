@@ -81,7 +81,9 @@ graphs can opt in with `specificationContext: "reference"`; see the
     inbox wakeups); `longrun.py`, `background.py` and `process_tree.py`
     (long commands, logs, waits, cancellation and descendant cleanup).
   - Memory: `memory.py` (lessons), `recall.py` and `embedder.py` (the
-    derived graph and hybrid retrieval).
+    derived graph and hybrid retrieval); `prompt-recall-client.mjs` and
+    `prompt-recall-daemon.py` keep armed offline prompt queries warm
+    ([lifecycle and limits](../../docs/warm-prompt-recall.md)).
   - `prompt-audit.py` (advisory prompt hygiene) and `migrate.py` (pre-1.0
     migration: plan, apply, finalize).
 - `contracts/` — versioned schemas: `FindingsV1`, `VerdictV1`,
