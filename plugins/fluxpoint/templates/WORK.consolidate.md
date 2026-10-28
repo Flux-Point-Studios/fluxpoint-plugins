@@ -29,9 +29,10 @@ tags, not arguments.
 ```json graph-ir
 {
   "version": 1,
+  "specificationContext": "reference",
   "name": "memory-consolidation",
   "campaign": "Consolidate the defect-sweep lesson stream: one canonical row per real finding, stale kills re-examined, drifted claims restated against the current code",
-  "budget": { "maxNodes": 40, "verifyFloorTokens": 40000, "nodeFloorTokens": 60000, "cacheTtl": "1h", "maxEstimatedTokens": 600000 },
+  "budget": { "maxNodes": 40, "verifyFloorTokens": 40000, "nodeFloorTokens": 60000, "cacheTtl": "1h", "maxEstimatedTokens": 350000 },
   "defaults": { "effort": "medium" },
   "roles": { "curator": { "effort": "medium" } },
   "nodes": [

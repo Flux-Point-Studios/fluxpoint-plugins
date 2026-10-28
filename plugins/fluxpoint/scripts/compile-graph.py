@@ -42,7 +42,7 @@ IDENT = re.compile(r"^[a-z][a-z0-9-]*$")
 # must demonstrably change what the compiler produces.
 IR_FIELDS = {
     "version", "name", "campaign", "budget", "defaults", "roles", "lists",
-    "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard", "authorizedBy",
+    "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard", "authorizedBy", "specificationContext",
 }
 NODE_FIELDS = {
     "id", "phase", "prompt", "contract", "role", "effort", "model", "agentType",
@@ -930,6 +930,8 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
     f = []
     if ir.get("version") != 1:
         f.append("IR version must be 1")
+    if ir.get("specificationContext", "inline") not in ("inline", "reference"):
+        f.append("specificationContext must be 'inline' or 'reference'")
     if "treeGuard" in ir and not isinstance(ir["treeGuard"], bool):
         f.append("treeGuard must be a boolean — it disables the shared-tree "
                  "sentinel, and a truthy non-bool would read as a policy "
@@ -2283,6 +2285,31 @@ def prompt_bytes(texts, ir, item=None, index=0, bounds=None):
     return shared, varying
 
 
+def project_specification(specification, ir):
+    """Only rebuildable reference metadata enters node context in reference mode."""
+    if not specification or ir.get("specificationContext", "inline") == "inline":
+        return specification
+    packet = specification.get("packet") or {}
+    return {"contextMode": "reference", "identity": specification["identity"],
+            "path": specification.get("path") or ".fluxpoint-spec.json",
+            "catalogue": {kind: [row["id"] for row in packet.get(kind, [])]
+                          for kind in ("requirements", "checks", "decisions")}}
+
+
+def reference_context_prefix(projected, plugin=None):
+    import hashlib
+    import shlex
+    plugin = plugin or _sibling("plugin_identity").current()
+    digest = hashlib.sha256(json.dumps(projected["identity"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    command = "bash " + shlex.quote(plugin["root"] + "/scripts/py.sh") + " specification.py --check --spec " + shlex.quote(projected["path"]) + " --check-identity " + digest + " --plugin-pin " + shlex.quote(json.dumps(plugin, sort_keys=True, separators=(",", ":")))
+    return ("First command, from your working tree's repository root: " + command + ". "
+            "Stop if it fails. This compares the current packet, proof baseline and referenced archive digests "
+            "with this graph's exact compiled identity, even if a changed packet was re-locked. "
+            "Then read only the requirement, binding check scopes and rulings needed for your task from the named packet; "
+            "resolve path#/pointer fields against the verified archives. Read the full packet when challenging its completeness. "
+            "Do not substitute a newer packet or omit applicable requirements. Catalogue and identity follow:\n")
+
+
 def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
     """Cold-input-token equivalents for the worst-case plan.
 
@@ -2314,8 +2341,10 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
     per_node, raw = {}, {}
     # One token per ASCII serialization byte is deliberately conservative.
     # Do not assume the packet, after a varying preamble, shares the cache.
-    spec_input = (len(SPEC_PREAMBLE) + len(json.dumps(specification, ensure_ascii=True,
-                                                    separators=(',', ':'))) + 1) if specification else 0
+    projected_spec = project_specification(specification, ir)
+    reference_prefix = reference_context_prefix(projected_spec) if projected_spec and projected_spec.get("contextMode") == "reference" else ""
+    spec_input = (len((SPEC_PREAMBLE + reference_prefix).encode("utf-8")) + len(json.dumps(projected_spec, ensure_ascii=True,
+                                                    separators=(',', ':'))) + 1) if projected_spec else 0
     for g in plan_groups(ir):
         if not persist:
             tracks.pop(g["track"], None)
@@ -2358,7 +2387,7 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
                 warm.add(key)
             raw[nid] = raw.get(nid, 0.0) + cost
             rec = per_node.setdefault(nid, {"calls": 0, "estimatedTokens": 0, "effort": effort,
-                                            "model": model or "default"})
+                                            "model": model or "default", "specificationInputTokens": 0 if g.get("sentinel") else spec_input})
             rec["calls"] += 1
     # Rounded once per node, and the headline is the sum of those: a profile
     # that does not add up to the estimate beside it is two numbers to argue
@@ -2855,6 +2884,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a(f"  name: {js_str(ir.get('name') or 'graph-campaign')},")
     a(f"  description: {js_str(ir['campaign'])},")
     a(f"  compilerVersion: {js_str(version)},")
+    a("  specificationContext: " + js_str(ir.get("specificationContext", "inline")) + ",")
     a("  plugin: PLUGIN,")
     a("  launchRequirements: " + json.dumps(public_launch_requirements(launch)) + ",")
     a("  phases: [")
@@ -2908,8 +2938,10 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("function tokenText(v) { return v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v) }")
     a("function longPreamble() { return " + js_str(LONG_PREAMBLE) + "; }")
     if specification:
-        a("const SPECIFICATION = " + json.dumps(specification, ensure_ascii=True))
-        a("function specificationPreamble() { return " + js_str(SPEC_PREAMBLE) + " + JSON.stringify(SPECIFICATION) + '\\n'; }")
+        projected = project_specification(specification, ir)
+        a("const SPECIFICATION = " + json.dumps(projected, ensure_ascii=False))
+        prefix = SPEC_PREAMBLE + (reference_context_prefix(projected, plugin) if projected.get("contextMode") == "reference" else "")
+        a("function specificationPreamble() { return " + js_str(prefix) + " + JSON.stringify(SPECIFICATION) + '\\n'; }")
     a("// Resolved inputs are logged, never silently defaulted behind your back.")
     a("log(`inputs: ${JSON.stringify(A)}`)")
     # What the spec priced, next to what the run will meter. The profile is
@@ -3296,7 +3328,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     if any((n.get("repeat") or {}).get("classBy") for n in nodes):
         extra += ", recurringClasses: RECURRING_CLASSES"
     if specification:
-        extra += ", specification: SPECIFICATION.identity"
+        extra += ", specification: SPECIFICATION.identity, specificationContext: SPECIFICATION.contextMode || 'inline'"
         if specification.get("path"):
             extra += ", specificationPath: SPECIFICATION.path"
     if any(n.get("irreversible") for n in nodes):
@@ -5052,11 +5084,12 @@ def main():
 
     est = estimate_tokens(ir, contracts, specification, embedded_args)
     cap = (ir.get("budget") or {}).get("maxEstimatedTokens")
+    context_line = ("; packet context " + ir.get("specificationContext", "inline") + " " + str(est["assumptions"]["specificationInputTokens"]) + " estimated input tokens/call") if specification else ""
     blind = unpriced_note(est)
     cost_line = (f"~{est['total']:,} estimated tokens"
                  + (f" of {cap:,} allowed" if cap is not None else "")
                  + f" ({est['cold']} cold prefill(s) of {est['calls']} call(s), "
-                 f"prompt-cache TTL {est['ttl']}"
+                 f"prompt-cache TTL {est['ttl']}" + context_line
                  + (f"; {blind}" if blind else "") + ")")
     # --check measures exactly the script compilation would write.
     try:

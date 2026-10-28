@@ -12,13 +12,14 @@ the repository's normal merge policy after the final gate passes.
 ```json graph-ir
 {
   "version": 1,
+  "specificationContext": "reference",
   "name": "repair-campaign",
   "campaign": "Repair a blocked review with independent fresh-tree checks and per-round integration",
   "budget": {
     "maxNodes": 256,
     "cacheTtl": "1h",
     "repairContextBytes": 32768,
-    "maxEstimatedTokens": 13000000
+    "maxEstimatedTokens": 9500000
   },
   "requiredArgs": [
     "findings"

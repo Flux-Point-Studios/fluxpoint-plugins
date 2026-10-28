@@ -63,3 +63,6 @@ shared worktree memory are described in [memory recall](memory-recall.md#corpus-
 [Compiled witness identity](witness-identity.md) documents plugin pins across
 launch, resume, gate execution and attestation recording.
 
+[Packet reference context](../plugins/fluxpoint/references/spec-format.md#packet-context-by-reference)
+reduces repeated scope text while retaining the exact compiled lock identity.
+

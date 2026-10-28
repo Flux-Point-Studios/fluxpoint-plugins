@@ -54,10 +54,12 @@ Workflow tool requires.
      names (default `.fluxpoint-spec.json` at the repository root), and a
      `CONTRACTS:` header overlays a repo-local contract directory on the
      shipped contracts; the `--check` line names both, so confirm they are
-     the ones this campaign was written against. The compiler embeds the
-     packet in node context. Verify the packet covers this goal, its check commands are
+     the ones this campaign was written against. The compiler uses the graph's `specificationContext`: shipped templates pass a
+     compact packet reference and exact identity, while older graphs inline it.
+     Reference-mode nodes first run the emitted `--check-identity` command, then
+     read their applicable requirements and binding scopes from the verified file. Verify the packet covers this goal, its check commands are
      wired into the repo harness, and it and its lock are committed for
-     isolated nodes. On Codex's fallback, pass the embedded packet to each
+     isolated nodes. On Codex's fallback, pass the same packet context and first-command instruction to each
      node and preserve its identity in the summary; recording rejects a
      stale or omitted identity. Do not re-lock a changed spec to repair a
      failing implementation; review the requirement change first.

@@ -399,6 +399,7 @@ probe("IR", "treeGuard", NODE_BASE, lambda ir: ir.update(treeGuard=False))
 probe("IR", "authorizedBy", NODE_BASE, lambda ir: ir.update(
     imports={"vault-params": "latest"}, authorizedBy="vault-params"))
 probe("IR", "argDefaults", NODE_BASE, lambda ir: ir.update(argDefaults={"target": "HEAD"}))
+probe("IR", "specificationContext", NODE_BASE, lambda ir: ir.update(specificationContext="reference"))
 
 # ------------------------------------------------------------ completeness
 print()
@@ -420,7 +421,7 @@ probed = {
                "maxEstimatedTokens", "cacheTtl", "repairContextBytes"},
     "IR": {
         "version", "name", "campaign", "budget", "defaults", "roles", "lists",
-        "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard", "authorizedBy",
+        "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard", "authorizedBy", "specificationContext",
     },
 }
 for level, registry in [

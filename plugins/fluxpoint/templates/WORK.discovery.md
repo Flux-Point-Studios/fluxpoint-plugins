@@ -24,9 +24,10 @@ Copy over `WORK.md`'s Campaign section to use it.
 ```json graph-ir
 {
   "version": 1,
+  "specificationContext": "reference",
   "name": "discovery-campaign",
   "campaign": "Sweep for defects until two consecutive rounds find nothing new",
-  "budget": { "maxNodes": 126, "verifyFloorTokens": 50000, "nodeFloorTokens": 80000, "cacheTtl": "1h", "maxEstimatedTokens": 5000000 },
+  "budget": { "maxNodes": 126, "verifyFloorTokens": 50000, "nodeFloorTokens": 80000, "cacheTtl": "1h", "maxEstimatedTokens": 2500000 },
   "defaults": { "effort": "medium" },
   "requiredArgs": ["target"],
   "roles": { "hunter": { "effort": "medium" } },

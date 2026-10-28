@@ -779,6 +779,8 @@ def main():
     parser.add_argument('--spec', help='packet path relative to --root (default ' + SPEC + ')')
     parser.add_argument('--graph', help="a graph file whose SPEC: header names the packet")
     parser.add_argument('--gate', help='declared gate whose attested pass permits --lock-harness')
+    parser.add_argument('--check-identity', help='expected SHA-256 of the canonical compiled identity (with --check)')
+    parser.add_argument('--plugin-pin', help='expected compiler installation identity as JSON')
     parser.add_argument('--closure', action='store_true', help='include computed test-support closure in --inputs')
     parser.add_argument('--strict-harness', action='store_true', help='refuse locked harness drift at this root before and after checks')
     action = parser.add_mutually_exclusive_group(required=True)
@@ -792,6 +794,14 @@ def main():
     args = parser.parse_args()
     root = Path(args.root).resolve()
     try:
+        if args.plugin_pin:
+            import plugin_identity
+            expected_plugin = json.loads(args.plugin_pin)
+            plugin_identity.verify(expected_plugin)
+            if expected_plugin != plugin_identity.current():
+                raise ValueError('PLUGIN-PIN: specification helper differs from the compiled installation')
+        if args.check_identity and (not args.check or not re.fullmatch(r'[0-9a-f]{64}', args.check_identity)):
+            raise ValueError('--check-identity requires --check and a SHA-256 hex digest')
         spec = args.spec
         if not spec and not args.graph and args.run:
             # Without --spec or --graph the runner reads the state file's own
@@ -819,6 +829,10 @@ def main():
             raise ValueError('--strict-harness is only for --check or --run')
         packet_file, lock_path = packet_paths(root, spec)
         doc, identity = load(root, locked=not args.lock, spec=spec)
+        if args.check_identity:
+            actual = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            if actual != args.check_identity:
+                raise ValueError('packet differs from the exact compiled identity; review and recompile before continuing')
         name = packet_file.relative_to(root).as_posix()
         if args.gate and not args.lock_harness:
             raise ValueError('--gate is only for --lock-harness')

@@ -265,11 +265,38 @@ projected referenced JSON files, and graph files declaring that same packet.
 Unrelated files, locks, paths outside the repository and graph packet redirects
 are refused. A newly referenced archive must already exist in the tree. Invalid
 projected JSON or packet structure fails rather than receiving a borrowed lock
-identity. Archived text remains fully resolved, so moving it behind a reference
-does not reduce compiled size.
+identity. Inline context keeps archived text fully resolved. Reference context
+keeps only the packet path, its exact identity and a catalogue of IDs in the
+compiled script, so archived prose does not inflate every prompt or the script.
 
 In a repair round, integrate every passing slice's proposals, including earlier
 passing rounds, into one immutable `packet-edits.json`. The integration checker
 compares the artifact with the returned `packetEdits` and projects it against
 every graph naming that packet. Conflicts, dropped proposals and overflow fail
 the round; low headroom raises a finding while revision is still reviewable.
+
+
+## Packet context by reference
+
+Set `"specificationContext": "reference"` in graph IR to pass the packet by
+reference. Shipped WORK templates use this setting. Existing graphs without it
+retain `"inline"` behavior. The compiler still fully validates and resolves the
+packet, but emits only its repo-relative path, the full lock identity (including
+archive digests), and requirement/check/decision IDs. Each node first runs the
+quoted, pinned `specification.py --check --check-identity <digest>` command from
+its working-tree root, then reads applicable requirements, binding check scopes
+and rulings from the verified files. A reviewer challenging packet completeness
+must read the whole packet. Reference mode changes transport, not applicability.
+
+`--check-identity` compares the canonical current identity with the compiled
+expectation, so relocking a changed packet or archive cannot make an old graph
+trust new bytes. A mismatch stops the worker. Run summaries retain the complete
+identity and record their context mode. `--check` reports packet input tokens per
+call, and each profile row records `specificationInputTokens`; prices include
+reference metadata and validation instructions. Tool output from targeted reads
+is workload-dependent and does not become a claim of measured latency savings.
+
+Reference text uses UTF-8 serialization instead of ASCII escapes in both modes.
+The starter, consolidation, discovery, feature, verified and repair template
+ceilings are now 200,000, 350,000, 2,500,000, 1,450,000, 1,300,000 and 9,500,000
+estimated tokens. Recompute against each campaign's packet and runtime context.

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "sha256": "eacc24cd0de659567147b50a186439d53edd14ce680fd8728b45e0a0ad522ffd",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/specification-reference-test.py": "57138f779bb584feee043a68575a969a3fb1a50a12798257c09db1736e0ce452"
+  }
+}

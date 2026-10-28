@@ -30,6 +30,11 @@ Compiled graphs pin the plugin witness by root, version and code hashes. Gate
 rows record their producer; launch, resume and recording detect witness drift.
 See [witness identity](../../docs/witness-identity.md).
 
+Shipped graph templates pass locked packets by reference with an exact identity
+check before reading applicable scope, reducing repeated packet context. Existing
+graphs can opt in with `specificationContext: "reference"`; see the
+[packet format](references/spec-format.md#packet-context-by-reference).
+
 
 ## Layout
 

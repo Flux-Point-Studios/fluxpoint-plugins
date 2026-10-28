@@ -57,7 +57,7 @@ Costs above describe concrete work and risk, not measured time or price estimate
    every active category ratcheted. A draft can lock before arming; re-lock
    after reviewing and arming the baseline, then run the actual proof checks.
 6. Mutating or irreversible graphs require a locked packet at compilation.
-   Embed the packet in their node context and its digest in run summaries.
+   Bind the packet in their node context and its digest in run summaries. Reference context verifies the exact compiled identity before reading applicable packet text; legacy inline context carries the whole packet.
    Recording such a run checks the digest again. Read-only discovery can run
    without a packet; an existing packet must still be valid. Harness-only fixes
    use `--lock-harness --gate <name>` after an attested pass for that declared
@@ -85,8 +85,8 @@ Costs above describe concrete work and risk, not measured time or price estimate
     This is a stated estimate, not a measured tokenizer count or a context-limit guarantee.
     Template ceilings include packet headroom; recompute against each goal's
     actual locked packet before launching. The starter, consolidation, discovery,
-    feature, verified and repair ceilings are 350,000, 600,000, 5,000,000,
-    2,500,000, 2,250,000 and 13,000,000 estimated tokens, respectively.
+    feature, verified and repair ceilings are 200,000, 350,000, 2,500,000,
+    1,450,000, 1,300,000 and 9,500,000 estimated tokens, respectively.
 
 ## Implementation validation
 
