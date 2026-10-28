@@ -113,3 +113,7 @@ the observations establish it. `[]` explicitly declares no shared resources.
 When returning PASS, optional `commits` names only the Git commits whose
 patched behavior you actually checked. Omit it for uncommitted patches; never
 copy a proposed commit list without verifying those exact changes.
+
+The diff tier's reproduce refuter must rerun the claim's exact recorded
+attack command and valid control on the current patch before REFUTED can
+count. A different command that happens to pass cannot discharge the claim.

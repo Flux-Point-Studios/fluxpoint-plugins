@@ -164,7 +164,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
   if(mode!=='unexecuted-attacker')executeProof(p,mode==='attacker-drops-harm'||mode==='claim-dropped-extra-harm'&&label.endsWith(':authority'));
   if(mode==='attacker-other-sha')r.patchSha256='0'.repeat(64);
   if(mode.startsWith('claim-')&&label.endsWith(':authority')){
-   const observed=reproduces=>({command:'python sibling_attack.py',result:reproduces?'exit 1: sibling harm':'exit 0: defended',controlCommand:'python valid.py',controlResult:'exit 0: valid',controlPassed:true,reproduces});
+   const observed=reproduces=>({command:mode==='claim-unrelated-reproduction'?'python unrelated_claim.py':ATTACK_COMMAND,result:reproduces?'exit 1: sibling harm':'exit 0: defended',controlCommand:CONTROL_COMMAND,controlResult:'exit 0: valid',controlPassed:true,reproduces});
    r.findings=[{finding:'unchecked sibling field in repaired invariant',severity:'HIGH',defectClass:'decode',invariant:'all sibling fields are guarded',classRewire:'guard the class at the shared boundary',measurement:'sibling_attack.py executed: harm observed',origin:'fix-introduced',introducedIn:1,
     originEvidence:{base:{snapshot:c.base,...observed(false)},targetClasses:c.targetClasses,rounds:c.patches.map(x=>({...x,...observed(!c.integrated)})),...(c.integrated?{integrated:{...c.integrated,...observed(true)}}:{})}}];
   }
@@ -174,7 +174,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
   if(mode==='claim-dead-refuter'&&label.endsWith(':scope'))return null;
   if(mode==='claim-harm-then-defended')executeProof(p,true);
   const measured=executeProof(p,mode==='claim-harm-refuted');
-  return {resolution:mode==='claim-refuted'||mode==='claim-fake-evidence'||mode==='claim-harm-refuted'||mode==='claim-harm-then-defended'?'REFUTED':mode==='claim-unresolved'?'UNRESOLVED':'CONFIRMED',attack:mode==='claim-fake-evidence'?obs:measured.attack,control:measured.control,contradiction:'executed case contradicts the claim at the intended boundary'};
+  return {resolution:mode==='claim-refuted'||mode==='claim-unrelated-reproduction'||mode==='claim-fake-evidence'||mode==='claim-harm-refuted'||mode==='claim-harm-then-defended'?'REFUTED':mode==='claim-unresolved'?'UNRESOLVED':'CONFIRMED',attack:mode==='claim-fake-evidence'?obs:measured.attack,control:measured.control,contradiction:'executed case contradicts the claim at the intended boundary'};
  }
  throw Error('unexpected call '+label);
 };
@@ -340,7 +340,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         defended = self.run_graph('claim-refuted')
         self.assertEqual(defended['r']['outcome'], 'COMPLETE')
         self.assertEqual(len(defended['r']['repairDiffReviews'][0]['refuters']), 3)
-        for mode in ('claim-confirmed', 'claim-unresolved', 'claim-dead-refuter', 'claim-fake-evidence', 'claim-harm-refuted', 'claim-harm-then-defended'):
+        for mode in ('claim-confirmed', 'claim-unresolved', 'claim-dead-refuter', 'claim-fake-evidence', 'claim-unrelated-reproduction', 'claim-harm-refuted', 'claim-harm-then-defended'):
             with self.subTest(mode=mode):
                 result = self.run_graph(mode)
                 self.assertEqual(result['r']['outcome'], 'INCOMPLETE')

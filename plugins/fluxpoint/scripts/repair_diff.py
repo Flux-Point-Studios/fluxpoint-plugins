@@ -238,6 +238,10 @@ def diff_receipt_issue(receipt, context, measured):
         expected_votes = {prefix + ':refute:' + finding['id'] + ':' + lens for lens in ('reproduce', 'reachability', 'scope')}
         if {v['spawnId'] for v in votes} != expected_votes:
             return 'DIFF-ATTACK-UNPROVEN: refutation must name the three distinct harness refuter seats'
+        evidence = finding.get('originEvidence') or {}
+        current = context.get('integrated') or context.get('current') or {}
+        origin = evidence.get('integrated') or next((p for p in evidence.get('rounds', [])
+            if isinstance(p, dict) and all(p.get(k) == current.get(k) for k in ('item','round','patch'))), None)
         for vote in votes:
             if (not isinstance(vote, dict) or vote.get('spawnId') not in by_id or vote != by_id[vote['spawnId']]
                     or vote['spawnId'] in used
@@ -246,6 +250,10 @@ def diff_receipt_issue(receipt, context, measured):
                     or not executed(vote.get('observations')) or any(o['reproduces'] is not False for o in vote['observations'])
                     or not any(o['reproduces'] is False and all(o[k][field] == vote[k][field] for k in ('attack', 'control') for field in ('command', 'result')) for o in vote['observations'])):
                 return 'DIFF-ATTACK-UNPROVEN: an open or unexecuted finding cannot discharge a commit'
+            if vote['spawnId'].endswith(':reproduce') and (not isinstance(origin, dict) or not any(
+                    o['reproduces'] is False and o['attack']['command'] == origin.get('command')
+                    and o['control']['command'] == origin.get('controlCommand') for o in vote['observations'])):
+                return 'DIFF-ATTACK-UNPROVEN: reproduce refuter did not run the claim command and control'
             used.add(vote['spawnId'])
     if used != set(by_id):
         return 'DIFF-ATTACK-UNPROVEN: receipt contains unrelated refuter votes'
