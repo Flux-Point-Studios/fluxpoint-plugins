@@ -83,6 +83,26 @@ class ReferenceContext(unittest.TestCase):
         self.assertIn('reject-missing', value['prompts'][0])
         self.assertIn('spec-tests', value['prompts'][0])
 
+    def test_emitted_first_command_checks_nested_project_in_worker_tree(self):
+        import re
+        import shlex
+        nested = self.root / 'apps/package with space'
+        nested.mkdir(parents=True)
+        for name in ('archive.json', '.fluxpoint-spec.json', '.fluxpoint-spec-lock.json'):
+            (self.root / name).rename(nested / name)
+        # A different packet at repository root must never be read instead.
+        (self.root / '.fluxpoint-spec.json').write_text('wrong repository-root packet')
+        ir = dict(self.ir, specificationContext='reference')
+        code = cg.emit(ir, CONTRACTS, specification=self.spec, project_prefix='apps/package with space/')
+        prelude = 'const prompts=[];const args={};const agent=async(p)=>{prompts.push(p);return {summary:"read",plan:"done",files:[],risks:[]}};const log=()=>{},phase=()=>{},budget={total:null,spent:()=>0};const parallel=async xs=>Promise.all(xs.map(f=>f()));'
+        program = prelude + '\n(async()=>{\n' + code.replace('export const meta =', 'const meta =') + '\n})().then(r=>process.stdout.write(JSON.stringify(prompts)))'
+        rendered = subprocess.run(['node', '-'], input=program, cwd=self.root, text=True, capture_output=True, check=True)
+        prompt = json.loads(rendered.stdout)[0]
+        command = re.search(r"First command, from your working tree's repository root: (.+?)\. Stop if it fails", prompt).group(1)
+        actual = subprocess.run(shlex.split(command), cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(actual.returncode, 0, actual.stdout + actual.stderr + '\n' + command)
+        self.assertIn(self.spec['identity']['sha256'], actual.stdout)
+
     def test_invalid_context_mode_refused(self):
         findings = cg.validate(dict(self.ir, specificationContext='guess'), CONTRACTS)
         self.assertTrue(any('specificationContext' in f for f in findings))

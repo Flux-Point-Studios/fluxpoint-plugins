@@ -72,6 +72,17 @@
         "packet-reference-tests"
       ],
       "counterexample": "Relocking changed archives makes an old compiled reference graph trust new bytes or estimates still price the inline packet"
+    },
+    {
+      "id": "reference-project-root",
+      "statement": "The emitted first identity command resolves the packet in the nested project directory within the worker tree, even when repository root carries another packet",
+      "decisions": [
+        "packet-reference-context"
+      ],
+      "checks": [
+        "packet-reference-tests"
+      ],
+      "counterexample": "A graph compiled with --gates-root apps/pkg runs --spec .fluxpoint-spec.json from repository root and reads the wrong packet"
     }
   ],
   "checks": [

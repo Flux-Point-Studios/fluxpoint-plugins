@@ -2346,6 +2346,7 @@ def project_specification(specification, ir):
     packet = specification.get("packet") or {}
     return {"contextMode": "reference", "identity": specification["identity"],
             "path": specification.get("path") or ".fluxpoint-spec.json",
+            "projectRoot": specification.get("projectRoot") or ".",
             "catalogue": {kind: [row["id"] for row in packet.get(kind, [])]
                           for kind in ("requirements", "checks", "decisions")}}
 
@@ -2355,7 +2356,7 @@ def reference_context_prefix(projected, plugin=None):
     import shlex
     plugin = plugin or _sibling("plugin_identity").current()
     digest = hashlib.sha256(json.dumps(projected["identity"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    command = "bash " + shlex.quote(plugin["root"] + "/scripts/py.sh") + " specification.py --check --spec " + shlex.quote(projected["path"]) + " --check-identity " + digest + " --plugin-pin " + shlex.quote(json.dumps(plugin, sort_keys=True, separators=(",", ":")))
+    command = "bash " + shlex.quote(plugin["root"] + "/scripts/py.sh") + " specification.py --check --root " + shlex.quote(projected.get("projectRoot") or ".") + " --spec " + shlex.quote(projected["path"]) + " --check-identity " + digest + " --plugin-pin " + shlex.quote(json.dumps(plugin, sort_keys=True, separators=(",", ":")))
     return ("First command, from your working tree's repository root: " + command + ". "
             "Stop if it fails. This compares the current packet, proof baseline and referenced archive digests "
             "with this graph's exact compiled identity, even if a changed packet was re-locked. "
@@ -2886,6 +2887,8 @@ def launch_requirements_note(ir):
 
 def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=None,
          project_prefix="", embedded_args=None, replay_state=None):
+    if specification and ir.get('specificationContext') == 'reference' and project_prefix:
+        specification = dict(specification, projectRoot=project_prefix.rstrip('/'))
     if embedded_args is not None:
         embedded_args = dict({key: value for key, value in (ir.get('argDefaults') or {}).items() if not key.startswith('_')}, **embedded_args)
     nodes = ir["nodes"]
@@ -5126,6 +5129,8 @@ def main():
                 packet, identity = projection[:2]
             specification = {"packet": packet, "identity": identity,
                              "path": os.path.relpath(packet_file, args.gates_root).replace(os.sep, "/")}
+            if ir.get('specificationContext') == 'reference':
+                specification['projectRoot'] = git_prefix(args.gates_root).rstrip('/') or '.'
             findings = validate(ir, contracts, gates, agents, specification, embedded_args, repository_root=args.gates_root)
         except (OSError, ValueError, TypeError) as e:
             print(f"graph-compile: spec required before implementation: {e}", file=sys.stderr)

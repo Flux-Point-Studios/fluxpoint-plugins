@@ -300,3 +300,5 @@ Reference text uses UTF-8 serialization instead of ASCII escapes in both modes.
 The starter, consolidation, discovery, feature, verified and repair template
 ceilings are now 200,000, 350,000, 2,500,000, 1,450,000, 1,300,000 and 9,500,000
 estimated tokens. Recompute against each campaign's packet and runtime context.
+
+For a graph rooted in a repository subdirectory, reference context carries that project path relative to each worker’s repository root. Its first identity check passes that path through `--root`, so it reads the project packet within the isolated tree even when the repository root has another packet.
