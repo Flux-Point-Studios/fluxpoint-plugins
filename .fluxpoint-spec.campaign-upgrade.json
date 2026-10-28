@@ -14,48 +14,48 @@
   ],
   "decisions": [
     {
-      "id": "backlog-runner-inputs",
+      "id": "campaign-upgrades",
       "status": "defaulted",
       "dependsOn": [],
       "record": {
-        "question": "How should runner configuration and check input paths be distinguished?",
+        "question": "How should newer compilers and recorders handle contracts and identities from an in-flight older campaign?",
         "options": [
           {
-            "option": "explicit-inputs",
+            "option": "validate-and-label-legacy",
             "argued_by": "model",
-            "strongest_objection": "Unrecognized directory-valued options need --path or harnessInputs to bind actual inputs"
+            "strongest_objection": "Historical reference bytes cannot gain provenance retroactively; the coverage gap must stay visible"
           },
           {
-            "option": "all-existing-paths",
+            "option": "reject-all-history",
             "argued_by": "model",
-            "strongest_objection": "Runner root settings silently lock unrelated repository files"
+            "strongest_objection": "A plugin update prevents recording completed work even when packet bytes and obligations still match"
           }
         ],
-        "chosen": "explicit-inputs",
-        "rationale": "Skip directory option values unless explicitly declared as input paths. Resolve harness bash through the existing cross-platform helper.",
+        "chosen": "validate-and-label-legacy",
+        "rationale": "Refuse ineffective guard schemas before launch. Permit exact historical packet identities for recording only with an explicit uncovered-reference statement; retain operator unpinned allowances.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
         "evidence": [
-          "Issue #208 reproduction seeds unrelated files through --rootdir=.",
-          "Issue #217 identifies CreateProcess System32 search before PATH"
+          "Issue181 reproductions show unchanged archives called edited and old schemas compile without emitted-guard fields",
+          "Six CLI/compiler regressions exercise the migration boundary"
         ]
       },
       "costs": [
         {
-          "option": "explicit-inputs",
-          "cost": "Small option classification and regression coverage",
+          "option": "validate-and-label-legacy",
+          "cost": "One compatibility helper, explicit metadata and regression coverage",
           "basis": "estimate",
           "evidence": [
-            "Existing PATH_FLAGS distinguishes explicit input options"
+            "Existing packet hashes and recorder Evidence are reusable"
           ]
         },
         {
-          "option": "all-existing-paths",
-          "cost": "Whole repository input drift and Windows failures",
+          "option": "reject-all-history",
+          "cost": "Replay and execution must restart across version updates",
           "basis": "measured",
           "evidence": [
-            "Issue #208 minimal reproduction"
+            "Issue181 in-flight campaign reproduction"
           ]
         }
       ]
@@ -66,7 +66,7 @@
       "id": "upgrade-compatibility",
       "statement": "Old schema fields required by emitted guards fail compilation with migration context; genuine legacy identities can be recorded with explicit missing-reference coverage and explicit unpinned allowances",
       "decisions": [
-        "backlog-runner-inputs"
+        "campaign-upgrades"
       ],
       "checks": [
         "upgrade-tests"

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "goal": "Keep runner directory options out of packet input closures and resolve the tightening harness shell explicitly",
+  "goal": "Preserve packet runner input boundaries, resolve tightening bash and ratchet Python typing suppressions",
   "asset": "Existing packet input closure and shared safe tightening precondition",
   "scope": [
     "Runner directory option handling (#208)",
@@ -58,6 +58,53 @@
           ]
         }
       ]
+    },
+    {
+      "id": "python-type-hatches",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should Python typing suppressions be counted without treating comments and strings as code?",
+        "options": [
+          {
+            "option": "tokens-and-ast",
+            "argued_by": "model",
+            "strongest_objection": "Static name resolution cannot reflect runtime monkeypatching"
+          },
+          {
+            "option": "line-patterns",
+            "argued_by": "model",
+            "strongest_objection": "Docstrings and non-typing cast names create misleading baseline counts"
+          }
+        ],
+        "chosen": "tokens-and-ast",
+        "rationale": "Use tokenize for comments and AST annotations/imports for Any, casts and decorators; preserve Python-only dormancy until explicit baselining.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue198 specifies docstring/import counterexamples",
+          "Seven scanner and real CLI tests passed"
+        ]
+      },
+      "costs": [
+        {
+          "option": "tokens-and-ast",
+          "cost": "One standard-library reader and explicit config handling",
+          "basis": "estimate",
+          "evidence": [
+            "No runtime dependencies or user code imports"
+          ]
+        },
+        {
+          "option": "line-patterns",
+          "cost": "Incorrect counts in ordinary docstrings",
+          "basis": "measured",
+          "evidence": [
+            "Issue198 examples"
+          ]
+        }
+      ]
     }
   ],
   "requirements": [
@@ -87,7 +134,7 @@
       "id": "python-hatches",
       "statement": "Count Python type suppressions, imported Any annotations, typing casts and checker off switches without counting prose, imports or unrelated casts; preserve legacy unarmed categories",
       "decisions": [
-        "backlog-runner-inputs"
+        "python-type-hatches"
       ],
       "checks": [
         "python-hatch-tests"
