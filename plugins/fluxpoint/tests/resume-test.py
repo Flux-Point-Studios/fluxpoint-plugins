@@ -443,5 +443,100 @@ const agent=async(prompt,opts)=>({findings:[]});
         self.assertIn("only non-underscore keys", refused.stderr)
 
 
+class ResumeCleanup(Assembly):
+    def set_defaults(self, defaults):
+        self.ir['argDefaults'] = defaults
+        self.file('WORK.md', '```json graph-ir\n' + json.dumps(self.ir) + '\n```\n')
+
+    def test_changed_default_requires_named_adopt_or_keep(self):
+        self.set_defaults({'defaultNote': 'new default'})
+        self.summary['argDefaults'] = {'defaultNote': 'none'}
+        self.save()
+        with self.assertRaisesRegex(ValueError, 'RESUME-DEFAULT-DRIFT.*defaultNote'):
+            resume.assemble(self.args)
+        self.args.keep_default = ['defaultNote']
+        resume.assemble(self.args)
+        self.assertEqual(self.compiled_inputs['defaultNote'], 'none')
+        self.args.keep_default = []
+        value = self.file('adopt.txt', 'new default')
+        self.args.set = ['defaultNote=@' + str(value)]
+        resume.assemble(self.args)
+        self.assertEqual(self.compiled_inputs['defaultNote'], 'new default')
+
+    def test_new_defaults_are_embedded_and_unset_removes_stray_key(self):
+        self.set_defaults({'added': 'value'})
+        self.args.unset = ['repairB']
+        resume.assemble(self.args)
+        self.assertEqual(self.compiled_inputs['added'], 'value')
+        self.assertNotIn('repairB', self.compiled_inputs)
+
+    def test_unknown_update_warns_and_plan_is_retained(self):
+        value = self.file('typo.txt', 'text')
+        self.args.set = ['typo=@' + str(value)]
+        with mock.patch('sys.stderr', new_callable=__import__('io').StringIO) as err:
+            workflow = resume.assemble(self.args)
+        self.assertIn('RESUME-UNUSED-SET: typo', err.getvalue())
+        plan = workflow['args']['_rerunPlan']
+        raw = Path(plan['path']).read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), plan['sha256'])
+        self.assertIn('rerun plan: live repair', json.loads(raw)['plan'])
+
+    def test_run_forces_utf8_in_child(self):
+        # Prove the environment is supplied on every platform, not just on Windows.
+        with mock.patch.dict(os.environ, {'PYTHONIOENCODING': ''}):
+            output = resume._run([sys.executable, '-c', 'import os; print(os.environ.get("PYTHONIOENCODING")); print("caf\u00e9 \u2014")'], self.root)
+        self.assertEqual(output.splitlines(), ['utf-8', 'caf\u00e9 \u2014'])
+
+
+class InlineCleanup(CompilerIntegration):
+    def test_unbound_inline_input_is_refused_and_record_rejects_unbound_summary(self):
+        workflow = self.initial()
+        self.assertIn('inline', self.execute(workflow, {'extra': 'unarchived text'})['error'])
+        result = self.execute(workflow)['summary']
+        result['inputs']['extra'] = 'unarchived text'
+        raw = self.file('unbound.json', json.dumps(result))
+        rejected = self.command('record-run.py', '--root', self.root, '--graph', self.graph,
+                                '--run-id', 'wf_unbound', '--result', raw, want=2)
+        self.assertIn('RESUME-INPUT-UNBOUND', rejected.stderr)
+
+
+class PlanCleanup(Fixture):
+    def test_legacy_plan_preserves_unchanged_prefix_until_first_change(self):
+        compiler = resume._module('compile-graph')
+        import replay_memo
+        replay_memo = compiler._sibling('replay_memo')
+        run_artifacts = compiler._sibling('run_artifacts')
+        for argv in [('init', '-q'), ('config', 'user.name', 'fixture'), ('config', 'user.email', 'test@example.invalid')]:
+            subprocess.run(['git', *argv], cwd=self.root, check=True)
+        self.file('source', 'base')
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'base'], cwd=self.root, check=True)
+        ir = {'version': 1, 'name': 'legacy', 'campaign': 'legacy', 'treeGuard': False, 'budget': {'maxNodes': 3},
+              'nodes': [{'id': 'n' + str(i), 'contract': 'FindingsV1', 'prompt': 'Read {{A.' + key + '}}.'} for i, key in enumerate(['a', 'b', 'c'])]}
+        public = {'a': 'A', 'b': 'B', 'c': 'C'}
+        results = {'n' + str(i): {'findings': []} for i in range(3)}
+        contracts = compiler.load_contracts(str(SCRIPTS.parent / 'contracts'))
+        source = compiler.emit(ir, contracts, embedded_args=public)
+        launch = {'nonce': 'old', 'since': '2026-10-28T00:00:00Z'}
+        body = dict(source=source, args={'_base': resume.fresh_base(self.root)}, results=results, readings=[])
+        dry = subprocess.run(['node', str(SCRIPTS / 'graph-plan.js')], input=json.dumps(body), text=True, capture_output=True, check=True)
+        calls = json.loads(dry.stdout)['calls']
+        prefix = [dict(promptSha256=hashlib.sha256(c['prompt'].encode()).hexdigest(), optsSha256=replay_memo.memo_key(c['opts']), label=c['opts']['label']) for c in calls]
+        artifact = {'summary': {'launch': launch, 'inputs': public, 'results': results}}
+        real_sibling = compiler._sibling
+        with mock.patch.object(compiler, '_sibling', side_effect=lambda name: {'replay_memo': replay_memo, 'run_artifacts': run_artifacts}.get(name) or real_sibling(name)), mock.patch.object(run_artifacts, 'read', return_value=(artifact, 'f' * 64)), mock.patch.object(replay_memo, 'build_memo', return_value={'_memo': {}, '_prefix': prefix}):
+            same = compiler.rerun_plan(ir, contracts, public, str(self.root), 'wf_prior')
+            changed = compiler.rerun_plan(ir, contracts, dict(public, b='CHANGED'), str(self.root), 'wf_prior')
+        self.assertEqual([x['status'] for x in same], ['prefix'] * 3)
+        self.assertEqual([x['status'] for x in changed], ['prefix', 'live', 'live'])
+        self.assertIn('arg changed: b', changed[1]['cause'])
+        self.assertIn('after first changed call n1', changed[2]['cause'])
+        journal = [dict(prompt=c['prompt'], start={'opts': c['opts']}, done={'type': 'result'}) for c in calls]
+        with mock.patch.object(compiler, '_sibling', side_effect=lambda name: {'replay_memo': replay_memo, 'run_artifacts': run_artifacts}.get(name) or real_sibling(name)), mock.patch.object(run_artifacts, 'read', return_value=(artifact, 'f' * 64)), mock.patch.object(replay_memo, 'build_memo', return_value={'_memo': {}, '_prefix': []}), mock.patch.object(replay_memo, '_journal_calls', return_value=journal):
+            legacy = compiler.rerun_plan(ir, contracts, public, str(self.root), 'wf_prior')
+        self.assertEqual([x['status'] for x in legacy], ['prefix'] * 3)
+
+
+
 if __name__ == "__main__":
     unittest.main()

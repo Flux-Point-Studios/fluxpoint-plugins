@@ -27,7 +27,7 @@ object described by the graph compiler. The initial assembly embeds every
 effective public IR default alongside the provided values. Duplicate updates, underscore keys
 and malformed JSON are refusals. Every other recorded input, including an
 effective default, is carried unchanged. A change in an IR default therefore
-cannot silently alter a carried repair epoch.
+cannot silently alter a carried repair epoch. When a previously recorded default changes, assembly refuses with `RESUME-DEFAULT-DRIFT`; use `--set key=@file` to adopt it or `--keep-default key` to retain the carried value. Newly added defaults are adopted into the immutable argument set and named on stderr. `--unset key` removes a carried value after its IR default is removed. An update no node or harness reads prints `RESUME-UNUSED-SET` so a misspelled repair key is visible.
 
 The compiler emits canonical `ARGS` and its full `ARGS_SHA256`; summary inputs
 retain the full resolved text and `argsSha256` identifies the embedded set.
@@ -36,9 +36,7 @@ The immutable source archive is
 both hashes, parses the actual constant and cross-checks each embedded value
 against the canonical recorded artifact
 `.claude/fluxpoint/runs/<runId>.json`. Every recorded input must be bound to
-`ARGS`; an additional summary field cannot become carried context. A direct
-compile that left defaults or inline inputs outside the embedded set needs a
-fresh fully embedded launch before structured resume. Different graph versions may archive the
+`ARGS`; an additional summary field cannot become carried context. Direct compilation with `--args` freezes public defaults too. Historical runs that left defaults or inline inputs outside the embedded set need a fresh fully embedded launch before structured resume. Different graph versions may archive the
 same argument bytes; each source must still pass its own hash. Missing,
 changed or conflicting source/recorded input is a refusal. Keep these local
 archives with the run records. Recording preserves immutable attempt snapshots
@@ -49,7 +47,7 @@ cannot replace the attempt a replay cites. Runs compiled before embedded argumen
 introduced require an explicit fresh launch with a reviewed initial JSON;
 there is no trustworthy automated recovery of absent context.
 
-Incoming inline values cannot override an embedded key. Recompiling an
+When arguments are embedded, every non-underscore inline value is refused. Recording checks the summary inputs against their immutable argument archive too. Recompiling an
 embedded script without `--args` refuses; `--args none` deliberately removes
 the embedded set for a fresh launch. `--check --args initial.json` prices the
 real rendered note text. Without an args file, the compiler names arguments
@@ -89,7 +87,7 @@ Git; required irreversible ledgers and actor release maps are freshly loaded.
 Every invocation gets a fresh `_replayLaunchNonce`. `_memo` and `_prefix`
 come from the harness rereading completed journal calls and transcripts, never
 from the input JSON. The compiler's `--plan` owns replay decisions and rejects
-unknown or unreached rejudge gates. A tree-moving repair still halts
+unknown or unreached rejudge gates. For ordinary serial graphs, the plan compares the actual rendered call prompts and options with the recorded prefix, marks calls before the first change as `prefix`, and marks later calls `live`. The plan is retained under `.claude/fluxpoint/plans/`; the launch and run summary carry its path and SHA-256, and recording verifies both the retained bytes and their argument digest. A tree-moving repair still halts
 `TREE-MOVED`; start a fresh run after reviewing the changed tree.
 
 Embedded context has the same authority as inline context. It does not extend

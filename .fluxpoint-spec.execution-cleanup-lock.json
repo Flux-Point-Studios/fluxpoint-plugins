@@ -1,8 +1,9 @@
 {
   "version": 1,
-  "sha256": "b14ecfb1a2f53a612ca571f9eb892ffd1ce5e6a6120aa4b0d1901d1f79ddc5da",
+  "sha256": "f9b7f97c798a2ae12f8f7286c8612679c7cd4ffffbbab2716d881861c1544016",
   "proofBaselineSha256": null,
   "harness": {
-    "plugins/fluxpoint/tests/execution-cleanup-test.py": "04072e5e97b8c01e17acd3726bce7dc7031223e7c338b488e86e9928bef800d3"
+    "plugins/fluxpoint/tests/execution-cleanup-test.py": "04072e5e97b8c01e17acd3726bce7dc7031223e7c338b488e86e9928bef800d3",
+    "plugins/fluxpoint/tests/resume-test.py": "2762641fbbdc7669c364e49e70f2c41fed32a9bca698765e231d6c3563a08792"
   }
 }

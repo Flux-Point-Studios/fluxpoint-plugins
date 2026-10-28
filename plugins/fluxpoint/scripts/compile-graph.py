@@ -2773,6 +2773,8 @@ def launch_requirements_note(ir):
 
 def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=None,
          project_prefix="", embedded_args=None):
+    if embedded_args is not None:
+        embedded_args = dict({key: value for key, value in (ir.get('argDefaults') or {}).items() if not key.startswith('_')}, **embedded_args)
     nodes = ir["nodes"]
     lists = ir.get("lists") or {}
     nodes_by_id = {x.get("id"): x for x in nodes}
@@ -2849,7 +2851,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("    ? (() => { try { return JSON.parse(args) } catch { return { target: args } } })()")
     a("    : {}")
     if embedded_args is not None:
-        a("for (const key of Object.keys(ARGS)) if (Object.prototype.hasOwnProperty.call(A, key)) throw new Error('embedded launch argument cannot be overridden inline: ' + key)")
+        a("for (const key of Object.keys(A)) if (!key.startsWith('_')) throw new Error('embedded launch argument cannot be overridden inline: ' + key)")
         a("Object.assign(A, ARGS)")
     for req in launch["args"]:
         shape = req["name"] + (" {" + ", ".join(req["fields"]) + "}" if req["fields"] else "")
@@ -3243,7 +3245,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("let INCOMPLETE = false")
     a("function summary(outcome) {")
     a("  const final = outcome === 'COMPLETE' && INCOMPLETE ? 'INCOMPLETE' : outcome")
-    extra = ""
+    extra = ", argDefaults: " + json.dumps(ir.get('argDefaults') or {}, ensure_ascii=True) + ", rerunPlan: A._rerunPlan || null"
     if any((n.get("repeat") or {}).get("classBy") for n in nodes):
         extra += ", recurringClasses: RECURRING_CLASSES"
     if specification:
@@ -4745,7 +4747,8 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
         raise ValueError('--plan needs Node.js to render the exact generated program locally; it never spawns an agent') from exc
     if result.returncode:
         raise ValueError('plan rendering refused: ' + result.stderr.strip())
-    rendered = json.loads(result.stdout)['summary']
+    rendered_output = json.loads(result.stdout)
+    rendered = rendered_output['summary']
     requested = set(public_args.get('rejudge') or {})
     reached = {r.get('gate') for r in rendered.get('rejudges', [])}
     if requested - reached:
@@ -4753,11 +4756,41 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     records = {r['node']: r for r in rendered.get('memoRecords', [])}
     old_inputs = source.get('inputs') or {}
     effective = dict(ir.get('argDefaults') or {}, **public_args)
+    legacy_modes = {}
+    if not replay_features(ir, public_args):
+        import hashlib
+        prefix = replay.get('_prefix', [])
+        calls = rendered_output.get('calls') or []
+        if not prefix:
+            try:
+                prior_calls = helper._journal_calls(run_id, projects)
+                prefix = [dict(promptSha256=hashlib.sha256(c['prompt'].encode('utf-8')).hexdigest(),
+                               optsSha256=helper.memo_key(c['start'].get('opts', c['start'].get('options'))),
+                               label=c['start'].get('label', (c['start'].get('opts') or {}).get('label')))
+                          for c in prior_calls if c.get('prompt') is not None and (c.get('done') or {}).get('type') == 'result']
+            except helper.ReplayError:
+                prefix = []
+        open_prefix, first_changed = True, None
+        for index, call in enumerate(calls):
+            prior = prefix[index] if index < len(prefix) else None
+            match = bool(open_prefix and prior and prior['promptSha256'] == hashlib.sha256(call['prompt'].encode('utf-8')).hexdigest()
+                         and prior['optsSha256'] == helper.memo_key(call['opts']))
+            label = call['opts'].get('label')
+            if not match:
+                open_prefix = False
+                first_changed = first_changed or label
+            legacy_modes.setdefault(label, ('prefix', 'unchanged runtime call prefix') if match else ('live', 'after first changed call ' + str(first_changed)))
     rows = []
     for n in ir['nodes']:
         nid = n['id']
         record = records.get(nid)
-        if record and record['mode'] == 'prefix':
+        if nid in legacy_modes:
+            status, cause = legacy_modes[nid]
+            if status == 'live':
+                changed = [t.split('.')[1] for t in SUBST.findall(str(n.get('prompt', ''))) if t.startswith('A.') and effective.get(t.split('.')[1]) != old_inputs.get(t.split('.')[1])]
+                if changed:
+                    cause = 'arg changed: ' + ', '.join(sorted(set(changed)))
+        elif record and record['mode'] == 'prefix':
             status, cause = 'prefix', 'unchanged runtime call prefix'
         elif record and record['mode'] == 'memo':
             status, cause = 'memo if the live read matches', 'same inputs and replayed ancestors; branch reading still required'
@@ -4867,6 +4900,11 @@ def main():
               file=sys.stderr)
         return 1
 
+    if embedded_args is not None:
+        for key, value in (ir.get('argDefaults') or {}).items():
+            if key in embedded_args and embedded_args[key] != value:
+                print(f"graph-compile: warning — argDefault {key} differs from embedded value; embedded value controls this launch", file=sys.stderr)
+        embedded_args = dict({key: value for key, value in (ir.get('argDefaults') or {}).items() if not key.startswith('_')}, **embedded_args)
     agents = load_agents(args.gates_root)
     gates = load_gates(args.gates_root)
     findings = validate(ir, contracts, gates, agents, embedded_args=embedded_args, repository_root=args.gates_root)

@@ -445,6 +445,31 @@ def main():
         print("record-run: duplicate wait identity; no wait or run artifact written", file=sys.stderr)
         return 2
 
+    if summary.get('argsSha256') is not None:
+        try:
+            from embedded_args import recover
+            recover(args.root, summary)
+        except (OSError, ValueError, TypeError) as exc:
+            print('record-run: immutable input verification failed: ' + str(exc), file=sys.stderr)
+            return 2
+    if summary.get('rerunPlan'):
+        try:
+            import hashlib
+            plan_ref = summary['rerunPlan']
+            plans = os.path.realpath(os.path.join(args.root, '.claude/fluxpoint/plans'))
+            path = os.path.realpath(plan_ref['path'])
+            if os.path.dirname(path) != plans:
+                raise ValueError('plan path is outside the canonical plan store')
+            with open(path, 'rb') as handle:
+                raw_plan = handle.read()
+            if hashlib.sha256(raw_plan).hexdigest() != plan_ref['sha256']:
+                raise ValueError('plan digest differs from the approved plan')
+            if json.loads(raw_plan)['argsSha256'] != summary.get('argsSha256'):
+                raise ValueError('plan arguments differ from the executed arguments')
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print('record-run: rerun plan verification failed: ' + str(exc), file=sys.stderr)
+            return 2
+
     # Pin bytes are harness inputs, not a claim an agent can vouch for. Do
     # this after the once-only ledger append, but before any run/Evidence row.
     try:

@@ -49,14 +49,20 @@ def _json(path):
 
 
 def _run(command, root):
-    proc = subprocess.run(command, cwd=root, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, text=True, encoding="utf-8")
+    try:
+        proc = subprocess.run(command, cwd=root, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                              env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+    except UnicodeError as exc:
+        raise ValueError('RESUME-COMMAND-FAILED: child output is not UTF-8') from exc
+    if proc.stdout is None or proc.stderr is None:
+        raise ValueError('RESUME-COMMAND-FAILED: child output could not be decoded')
     if proc.returncode:
         raise ValueError("RESUME-COMMAND-FAILED: " + " ".join(str(x) for x in command) +
-                         "\n" + (proc.stderr or proc.stdout).strip())
-    if proc.stderr.strip():
+                         "\n" + (proc.stderr or proc.stdout or "no command diagnostics").strip())
+    if (proc.stderr or "").strip():
         print(proc.stderr.rstrip(), file=sys.stderr)
-    return proc.stdout
+    return proc.stdout or ""
 
 
 def fresh_base(root):
@@ -142,12 +148,39 @@ def assemble(args):
                         if not key.startswith("_")}, **carried)
     before = canonical(carried)
     updates = _updates(args)
-    assembled = dict(carried, **updates)
+    unsets = set(getattr(args, 'unset', []) or [])
+    if any(not key or key.startswith('_') for key in unsets) or unsets & set(updates):
+        raise ValueError('RESUME-UNSET: use non-underscore keys not also named by --set')
+    defaults = ir.get('argDefaults') or {}
+    keeps = set(getattr(args, 'keep_default', []) or [])
+    if keeps - set(defaults):
+        raise ValueError('RESUME-KEEP-DEFAULT: no current default for ' + ', '.join(sorted(keeps - set(defaults))))
+    if unsets & set(defaults):
+        raise ValueError('RESUME-UNSET: remove the IR argDefault first: ' + ', '.join(sorted(unsets & set(defaults))))
+    tokens = set(compiler.SUBST.findall(json.dumps(ir)))
+    recognized = set(defaults) | {'rejudge'} | {t.split('.')[1].split('[')[0] for t in tokens if t.startswith('A.')}
+    if 'A' not in tokens:
+        for key in sorted(set(updates) - recognized):
+            print('resume: RESUME-UNUSED-SET: ' + key + ' is not read by any node or harness field', file=sys.stderr)
+    changed_defaults = []
+    if resuming:
+        old_defaults = prior.get('argDefaults')
+        for key, value in defaults.items():
+            changed = (key in old_defaults and canonical(old_defaults[key]) != canonical(value)) if isinstance(old_defaults, dict) else (key in carried and canonical(carried[key]) != canonical(value))
+            if changed and key not in updates and key not in keeps:
+                changed_defaults.append(key)
+        if changed_defaults:
+            raise ValueError('RESUME-DEFAULT-DRIFT: ' + ', '.join(sorted(changed_defaults)) + '; adopt with --set key=@file or retain with --keep-default key')
+    adopted = {key: value for key, value in defaults.items() if key not in carried and key not in updates}
+    for key in sorted(adopted):
+        print('resume: adopted new argDefault ' + key, file=sys.stderr)
+    assembled = {key: value for key, value in dict(carried, **adopted, **updates).items() if key not in unsets}
+    named_changes = set(updates) | set(adopted) | unsets
     assembled = prepare_pinned_inputs(root, assembled, allowances)
     if resuming:
         original = json.loads(before)
         for key in set(original) | set(assembled):
-            if key not in updates and (key not in original or key not in assembled or
+            if key not in named_changes and (key not in original or key not in assembled or
                     canonical(original[key]) != canonical(assembled[key])):
                 raise ValueError("RESUME-CARRIED-DRIFT: " + key + " changed without --set")
 
@@ -202,6 +235,19 @@ def assemble(args):
                 command += ["--projects", args.projects]
             plan = _run(command, root)
             print(plan.rstrip(), file=sys.stderr)
+            plan_record = {'sourceRunId': args.run, 'sourceArtifactSha256': source_sha,
+                           'argsSha256': hashlib.sha256(canonical(assembled).encode('utf-8')).hexdigest(), 'plan': plan}
+            plan_raw = (canonical(plan_record) + '\n').encode('utf-8')
+            plan_digest = hashlib.sha256(plan_raw).hexdigest()
+            plans = Path(root) / '.claude/fluxpoint/plans'
+            plans.mkdir(parents=True, exist_ok=True)
+            plan_path = plans / (args.run + '-' + plan_digest + '.json')
+            if plan_path.exists() and plan_path.read_bytes() != plan_raw:
+                raise ValueError('RESUME-PLAN-HASH: immutable plan changed')
+            if not plan_path.exists():
+                with plan_path.open('xb') as handle:
+                    handle.write(plan_raw)
+            launch_args['_rerunPlan'] = {'path': str(plan_path), 'sha256': plan_digest}
         diagnostics = _run([sys.executable, str(HERE / "compile-graph.py"), graph,
                             "--args", staged, "--gates-root", root, "--out", output], root)
         if diagnostics.strip():
@@ -228,6 +274,8 @@ def main(argv=None):
     source.add_argument("--args", help="initial non-underscore args JSON, before the first launch")
     parser.add_argument("--set", action="append", default=[], help="key=@file; UTF-8 text is preserved exactly")
     parser.add_argument("--set-json", action="append", default=[], help="key=@file; structured JSON such as rejudge")
+    parser.add_argument('--unset', action='append', default=[], help='remove a carried non-underscore key; remove its IR default first')
+    parser.add_argument('--keep-default', action='append', default=[], help='explicitly keep a carried value when its IR default changed')
     parser.add_argument("--unpinned-ok", action="append", default=[], help="explicit absolute evidence path exception")
     parser.add_argument("--out", help="compiled output (default .claude/workflows/<name>.graph.js)")
     parser.add_argument("--projects", help="runtime projects directory for journal/transcript verification")

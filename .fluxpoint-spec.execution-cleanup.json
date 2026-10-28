@@ -7,7 +7,8 @@
     "Parked descendant propagation and unique wait files",
     "Probe validation parity on emission",
     "Execution citation commit identity and pre-start journal failures",
-    "Single-copy irreversible prompt and parseable await preamble"
+    "Single-copy irreversible prompt and parseable await preamble",
+    "Structured resume default reconciliation, explicit removals, immutable inputs, persisted rerun plans and UTF-8 child diagnostics"
   ],
   "outOfScope": [
     "External workflow runtime cache redesign",
@@ -72,6 +73,17 @@
         "execution-cleanup-tests"
       ],
       "counterexample": "A descendant park spawns, a long wait collides, a list dependency crashes emission, unchecked probe emits, a fabricated sha passes, or a pre-start event prevents resume"
+    },
+    {
+      "id": "structured-resume-followup",
+      "statement": "Changed defaults require explicit resolution, added defaults are bound, inline unknown inputs refuse, named removals work, plans retain provenance and subprocess output uses UTF-8",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "structured-resume-tests"
+      ],
+      "counterexample": "An ignored default change, unbound new input, unused typo without warning, unrecorded plan or Windows decoding crash"
     }
   ],
   "checks": [
@@ -87,6 +99,19 @@
         "Fixture workflow runtime preserves the supported agent call contract"
       ],
       "timeoutSeconds": 120
+    },
+    {
+      "id": "structured-resume-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/resume-test.py"
+      ],
+      "scope": "Assemble and run actual compiled launches with immutable archives and focused mocked provenance boundaries",
+      "assumptions": [
+        "Runtime prefix predictions remain conditional on the recorded workflow call ordering"
+      ],
+      "timeoutSeconds": 180
     }
   ],
   "challenges": [
