@@ -123,8 +123,25 @@ Settings survive plugin upgrades in
 only; recall does not synchronize them. Each origin must be unique and use
 letters, numbers, dots, underscores or dashes. IDs include the origin, so files
 with the same basename in two corpora remain distinct. `weight` defaults to 1
-and must be greater than zero and at most 2. This version does not implement a
-Codex-memory format or split shared indexes for user-level corpora.
+and must be greater than zero and at most 2. User-level corpora still share the
+checkout's derived index; separate corpus indexes remain future work.
+
+Codex stores are discovered through `$CODEX_HOME/memories` (default
+`~/.codex/memories`) in either runtime. The `codex-memories` format reads
+`MEMORY.md`, `memory_summary.md`, `raw_memories.md` and `rollout_summaries/*.md`.
+Aggregate files split at headings and preserve the heading path on each card.
+Rollouts preserve `thread_id` and `updated_at`; only a `cwd` inside the current
+project is eligible. A configured corpus can map peer paths with
+`"pathAliases": {"/peer/work/report-service": "/local/report-service"}`.
+An explicit corpus entry overrides automatic discovery of that folder.
+
+Aggregate passages without `cwd` need an ancestor heading of the form
+`Project: <checkout-name>` (or `Repo:` / `Repository:`). Other passages are
+skipped to keep the user-wide Codex store from mixing unrelated projects.
+Set `"allowUnscoped": true` on an explicit `codex-memories` corpus only when
+its global preferences and cross-project notes are intended for this index.
+This opt-in never disables the rollout `cwd` filter. Files stay read only;
+symlinked files and rollout directories are skipped.
 
 A note's `metadata.modified` supplies its date (file mtime is the fallback), and
 `metadata.originSessionId` preserves the session. `metadata.supersededBy` or

@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "goal": "Read Codex memory stores as scoped recall corpora",
+  "asset": "Derived recall index and session context",
+  "scope": [
+    "Codex leaf heading passages and rollout provenance (#164)",
+    "cwd and configured peer alias scoping",
+    "Runtime-independent CODEX_HOME discovery"
+  ],
+  "outOfScope": [
+    "Serving unscoped cross-project aggregate memories by default",
+    "Changing recall daemon architecture"
+  ],
+  "decisions": [
+    {
+      "id": "recall-derived-maintenance",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should recall discover local knowledge and refresh without blocking hooks or sending documents unexpectedly?",
+        "options": [
+          {
+            "option": "derived-configured-corpora",
+            "argued_by": "model",
+            "strongest_objection": "Source discovery and concurrent cache publication need clear bounds and regression tests"
+          },
+          {
+            "option": "patch-plugin-cache",
+            "argued_by": "model",
+            "strongest_objection": "Auto-updates discard local source and refresh customizations"
+          },
+          {
+            "option": "persistent-query-service",
+            "argued_by": "model",
+            "strongest_objection": "Adds lifecycle and authentication work beyond source discovery and reliable refresh"
+          }
+        ],
+        "chosen": "derived-configured-corpora",
+        "rationale": "Keep sources read-only, make corpus roots explicit and derive a fresh atomic cache; hooks launch detached keyless rebuilds.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Open issue reproductions #147-152 #159 #161 #163 and current source inspection"
+        ]
+      },
+      "costs": [
+        {
+          "option": "derived-configured-corpora",
+          "cost": "Maintain a bounded Markdown reader, configuration validation and atomic derived cache writes",
+          "basis": "estimate",
+          "evidence": [
+            "Existing recall lexical retrieval and workfile_lock cover ranking and serialized publication"
+          ]
+        },
+        {
+          "option": "patch-plugin-cache",
+          "cost": "Every plugin update requires reapplying local edits and risks silently dropping context",
+          "basis": "measured",
+          "evidence": [
+            "Issue #152 documents cache version replacement behavior"
+          ]
+        },
+        {
+          "option": "persistent-query-service",
+          "cost": "Add process lifetime, client framing, authentication and invalidation protocols",
+          "basis": "unknown",
+          "evidence": [
+            "Issue #153 requests warm queries; no deployment or benchmark evidence yet"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "codex-corpus",
+      "statement": "Discover Codex memory and preserve scoped heading, thread and timestamp metadata without serving another project's rollout or aggregate section",
+      "decisions": [
+        "recall-derived-maintenance"
+      ],
+      "checks": [
+        "codex-memory-tests"
+      ],
+      "counterexample": "A rollout for another cwd enters this project index, or MEMORY.md is skipped despite a matching project section"
+    }
+  ],
+  "checks": [
+    {
+      "id": "codex-memory-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/codex-memory-test.py"
+      ],
+      "scope": "Controlled Codex stores exercise discovery, leaf passages, aliases, provenance and refresh fingerprints",
+      "assumptions": [
+        "cwd metadata and configured aliases truthfully identify source project"
+      ],
+      "timeoutSeconds": 60
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does a detached rebuild or configured corpus authorize document embeddings?",
+      "resolution": "No. Refresh and ordinary queries rebuild keyless; explicit build --embed is required for document backfill, and external notes require explicit FPL_EMBEDDER selection."
+    }
+  ]
+}
