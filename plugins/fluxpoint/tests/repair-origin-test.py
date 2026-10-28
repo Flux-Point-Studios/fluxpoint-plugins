@@ -95,7 +95,8 @@ class RealReplay(unittest.TestCase):
         diff = self.git('diff', 'HEAD', '--', 'state.json')
         path = self.root / '.claude' / 'fluxpoint' / 'rounds' / 'launch' / item / ('r' + str(round_)) / 'patch.diff'
         path.parent.mkdir(parents=True)
-        path.write_text(diff)
+        # Bytes: on Windows write_text gives the patch CRLF context lines, which git apply refuses.
+        path.write_bytes(diff.encode('utf-8'))
         self.git('checkout', '--', 'state.json')
         return {'item': item, 'round': round_, 'patch': str(path)}
 
