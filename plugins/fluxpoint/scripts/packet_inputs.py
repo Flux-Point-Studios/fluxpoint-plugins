@@ -200,6 +200,9 @@ class Inputs:
                     if arg.startswith('-') and not sep:
                         continue
                     path = self.locate(text, cwd, explicit)
+                    option_value = (sep and arg.startswith('-')) or (i and argv[i - 1].startswith('-'))
+                    if path is not None and path.is_dir() and option_value and not explicit:
+                        continue  # Runner roots configure discovery; they are not input directories.
                     if path is not None:
                         self._seed_path(path, kind, cid, text)
         for rel in self.doc.get('harnessInputs', []):

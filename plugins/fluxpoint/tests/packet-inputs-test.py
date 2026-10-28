@@ -103,6 +103,22 @@ class PacketInputsTests(unittest.TestCase):
         record = specification.harness_record(self.root)
         self.assertIn('tests/fixtures.py', record['changedPaths'])
 
+    def test_runner_directory_options_do_not_seed_the_repository(self):
+        from packet_inputs import Inputs
+        self.write('README.md', 'unrelated\n')
+        self.commit()
+        argv = self.doc['checks'][0]['argv']
+        expected = Inputs(self.root, self.doc).hashes()
+        for option in (['--rootdir=.'], ['--confcutdir', '.'],
+                       ['--confcutdir=tests']):
+            with self.subTest(option=option):
+                self.doc['checks'][0]['argv'] = argv + option
+                self.assertEqual(Inputs(self.root, self.doc).hashes(), expected)
+        self.doc['checks'][0]['argv'] = argv + ['--path', '.']
+        self.assertIn('README.md', Inputs(self.root, self.doc).hashes())
+        self.doc['checks'][0]['argv'] = argv + ['.']
+        self.assertIn('README.md', Inputs(self.root, self.doc).hashes())
+
     def test_touches_covers_directories_fixed_inputs_and_unlocked_changes(self):
         self.lock()
         for path in ('tests', '.', 'tests/helper.py', specification.SPEC, specification.LOCK,

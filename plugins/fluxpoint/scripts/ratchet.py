@@ -2,6 +2,7 @@
 import math
 import os
 import subprocess
+from process_tree import bash_path
 
 
 def clean(root, expected_head=None):
@@ -25,7 +26,7 @@ def green(root):
     harness = os.path.join(root, 'scripts', 'harness.sh')
     if not os.path.isfile(harness):
         raise ValueError('--tighten requires scripts/harness.sh --full')
-    result = subprocess.run(['bash', 'scripts/harness.sh', '--full'], cwd=root,
+    result = subprocess.run([bash_path(), 'scripts/harness.sh', '--full'], cwd=root,
                             capture_output=True, text=True)
     if result.returncode:
         raise ValueError('--tighten refused: harness --full is red\n' +

@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "goal": "Keep runner directory options out of packet input closures and resolve the tightening harness shell explicitly",
+  "asset": "Existing packet input closure and shared safe tightening precondition",
+  "scope": [
+    "Runner directory option handling (#208)",
+    "Explicit harness bash resolution (#217)"
+  ],
+  "outOfScope": [
+    "Changing positional directory input behavior",
+    "Changing ratchet acceptance policy"
+  ],
+  "decisions": [
+    {
+      "id": "backlog-runner-inputs",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should runner configuration and check input paths be distinguished?",
+        "options": [
+          {
+            "option": "explicit-inputs",
+            "argued_by": "model",
+            "strongest_objection": "Unrecognized directory-valued options need --path or harnessInputs to bind actual inputs"
+          },
+          {
+            "option": "all-existing-paths",
+            "argued_by": "model",
+            "strongest_objection": "Runner root settings silently lock unrelated repository files"
+          }
+        ],
+        "chosen": "explicit-inputs",
+        "rationale": "Skip directory option values unless explicitly declared as input paths. Resolve harness bash through the existing cross-platform helper.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue #208 reproduction seeds unrelated files through --rootdir=.",
+          "Issue #217 identifies CreateProcess System32 search before PATH"
+        ]
+      },
+      "costs": [
+        {
+          "option": "explicit-inputs",
+          "cost": "Small option classification and regression coverage",
+          "basis": "estimate",
+          "evidence": [
+            "Existing PATH_FLAGS distinguishes explicit input options"
+          ]
+        },
+        {
+          "option": "all-existing-paths",
+          "cost": "Whole repository input drift and Windows failures",
+          "basis": "measured",
+          "evidence": [
+            "Issue #208 minimal reproduction"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "runner-options",
+      "statement": "Directory-valued runner options do not seed unrelated files; explicit path flags and positional directories continue to seed inputs",
+      "decisions": [
+        "backlog-runner-inputs"
+      ],
+      "checks": [
+        "input-tests"
+      ],
+      "counterexample": "--rootdir=. seeds an unrelated README or --path tests stops binding test files"
+    },
+    {
+      "id": "tightening-shell",
+      "statement": "The full harness runs through bash_path() while preserving clean tree and HEAD movement checks",
+      "decisions": [
+        "backlog-runner-inputs"
+      ],
+      "checks": [
+        "ratchet-tests"
+      ],
+      "counterexample": "A bare bash is launched despite a resolved shell path"
+    }
+  ],
+  "checks": [
+    {
+      "id": "input-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/packet-inputs-test.py"
+      ],
+      "scope": "Exercise actual packet CLI and shared tightening in temporary git repositories",
+      "assumptions": [
+        "Linux regressions validate routing; native Windows behavior remains covered by CI"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "ratchet-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/metric-ratchet-test.py"
+      ],
+      "scope": "Exercise actual packet CLI and shared tightening in temporary git repositories",
+      "assumptions": [
+        "Linux regressions validate routing; native Windows behavior remains covered by CI"
+      ],
+      "timeoutSeconds": 180
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Should positional directories also be skipped?",
+      "resolution": "No, positional paths and PATH_FLAGS remain explicit inputs; only option values naming directories are skipped."
+    }
+  ]
+}
