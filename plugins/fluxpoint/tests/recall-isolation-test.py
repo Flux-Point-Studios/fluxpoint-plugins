@@ -53,6 +53,12 @@ class Isolation(unittest.TestCase):
         (self.mem / 'rollout_summaries/link.md').write_text(f'thread_id: other\ncwd: {self.root}/linked\n\n# Private other\nOTHER_PROJECT_SECRET\n')
         self.assertEqual(sources.notes(self.root)[0], {})
 
+    def test_invalid_local_cwd_link_is_ignored(self):
+        try: (self.root / 'cycle').symlink_to('cycle', target_is_directory=True)
+        except (OSError, NotImplementedError): self.skipTest('directory symlinks unavailable')
+        (self.mem / 'rollout_summaries/cycle.md').write_text(f'thread_id: broken\ncwd: {self.root}/cycle\n\n# Broken cwd\nUnscoped note\n')
+        self.assertEqual(sources.notes(self.root)[0], {})
+
     def test_canonical_repository_scope_survives_sibling_worktree_name(self):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'base'], check=True)

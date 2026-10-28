@@ -180,7 +180,7 @@ def _project_view(root):
         return {"identity": _portable_path(directory),
                 "roots": sorted({_portable_path(path) for path in roots}),
                 "names": sorted({path.name for path in roots})}
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         return view
 
 
@@ -191,7 +191,10 @@ def _codex_scope(cwd, root, corpus):
         if source == old or source.startswith(old + '/'):
             source = _portable_path(local) + source[len(old):]
             break
-    if Path(source).is_absolute(): source = _portable_path(Path(source).resolve())
+    try:
+        if Path(source).is_absolute(): source = _portable_path(Path(source).resolve())
+    except (OSError, RuntimeError):
+        return False
     view = corpus.get('_projectView') or project_view(root)
     return any(source == base or source.startswith(base + '/') for base in view['roots'])
 
