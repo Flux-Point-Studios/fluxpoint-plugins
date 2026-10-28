@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "sha256": "fd0d18a60e1f961a49ccc75ac378695b0d559345fa3080421e167ebf3b9dd8ab",
+  "sha256": "7e088f22fed835c06a7be11d75cd2971d1c34d05f140593b64431c50f945fd3e",
   "proofBaselineSha256": null,
   "harness": {
-    "plugins/fluxpoint/tests/metric-ratchet-test.py": "3de1a981ec0fe4123da3bda5e65369227c36888300bf25a2c48014178ebb889e",
-    "plugins/fluxpoint/tests/packet-inputs-test.py": "8db60a6aa47d28ca8a49163e1022e9d34c0550534886376d7450f6d134171da8"
+    "plugins/fluxpoint/tests/metric-ratchet-test.py": "5808e0a09777767c523d383a0ba512aa332a907505e5f4808f8f443b4a68c95f",
+    "plugins/fluxpoint/tests/packet-inputs-test.py": "eb39ff54758078c168d45ac1f6f72a9f0f9e0da9d3a755a3b56d8d77d693e785"
   }
 }

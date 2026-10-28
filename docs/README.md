@@ -49,5 +49,7 @@ its accepted CLI options.
 [Design notes](../plugins/fluxpoint/DESIGN-NOTES.md) and the
 [roadmap](../plugins/fluxpoint/ROADMAP.md) preserve historical reasoning and
 remaining gaps. Use the operational guides above for current instructions.
+The [proof-strength ratchet](../plugins/fluxpoint/README.md) includes Python
+typing suppressions and checker configuration; its module help lists categories.
 The [documentation audit](documentation-audit.md) records the checked surfaces,
 corrections and verification limits of the October 2026 review.

@@ -4,7 +4,8 @@
   "asset": "Existing packet input closure and shared safe tightening precondition",
   "scope": [
     "Runner directory option handling (#208)",
-    "Explicit harness bash resolution (#217)"
+    "Explicit harness bash resolution (#217)",
+    "Python type escape hatch detection (#198)"
   ],
   "outOfScope": [
     "Changing positional directory input behavior",
@@ -81,6 +82,17 @@
         "ratchet-tests"
       ],
       "counterexample": "A bare bash is launched despite a resolved shell path"
+    },
+    {
+      "id": "python-hatches",
+      "statement": "Count Python type suppressions, imported Any annotations, typing casts and checker off switches without counting prose, imports or unrelated casts; preserve legacy unarmed categories",
+      "decisions": [
+        "backlog-runner-inputs"
+      ],
+      "checks": [
+        "python-hatch-tests"
+      ],
+      "counterexample": "A type ignore is added without increasing a hatch count or a docstring is counted as a suppression"
     }
   ],
   "checks": [
@@ -109,6 +121,19 @@
         "Linux regressions validate routing; native Windows behavior remains covered by CI"
       ],
       "timeoutSeconds": 180
+    },
+    {
+      "id": "python-hatch-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/python-hatches-test.py"
+      ],
+      "scope": "Token and AST scanner cases and real proof-guard baseline/check CLI",
+      "assumptions": [
+        "Static import resolution cannot account for runtime monkeypatching"
+      ],
+      "timeoutSeconds": 60
     }
   ],
   "challenges": [

@@ -50,6 +50,18 @@ protocol, so the erased type is the one that matters:
   ts.ts_ignore    `@ts-ignore` and `@ts-nocheck`
   flags.types_off `"strict": false` and its siblings in a tsconfig
 
+Python sources and stubs use tokenize and ast rather than line patterns:
+  py.type_ignore   type: ignore, pyright: ignore/basic/off, mypy: ignore-errors
+  py.no_type_check imported typing.no_type_check decorators
+  py.any           imported typing.Any in annotations, including nested types
+  py.cast          calls resolving to typing.cast through explicit imports
+Checker off switches in mypy.ini, setup.cfg, pyproject.toml and
+pyrightconfig.json also count as flags.types_off. Imports, docstrings,
+assert_type and lint-only noqa comments do not count. Variadic Any annotations
+and .pyi stubs count. Python alone keeps the ratchet dormant until explicitly
+baselined; existing baselines report new categories as not yet ratcheted.
+This is static import resolution, not execution or a replacement for a checker.
+
 Two deliberate exclusions, because a ratchet that cries wolf gets
 re-baselined blind. `@ts-expect-error` is NOT counted: it fails the build
 once the error it names goes away, so it cannot rot in place, and counting
@@ -78,6 +90,7 @@ import os
 import re
 import subprocess
 import sys
+from python_hatches import CATEGORIES as PY_CATEGORIES, scan as scan_python
 
 BASELINE = ".fluxpoint-proof-baseline.json"
 
@@ -199,7 +212,7 @@ def strip_source(line, suffix):
 
 # Categories that need structure rather than a line match, so they are
 # counted by a small parser instead of a regex.
-STRUCTURAL = ["aiken.vacuous_test", "aiken.constant_predicate"]
+STRUCTURAL = ["aiken.vacuous_test", "aiken.constant_predicate", *PY_CATEGORIES]
 
 TEST_START = re.compile(r"^\s*test\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 # A body that proves nothing: a bare boolean, or a value compared to itself.
@@ -326,7 +339,8 @@ def scan(root):
         if not suffix:
             continue
         applicable = [(c, rx) for c, sfx, rx in compiled if suffix in sfx]
-        if not applicable:
+        python_input = suffix in ('.py', '.pyi') or base in ('mypy.ini', '.mypy.ini', 'setup.cfg', 'pyproject.toml', 'pyrightconfig.json')
+        if not applicable and not python_input:
             continue
         path = os.path.join(root, rel)
         try:
@@ -334,6 +348,11 @@ def scan(root):
                 lines = fh.readlines()
         except OSError:
             continue
+        if python_input:
+            for cat, n, raw in scan_python(rel, ''.join(lines)):
+                counts[cat] += 1
+                if len(hits[cat]) < 20:
+                    hits[cat].append(f"{rel}:{n}: {raw.strip()[:100]}")
         for n, raw in enumerate(lines, 1):
             line = strip_source(raw, suffix)
             for cat, rx in applicable:

@@ -379,6 +379,11 @@ proved one.
   surface an autonomous caller actually reaches, so it is gated rather than
   trusted. `@ts-expect-error` is deliberately uncounted, because it fails
   the build once the error it names is fixed and so cannot rot in place.
+  Python sources and stubs count `type: ignore` / checker directives,
+  `no_type_check`, imported `Any` annotations and `typing.cast` calls using
+  token and AST parsing. Checker off switches in mypy and pyright configs
+  count too. Imports, docstrings, `assert_type` and `noqa` do not count.
+  Python alone stays dormant until `--baseline` explicitly arms the ratchet.
   A category this plugin adds after a repo armed is reported as new and
   left unratcheted until the next `--baseline`, so an upgrade never reds a
   diff nobody wrote.
