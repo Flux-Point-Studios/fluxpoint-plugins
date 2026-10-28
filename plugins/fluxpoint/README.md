@@ -75,8 +75,8 @@ graphs can opt in with `specificationContext: "reference"`; see the
     `metrics.py` (per-campaign rates), `sweep.py` (plan and score an
     effort/model sweep: variants, a held-out split, pass-rate intervals).
     `resume.py`, `replay_memo.py` and `run_artifacts.py` bind launch/resume and
-    replay artifacts; `repair-proof.py`, `repair-replay.py`, `repair_diff.py`
-    and `unchecked-repairs.py` track fixes and their independent evidence.
+    replay artifacts; `repair-proof.py`, `repair-replay.py`, `repair_diff.py`,
+    `repair_journal.py` and `unchecked-repairs.py` track fixes and their independent evidence.
   - Operations: `box-health.py` and `watchdog.py` (machine observations and
     inbox wakeups); `longrun.py`, `background.py` and `process_tree.py`
     (long commands, logs, waits, cancellation and descendant cleanup).

@@ -118,16 +118,57 @@ class UncheckedRepairsTests(unittest.TestCase):
         summary['repairReadNonce'] = nonce
         return summary
 
+    def journal(self, summary):
+        import repair_journal
+        directory = self.root / 'runtime/projects/project/session/subagents/workflows/repair'
+        directory.mkdir(parents=True, exist_ok=True)
+        events = []
+        for i, (label, result) in enumerate(repair_journal.expected_calls(summary)):
+            agent = 'repair' + str(i)
+            events += [dict(type='started', agentId=agent, label=label), dict(type='result', agentId=agent, result=result)]
+            (directory / ('agent-' + agent + '.jsonl')).write_text(json.dumps(dict(type='user', message=dict(role='user', content='Fixed repair seat ' + label))) + '\n')
+        (directory / 'journal.jsonl').write_text(''.join(json.dumps(e) + '\n' for e in events))
+
     def record_repair(self, commits):
         self.repair_graph()
         summary = self.pass_summary(commits)
+        self.journal(summary)
         p = subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'),
                             '--root', str(self.root), '--graph', str(self.graph), '--run-id', 'repair'],
                            input=json.dumps(summary), text=True, capture_output=True,
-                           env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=20)
+                           env=dict(os.environ, FPL_MEMORY_INDEX='0', CLAUDE_CONFIG_DIR=str(self.root / 'runtime')), timeout=20)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.set_graph([{'id': 'review', 'contract': 'RedTeamV1'}])
         return json.loads((self.runs / 'repair.json').read_text())
+
+    def test_repair_seat_result_must_match_the_runtime_journal(self):
+        import repair_journal
+        summary = self.pass_summary([self.first])
+        self.journal(summary)
+        projects = self.root / 'runtime/projects'
+        verified = repair_journal.corroborate(summary, 'repair', projects=projects)
+        self.assertTrue(verified['seats'])
+        directory = projects / 'project/session/subagents/workflows/repair'
+        journal = directory / 'journal.jsonl'
+        rows = [json.loads(line) for line in journal.read_text().splitlines()]
+        for row in rows:
+            if row.get('type') == 'result' and row.get('result', {}).get('verdict') == 'PASS':
+                row['result']['verdict'] = 'FAIL'
+        journal.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        with self.assertRaisesRegex(ValueError, 'differs from journal'):
+            repair_journal.corroborate(summary, 'repair', projects=projects)
+
+    def test_handwritten_pass_without_runtime_seats_cannot_discharge_commit(self):
+        self.repair_graph()
+        summary = self.pass_summary([self.first])
+        p = subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'), '--root', str(self.root),
+            '--graph', str(self.graph), '--run-id', 'repair'], input=json.dumps(summary), text=True,
+            capture_output=True, env=dict(os.environ, FPL_MEMORY_INDEX='0', CLAUDE_CONFIG_DIR=str(self.root / 'missing-runtime')))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        artifact = json.loads((self.runs / 'repair.json').read_text())
+        self.assertEqual(artifact['checked'], [])
+        self.assertEqual(artifact['outcome'], 'INCOMPLETE')
+        self.assertIn('REPAIR-JOURNAL-UNPROVEN', p.stderr)
 
     def run_check(self):
         return subprocess.run([sys.executable, str(SCRIPTS / 'unchecked-repairs.py'),

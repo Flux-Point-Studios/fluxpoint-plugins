@@ -745,6 +745,14 @@ def main():
         outcome = "REFUSED-REPLAY"
         print("record-run: REPLAY-PROVENANCE — " + str(exc), file=sys.stderr)
     repair_checkers, checked, repair_problems = repair_receipts(summary, args.graph, root=args.root)
+    repair_journal = None
+    if checked:
+        try:
+            import repair_journal as _repair_journal
+            repair_journal = _repair_journal.corroborate(summary, args.run_id)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            repair_problems.append('REPAIR-JOURNAL-UNPROVEN: ' + str(exc))
+            checked = []
     for issue in repair_problems:
         print("record-run: checked commit refused — " + issue, file=sys.stderr)
     if repair_problems and outcome in ("COMPLETE", "UNKNOWN"):
@@ -764,6 +772,7 @@ def main():
                 "checked": checked,
                 "repairCheckers": repair_checkers,
                 "repairCheckProblems": repair_problems,
+                "repairJournal": repair_journal,
                 "replayChecked": replay_checked,
                 "rejudges": rejudges,
                 "replayProblems": replay_problems,

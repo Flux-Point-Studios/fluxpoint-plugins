@@ -142,6 +142,13 @@ oversized value ends INCOMPLETE before the next seat spawns; split the slice
 or raise the declared bound and review the new estimate. Integration receives
 patch paths, packet proposals, sibling claims and resource declarations.
 Detailed checker and reviewer logs stay in the recorded results.
+Before marking commits checked, the recorder requires one completed runtime
+journal seat for every checker, attacker, refuter and fixed witness and
+compares their returned values with the repair receipt. A fabricated summary
+without those seats cannot discharge a commit. The recorded journal
+certificate identifies the matched agents and result hashes. Command output
+inside a seat still crosses the model relay; this certificate does not
+establish that an arbitrary narrated command actually ran.
 `graph-run` supplies a stamped launch identity and the graph retains it in
 the run summary. Tree sentinels, the runtime node ceiling and run recording
 apply just as they do to every compiled campaign. Use `/fluxpoint:graph-run`
