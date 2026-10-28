@@ -2,12 +2,44 @@
 import ctypes
 import os
 import secrets
+import shutil
 import subprocess
 import time
 
 
 class CleanupPending(OSError):
     """Owned descendants could not be observed drained; never publish cancellation."""
+
+
+def bash_path():
+    """The bash to start, as an absolute path where one is known.
+
+    On Windows a bare "bash" is resolved by CreateProcess, which searches
+    System32 before PATH: on a machine with WSL that is WSL's bash.exe, a
+    different toolchain from the Git Bash the hooks and the Bash tool use.
+    py.sh exports the bash it runs under as FPL_BASH. Without it, PATH is
+    searched past System32 and WindowsApps, where WSL's launchers live, and
+    then beside git, which Git for Windows installs with its bash.
+    """
+    for cand in (os.environ.get('FPL_BASH'), os.environ.get('CLAUDE_CODE_GIT_BASH_PATH')):
+        if cand and os.path.isfile(cand):
+            return cand
+    if os.name != 'nt':
+        return shutil.which('bash') or 'bash'
+    system = os.path.normcase(os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), 'System32'))
+    dirs = [d for d in os.environ.get('PATH', '').split(os.pathsep)
+            if os.path.normcase(d.rstrip('\\/')) != system and 'windowsapps' not in os.path.normcase(d)]
+    found = shutil.which('bash', path=os.pathsep.join(dirs))
+    if found:
+        return found
+    git = shutil.which('git')
+    here = os.path.dirname(os.path.realpath(git)) if git else ''
+    for _ in range(3 if git else 0):
+        cand = os.path.join(here, 'usr', 'bin', 'bash.exe')
+        if os.path.isfile(cand):
+            return cand
+        here = os.path.dirname(here)
+    return 'bash'
 
 
 def identity(pid):
@@ -208,6 +240,8 @@ class ProcessTree:
         self.job = WindowsJob(create=True) if (platform or os.name) == 'nt' else None
         self.proc = None
         self.members = []
+        if self.job and not shell and isinstance(command, list) and str(command[0]).lower() in ('bash', 'bash.exe'):
+            command = [bash_path()] + command[1:]
         try:
             options = {'creationflags': 0x200 | 0x4} if self.job else {'start_new_session': True}
             self.proc = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL,

@@ -115,6 +115,7 @@ function repairCoverageIssue(check, measured, fixed) {
 }
 const REPAIR_SENTINEL_SCHEMA = {type:'object',required:['status'],properties:{status:{type:'string'},rawPatch:{type:'string'},base:{type:'string'},patch:{type:'string'},item:{type:'string'},round:{type:'integer'},snapshot:{type:'string'},token:{type:'string'},patchSha256:{type:'string'},observations:{type:'array',items:{type:'object'}},issue:{type:'string'}}}
 const repairQuote = s => "'" + String(s).replace(/'/g, "'\\''") + "'"
+const repairHelperCommand = mode => REPAIR_PROOF_ARGV.map(repairQuote).join(' ') + ' ' + mode
 function repairSamePath(expected, actual) {
   if (typeof expected !== 'string' || typeof actual !== 'string') return false
   // Native pathlib normalizes mixed Windows separators. A POSIX backslash
@@ -129,7 +130,7 @@ function repairIdentity(context) { const p = context.integrated || context.curre
 async function repairSentinel(mode, context, extra = {}, id = '') {
   const identity = repairIdentity(context)
   const args = mode === 'cleanup' ? extra : {...identity,root:REPAIR_LAUNCH.root,...extra}
-  const command = 'bash ' + repairQuote(REPAIR_PROOF_HELPER) + ' repair-proof.py ' + mode + ' ' + Object.entries(args).map(([k,v]) => '--' + k + ' ' + repairQuote(v)).join(' ')
+  const command = repairHelperCommand(mode) + ' ' + Object.entries(args).map(([k,v]) => '--' + k + ' ' + repairQuote(v)).join(' ')
   return agent('FIXED REPAIR WITNESS. Run exactly this command and return its raw JSON verbatim. Do not inspect or accept fixer/checker reasoning, manually edit source/artifacts, infer a digest, or substitute another command. The helper may create/clean only its owned scratch archives. A command failure returns status INCOMPLETE with its issue.\nCOMMAND: ' + command + '\nREAD PHASE: '+id+'\nFRESH LAUNCH READ: ' + A._replayLaunchNonce,
     {label:'repair-witness:'+mode+':'+context.item+':r'+context.round+':'+id,effort:'low',schema:REPAIR_SENTINEL_SCHEMA})
 }
@@ -158,7 +159,7 @@ function repairCheckerEvidenceIssue(check, context, measured) {
   return null
 }
 function repairSnapshotBrief(snapshot) {
-  return 'SNAPSHOT IDENTITY: '+JSON.stringify(snapshot)+'\nThe harness already applied the complete current patch to this fresh archive of the exact launch base. Work only there; no second snapshot or second patch application. Run ALL attack/control cases through bash '+repairQuote(REPAIR_PROOF_HELPER)+' repair-proof.py execute --snapshot '+repairQuote(snapshot.snapshot)+' --token '+repairQuote(snapshot.token)+' --control <valid-command> --attack <case-command>. Copy the actual command/result observations into each sibling and hunk row. Latency observedMs must copy attack.elapsedMs; for alarms pass --series <absolute-production-series>, read its frozen copy from FPL_PRODUCTION_SERIES, and have the command print JSON {durationSeconds,falsePositives,maxPerDay}, then copy its measured output and helper-read series digest. These actual executions, not descriptions, are independently logged outside the snapshot and collected by the cleanup sentinel.\n'
+  return 'SNAPSHOT IDENTITY: '+JSON.stringify(snapshot)+'\nThe harness already applied the complete current patch to this fresh archive of the exact launch base. Work only there; no second snapshot or second patch application. Run ALL attack/control cases through '+repairHelperCommand('execute')+' --snapshot '+repairQuote(snapshot.snapshot)+' --token '+repairQuote(snapshot.token)+' --control <valid-command> --attack <case-command>. Copy the actual command/result observations into each sibling and hunk row. Latency observedMs must copy attack.elapsedMs; for alarms pass --series <absolute-production-series>, read its frozen copy from FPL_PRODUCTION_SERIES, and have the command print JSON {durationSeconds,falsePositives,maxPerDay}, then copy its measured output and helper-read series digest. These actual executions, not descriptions, are independently logged outside the snapshot and collected by the cleanup sentinel.\n'
 }
 async function repairCheckedSpawn(context, measured, prompt, options) {
   const snapshot = await repairSentinel('materialize',context,{sha256:measured.patchSha256},options.label)
@@ -180,7 +181,7 @@ async function repairDiffAttack(context, measured, phaseName) {
   const attackSchema = {type:'object',required:['base','patchSha256','completed','evidence','blockers','findings'],properties:{base:{type:'string'},patchSha256:{type:'string'},completed:{type:'boolean'},evidence:{type:'array',minItems:1,items:{type:'string'}},blockers:{type:'array',items:{type:'string'}},findings:C.FixCheckV1.properties.findings}}
   const voteSchema = {type:'object',required:['resolution','attack','control','contradiction'],properties:{resolution:{enum:['REFUTED','CONFIRMED','UNRESOLVED']},attack:{type:'object'},control:{type:'object'},contradiction:{type:'string'}}}
   const subject = 'PINNED PATCH SUBJECT: '+JSON.stringify(measured)+'\nORIGIN REPLAY CONTEXT: '+JSON.stringify(context)+'\nORIGINAL FINDINGS: '+JSON.stringify(A.findings || [])+'\nSETTLED ORIGINAL FINDINGS (context, never evidence): '+JSON.stringify(repairOriginalTitles())
-  const snapshotPrompt = s => 'SNAPSHOT IDENTITY: '+JSON.stringify(s)+'\nFresh base-archive snapshot: '+s.snapshot+'; ownership token: '+s.token+'. Run all controls/attacks through bash '+repairQuote(REPAIR_PROOF_HELPER)+' repair-proof.py execute --snapshot '+repairQuote(s.snapshot)+' --token '+repairQuote(s.token)+' --control <valid-command> --attack <case-command>. Copy its actual attack/control observations into refutation votes. That helper drains owned subprocesses and writes an independent execution log before returning. An evidence string without a logged execution cannot complete this seat. Do not run detached commands or mutate shared files. Missing tools/controls are blockers. '
+  const snapshotPrompt = s => 'SNAPSHOT IDENTITY: '+JSON.stringify(s)+'\nFresh base-archive snapshot: '+s.snapshot+'; ownership token: '+s.token+'. Run all controls/attacks through '+repairHelperCommand('execute')+' --snapshot '+repairQuote(s.snapshot)+' --token '+repairQuote(s.token)+' --control <valid-command> --attack <case-command>. Copy its actual attack/control observations into refutation votes. That helper drains owned subprocesses and writes an independent execution log before returning. An evidence string without a logged execution cannot complete this seat. Do not run detached commands or mutate shared files. Missing tools/controls are blockers. '
   const observed = r => Array.isArray(r?._executed) && r._executed.length > 0 && r._executed.every(o => o && o.base === context.base && o.patchSha256 === measured.patchSha256 && repairObservation(o.attack) && repairObservation(o.control) && typeof o.reproduces === 'boolean')
   async function runSeat(id, prompt, schema) {
     if (!affordable(id)) { receipt.blockers.push(id+': budget floor'); return null }

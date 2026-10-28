@@ -208,6 +208,25 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         checked, problems = repair_checks.checked(result['r'], repair_checks.descriptors(self.ir))
         self.assertEqual((checked, problems), ([self.head], []))
 
+    def test_helper_commands_start_an_absolute_program(self):
+        # A launcher with no shell hands argv[0] to CreateProcess, which searches
+        # System32 before PATH; on Windows a bare `bash` there is WSL's launcher.
+        calls = self.run_graph()['calls']
+        commands = {}
+        for marker in ('COMMAND: ', 'cases through ', 'controls/attacks through '):
+            commands[marker] = [call['p'].split(marker, 1)[1].split('\n')[0] for call in calls if marker in call['p']]
+            self.assertTrue(commands[marker], marker)
+            for command in commands[marker]:
+                program = shlex.split(command)[0]
+                self.assertTrue(os.path.isabs(program) and os.path.isfile(program), command)
+        read = next(command for command in commands['COMMAND: '] if ' read ' in command)
+        log = self.root / 'read.log'
+        runner = [sys.executable, str(SCRIPTS / 'longrun.py'), '--root', str(self.root)]
+        token = subprocess.run(runner + ['start', '--log', str(log), '--'] + shlex.split(read), cwd=self.root,
+                               capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+        subprocess.run(runner + ['await', token, '--timeout', '60'], cwd=self.root, capture_output=True, check=True, timeout=90)
+        self.assertIn('"status": "READ"', log.read_text(encoding='utf-8', errors='replace'))
+
     def test_sibling_proof_failures_never_reach_diff_attack(self):
         for mode in ('missing-siblings', 'empty-siblings', 'missing-axis', 'wrong-targets', 'uncited-na', 'fixer-unrerun', 'fixer-only'):
             with self.subTest(mode=mode):
@@ -377,7 +396,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
             ('unc-local-root', '//server/share/patch.diff', '/server/share/patch.diff', False),
             ('posix-literal-backslash', r'/repo/literal\name/patch.diff', '/repo/literal/name/patch.diff', False),
         ]
-        setup = "const A={_replayLaunchNonce:'" + '1' * 64 + "'},REPAIR_LAUNCH={root:'ignored'},REPAIR_PROOF_HELPER='ignored';let reply;const repairText=v=>typeof v==='string'&&!!v.trim();const agent=async()=>reply;\n"
+        setup = "const A={_replayLaunchNonce:'" + '1' * 64 + "'},REPAIR_LAUNCH={root:'ignored'},REPAIR_PROOF_ARGV=['ignored'];let reply;const repairText=v=>typeof v==='string'&&!!v.trim();const agent=async()=>reply;\n"
         script = setup + (SCRIPTS / 'repair-proof.js').read_text(encoding='utf-8') + '\nconst cases=' + json.dumps(cases) + ';\n' + '''
 (async()=>{const results=[];for(const [name,expected,actual]of cases){
  const context={base:'a'.repeat(40),item:'slice',round:1,current:{patch:expected}};

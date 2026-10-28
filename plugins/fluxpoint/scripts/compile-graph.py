@@ -3194,7 +3194,13 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             a(helpers.read())
         a("const REPAIR_DIFF_REVIEWS = []")
         plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        a("const REPAIR_PROOF_HELPER = " + js_str(os.path.join(plugin_root, "scripts", "py.sh").replace("\\", "/")))
+        # An absolute bash, not a bare `bash`: a seat may hand this argv to a
+        # launcher with no shell, and on Windows CreateProcess resolves a bare
+        # `bash` in System32 first, which is WSL's launcher.
+        from process_tree import bash_path
+        a("const REPAIR_PROOF_ARGV = " + json.dumps([bash_path().replace("\\", "/"),
+                                                     os.path.join(plugin_root, "scripts", "py.sh").replace("\\", "/"),
+                                                     "repair-proof.py"]))
         a("const REPAIR_REVIEW_AGENT = " + js_str(os.path.join(plugin_root, "agents", "red-team-reviewer.md").replace("\\", "/")))
         with open(os.path.join(plugin_root, "workflows", "red-team.js"), encoding="utf-8") as source:
             catalogue = source.read()

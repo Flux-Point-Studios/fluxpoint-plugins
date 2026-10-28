@@ -120,7 +120,7 @@ def host_for(at, tree, gates, gate):
         except (ValueError, IndexError):
             return None  # A compound shell gate has no one known interpreter.
         interpreter = first
-        command = [at._bash(), '-c', ' '.join(shlex.quote(x) for x in [interpreter, *flags, '-c', probe])]
+        command = [at.bash_path(), '-c', ' '.join(shlex.quote(x) for x in [interpreter, *flags, '-c', probe])]
     try:
         result = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=15)
         host = json.loads(result.stdout) if result.returncode == 0 else None
