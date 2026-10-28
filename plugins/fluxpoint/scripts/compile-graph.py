@@ -607,7 +607,7 @@ def after_ids(n):
 def ancestors(n, by_id):
     found = set()
     def visit(node):
-        for dep in after_ids(node):
+        for dep in after_ids(node) + ([(node.get("reduce") or {}).get("from")] if node.get("reduce") else []):
             if isinstance(dep, str) and dep not in found and dep in by_id:
                 found.add(dep)
                 visit(by_id[dep])
@@ -2970,7 +2970,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("function provePreamble(gate) {")
         a("  return longPreamble() + (gate === 'ci'")
         a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run the fluxpoint plugin's scripts/py.sh attest.py --ci${ROOT_ARG} --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
-        a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground attest.py --await${ROOT_ARG} <token>. A red whose wrapper row carries fault can be settled only by attest.py --rerun-fault <attestId>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}; await its one sequential native/reference pair and cite the pair. Every other red stays red. Never rerun until green: a later pass does not erase any unsettled red at the same tree and nonce. Return gate '${gate}', the exit, and the attestId the witness recorded (scripts/py.sh attest.py --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
+        a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground attest.py --await <token>${ROOT_ARG}. A red whose wrapper row carries fault can be settled only by attest.py --rerun-fault <attestId>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}; await its one sequential native/reference pair and cite the pair. Every other red stays red. Never rerun until green: a later pass does not erase any unsettled red at the same tree and nonce. Return gate '${gate}', the exit, and the attestId the witness recorded (scripts/py.sh attest.py --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
         a("}")
         a("const CITES = " + json.dumps({n['id']: n['cites'] for n in cited_nodes}, sort_keys=True))
         a("function citesPreamble(gates) {")
@@ -3012,15 +3012,19 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             sources = red_team_sources(gate, ir)
             if not sources:
                 continue
-            stages, visited, current = [], set(), gate
-            while current:
-                dep = current.get("after") or (current.get("reduce") or {}).get("from")
-                if not dep or dep in visited:
-                    break
-                visited.add(dep)
-                current = nodes_by_id.get(dep)
-                if current and (current.get("contract") == "RedTeamV1" or is_reduce(current)):
-                    stages.append(dep)
+            stages, visited, pending = [], set(), [gate]
+            while pending:
+                current = pending.pop()
+                deps = after_ids(current) + ([(current.get("reduce") or {}).get("from")] if current.get("reduce") else [])
+                for dep in deps:
+                    if not isinstance(dep, str) or dep in visited:
+                        continue
+                    visited.add(dep)
+                    producer = nodes_by_id.get(dep)
+                    if producer:
+                        if producer.get("contract") == "RedTeamV1" or is_reduce(producer):
+                            stages.append(dep)
+                        pending.append(producer)
             terminals[gate["id"]] = {"sources": sources, "stages": stages}
         a("const RED_TEAM_TERMINALS = " + json.dumps(terminals))
 
@@ -3871,7 +3875,7 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
     # with itself about why.
     has_parked = any(o.get("actor", "agent") != "agent" for o in ir["nodes"])
     dep = n.get("after") or (n.get("reduce") or {}).get("from")
-    guard = has_parked and dep and (n.get("actor", "agent") == "agent" or replay_features(ir))
+    guard = has_parked and dep
     if guard:
         check = (f"{json.dumps(dep)}.some(id => BLOCKED.has(id))" if isinstance(dep, list) else f"BLOCKED.has({js_str(dep)})")
         a(f"if ({check}) {{")
@@ -4005,6 +4009,8 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         a(f"let ok_{var} = true")
         if n.get("irreversible"):
             key = f"k_{var}"
+            a(f"const prompt_{var} = {prompt}")
+            prompt = f"prompt_{var}"
             a(f"const {key} = ledgerKey({js_str(nid)}, {prompt})")
             # A replayed node must not also be filed 'OK'. Reporting a
             # ceremony that did not happen the same way as one that did is
@@ -4866,7 +4872,7 @@ def main():
     findings = validate(ir, contracts, gates, agents, embedded_args=embedded_args, repository_root=args.gates_root)
     if not findings:
         findings.extend(prose_pin_findings(text, ir))
-    if not findings and args.check:
+    if not findings:
         findings.extend(probe_findings(ir, embedded_args))
     specification = None
     spec_path = header.get("SPEC")

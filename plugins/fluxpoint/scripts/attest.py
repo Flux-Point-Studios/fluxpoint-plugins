@@ -1345,6 +1345,11 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
                 "detail": (f"cites {cited}, which ran on commit "
                            f"{str(row['headSha'])[:12]}, but this campaign ran on "
                            f"{str(head)[:12]}")}
+    if (row.get("witness") not in ("forge", "reuse") and r.get("sha") is not None
+            and (not isinstance(r["sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", r["sha"])
+                 or r["sha"] != row.get("treeSha"))):
+        return {**base, "status": "MISMATCH",
+                "detail": "local claim sha differs from the exact commit the gate judged"}
     if row.get('cancelled'):
         return {**base, "status": "STALE", "detail": "cancelled execution is not a gate verdict"}
     if row.get('witness') not in ('forge', 'reuse') and root:

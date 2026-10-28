@@ -36,6 +36,14 @@ PROOF_RANK = {"NOT-APPLICABLE": 0, "SOUND": 1, "UNPROVEN": 2, "WEAKENED": 3}
 SEVERITY_RANK = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
 
+def wait_filename(campaign, node):
+    """Keep both readable components and hash their complete identity."""
+    import hashlib
+    slug = lambda value: "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in value)
+    digest = hashlib.sha256(json.dumps([campaign, node], ensure_ascii=True).encode("utf-8")).hexdigest()[:16]
+    return f"{slug(campaign)[:80]}.{slug(node)[:40]}.{digest}.json"
+
+
 def red_team_coverage_issue(coverage):
     """Validate the durable scope of a SHIP independently of schema execution."""
     if not isinstance(coverage, dict):
@@ -431,6 +439,12 @@ def main():
     except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
         print(f"record-run: ledger append failed: {e}", file=sys.stderr)
 
+    waits = summary.get("waits") or []
+    wait_names = [wait_filename(summary.get("campaign", ""), w.get("node", "")) for w in waits]
+    if len(set(wait_names)) != len(wait_names):
+        print("record-run: duplicate wait identity; no wait or run artifact written", file=sys.stderr)
+        return 2
+
     # Pin bytes are harness inputs, not a claim an agent can vouch for. Do
     # this after the once-only ledger append, but before any run/Evidence row.
     try:
@@ -556,9 +570,8 @@ def main():
                 # moved the problem rather than solved it.
                 rec["runId"] = args.run_id
                 rec.setdefault("lastChecked", 0)
-                safe = "".join(ch if ch.isalnum() or ch in "-_" else "-"
-                               for ch in f"{campaign}.{w.get('node','')}")[:120]
-                with open(os.path.join(wdir, f"{safe}.json"), "w", encoding="utf-8", newline="\n") as fh:
+                safe = wait_filename(campaign, w.get('node', ''))
+                with open(os.path.join(wdir, safe), "w", encoding="utf-8", newline="\n") as fh:
                     json.dump(rec, fh, indent=2)
     except Exception as e:  # noqa: BLE001
         print(f"record-run: inbox/waits update failed: {e}", file=sys.stderr)

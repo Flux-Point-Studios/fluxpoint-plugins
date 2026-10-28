@@ -135,6 +135,10 @@ def _journal_calls(run_id, projects):
         kind = event.get("type")
         if "agentId" not in event:
             continue
+        # A runtime worktree-spawn failure has no agent or transcript. It
+        # consumes no call slot; a later start under the same key may succeed.
+        if kind == "failed" and event["agentId"] == "":
+            continue
         aid = _component(event["agentId"], "agent id")
         if kind == "started":
             if aid in started:

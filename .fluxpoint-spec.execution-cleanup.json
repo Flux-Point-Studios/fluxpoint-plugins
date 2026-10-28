@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "goal": "Correct compiler dependency, parked-node propagation and execution evidence cleanup regressions",
+  "asset": "Flux Point gate execution, proof/statement ratchets, retained run evidence and counterexample ledger",
+  "scope": [
+    "Compiler dependency ancestry through reducers",
+    "Parked descendant propagation and unique wait files",
+    "Probe validation parity on emission",
+    "Execution citation commit identity and pre-start journal failures",
+    "Single-copy irreversible prompt and parseable await preamble"
+  ],
+  "outOfScope": [
+    "External workflow runtime cache redesign",
+    "Broad memory or repair lifecycle changes"
+  ],
+  "decisions": [
+    {
+      "id": "execution-cleanup",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should reported compiler defects be repaired?",
+        "options": [
+          {
+            "option": "focused-regressions",
+            "argued_by": "model",
+            "strongest_objection": "Several independent paths require executable coverage"
+          },
+          {
+            "option": "defer",
+            "argued_by": "model",
+            "strongest_objection": "Leaves concrete execution failures open"
+          }
+        ],
+        "chosen": "focused-regressions",
+        "rationale": "Reuse current orchestration and evidence protocols, preserving existing public semantics while fixing invalid edges and command shapes.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "GitHub issues 154,155,157,187,190,191,195,220 reproduced from current source"
+        ]
+      },
+      "costs": [
+        {
+          "option": "focused-regressions",
+          "cost": "Focused implementation and regression maintenance",
+          "basis": "estimate",
+          "evidence": [
+            "Current compiler and execution modules already expose the needed boundaries"
+          ]
+        },
+        {
+          "option": "defer",
+          "cost": "Repeated invalid launches",
+          "basis": "estimate",
+          "evidence": [
+            "Current compiler and execution modules already expose the needed boundaries"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "execution-cleanup-correctness",
+      "statement": "Blocked parks request no release, wait paths remain unique, reducer ancestry compiles, output validation matches check, execution citations bind sha, pre-start failures preserve journal readability, and emitted await syntax parses",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "execution-cleanup-tests"
+      ],
+      "counterexample": "A descendant park spawns, a long wait collides, a list dependency crashes emission, unchecked probe emits, a fabricated sha passes, or a pre-start event prevents resume"
+    }
+  ],
+  "checks": [
+    {
+      "id": "execution-cleanup-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/execution-cleanup-test.py"
+      ],
+      "scope": "Execute focused compiler output, Node orchestration, actual CLI parsing and citation/journal validation",
+      "assumptions": [
+        "Fixture workflow runtime preserves the supported agent call contract"
+      ],
+      "timeoutSeconds": 120
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Could a failed attempt with no agent have a real result to replay?",
+      "resolution": "Only empty-agent failed pre-start events are skipped; result or started events still refuse malformed identity."
+    }
+  ]
+}

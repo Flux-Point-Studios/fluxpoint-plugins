@@ -93,3 +93,5 @@ Windows load behavior, hermetic solver execution, kernel proof reconstruction
 or conformance of a Cardano ledger model. Blaster's scope and solver trust remain
 explicit. Existing consuming repositories must deliberately update copied
 harnesses to adopt newer gates; installing a plugin update does not rewrite them.
+
+Compiler execution cleanup regressions are exercised by `plugins/fluxpoint/tests/execution-cleanup-test.py`: parked descendants, unique wait records, reducer ancestry, probe validation on emission, irreversible prompt reuse, await argument order, local citation commit identity and pre-start journal failures.

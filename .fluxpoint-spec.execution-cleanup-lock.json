@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "sha256": "b14ecfb1a2f53a612ca571f9eb892ffd1ce5e6a6120aa4b0d1901d1f79ddc5da",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/execution-cleanup-test.py": "04072e5e97b8c01e17acd3726bce7dc7031223e7c338b488e86e9928bef800d3"
+  }
+}
