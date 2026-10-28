@@ -47,6 +47,7 @@ and the proof-guard ratchet's, not this file's.
 Claude Code uses PostToolUseFailure for a failed Bash call; hooks.json routes
 that event to this reader too. Its error field reports "Command failed with
 exit code N". Codex supplies a completed-shell header for either outcome.
+An UNATTESTED claim carries no information about whether the gate passed.
 Unreadable exits remain unattested. Compiled prove nodes use the managed
 wrapper so every pending, failed and completed execution is retained.
 

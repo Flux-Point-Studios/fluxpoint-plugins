@@ -9,8 +9,8 @@ because the reader stops looking.
 Pinned here so they cannot drift back:
   - the irreversible ledger is gitignored, so it cannot be described as
     committed and cannot promise once-only across clones
-  - attestation records passes and (measured) never reds, so the log's own
-    docstring must count that among its limits
+  - attestation must state the actual configured failure event and retain
+    the distinction between an unreadable exit and a failed gate
   - record-run must distinguish a node claiming green with no row from one
     claiming red with no row, because only the first is suspicious
 """
@@ -76,9 +76,12 @@ with tempfile.TemporaryDirectory() as d:
 report("a fresh clone's ledger reads as a first run", empty,
        "empty, exit 0" if empty else f"rc={r.returncode} {r.stdout[:20]}")
 
-# ==================== attestation states its asymmetry ==================
-report("attest.py counts the failure-delivery limit",
-       "Three limits" in ATTEST, "three limits")
+# ==================== attestation states its runtime boundary =============
+HOOKS = json.loads(read('hooks', 'hooks.json'))['hooks']
+failure_hook = any('exec-attest.sh' in hook.get('command', '')
+                   for group in HOOKS.get('PostToolUseFailure', []) for hook in group.get('hooks', []))
+report("attestation documents and registers the runtime failure event",
+       'PostToolUseFailure' in ATTEST and failure_hook, "failure event routed")
 # Collapse wrapped prose before matching: these are paragraphs, and a claim
 # that happens to fall across a line break is still the claim.
 FLAT = re.sub(r"\s+", " ", ATTEST)
