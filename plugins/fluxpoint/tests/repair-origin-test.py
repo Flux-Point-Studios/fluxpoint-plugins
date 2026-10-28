@@ -33,9 +33,7 @@ CONTRACTS = CG.load_contracts(str(PLUGIN / 'contracts'))
 
 
 def python_command(code):
-    if os.name == 'nt':
-        return subprocess.list2cmdline([sys.executable, '-c', code])
-    return shlex.quote(sys.executable) + ' -c ' + shlex.quote(code)
+    return shlex.join([sys.executable, '-c', code])
 
 
 

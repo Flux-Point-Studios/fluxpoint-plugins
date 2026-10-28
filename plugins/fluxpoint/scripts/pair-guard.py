@@ -108,6 +108,8 @@ import subprocess
 import sys
 import tempfile
 
+from process_tree import shell_argv
+
 MANIFEST = ".fluxpoint-pairs.json"
 ACKS = ".fluxpoint-pair-acks.json"
 ACK_FIELDS = {"pair", "source_sha", "why"}
@@ -435,7 +437,7 @@ def reader_words(p):
 def _run(cmd, root, stdin=None, env=None, timeout=None):
     """(rc, stdout, stderr) as bytes; rc None on timeout."""
     try:
-        r = subprocess.run(cmd, shell=True, cwd=root, input=stdin,
+        r = subprocess.run(shell_argv(cmd), cwd=root, input=stdin,
                            capture_output=True, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
         return None, b"", b""
@@ -541,7 +543,7 @@ def report_differential(p, r, failures):
 
 def run_parity_cmd(root, p):
     """(rc, tail) of the declared parity command."""
-    r = subprocess.run(p["parity"], shell=True, cwd=root, capture_output=True, text=True)
+    r = subprocess.run(shell_argv(p["parity"]), cwd=root, capture_output=True, text=True)
     tail = (r.stdout + r.stderr).strip().splitlines()[-3:]
     return r.returncode, tail
 

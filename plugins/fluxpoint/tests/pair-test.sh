@@ -134,11 +134,13 @@ check "the same pattern still matches at its own level" 1 "$?"
 # Co-change proves somebody touched both files. Only parity proves they
 # agree, which is why a pair without one is reported as half-checked.
 mkrepo
-printf '#!/bin/sh\ngrep -q "300" api/policies.py && grep -q "300" contracts/policy/policy_window.ak\n' \
+printf '#!/bin/sh\ngrep -q "$WANT" api/policies.py && grep -q "$WANT" contracts/policy/policy_window.ak\n' \
   >check_parity.sh; chmod +x check_parity.sh
+# The parity is a POSIX command line on every platform. On Windows shell=True
+# would hand it to cmd.exe, which has no `NAME=value cmd` prefix.
 manifest <<'EOF'
 [{"id":"policy-window","source":"contracts/**/policy*.ak",
-  "mirror":["api/policies.py"],"parity":"sh check_parity.sh"}]
+  "mirror":["api/policies.py"],"parity":"WANT=300 sh check_parity.sh"}]
 EOF
 git add -A; git -c user.email=t@t -c user.name=t commit -qm manifest
 out="$($PG --check 2>&1)"; rc=$?
