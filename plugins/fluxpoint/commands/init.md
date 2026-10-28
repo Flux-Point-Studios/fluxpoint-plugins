@@ -19,7 +19,7 @@ step; do not stop at copying files.
    the repo has a pre-1.0 `LOOP.md`, stop and run `/fluxpoint:migrate`
    instead of writing a second state file.
 3. Ensure `.gitignore` contains `.claude/fluxpoint/`,
-   `.claude/worktrees/`, and `__pycache__/`. The worktrees entry
+   `.claude/worktrees/`, `.claude/workflows/`, and `__pycache__/`. The worktrees entry
    matters as soon as any campaign has a `mutates` node: those run in
    isolated trees under `.claude/worktrees/`, which must never be
    committed.

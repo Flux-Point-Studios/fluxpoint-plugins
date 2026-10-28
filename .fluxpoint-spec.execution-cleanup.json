@@ -8,7 +8,8 @@
     "Probe validation parity on emission",
     "Execution citation commit identity and pre-start journal failures",
     "Single-copy irreversible prompt and parseable await preamble",
-    "Structured resume default reconciliation, explicit removals, immutable inputs, persisted rerun plans and UTF-8 child diagnostics"
+    "Structured resume default reconciliation, explicit removals, immutable inputs, persisted rerun plans and UTF-8 child diagnostics",
+    "Attestation classifies exact harness STATUS and inserted Evidence/Decisions edits without exempting content changes"
   ],
   "outOfScope": [
     "External workflow runtime cache redesign",
@@ -84,6 +85,17 @@
         "structured-resume-tests"
       ],
       "counterexample": "An ignored default change, unbound new input, unused typo without warning, unrecorded plan or Windows decoding crash"
+    },
+    {
+      "id": "harness-content-dirt",
+      "statement": "Harness-only root graph edits and untracked workflow artifacts are clean while any source, existing evidence, prompt, trusted config or linked worktree dirt is retained and named in the row",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "harness-dirt-tests"
+      ],
+      "counterexample": "An ordinary STATUS edit makes all gates stale, or a content edit is hidden by a broad Markdown exemption"
     }
   ],
   "checks": [
@@ -112,6 +124,19 @@
         "Runtime prefix predictions remain conditional on the recorded workflow call ordering"
       ],
       "timeoutSeconds": 180
+    },
+    {
+      "id": "harness-dirt-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/harness-dirt-test.py"
+      ],
+      "scope": "Native git repositories and linked worktrees, real gate wrapper and exact Markdown diff policy",
+      "assumptions": [
+        "The root graph is tracked and Git supplies its committed baseline"
+      ],
+      "timeoutSeconds": 120
     }
   ],
   "challenges": [

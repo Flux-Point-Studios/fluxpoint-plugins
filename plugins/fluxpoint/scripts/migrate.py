@@ -188,7 +188,7 @@ def rewire_gitignore(path):
             (".claude/fluxpoint-loop", ".claude/fluxpoint-graph")]
     # .claude/worktrees/ holds the isolated trees mutating nodes run in;
     # they are transient and must never be committed.
-    for want in (f"{NEW_DIR}/", ".claude/worktrees/", "__pycache__/"):
+    for want in (f"{NEW_DIR}/", ".claude/worktrees/", ".claude/workflows/", "__pycache__/"):
         if want not in [l.strip() for l in kept]:
             kept.append(want)
     open(path, "w", encoding="utf-8", newline="\n").write("\n".join(kept) + "\n")

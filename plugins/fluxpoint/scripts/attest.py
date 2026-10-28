@@ -701,24 +701,73 @@ def head_sha(root):
         return ""
 
 
-def dirty(root):
-    """Unknown content state is dirty. Only untracked attestation metadata is omitted."""
+def dirty_paths(root, harness=True):
+    """Classify observed dirt, retaining the paths at execution time."""
     import subprocess
+    import evidence_table
     try:
         p = subprocess.run(['git', '-C', root, 'status', '--porcelain=v1', '-z',
                             '--untracked-files=all', '--ignore-submodules=none'],
                            capture_output=True, timeout=10)
-        if p.returncode:
-            return True
-        # -z keeps whitespace, newlines and quoted names unambiguous. Renames
-        # are already dirty from their first entry, so need no special pairing.
-        for entry in p.stdout.split(b'\0'):
-            if entry and not (entry.startswith(b'?? .claude/fluxpoint/') and
-                              entry[3:].split(b'/')[2] in (b'attest.jsonl', b'attest-bg')):
-                return True
-        return False
-    except (OSError, subprocess.TimeoutExpired):
-        return True
+        top = subprocess.run(['git', '-C', root, 'rev-parse', '--show-toplevel'],
+                             capture_output=True, text=True, timeout=10)
+        if p.returncode or top.returncode:
+            raise OSError('git status unavailable')
+        result, entries, index = [], p.stdout.split(b'\0'), 0
+        while index < len(entries):
+            entry = entries[index]
+            index += 1
+            if not entry:
+                continue
+            state, raw_path = entry[:2], entry[3:]
+            path = os.fsdecode(raw_path)
+            kind = 'content'
+            if state == b'??' and (path.startswith('.claude/workflows/') or
+                    (path.startswith('.claude/fluxpoint/') and path.split('/')[2] in ('attest.jsonl', 'attest-bg'))):
+                kind = 'harness'
+            elif harness and not any(ch in state for ch in b'RCD?'):
+                baseline = subprocess.run(['git', '-C', root, 'show', 'HEAD:' + path], capture_output=True, timeout=10)
+                current_path = os.path.join(top.stdout.strip(), path)
+                try:
+                    before = baseline.stdout.decode('utf-8')
+                    with open(current_path, encoding='utf-8', newline='') as handle:
+                        after = handle.read()
+                    graph = (os.path.basename(path) in ('WORK.md', 'LOOP.md') or
+                             bool(re.search(r'^ {0,3}```(?:json\s+graph-ir|graph-ir)', before, re.M)))
+                    in_root = os.path.commonpath([os.path.realpath(root), os.path.realpath(current_path)]) == os.path.realpath(root)
+                    if baseline.returncode == 0 and in_root and graph and evidence_table.harness_only_change(before, after):
+                        kind = 'harness'
+                except (OSError, UnicodeError):
+                    pass
+            result.append({'path': path, 'kind': kind, 'root': os.path.realpath(root)})
+            # Porcelain -z adds the original name after a rename/copy. Both
+            # paths are content, never separately interpreted as metadata.
+            if any(ch in state for ch in b'RC') and index < len(entries):
+                result.append({'path': os.fsdecode(entries[index]), 'kind': 'content', 'root': os.path.realpath(root)})
+                index += 1
+        return result
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        return [{'path': '<git status unavailable>', 'kind': 'content', 'root': os.path.realpath(root)}]
+
+
+def dirty(root):
+    return any(item['kind'] == 'content' for item in dirty_paths(root))
+
+
+def _execution_dirt(root, tree, reference=False):
+    paths = dirty_paths(root)
+    if not reference and os.path.realpath(tree) != os.path.realpath(root):
+        paths.extend(dirty_paths(tree, harness=False))
+    return paths
+
+
+def _merge_dirt(*snapshots):
+    found = {}
+    for item in (p for snapshot in snapshots for p in snapshot):
+        key = item['root'], item['path']
+        if key not in found or item['kind'] == 'content':
+            found[key] = item
+    return list(found.values())
 
 
 def _hook_tree(root, payload, command):
@@ -867,6 +916,7 @@ def record(root, payload):
     out = resp if isinstance(resp, dict) else {"stdout": str(resp)}
     log = f"{out.get('stdout') or ''}\n---\n{out.get('stderr') or ''}"
     session = str(payload.get("session_id") or "")
+    observed_dirt = _execution_dirt(root, _hook_tree(root, payload, command))
     row = {
         # The raw command and its nonce are part of the identity: two
         # executions that normalize alike in one second (a nonce-prefixed
@@ -881,7 +931,8 @@ def record(root, payload):
         "logSha256": sha(log),
         "headSha": head_sha(root),
         "treeSha": _tree_sha(root, payload, command),
-        "dirty": dirty(root) or dirty(_hook_tree(root, payload, command)),
+        "dirty": any(p["kind"] == "content" for p in observed_dirt),
+        "dirtyPaths": observed_dirt,
         "when": when,
         "sessionId": session,
         # Subagent Bash calls fire this hook too, and a gate run inside a
@@ -990,7 +1041,7 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
     # commit for every witness. Where the gate actually ran is treeSha.
     head = head_sha(root)
     tree_head = head_sha(tree)
-    was_dirty = dirty(root) or (dirty(tree) if not reference else False)
+    initial_dirt = _execution_dirt(root, tree, reference)
     if reference:
         tree_head = reference['treeSha']
     manifest_hash = fault_policy.manifest_sha(root)
@@ -1030,6 +1081,9 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
     with open(log, "rb") as fh:
         log_bytes = fh.read()
     text = log_bytes.decode("utf-8", "replace")
+    observed_dirt = _merge_dirt(initial_dirt, _execution_dirt(root, tree, reference))
+    if head_sha(root) != head or (not reference and head_sha(tree) != tree_head):
+        observed_dirt.append({'path': '<HEAD moved during execution>', 'kind': 'content', 'root': os.path.realpath(root)})
     row = {
         "attestId": "att_" + sha(f"{started}|{norm}|{code}|{token}")[:12],
         "gate": gate, "command": norm, "commandSha": sha(norm), "exit": code,
@@ -1037,7 +1091,8 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
         "started": started, "when": now(), "sessionId": "", "agent": "",
         "witness": "wrapper", "token": token, "nonce": nonce, "tree": os.path.abspath(tree),
         "host": host, "manifestSha256": manifest_hash,
-        'dirty': was_dirty or dirty(root) or (not reference and (dirty(tree) or head_sha(tree) != tree_head)) or head_sha(root) != head,
+        'dirty': any(p['kind'] == 'content' for p in observed_dirt),
+        'dirtyPaths': observed_dirt,
     }
     if attempt:
         row['attempt'] = attempt
@@ -1337,8 +1392,9 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
             fresh_forge_green = claimed == 0 and facts['exit'] == 0
         except (OSError, RuntimeError, ValueError, KeyError, TypeError) as e:
             return {**base, "status": "MISMATCH", "detail": "forge re-read refused: " + str(e)}
-    elif row.get('dirty') is not False:
-        return {**base, "status": "STALE", "detail": "local row is dirty or predates content binding; rerun on a clean tree"}
+    elif row.get('dirty') is not False or any(p.get('kind') == 'content' for p in (row.get('dirtyPaths') or []) if isinstance(p, dict)):
+        paths = ', '.join(p.get('path', '?') for p in (row.get('dirtyPaths') or []) if isinstance(p, dict) and p.get('kind') == 'content')
+        return {**base, "status": "STALE", "detail": "local row is dirty or predates content binding; rerun on a clean tree" + (": " + paths if paths else "")}
     if (head and row.get("witness") not in ("forge", "reuse") and row.get("headSha")
             and not _same_commit(row["headSha"], head)):
         return {**base, "status": "STALE",

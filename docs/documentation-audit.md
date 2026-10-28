@@ -95,3 +95,5 @@ explicit. Existing consuming repositories must deliberately update copied
 harnesses to adopt newer gates; installing a plugin update does not rewrite them.
 
 Compiler execution cleanup regressions are exercised by `plugins/fluxpoint/tests/execution-cleanup-test.py`: parked descendants, unique wait records, reducer ancestry, probe validation on emission, irreversible prompt reuse, await argument order, local citation commit identity and pre-start journal failures.
+
+`harness-dirt-test.py` exercises attestation after a tracked graph STATUS update, inserted Evidence/Decisions rows, untracked and tracked compiled scripts, source/config/IR drift and a dirty linked worktree. The committed graph remains the content boundary; existing rows and prompts are never exempted.

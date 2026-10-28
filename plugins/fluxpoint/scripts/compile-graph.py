@@ -3245,7 +3245,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("let INCOMPLETE = false")
     a("function summary(outcome) {")
     a("  const final = outcome === 'COMPLETE' && INCOMPLETE ? 'INCOMPLETE' : outcome")
-    extra = ", argDefaults: " + json.dumps(ir.get('argDefaults') or {}, ensure_ascii=True) + ", rerunPlan: A._rerunPlan || null"
+    extra = (", argDefaults: " + json.dumps(ir.get('argDefaults') or {}, ensure_ascii=True) + ", rerunPlan: A._rerunPlan || null") if embedded_args is not None else ""
     if any((n.get("repeat") or {}).get("classBy") for n in nodes):
         extra += ", recurringClasses: RECURRING_CLASSES"
     if specification:
