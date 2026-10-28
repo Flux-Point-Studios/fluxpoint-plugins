@@ -197,6 +197,20 @@ class RealReplay(unittest.TestCase):
                 REPLAY.observe(archive, None, self.control, self.command, 1)
         self.assertTrue((scratch / 'state.json').exists())
 
+    def test_command_that_runs_git_init_keeps_its_result_and_removes_scratch(self):
+        archive = subprocess.run(['git', '-C', str(self.root), 'archive', self.base],
+                                 capture_output=True, check=True).stdout
+        scratch = self.root / 'git-init-snapshot'
+        scratch.mkdir()
+        command = python_command(
+            'import subprocess,sys; git=["git","-c","user.name=t","-c","user.email=t@example.invalid"]; '
+            'subprocess.run(git+["init","-q"],check=True); '
+            'subprocess.run(git+["commit","-q","--allow-empty","-m","x"],check=True); sys.exit(1)')
+        with patch.object(REPLAY.tempfile, 'mkdtemp', return_value=str(scratch)):
+            observed = REPLAY.observe(archive, None, self.control, command, 30)
+        self.assertTrue(observed['reproduces'])
+        self.assertFalse(scratch.exists())
+
     def test_failed_controls_missing_patches_and_no_current_reproduction_refuse_origin(self):
         patch = self.patch('parser', 1, dict(self.state, left=True))
         ctx = {'base': self.base, 'round': 1, 'patches': [patch], 'current': patch, 'targetClasses': []}

@@ -5,15 +5,18 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 PLUGIN = Path(__file__).resolve().parents[1]
 SCRIPTS = PLUGIN / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
+from process_tree import CleanupPending
 from repair_diff import manifest, AXES, coverage_issue
 import repair_checks
 
@@ -406,6 +409,37 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         marker.unlink()
         self.assertEqual(PROOF.cleanup(s['snapshot'], s['token'])['status'], 'CLEANED')
         self.assertFalse(Path(s['snapshot']).exists())
+
+    def snapshot(self):
+        return PROOF.materialize(self.root, self.base, str(self.patches[0]), manifest(self.data)['patchSha256'], 'slice', 1)
+
+    def test_cleanup_removes_git_objects_an_attack_left_behind(self):
+        s = self.snapshot()
+        code = ('import subprocess,sys; git=["git","-c","user.name=t","-c","user.email=t@example.invalid"]; '
+                'subprocess.run(git+["init","-q"],check=True); '
+                'subprocess.run(git+["commit","-q","--allow-empty","-m","x"],check=True); sys.exit(1)')
+        command = subprocess.list2cmdline([sys.executable, '-c', code]) if os.name == 'nt' else shlex.join([sys.executable, '-c', code])
+        self.assertTrue(PROOF.execute(s['snapshot'], s['token'], 'git --version', command, 30)['reproduces'])
+        cleaned = PROOF.cleanup(s['snapshot'], s['token'])
+        self.assertEqual((cleaned['status'], len(cleaned['observations'])), ('CLEANED', 1))
+        self.assertFalse(Path(s['snapshot']).parent.exists())
+
+    def test_cleanup_names_what_it_could_not_remove(self):
+        s = self.snapshot()
+        held = Path(s['snapshot']) / 'held.txt'
+        held.write_text('open elsewhere')
+        unlink = os.unlink
+
+        def refuse(path, *args, **kwargs):
+            if os.path.basename(path) == 'held.txt':
+                raise PermissionError(13, 'Access is denied')
+            return unlink(path, *args, **kwargs)
+
+        with mock.patch.object(os, 'unlink', refuse):
+            with self.assertRaisesRegex(CleanupPending, re.escape(str(held))):
+                PROOF.cleanup(s['snapshot'], s['token'])
+        self.assertTrue(held.exists())
+        self.assertEqual(PROOF.cleanup(s['snapshot'], s['token'])['status'], 'CLEANED')
 
     def test_alarm_series_is_reread_and_provider_pool_cannot_be_omitted(self):
         measured = manifest(b'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+provider rate-limit alarm timer\n')
