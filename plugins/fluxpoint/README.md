@@ -37,6 +37,10 @@ check before reading applicable scope, reducing repeated packet context. Existin
 graphs can opt in with `specificationContext: "reference"`; see the
 [packet format](references/spec-format.md#packet-context-by-reference).
 
+Review lenses receive upstream suite witness pointers and can cite the same green
+execution at one head and launch. Typed suite coverage is checked against source
+rows; own reruns name the claim under test. See
+[review gate evidence](../../docs/review-gate-evidence.md).
 
 ## Layout
 

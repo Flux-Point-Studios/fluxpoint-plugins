@@ -74,7 +74,8 @@ def red_team_coverage_issue(coverage):
         return "SHIP coverage repeats a lens"
     if type(coverage.get("sampled")) is not bool:
         return "SHIP coverage must declare whether the review sampled"
-    return None
+    import review_gates
+    return review_gates.shape(coverage)
 
 
 def red_team_coverage_records(summary):

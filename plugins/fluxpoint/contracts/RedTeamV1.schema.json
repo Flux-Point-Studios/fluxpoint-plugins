@@ -95,6 +95,9 @@
             "minLength": 1
           }
         },
+        "suites": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}, "description": "Gate suites claimed as covered, each backed by reused or own witnessed execution."},
+        "citedGates": {"type": "array", "items": {"type": "object", "required": ["gate", "attestId", "exit", "sha", "nonce", "logSha256"], "properties": {"gate": {"type": "string", "minLength": 1}, "attestId": {"type": "string", "minLength": 1}, "exit": {"type": "integer", "const": 0}, "sha": {"type": "string", "pattern": "^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"}, "nonce": {"type": "string", "minLength": 1}, "logSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "runtime": {}}}, "description": "Reused upstream source rows at the reviewed head and launch; record-run checks the actual log."},
+        "executedGates": {"type": "array", "items": {"type": "object", "required": ["gate", "attestId", "exit", "sha", "nonce", "logSha256", "reason"], "properties": {"gate": {"type": "string", "minLength": 1}, "attestId": {"type": "string", "minLength": 1}, "exit": {"type": "integer", "const": 0}, "sha": {"type": "string", "pattern": "^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"}, "nonce": {"type": "string", "minLength": 1}, "logSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "runtime": {}, "reason": {"type": "string", "minLength": 10}}}, "description": "Own witnessed reruns, each justified by the named claim under test."},
         "sampled": {
           "type": "boolean"
         }

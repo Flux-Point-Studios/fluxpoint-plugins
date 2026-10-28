@@ -1611,6 +1611,8 @@ def verify_claims(root, summary):
             for gate in steps:
                 checks.append({'node': node, 'gate': gate, 'declared': True, 'status': 'MISMATCH',
                                'detail': 'declared cited node produced no result'})
+    import review_gates
+    checks.extend(review_gates.verify(_api(), root, summary or {}, rows, gates))
     return checks, []
 
 
@@ -1652,6 +1654,7 @@ def main():
     g.add_argument("--check-ci", action="store_true", help="validate the CI policy and refuse the harness own status identity")
     g.add_argument("--stamp", action="store_true",
                    help="print a launch stamp for args._launch")
+    g.add_argument("--show", metavar="ATTEST_ID", help="print one source attest row as JSON without executing it")
     g.add_argument("--last", metavar="GATE",
                    help="print the newest attested row of GATE (with --nonce: of this run)")
     a = ap.parse_args()
@@ -1684,6 +1687,14 @@ def main():
         import fault_attempts
         return fault_attempts.rerun(_api(), a.root, a.rerun_fault, a.nonce,
                                     a.detach, a.token, a.tree)
+    if a.show:
+        row = next((row for row in read(a.root) if row.get("attestId") == a.show
+                    and (not a.nonce or row.get("nonce") == a.nonce)), None)
+        if row is None:
+            print("attest: source row not found for this id/nonce", file=sys.stderr)
+            return 1
+        print(json.dumps(row, sort_keys=True))
+        return 0
     if a.last:
         mine = [r for r in read(a.root) if r.get("gate") == a.last
                 and (not a.nonce or r.get("nonce") == a.nonce)]

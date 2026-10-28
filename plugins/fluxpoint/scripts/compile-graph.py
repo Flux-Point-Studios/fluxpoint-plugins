@@ -3100,6 +3100,31 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         expected = {n["id"]: list_var(n["foreach"]) for n in nodes if n.get("contract") == "RedTeamV1" and n.get("foreach")}
         a("const RED_TEAM_EXPECTED = {" + ", ".join(json.dumps(k) + ": " + v for k, v in expected.items()) + "}")
         a("const RED_TEAM_CHECKS = {}")
+        a("const REVIEW_GATE_EVIDENCE = {}")
+        a("const REVIEW_GATE_NODES = " + json.dumps({node['id']: {'prove': prove_gate(node), 'cites': node.get('cites', [])} for node in nodes if prove_gate(node) or node.get('cites')}))
+        a("function gateEvidencePreamble(id) {")
+        a("  const pointers = []; const nonce = (A._launch || {}).nonce || null")
+        a("  for (const [node, declaration] of Object.entries(REVIEW_GATE_NODES)) for (const r of (Array.isArray(RESULTS[node]) ? RESULTS[node] : [RESULTS[node]]).filter(Boolean)) {")
+        a("    const rows = declaration.prove ? [{...r, gate: declaration.prove}] : (Array.isArray(r.citations) ? r.citations : []).filter(c => c && declaration.cites.includes(c.gate))")
+        a("    for (const row of rows) if (row && typeof row.attestId === 'string') pointers.push({node, gate: row.gate, attestId: row.attestId, exit: row.exit, sha: row.sha || null, logSha256: row.logSha256 || null, nonce, runtime: row.runtime || null})")
+        a("  }")
+        a("  REVIEW_GATE_EVIDENCE[id] = pointers")
+        a("  if (!pointers.length) return ''")
+        a("  return 'UPSTREAM SUITE EVIDENCE — candidate witness pointers, not worker proof. Read each applicable source row with ' + ATTEST + ' --show <attestId>' + ROOT_ARG + ' --nonce ' + nonce + '. A green row at the reviewed head and launch is suite evidence: cite it and do not rerun a covered suite. Spend tool time on attacks, valid controls and new PoCs. Rerun only for a named claim and record that reason. coverage.suites names claimed gate coverage; coverage.citedGates contains reused {gate,attestId,exit,sha,logSha256,nonce,runtime?}; coverage.executedGates records your own witnessed runs with a reason naming the claim. Missing/red/stale evidence is a blocker. Unknown runtime remains unknown. The recorder validates all citations against source rows.\\n' + JSON.stringify(pointers) + '\\n'")
+        a("}")
+        a("function reviewGateCitationIssue(c) {")
+        a("  const suites = c.suites === undefined ? [] : c.suites, reused = c.citedGates === undefined ? [] : c.citedGates, own = c.executedGates === undefined ? [] : c.executedGates")
+        a("  if (!Array.isArray(suites) || suites.some(g => typeof g !== 'string' || !g) || new Set(suites).size !== suites.length || !Array.isArray(reused) || !Array.isArray(own)) return 'invalid review suite coverage'")
+        a("  const claims = [...reused, ...own], heads = new Set((c.subject || []).map(s => s.head)), nonce = (A._launch || {}).nonce")
+        a("  if (claims.some(r => !r || typeof r.gate !== 'string' || !r.gate || typeof r.attestId !== 'string' || !r.attestId || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(r.sha || '') || !/^[0-9a-f]{64}$/.test(r.logSha256 || '') || r.exit !== 0 || typeof r.nonce !== 'string' || r.nonce !== nonce || !heads.has(r.sha))) return 'review citation is malformed, red or names another head/launch'")
+        a("  if (new Set(claims.map(r => r.gate + ':' + r.attestId)).size !== claims.length) return 'review repeats an execution citation'")
+        a("  if (suites.some(g => !claims.some(r => r.gate === g))) return 'review suite claim has no execution witness'")
+        a("  if (own.some(r => typeof r.reason !== 'string' || r.reason.trim().length < 10)) return 'own suite rerun must name the claim it tests'")
+        a("  const offered = Object.values(REVIEW_GATE_EVIDENCE).flat()")
+        a("  if (own.some(r => offered.some(p => p.gate === r.gate && p.attestId === r.attestId))) return 'own rerun cites an upstream execution; record it as reused'")
+        a("  if (reused.some(r => !offered.some(p => p.gate === r.gate && p.attestId === r.attestId))) return 'review citation was not offered by an upstream gate'")
+        a("  return null")
+        a("}")
         terminals = {}
         for gate in nodes:
             if gate.get("contract") != "RedTeamV1" or not gate.get("haltWhen"):
@@ -3167,7 +3192,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  if (!c || !Array.isArray(c.subject) || !c.subject.length || !Number.isSafeInteger(c.attackers) || c.attackers < 1 || !Array.isArray(c.lenses) || !c.lenses.length || c.lenses.some(x => typeof x !== 'string' || !x.trim()) || new Set(c.lenses).size !== c.lenses.length || typeof c.sampled !== 'boolean') return 'SHIP without complete coverage metadata'")
         a("  const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i")
         a("  if (c.subject.some(s => !s || typeof s.repository !== 'string' || !s.repository.trim() || !oid.test(s.base) || !oid.test(s.head) || ['files','additions','deletions'].some(k => !Number.isSafeInteger(s[k]) || s[k] < 0)) || new Set(c.subject.map(s => s.repository)).size !== c.subject.length) return 'SHIP with invalid or unpinned reviewed range/counts'")
-        a("  return null")
+        a("  return reviewGateCitationIssue(c)")
         a("}")
         a("function redTeamIncoherent(r) {")
         a("  if (!r || typeof r !== 'object') return null")
@@ -3406,7 +3431,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("  const inputs = Object.fromEntries(Object.entries(A).filter(([k]) => !k.startsWith('_')))")
     if any(n.get("contract") == "RedTeamV1" for n in nodes):
         a("  const redTeamReviews = { terminals: RED_TEAM_TERMINALS, checks: RED_TEAM_CHECKS, expected: Object.fromEntries(Object.entries(RED_TEAM_EXPECTED).map(([id, items]) => [id, { attackers: items.length, lenses: items.map(x => x.key).filter(x => typeof x === 'string') }])) }")
-        extra += ", redTeamReviews"
+        extra += ", redTeamReviews, reviewGateEvidence: REVIEW_GATE_EVIDENCE"
     a("  return { campaign, outcome: final, results: RESULTS, provenance: PROVENANCE,")
     a(f"           contracts: CONTRACTS, inputs{extra} }}")
     a("}")
@@ -3489,6 +3514,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("    spawn(")
         if specification:
             a("      specificationPreamble() +")
+        if any(node.get("contract") == "RedTeamV1" for node in nodes):
+            a("      (codeReview ? gateEvidencePreamble(label) : '') +")
         a("      `Attempt to REFUTE this claim. ${claimText}\\n\\n` + (priors || '') +")
         a("        `Re-read the underlying code or evidence YOURSELF; do not trust the claim's own summary. ` +")
         a("        `Hunt for the reason it is wrong: a guard upstream, a type that forbids the state, a test that pins it. ` +")
@@ -3952,6 +3979,8 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         pre = "basePreamble() + "
     if ir.get("authorizedBy") and (n.get("mutates") or n.get("irreversible")):
         pre = "authorizationPreamble() + " + pre
+    if n.get("contract") == "RedTeamV1":
+        pre += f"gateEvidencePreamble({js_str(nid)}) + "
     if n.get("contract") == "RedTeamV1" and n.get("haltWhen") and red_team_sources(n, ir):
         pre += f"redTeamPreamble({json.dumps(red_team_sources(n, ir))}) + "
     if n.get('cites'):

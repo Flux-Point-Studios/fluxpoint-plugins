@@ -71,3 +71,5 @@ launch, resume, gate execution and attestation recording.
 [Packet reference context](../plugins/fluxpoint/references/spec-format.md#packet-context-by-reference)
 reduces repeated scope text while retaining the exact compiled lock identity.
 
+[Suite evidence in independent reviews](review-gate-evidence.md) explains typed
+gate citations, shared lens reuse and named rerun reasons.
