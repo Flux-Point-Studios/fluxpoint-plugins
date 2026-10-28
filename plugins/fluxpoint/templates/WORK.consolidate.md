@@ -31,7 +31,7 @@ tags, not arguments.
   "version": 1,
   "name": "memory-consolidation",
   "campaign": "Consolidate the defect-sweep lesson stream: one canonical row per real finding, stale kills re-examined, drifted claims restated against the current code",
-  "budget": { "maxNodes": 40, "verifyFloorTokens": 40000, "nodeFloorTokens": 60000, "cacheTtl": "1h", "maxEstimatedTokens": 350000 },
+  "budget": { "maxNodes": 40, "verifyFloorTokens": 40000, "nodeFloorTokens": 60000, "cacheTtl": "1h", "maxEstimatedTokens": 600000 },
   "defaults": { "effort": "medium" },
   "roles": { "curator": { "effort": "medium" } },
   "nodes": [
@@ -106,8 +106,11 @@ tags, not arguments.
 
 `maxNodes` prices the worst case: 3 rounds x (1 curator + 4 expected
 items x 1 skeptic) = 15, with headroom for re-proposals. Typical runs
-cost one round. `maxEstimatedTokens` (350k) bounds the same worst case in
-tokens under the declared 1-hour prompt-cache TTL.
+cost one round. `maxEstimatedTokens` (600k) bounds the same worst case in
+tokens, including the expanded locked packet, under the declared 1-hour
+prompt-cache TTL. Re-run `--check` with the consuming repository's packet
+and expected item counts; the shipped ceiling leaves headroom above this
+repository's estimate and is not a measured bill.
 
 ## Decisions
 Appended automatically by `scripts/record-run.py` — do not hand-edit.

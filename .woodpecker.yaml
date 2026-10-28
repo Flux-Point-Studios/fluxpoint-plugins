@@ -1,0 +1,82 @@
+# The repo gates itself with the same contract the plugin scaffolds into
+# every other repo: scripts/harness.sh --full, exit 0 = green.
+#
+# The Windows specification job stays in .github/workflows: this agent is
+# Linux-only.
+
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+  - event: manual
+
+# The default clone fetches one commit, and graph-replay-test reads the
+# baseline compiler from c848f07 with git show, so clone the full history.
+clone:
+  - name: git
+    image: woodpeckerci/plugin-git:2.9.2
+    settings:
+      depth: 0
+      partial: false
+
+steps:
+  - name: harness-full
+    # Independent checks start together and retain separate verdicts.
+    depends_on: []
+    image: nikolaik/python-nodejs:python3.11-nodejs22
+    commands:
+      # jq: the hook scripts prefer it over their python fallback, and the
+      # GitHub runner this replaces carried it.
+      - apt-get update -qq && apt-get install -yqq --no-install-recommends jq > /dev/null
+      # The clone step and this one run as different users; without this, git
+      # refuses the checkout as dubiously owned.
+      - git config --global --add safe.directory '*'
+      # The official installer, not npm: the npm global install skips the
+      # optional dependency carrying the native binary. `$$` escapes
+      # Woodpecker's own variable substitution.
+      - curl -fsSL https://claude.ai/install.sh | bash
+      - export PATH="$$HOME/.local/bin:$$PATH"
+      - claude --version
+      # Woodpecker exports SHELL=/bin/sh (dash); the suites take $SHELL as
+      # the bash that runs the hook scripts, as it is on the GitHub runner.
+      - export SHELL=/bin/bash
+      - bash scripts/harness.sh --full
+      # Prompt hygiene (advisory) on its own line so the trend is readable
+      # in the log; only a scan that could not run (exit 2) fails it.
+      - python3 plugins/fluxpoint/scripts/prompt-audit.py
+
+  - name: executable-bits
+    depends_on: []
+    image: nikolaik/python-nodejs:python3.11-nodejs22
+    commands:
+      - git config --global --add safe.directory '*'
+      # bash, for the process substitution; the step shell is dash.
+      - |
+        bash -c '
+          missing=0
+          while IFS= read -r f; do
+            if [ ! -x "$$f" ]; then echo "not executable: $$f"; missing=1; fi
+          done < <(git ls-files "*.sh")
+          exit $$missing
+        '
+
+  - name: blaster-live
+    depends_on: []
+    image: ubuntu:24.04
+    commands:
+      - apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq --no-install-recommends python3 git ca-certificates curl zstd unzip build-essential > /dev/null
+      - mkdir -p /tmp/fluxpoint-blaster-tools
+      - curl -fsSL --retry 2 https://github.com/leanprover/lean4/releases/download/v4.24.0/lean-4.24.0-linux.tar.zst -o /tmp/fluxpoint-blaster-tools/lean.tar.zst
+      - echo 'b14f5e5159219dd1a1956c3b806813319f5e94ccd5bdfd56f54520609a5bb5ec  /tmp/fluxpoint-blaster-tools/lean.tar.zst' | sha256sum -c -
+      - tar --zstd -xf /tmp/fluxpoint-blaster-tools/lean.tar.zst -C /tmp/fluxpoint-blaster-tools
+      - curl -fsSL --retry 2 https://github.com/Z3Prover/z3/releases/download/z3-4.15.2/z3-4.15.2-x64-glibc-2.39.zip -o /tmp/fluxpoint-blaster-tools/z3.zip
+      - echo '85d2da1bf440fca3288874c2a06e23f96d09befcc21b5a7489fe0fa40444e685  /tmp/fluxpoint-blaster-tools/z3.zip' | sha256sum -c -
+      - unzip -q /tmp/fluxpoint-blaster-tools/z3.zip -d /tmp/fluxpoint-blaster-tools
+      - export PATH="/tmp/fluxpoint-blaster-tools/lean-4.24.0-linux/bin:/tmp/fluxpoint-blaster-tools/z3-4.15.2-x64-glibc-2.39/bin:$$PATH"
+      - export LEAN_NUM_THREADS=4
+      - git init -q /tmp/fluxpoint-blaster-tools/Lean-blaster
+      - git -C /tmp/fluxpoint-blaster-tools/Lean-blaster remote add origin https://github.com/input-output-hk/Lean-blaster
+      - git -C /tmp/fluxpoint-blaster-tools/Lean-blaster fetch --depth 1 origin a16614e5e44a693664043552f259235f15f1c884
+      - git -C /tmp/fluxpoint-blaster-tools/Lean-blaster checkout --detach -q FETCH_HEAD
+      - (cd /tmp/fluxpoint-blaster-tools/Lean-blaster && lake build Blaster)
+      - python3 plugins/fluxpoint/tests/blaster-live.py --backend /tmp/fluxpoint-blaster-tools/Lean-blaster

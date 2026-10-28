@@ -64,7 +64,11 @@ def summary(verdict, surface, **extra):
          "results": {"gate": {"exit": 0, "command": "scripts/harness.sh --full", "tail": ""},
                      "pa": {"verdict": verdict, "surface": surface, "checker": "dafny verify .",
                             "findings": []},
-                     "rt": {"verdict": "SHIP", "findings": []}},
+                     "rt": {"verdict": "SHIP", "findings": [], "coverage": {
+                         "subject": [{"repository": "fixture", "base": "a" * 40, "head": "b" * 40,
+                                      "files": 1, "additions": 1, "deletions": 0}],
+                         "attackers": 6, "lenses": ["authority", "value", "state", "input", "operations", "composition"],
+                         "sampled": False}}},
          "provenance": [{"node": "gate", "status": "OK"}, {"node": "pa", "status": "OK"},
                         {"node": "rt", "status": "OK"}]}
     s.update(extra)

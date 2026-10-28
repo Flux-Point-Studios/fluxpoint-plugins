@@ -134,6 +134,22 @@ probe("node", "agentType", NODE_BASE, setnode(agentType="red-team-reviewer"))
 probe("node", "foreach", NODE_BASE, setnode(foreach="la"))
 probe("node", "after", NODE_BASE,
       setnode(after="seed", prompt="use the prior result: {{prev}}"))
+probe("node", "lane", NODE_BASE, setnode(lane="independent"))
+probe("node", "fresh", NODE_BASE, setnode(fresh=True))
+probe("node", "repository", NODE_BASE, setnode(repository="repo", branch="main"))
+probe("node", "branch", NODE_BASE, setnode(repository="repo", branch="main"))
+
+
+def replay_builder(ir, replay=False):
+    ir['nodes'][N].update(mutates=True, pushes='repo#main')
+    if replay:
+        ir['nodes'][N]['replay'] = 'inputs'
+    ir['nodes'].append({'id':'check-builder','prompt':'Check {{prev}}','after':'probe',
+                        'contract':'HarnessCheckV1','independent':True,'verifies':'probe'})
+
+
+probe("node", "pushes", NODE_BASE, replay_builder)
+probe("node", "replay", NODE_BASE, lambda ir: replay_builder(ir, replay=True))
 probe("node", "mutates", NODE_BASE, lambda ir: (
     ir["nodes"][N].update(mutates=True),
     ir["nodes"].append({"id": "gate", "phase": "G", "prompt": "verify it",
@@ -142,6 +158,7 @@ probe("node", "mutates", NODE_BASE, lambda ir: (
 ))
 probe("node", "independent", NODE_BASE, setnode(independent=True, verifies="seed"))
 probe("node", "verifies", NODE_BASE, setnode(independent=True, verifies="seed"))
+probe("node", "cites", NODE_BASE, setnode(independent=True, cites=["suite"]))
 probe("node", "verify", NODE_BASE, setnode(verify="panel:3", verifyOver="findings"))
 probe("node", "verifyOver", NODE_BASE, setnode(verify="skeptic:1", verifyOver="findings"))
 probe("node", "expectItems", NODE_BASE,
@@ -153,6 +170,10 @@ probe("node", "haltReason", NODE_BASE,
               haltReason="a specific and quotable reason"))
 probe("node", "onRed", NODE_BASE, setnode(onRed="drop+log"))
 probe("node", "isolation", NODE_BASE, setnode(isolation="worktree"))
+# probe is read by graph-audit.js and by --check, which runs that script's
+# probe grammar; the compiler itself refuses it on a node the audit never
+# probes, which is the effect measured here.
+probe("node", "probe", NODE_BASE, setnode(probe={"commands": []}))
 probe("node", "repeat", NODE_BASE,
       setnode(verify="skeptic:1", verifyOver="findings",
               repeat={"untilDryRounds": 2, "maxRounds": 6, "dedupeBy": ["file"]}))
@@ -333,6 +354,11 @@ def setrepeat(**kw):
 probe("repeat", "untilDryRounds", REPEAT_BASE, setrepeat(untilDryRounds=3))
 probe("repeat", "maxRounds", REPEAT_BASE, setrepeat(maxRounds=9))
 probe("repeat", "dedupeBy", REPEAT_BASE, setrepeat(dedupeBy=["file", "line"]))
+probe("repeat", "classBy", REPEAT_BASE, setrepeat(classBy=["defectClass"]))
+probe("repeat", "reframeAfter", REPEAT_BASE, setrepeat(classBy=["defectClass"], reframeAfter=3))
+# Repair rules cannot silently degrade into discovery rules.
+probe("repeat", "until", REPEAT_BASE, setrepeat(until="verdict == 'SHIP'"))
+probe("repeat", "integrate", REPEAT_BASE, setrepeat(integrate=["merge", "review"]))
 
 # ----------------------------------------------------------- budget fields
 probe("budget", "maxNodes", NODE_BASE, lambda ir: ir["budget"].update(maxNodes=1))
@@ -368,6 +394,8 @@ probe("IR", "nodes", NODE_BASE,
                                      "prompt": "another", "contract": "DesignV1"}))
 probe("IR", "requiredArgs", NODE_BASE, lambda ir: ir.update(requiredArgs=["target"]))
 probe("IR", "treeGuard", NODE_BASE, lambda ir: ir.update(treeGuard=False))
+probe("IR", "authorizedBy", NODE_BASE, lambda ir: ir.update(
+    imports={"vault-params": "latest"}, authorizedBy="vault-params"))
 probe("IR", "argDefaults", NODE_BASE, lambda ir: ir.update(argDefaults={"target": "HEAD"}))
 
 # ------------------------------------------------------------ completeness
@@ -378,9 +406,10 @@ probed = {
         "foreach", "after", "mutates", "independent", "verifies", "verify",
         "verifyOver", "expectItems", "haltWhen", "haltReason", "onRed",
         "isolation", "repeat", "irreversible", "actor", "release", "wake",
-        "decides", "honors", "memory", "reduce",
+        "decides", "honors", "memory", "reduce", "cites", "lane", "fresh", "repository", "branch", "pushes", "replay",
+        "probe",
     },
-    "repeat": {"untilDryRounds", "maxRounds", "dedupeBy"},
+    "repeat": {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter"},
     "reduce": {"from", "over", "dedupeBy", "sortBy", "order", "topK"},
     "memory": {"seed", "emit", "key", "priors", "classBy"},
     "release": {"instructions", "proofContract", "whyNotAgent"},
@@ -389,7 +418,7 @@ probed = {
                "maxEstimatedTokens", "cacheTtl"},
     "IR": {
         "version", "name", "campaign", "budget", "defaults", "roles", "lists",
-        "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard",
+        "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard", "authorizedBy",
     },
 }
 for level, registry in [

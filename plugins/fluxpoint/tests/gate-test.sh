@@ -138,10 +138,6 @@ git -c user.email=t@t -c user.name=t commit -qm "on another branch"
 git checkout -q - 2>/dev/null
 check "a baseline that is not an ancestor falls back to HEAD" allow "$(run_gate)"
 
-cd /; rm -rf "$ROOT"
-printf '\n%d passed, %d failed\n' "$pass" "$fail"
-[ "$fail" -eq 0 ]
-
 # ---- a gate that cannot finish must stop RUNNING, not just stop blocking ----
 # Observed 2026-08-11 in a repo whose harness --full takes ~35 min against a
 # 540s ceiling: the gate times out, yields after $max blocks -- and then re-runs
@@ -227,3 +223,7 @@ if [ "$got" = "--full" ]; then
 else
   printf 'FAIL  %-52s -> %s\n' "unset still means --full" "${got:-<nothing>}"; fail=$((fail+1))
 fi
+
+cd /; rm -rf "$ROOT"
+printf '\n%d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]

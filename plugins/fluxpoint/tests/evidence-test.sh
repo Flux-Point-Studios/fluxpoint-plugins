@@ -13,6 +13,8 @@
 # propagates it, set -e ends the run — which is precisely the case the
 # function exists to support.
 set -uo pipefail
+# This suite exercises the explicit work-file compatibility contract.
+export FPL_GATE_EVIDENCE=work
 
 if [ -z "${FPL_PY:-}" ]; then
   # Probe each candidate by RUNNING it, rather than asking whether the name
@@ -204,17 +206,33 @@ cat >"$ROOT/ps.sh" <<'EOF'
 set -euo pipefail
 EOF
 sed -n '/^plugin_script()/,/^}/p' "$PLUGIN/templates/harness.sh" >>"$ROOT/ps.sh"
-# The root vars are unset here on purpose: this case is about the `find`
-# branch surviving a missing plugin directory, and this file exports
-# CLAUDE_PLUGIN_ROOT at the top. Once the resolver started honoring that root
-# — which is what makes it version-correct — an inherited value would resolve
-# the script and this case would stop exercising the branch it names.
-printf 'unset FPL_PLUGIN_ROOT CLAUDE_PLUGIN_ROOT\nHOME=/nonexistent-home\np="$(plugin_script proof-guard.py)"\necho "survived:[$p]"\n' \
-  >>"$ROOT/ps.sh"
-out="$(bash "$ROOT/ps.sh" 2>&1)"; rc=$?
+# Isolate only the discovery filesystem. The resolver intentionally also
+# searches the real Codex cache, which may already contain this script, and
+# an explicit PLUGIN_ROOT bypasses discovery altogether. Remap both find
+# roots to missing scratch directories while keeping real find's exit 1;
+# HOME and CODEX_HOME retain the caller's values throughout the test.
+cat >>"$ROOT/ps.sh" <<'EOF'
+unset FPL_PLUGIN_ROOT CLAUDE_PLUGIN_ROOT PLUGIN_ROOT
+find() {
+  printf '%s\n' "$1" "$2" >"$FPL_EVIDENCE_FIND_FIXTURE/find-roots"
+  shift 2
+  command find "$FPL_EVIDENCE_FIND_FIXTURE/missing-claude" \
+    "$FPL_EVIDENCE_FIND_FIXTURE/missing-codex" "$@"
+}
+p="$(plugin_script proof-guard.py)"
+echo "survived:[$p]"
+EOF
+mkdir -p "$ROOT/cache-fixture"
+out="$(FPL_EVIDENCE_FIND_FIXTURE="$ROOT/cache-fixture" bash "$ROOT/ps.sh" 2>&1)"; rc=$?
 check "plugin_script survives a missing plugin directory" 0 "$rc"
 case "$out" in *"survived:[]"*) ok "and returns empty rather than exploding" "empty" ;;
   *) bad "and returns empty rather than exploding" "${out:0:40}" ;; esac
+expected_roots="$(printf '%s\n' "$HOME/.claude/plugins" "${CODEX_HOME:-$HOME/.codex}/plugins/cache")"
+if [ "$(cat "$ROOT/cache-fixture/find-roots" 2>/dev/null)" = "$expected_roots" ]; then
+  ok "missing-plugin fixture covers both runtime discovery roots" "Claude + Codex"
+else
+  bad "missing-plugin fixture covers both runtime discovery roots" "unexpected discovery roots"
+fi
 
 cd /; rm -rf "$ROOT"
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

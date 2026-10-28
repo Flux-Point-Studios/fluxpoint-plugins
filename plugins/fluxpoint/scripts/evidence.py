@@ -10,10 +10,14 @@ provenance no stronger than the hand-written row it replaced.
 
 The witness already exists. `dod-gate.sh` is a Stop hook: the *runtime*
 invokes it, at the moment the agent claims to be done, and it already
-re-runs `scripts/harness.sh --full`, holds the exit code, the log, and the
+runs its configured harness invocation, holds the exit code, the log, and the
 tree state, and already distinguishes PASS from FAIL from TIMEOUT. What was
 missing was not another writer — it was a reader. So the gate writes its own
-row, and this script is the writer it calls: it executes nothing.
+verdict, and this script is the writer it calls: it executes nothing.
+
+Stop verdicts default to ignored local JSONL, rendered at SessionStart.
+`FPL_GATE_EVIDENCE=work` opts into the shared table; both table writers
+serialize their read/modify/write through the same process lock.
 
   evidence.py --record --source gate --outcome PASS \\
       --claim "..." --proof "..." [--graph WORK.md]
@@ -35,6 +39,7 @@ is worth stating rather than blurring.
 """
 import argparse
 import datetime
+import json
 import os
 import re
 import sys
@@ -94,6 +99,54 @@ def already_said(text, source, outcome, proof):
 
 
 def splice(path, source, outcome, claim, proof, when=None):
+    from workfile_lock import workfile_lock
+    with workfile_lock(path):
+        return _splice(path, source, outcome, claim, proof, when)
+
+
+def append_local(path, source, outcome, claim, proof, when=None):
+    from workfile_lock import workfile_lock
+    with workfile_lock(path):
+        rows = local_rows(path)
+        if rows and all(rows[-1].get(k) == v for k, v in
+                        (("source", source), ("outcome", outcome), ("proof", proof))):
+            return "unchanged"
+        row = dict(when=when or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                   source=source, outcome=outcome, claim=claim, proof=proof)
+        with open(path, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return "written"
+
+
+def local_rows(path):
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                    if (isinstance(row, dict) and row.get("source") == "gate"
+                            and row.get("outcome") in OUTCOMES):
+                        rows.append(row)
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return rows
+
+
+def render_local(path, limit=3):
+    rows = local_rows(path)
+    if rows:
+        print(f"### Recorded by the gate (local: {path}; the runtime ran the harness itself)")
+        for r in reversed(rows[-limit:]):
+            print("| " + " | ".join(cell(r.get(k, "")) for k in
+                  ("when", "source", "outcome", "claim", "proof")) + " |")
+        if len(rows) > limit:
+            print(f"[elided: {len(rows) - limit} older local gate row(s) — read {path}]")
+
+
+def _splice(path, source, outcome, claim, proof, when=None):
     """Insert the row under the Evidence header. Returns a status string."""
     if not os.path.exists(path):
         return "no-file"
@@ -134,11 +187,18 @@ def main():
     ap.add_argument("--graph", default="WORK.md",
                     help="work-state file carrying the Evidence table")
     ap.add_argument("--source", default="gate", choices=sorted(SOURCES))
-    ap.add_argument("--outcome", required=True, choices=sorted(OUTCOMES))
-    ap.add_argument("--claim", required=True)
-    ap.add_argument("--proof", required=True)
-    ap.add_argument("--record", action="store_true", required=True)
+    ap.add_argument("--local", help="append a local JSONL verdict instead of changing --graph")
+    ap.add_argument("--render-local", metavar="JSONL", help="render local gate verdicts")
+    ap.add_argument("--outcome", choices=sorted(OUTCOMES))
+    ap.add_argument("--claim")
+    ap.add_argument("--proof")
+    ap.add_argument("--record", action="store_true")
     a = ap.parse_args()
+    if a.render_local:
+        render_local(a.render_local)
+        return 0
+    if not a.record or any(v is None for v in (a.outcome, a.claim, a.proof)):
+        ap.error("--record, --outcome, --claim and --proof are required")
 
     # A newline or a pipe in a claim is either an accident or an attempt to
     # forge columns; cell() would silently flatten it, so say so instead.
@@ -148,7 +208,10 @@ def main():
                   f"one line and five columns", file=sys.stderr)
             return 2
 
-    status = splice(a.graph, a.source, a.outcome, a.claim, a.proof)
+    status = (append_local(a.local, a.source, a.outcome, a.claim, a.proof) if a.local
+              else splice(a.graph, a.source, a.outcome, a.claim, a.proof))
+    if a.local:
+        a.graph = a.local
     if status == "written":
         print(f"evidence: recorded a {a.source} row ({a.outcome}) in {a.graph}")
         return 0

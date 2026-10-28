@@ -1,5 +1,38 @@
 # fluxpoint — design notes
 
+## Definition of Done boundary (decision #105)
+
+Keep the shared Definition of Done at the project's declared engineering and
+merge boundary. Do not introduce a universal `merged-unverified` state or
+infer field success from a green pre-merge suite. The plugin serves libraries,
+on-chain scripts and hosted applications; it has no shared deployment target,
+telemetry source, rollout authority or safe rollback action. A generic state
+without those observations would claim a lifecycle it cannot verify.
+
+Projects that need field verification declare a separate deployment campaign
+with their own attested check, observation window and rollback criteria.
+Record deployment and observed outcomes there, and leave that campaign open
+until its own Definition of Done passes or its rollback is recorded. A merge
+campaign's completion certifies only its stated scope. A feature flag's owner,
+kill-switch or ramp purpose, expiry and retirement check belong to that
+project's deployment specification. Generic deterministic metrics can ratchet
+flag debt when the project declares an exact count; the plugin does not infer
+which flags are safe to retire.
+
+Reconsider this boundary when a concrete integration supplies deployment
+identity, reproducible field checks and a measured rollback workflow that
+cannot already be expressed as an attested campaign.
+
+## Historical design record
+
+The sections below describe the versions named in their headings, beginning
+with v0.1. They preserve earlier APIs and decisions rather than serving as
+current setup instructions. For the current graph fields and verification
+tiers, use [graph engineering](skills/graph-engineering/SKILL.md); the
+[documentation index](../../docs/README.md) links the other operational guides.
+In particular, the early `verify: harness` tier below was removed; declared
+gate execution now uses `verify: "prove:<gate>"` and attested evidence.
+
 These notes record what the v0.1 smoke test proved, the redesign it
 pointed to, and how that redesign landed. Not bound by prior conventions —
 the goal was the best design, not symmetry with what came before.
@@ -106,7 +139,8 @@ What v1.36 changed is the instrumentation, and only that:
 - the compiler prices every graph (`estimate_tokens`: prefix per call,
   warm or cold by the declared `cacheTtl` and the `(model, effort)` of the
   call before it, work scaled by `EFFORT_MULT`, the call weighted by
-  `MODEL_MULT`) and refuses a graph over `budget.maxEstimatedTokens`;
+  `MODEL_MULT`, and since v1.43 each node's own prompt text by its bytes)
+  and refuses a graph over `budget.maxEstimatedTokens`;
 - every compiled script carries `ESTIMATE` and a per-node `PROFILE`
   (effort, model, calls, estimated tokens) into its summary beside
   `spent`;
@@ -126,6 +160,55 @@ assumption until that sweep has run; a flat curve would itself be the
 finding, and would mean the task is not bound by thinking compute and the
 defaults should come down. Until then the templates keep their
 settings, and every one of them is labelled as asserted.
+
+v1.43 settles the evaluation question and builds everything around the
+sweep except the spend. `scripts/sweep.py --plan` writes one graph file per
+setting under test (the role changed, nothing else; a role no node uses,
+or one a node overrides inline, is refused, because a knob that does not
+reach its calls sweeps noise), prices and validates each against the same
+packet the compiler would load, and draws a train/test split of the cases at
+random, stratified by tag, never by score, with the test fraction honored
+over the whole set; a plan that holds out nothing is refused, since no rep
+count can then compare two variants. `--score` grades
+recorded runs per variant — a pass is COMPLETE with no red harness, no
+BLOCK and no WEAKENED — with Wilson intervals on the test split as the
+headline, calls the curve flat when every interval overlaps, and
+`--hillclimb DIR` exports the runs in the layout the claude-api hillclimb
+flow reads (`baseline/` for the unmodified setting, `v<N>/` for the rest,
+transcripts for the train split only). Each compiled summary now carries its launch `inputs`, so a
+run is matched to its case.
+
+The arithmetic that settles whether the harness can serve as the
+evaluation: it can, but only at sample sizes a binary score forces. A pass
+rate over n runs is known to about ±1/sqrt(n). Planned over the feature
+template (four variants, twelve cases, three reps, about 32.6M estimated
+tokens), the four held-out cases give twelve test runs per variant and
+resolve differences of about 40 points; seeing a 20-point difference takes
+about 93 test runs per variant, a 10-point one about 388. So a first sweep
+can only find a large effect or a flat curve, and the flat curve is the
+finding most worth having. A finer-grained score — node death rate, panel
+kill rate, confirmed findings per run — would lower those counts, and is
+the next thing to build if the first sweep comes back flat and ambiguous.
+
+Still not done: running it needs an authenticated campaign runner with access
+to the requested models and usage metering.
+
+Review on 2026-10-14: issue #67 remains open. The attached cloud environment
+reports current observations with no configured secrets, runtime variables,
+capabilities or outbound identities. Claude Code 2.1.300 was installed locally
+to run the real plugin validator; `claude auth status` reports `loggedIn: false`
+and `authMethod: none`. The Codex CLI is present, but does not establish access to the requested Claude model
+and effort grid or its billing meter. No held-out model runs or actual bill
+were produced, so no role default was changed and no measured curve is claimed.
+
+The deterministic metric ratchet added for #101 supplies exact graded counts
+and can now measure real pinned Aiken unit-test costs (#102). It does not by
+itself show that an effort choice improves coding quality. A useful calibration
+still needs campaign-specific held-out tasks, the unchanged full correctness
+harness, per-run task scores, and actual token/cost observations across the
+architect, builder and red-team effort/model grid. The existing sweep planner,
+train/test split and scorer prepare those runs; the unavailable authenticated
+runner and usage meter are the concrete blocker to completing #67 here.
 
 ## What the smoke test established
 

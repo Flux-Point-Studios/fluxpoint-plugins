@@ -4,6 +4,10 @@ This repository gates itself with the same contract the fluxpoint plugin
 scaffolds into other repos: `scripts/harness.sh --full`, exit 0 is green.
 CI runs it on every push to `main` and every pull request.
 
+Use [development setup](docs/development-setup.md) for prerequisites and the
+optional native solver smoke test. The full harness needs Bash, Git history,
+Python 3.9+, Node.js 18+ and Claude Code's plugin validator on `PATH`.
+
 ## Before you open a pull request
 
 ```
@@ -13,9 +17,13 @@ claude plugin validate .
 
 `--full` checks every manifest and contract, syntax-checks every script,
 validates the plugin, checks that the Claude Code and Codex manifests agree,
-compiles every campaign template and syntax-checks the generated JavaScript,
-then runs every suite under `plugins/fluxpoint/tests/` and
-`plugins/substrate/tests/`. One step is advisory: `prompt-audit.py` scans
+compiles every campaign template and syntax-checks the generated JavaScript
+and the shipped workflow scripts, then runs the regression suites wired from
+`plugins/fluxpoint/tests/` and `plugins/substrate/tests/`. The native Lean/Z3
+smoke test is a separate `blaster-live` CI job; Windows CI runs selected
+platform suites and an actual health sample. Run only one full harness at a
+time because some suites share `/tmp/fpl-*` paths.
+One step is advisory: `prompt-audit.py` scans
 the prompt-bearing files for patterns that degrade a frontier model and
 prints the trend without failing the run.
 
@@ -41,6 +49,11 @@ the terms in section 5 of [LICENSE](LICENSE).
   in [docs/runtimes.md](docs/runtimes.md), and a new command needs its Codex
   entry point under `skills/<plugin>-<name>/`. The harness checks the second;
   tests cover the first.
+- **Documentation.** A feature change updates its guide, the relevant README
+  inventory and [documentation index](docs/README.md). Check command examples
+  against the CLI and CI, and label historical APIs in design records. Use
+  [the audit map](docs/documentation-audit.md) to find the implementation and
+  regression suite behind a documented claim.
 - **Executable bits.** Hooks are invoked through `bash`, so a stripped bit
   cannot disarm them, but keep the bits correct for direct runs:
   `git update-index --chmod=+x $(git ls-files '*.sh')`. CI checks this.

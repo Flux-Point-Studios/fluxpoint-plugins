@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 import { parseJsonNoDuplicateKeys, parseTimestamp } from "./lifecycle.mjs";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_EXCLUDE_DIRS = ["node_modules", ".git", "dist", "build", "out", "coverage", "__pycache__"];
 const WALK_MAX_DEPTH = 6;
@@ -87,6 +88,21 @@ function readBoundedUtf8File(file, label, maxBytes) {
   }
 }
 
+function repoLabel(r) {
+  return r.repo === r.dir ? clean(r.dir) : `${clean(r.repo)} (dir ${clean(r.dir)})`;
+}
+
+function manifestLabel(r) {
+  return `${clean(r.dir)}/substrate.json`;
+}
+
+function orderProblems(problems) {
+  // Checkout/identity collisions must not consume the session's entire budget
+  // before the dangling edges and import sites a manifest edit can repair.
+  const collision = (p) => /^(duplicate primitive id:|repo .* is declared in)/.test(p);
+  problems.sort((a, b) => Number(collision(a)) - Number(collision(b)));
+}
+
 function resolveRoot(argv) {
   const i = argv.indexOf("--root");
   if (i !== -1) {
@@ -98,13 +114,14 @@ function resolveRoot(argv) {
 }
 
 function loadConfig(root, problems) {
-  const config = { graceHours: 6, excludeDirs: new Set(DEFAULT_EXCLUDE_DIRS), nonGitRepos: Object.create(null) };
+  const config = { graceHours: 6, excludeDirs: new Set(DEFAULT_EXCLUDE_DIRS), excludeRepos: [], nonGitRepos: Object.create(null) };
   const cf = path.join(root, "substrate.config.json");
   if (!fs.existsSync(cf)) return config;
   try {
     const parsed = JSON.parse(fs.readFileSync(cf, "utf8"));
     if (typeof parsed.graceHours === "number") config.graceHours = parsed.graceHours;
     if (Array.isArray(parsed.excludeDirs)) for (const d of parsed.excludeDirs) config.excludeDirs.add(String(d));
+    if (Array.isArray(parsed.excludeRepos)) config.excludeRepos = parsed.excludeRepos.filter(isStr);
     if (parsed.nonGitRepos && typeof parsed.nonGitRepos === "object") {
       for (const [dir, rels] of Object.entries(parsed.nonGitRepos)) {
         if (dir === "__proto__" || dir === "constructor" || dir === "prototype") continue;
@@ -138,22 +155,22 @@ function validateManifest(parsed, dir, problems) {
     return null;
   }
   if (parsed.primitives !== undefined && !Array.isArray(parsed.primitives)) {
-    problems.push(`invalid manifest: ${clean(parsed.repo)} field "primitives" is not an array`);
+    problems.push(`invalid manifest: ${clean(dir)}/substrate.json field "primitives" is not an array`);
     return null;
   }
   const repo = clean(parsed.repo);
   const primitives = [];
   for (const p of parsed.primitives || []) {
     if (!p || typeof p !== "object" || !isStr(p.id)) {
-      problems.push(`invalid primitive in ${repo}: each needs a string "id"`);
+      problems.push(`invalid primitive in ${clean(dir)}/substrate.json: each needs a string "id"`);
       continue;
     }
     if (![p.kind, p.status, p.desc].every(isStr) || !strArray(p.paths) || !strArray(p.consumes || [])) {
-      problems.push(`invalid primitive ${clean(p.id)} in ${repo}: kind/status/desc must be strings, paths/consumes string arrays`);
+      problems.push(`invalid primitive ${clean(p.id)} in ${clean(dir)}/substrate.json: kind/status/desc must be strings, paths/consumes string arrays`);
       continue;
     }
     if (p.terminal !== undefined && typeof p.terminal !== "boolean") {
-      problems.push(`invalid primitive ${clean(p.id)} in ${repo}: "terminal" must be a boolean`);
+      problems.push(`invalid primitive ${clean(p.id)} in ${clean(dir)}/substrate.json: "terminal" must be a boolean`);
       continue;
     }
     primitives.push({
@@ -169,25 +186,23 @@ function validateManifest(parsed, dir, problems) {
   return { repo, primitives };
 }
 
-function loadManifests(root, excludeDirs, problems) {
+function loadManifests(root, dirs, problems) {
   const repos = [];
-  for (const entry of fs.readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.isDirectory()) continue;
-    if (excludeDirs.has(entry.name)) continue; // never ingest manifests from node_modules/.git/vendored build dirs
-    const mf = path.join(root, entry.name, "substrate.json");
+  for (const dir of dirs) {
+    const mf = path.join(root, dir, "substrate.json");
     if (!fs.existsSync(mf)) continue; // manifest-less repos are demos/synthetic by doctrine — never alarmed on
     let parsed;
     try {
       parsed = JSON.parse(fs.readFileSync(mf, "utf8"));
     } catch (e) {
-      problems.push(`unreadable manifest: ${clean(entry.name)}/substrate.json (${clean(e.message)})`);
+      problems.push(`unreadable manifest: ${clean(dir)}/substrate.json (${clean(e.message)})`);
       continue;
     }
-    const v = validateManifest(parsed, entry.name, problems);
+    const v = validateManifest(parsed, dir, problems);
     if (!v) continue;
     // internal fields are set here, never from the manifest — a manifest cannot
     // override dir/mtimeMs to steer git -C outside the repo or backdate staleness
-    repos.push({ repo: v.repo, primitives: v.primitives, dir: entry.name, manifest: mf, mtimeMs: fs.statSync(mf).mtimeMs });
+    repos.push({ repo: v.repo, primitives: v.primitives, dir, manifest: mf, mtimeMs: fs.statSync(mf).mtimeMs });
   }
   return repos;
 }
@@ -225,10 +240,10 @@ function fmtAge(ms) {
   return `${Math.round(h / 24)}d`;
 }
 
-function deliverableAlarms(root, excludeDirs, problems) {
+function deliverableAlarms(root, dirs, problems) {
   const alarms = [];
-  for (const entry of fs.readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.isDirectory() || excludeDirs.has(entry.name)) continue;
+  for (const dir of dirs) {
+    const entry = { name: dir };
     const df = path.join(root, entry.name, "deliverables.json");
     if (!fs.existsSync(df)) continue;
     let parsed;
@@ -618,18 +633,48 @@ function importLint(root, repos, excludeDirs) {
 }
 
 function buildGraph(repos, problems) {
-  const nodes = new Map(); // id -> { ...primitive, repo }
+  const byRepo = new Map();
   for (const r of repos) {
+    if (!byRepo.has(r.repo)) byRepo.set(r.repo, []);
+    byRepo.get(r.repo).push(r);
+  }
+  const ambiguous = new Set();
+  for (const [repo, copies] of byRepo) {
+    if (copies.length < 2) continue;
+    ambiguous.add(repo);
+    problems.push(`repo ${repo} is declared in ${copies.length} directories (${clean(copies.map(manifestLabel).join(", "))}); exclude a directory with excludeRepos in substrate.config.json`);
+  }
+  const nodes = new Map(); // id -> { ...primitive, repo, dir }
+  for (const r of repos) {
+    const localIds = new Set();
     for (const p of r.primitives || []) {
-      if (nodes.has(p.id)) problems.push(`duplicate primitive id: ${p.id} (${nodes.get(p.id).repo} and ${r.repo})`);
-      nodes.set(p.id, { ...p, repo: r.repo });
+      if (localIds.has(p.id)) {
+        problems.push(`duplicate primitive id: ${p.id} (${manifestLabel(r)} and ${manifestLabel(r)})`);
+        continue;
+      }
+      localIds.add(p.id);
+      const previous = nodes.get(p.id);
+      if (previous) {
+        // A same-name directory conflict is already actionable as one problem,
+        // rather than one line per id copied into every checkout. A duplicate
+        // within one manifest remains a separate schema problem.
+        if (previous.dir === r.dir || previous.repo !== r.repo || !ambiguous.has(r.repo)) {
+          problems.push(`duplicate primitive id: ${p.id} (${manifestLabel(previous)} and ${manifestLabel(r)})`);
+        }
+        continue; // never silently replace the first primitive with a later copy
+      }
+      nodes.set(p.id, { ...p, repo: r.repo, dir: r.dir });
     }
+  }
+  // Validate every manifest, including a colliding primitive that cannot be
+  // represented in the graph, so choosing a deterministic node hides no error.
+  for (const r of repos) for (const p of r.primitives) for (const target of p.consumes) {
+    if (!nodes.has(target)) problems.push(`unknown consumes target: ${p.id} -> ${target} (${manifestLabel(r)})`);
   }
   const edges = []; // [from, to] = from consumes to
   for (const n of nodes.values()) {
     for (const target of n.consumes || []) {
-      if (!nodes.has(target)) problems.push(`unknown consumes target: ${n.id} -> ${target}`);
-      else edges.push([n.id, target]);
+      if (nodes.has(target)) edges.push([n.id, target]);
     }
   }
   edges.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
@@ -702,14 +747,15 @@ function gitAvailable() {
   }
 }
 
-function samePath(a, b) {
+function canonicalPath(p) {
   // git prints forward slashes; realpath both sides so symlinked temp dirs
   // (macOS /var -> /private/var) and Windows casing cannot break the compare.
-  const canon = (p) => {
-    const r = fs.realpathSync(path.resolve(p));
-    return process.platform === "win32" ? r.toLowerCase() : r;
-  };
-  return canon(a) === canon(b);
+  const r = fs.realpathSync(path.resolve(p));
+  return process.platform === "win32" ? r.toLowerCase() : r;
+}
+
+function samePath(a, b) {
+  return canonicalPath(a) === canonicalPath(b);
 }
 
 function isGitWorkTree(dir) {
@@ -723,11 +769,98 @@ function isGitWorkTree(dir) {
   }
 }
 
-function stalenessAlarms(repos, root, config) {
+function discoveryPattern(pattern, dir) {
+  // Only * and ? are special, and matching is against an immediate child's
+  // full name. This setting never prunes a same-named directory inside a repo.
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped.replace(/\*/g, ".*").replace(/\?/g, ".")}$`, "u").test(dir);
+}
+
+function originIdentity(repoDir, origin) {
+  if (!origin) return null;
+  const scp = origin.match(/^(?:[^/@:]+@)?([^/:]+):(.+)$/);
+  if (scp && !/^[A-Za-z]:[\\/]/.test(origin) && !origin.includes("://")) {
+    return { key: `remote:${scp[1].toLowerCase()}/${scp[2].replace(/^\/+|\/+$/g, "").replace(/\.git$/, "")}` };
+  }
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(origin)) {
+    const url = new URL(origin);
+    if (url.protocol !== "file:") {
+      const defaultPort = { "ssh:": "22", "http:": "80", "https:": "443" }[url.protocol];
+      const port = !url.port || url.port === defaultPort ? "" : `:${url.port}`;
+      return { key: `remote:${url.hostname.toLowerCase()}${port}/${url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "")}` };
+    }
+    origin = fileURLToPath(url);
+  }
+  let local = path.resolve(repoDir, origin);
+  if (fs.existsSync(local)) local = canonicalPath(local);
+  return { key: `file:${local}`, local };
+}
+
+function discoverDirectories(root, config, gitOk) {
+  const entries = fs.readdirSync(root, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !config.excludeDirs.has(e.name)
+      && !config.excludeRepos.some((p) => discoveryPattern(p, e.name)))
+    .map((e) => ({ dir: e.name, abs: path.join(root, e.name) }))
+    .filter((e) => ["substrate.json", "deliverables.json"].some((f) => fs.existsSync(path.join(e.abs, f))))
+    .sort((a, b) => a.dir.localeCompare(b.dir));
+  for (const e of entries) {
+    if (!gitOk || !isGitWorkTree(e.abs)) continue;
+    try {
+      e.common = canonicalPath(path.resolve(e.abs, git(e.abs, ["rev-parse", "--git-common-dir"])));
+      e.main = samePath(git(e.abs, ["rev-parse", "--absolute-git-dir"]), e.common);
+      let origin = "";
+      try { origin = git(e.abs, ["config", "--get", "remote.origin.url"]); } catch { /* no origin is valid */ }
+      e.origin = originIdentity(e.abs, origin);
+    } catch { /* keep a checkout even if its git metadata is unavailable */ }
+  }
+
+  const parents = entries.map((_, i) => i);
+  const find = (i) => parents[i] === i ? i : (parents[i] = find(parents[i]));
+  const unite = (a, b) => { parents[find(b)] = find(a); };
+  const identities = new Map();
+  const sources = new Map();
+  entries.forEach((e, i) => {
+    if (!e.common) return;
+    sources.set(canonicalPath(e.abs), i);
+    sources.set(e.common, i);
+    for (const key of [`git:${e.common}`, e.origin?.key].filter(Boolean)) {
+      if (identities.has(key)) unite(identities.get(key), i);
+      else identities.set(key, i);
+    }
+  });
+  const localSources = new Set();
+  entries.forEach((e, i) => {
+    const source = sources.get(e.origin?.local);
+    if (source === undefined) return;
+    unite(source, i);
+    localSources.add(entries[source].common);
+  });
+  const groups = new Map();
+  entries.forEach((e, i) => {
+    const key = find(i);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(e);
+  });
+  const dirs = [], notes = [];
+  for (const group of groups.values()) {
+    // Prefer the source of a local clone, then a main worktree, then name.
+    // All worktrees of that source share the same source priority.
+    group.sort((a, b) => Number(localSources.has(b.common)) - Number(localSources.has(a.common))
+      || Number(!!b.main) - Number(!!a.main) || a.dir.localeCompare(b.dir));
+    const chosen = group[0];
+    dirs.push(chosen.dir);
+    if (group.length < 2) continue;
+    const others = group.slice(1).map((e) => e.dir).sort();
+    const kind = group.every((e) => e.common === chosen.common) ? "worktree" : "checkout";
+    notes.push(`${clean(chosen.dir)}: ${others.length} other ${kind}${others.length === 1 ? "" : "s"} ignored (${clean(others.join(", "))})`);
+  }
+  return { dirs: dirs.sort((a, b) => a.localeCompare(b)), notes: notes.sort() };
+}
+
+function stalenessAlarms(repos, root, config, gitOk) {
   const alarms = [];
   const notes = [];
   const graceMs = config.graceHours * 60 * 60 * 1000;
-  const gitOk = gitAvailable();
   let gitSkipped = false;
   for (const r of [...repos].sort((a, b) => a.repo.localeCompare(b.repo))) {
     try {
@@ -741,7 +874,7 @@ function stalenessAlarms(repos, root, config) {
               .split("\n").map((s) => s.trim()).filter((s) => s && s !== "substrate.json"),
           );
           // only alarm when a non-manifest file actually changed (a lone re-commit of substrate.json is not drift)
-          if (files.size) alarms.push(`manifest may be stale: ${r.repo} changed ${files.size} files since manifest`);
+          if (files.size) alarms.push(`manifest may be stale: ${repoLabel(r)} changed ${files.size} files since manifest`);
         }
       } else if (declared) {
         let newestMs = 0, newerCount = 0, capped = false, escaped = false;
@@ -752,18 +885,18 @@ function stalenessAlarms(repos, root, config) {
           capped = capped || res.capped;
           escaped = escaped || res.escaped;
         }
-        if (escaped) notes.push(`config path escaped ${r.repo}'s directory and was ignored — nonGitRepos paths must stay inside the repo`);
-        if (capped) notes.push(`walk capped for ${r.repo}: limits are depth ${WALK_MAX_DEPTH} / ${WALK_MAX_ENTRIES} entries, so newer-file counts are a lower bound`);
+        if (escaped) notes.push(`config path escaped ${repoLabel(r)}'s directory and was ignored — nonGitRepos paths must stay inside the repo`);
+        if (capped) notes.push(`walk capped for ${repoLabel(r)}: limits are depth ${WALK_MAX_DEPTH} / ${WALK_MAX_ENTRIES} entries, so newer-file counts are a lower bound`);
         if (newestMs > r.mtimeMs + graceMs) {
-          alarms.push(`manifest may be stale: ${r.repo} changed ${newerCount} files since manifest`);
+          alarms.push(`manifest may be stale: ${repoLabel(r)} changed ${newerCount} files since manifest`);
         }
       } else if (gitOk) {
-        notes.push(`staleness skipped: ${r.repo} is not a git repo and has no nonGitRepos entry in substrate.config.json`);
+        notes.push(`staleness skipped: ${repoLabel(r)} is not a git repo; add ${JSON.stringify(clean(r.dir))} to nonGitRepos in substrate.config.json`);
       } else {
         gitSkipped = true; // cannot classify without git; the single note below covers it
       }
     } catch (e) {
-      alarms.push(`staleness check failed: ${r.repo} (${clean(e.message.split("\n")[0])})`);
+      alarms.push(`staleness check failed: ${repoLabel(r)} (${clean(e.message.split("\n")[0])})`);
     }
   }
   if (gitSkipped) notes.unshift("git not found — staleness skipped for git repos");
@@ -782,8 +915,8 @@ function emitMarkdown(repos, graph, alarms, notes, problems) {
   L.push(`## Nodes (${nodes.size} primitives, by repo)`);
   for (const r of [...repos].sort((a, b) => a.repo.localeCompare(b.repo))) {
     L.push("");
-    L.push(`### ${r.repo}`);
-    for (const p of [...(r.primitives || [])].sort((a, b) => a.id.localeCompare(b.id))) {
+    L.push(`### ${repoLabel(r)}`);
+    for (const p of [...nodes.values()].filter((p) => p.dir === r.dir).sort((a, b) => a.id.localeCompare(b.id))) {
       L.push(`- **${p.id}** (${p.kind}, ${p.status}${p.terminal ? ", terminal" : ""}) — ${p.desc}`);
       L.push(`  - paths: ${p.paths.map((x) => `\`${x}\``).join(", ")}`);
       if ((p.consumes || []).length) L.push(`  - consumes: ${p.consumes.join(", ")}`);
@@ -838,13 +971,16 @@ function main() {
   const out = path.join(root, "SUBSTRATE.md");
   const problems = [];
   const config = loadConfig(root, problems);
-  const repos = loadManifests(root, config.excludeDirs, problems);
+  const gitOk = gitAvailable();
+  const discovery = discoverDirectories(root, config, gitOk);
+  const repos = loadManifests(root, discovery.dirs, problems);
   const graph = buildGraph(repos, problems);
   const lint = importLint(root, repos, config.excludeDirs);
   problems.push(...lint.problems);
-  const { alarms, notes } = stalenessAlarms(repos, root, config);
-  notes.push(...lint.notes);
-  alarms.push(...deliverableAlarms(root, config.excludeDirs, problems));
+  const { alarms, notes } = stalenessAlarms(repos, root, config, gitOk);
+  notes.push(...discovery.notes, ...lint.notes);
+  alarms.push(...deliverableAlarms(root, discovery.dirs, problems));
+  orderProblems(problems);
   if (mode === "emit") {
     writeSubstrateMd(out, emitMarkdown(repos, graph, alarms, notes, problems));
     console.log(`wrote ${out}: ${repos.length} repos, ${graph.nodes.size} primitives, ${graph.edges.length} edges, ${graph.orphans.length} orphans, ${graph.hubs.length} hubs, ${alarms.length} alarms`);
@@ -877,6 +1013,7 @@ function main() {
       orphans: graph.orphans.map((id) => clean(id, 200)),
       hubs: graph.hubs.map((id) => ({ id: clean(id, 200), inDegree: graph.inDegree.get(id) })),
       problems: capList(problems).map((p) => clean(p)),
+      notes: capList(notes).map((n) => clean(n)),
     }));
     if (problems.length) process.exitCode = 1;
   } else {

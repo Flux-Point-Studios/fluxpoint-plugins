@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "toolchain": {
+    "lean": "4.24.0",
+    "z3": "4.15.2",
+    "blaster": "a16614e5e44a693664043552f259235f15f1c884"
+  },
+  "timeoutSeconds": 30,
+  "buildTimeoutSeconds": 300,
+  "checks": [
+    {
+      "id": "safety",
+      "module": "Verification.Model",
+      "declaration": "Verification.safety",
+      "witness": "Verification.feasible",
+      "expected": "valid",
+      "trust": "solver",
+      "seed": 1,
+      "scope": "Replace with the exact input domain and property this model checks",
+      "assumptions": [
+        "Lean-blaster normalization and SMT translation, Z3, and the declared model are trusted",
+        "Replace with the model's domain assumptions and its checked connection to the implementation"
+      ]
+    }
+  ],
+  "regressions": []
+}

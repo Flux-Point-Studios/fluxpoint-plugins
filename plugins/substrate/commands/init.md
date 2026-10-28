@@ -16,14 +16,21 @@ step; do not stop at scaffolding files.
    {
      "graceHours": 6,
      "excludeDirs": [],
+     "excludeRepos": [],
      "nonGitRepos": {}
    }
    ```
 
    Explain each key while writing it: `graceHours` is the window in which a
    manifest edit and its code changes count as one shipment; `excludeDirs`
-   adds to the built-in walk excludes (`node_modules`, `.git`, `dist`,
-   `build`, `out`, `coverage`, `__pycache__`); `nonGitRepos` maps a non-git
+   adds to the built-in excludes (`node_modules`, `.git`, `dist`,
+   `build`, `out`, `coverage`, `__pycache__`) for top-level manifest and
+   ledger discovery and for directory walks at every depth. `excludeRepos`
+   excludes top-level directories from manifest and ledger discovery only;
+   it accepts exact names and `*` / `?` patterns, such as `wt-*`, without
+   pruning matching source directories inside retained repos. Git worktrees
+   and clones sharing an origin are grouped automatically, with a note
+   naming the checkout used and the copies ignored. `nonGitRepos` maps a non-git
    repo's dirname to the relative code paths its staleness check may walk —
    undeclared non-git repos are skipped from staleness entirely.
 3. Pick the first repo to seed: "$ARGUMENTS" if provided, otherwise ask.
@@ -54,11 +61,12 @@ step; do not stop at scaffolding files.
    and marks them as outside the substrate.
 4. If the seeded repo is not a git repo, add its dirname and code paths to
    `nonGitRepos` in the config, or its staleness will be skipped.
-5. Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/substrate-graph.mjs" --emit`.
-   If `${CLAUDE_PLUGIN_ROOT}` expands empty in your shell, locate the plugin
-   with `find ~/.claude/plugins ~/.codex/plugins/cache -type d -path '*substrate/scripts' 2>/dev/null | head -1`.
+5. Resolve `$ROOT` from `CLAUDE_PLUGIN_ROOT`, then `PLUGIN_ROOT`, or the
+   parent of this loaded command's `commands/` directory. Use that installation
+   throughout; the first recursive cache match may be an older version.
+   Run `node "$ROOT/scripts/substrate-graph.mjs" --emit`.
    Fix any `problem:` lines it prints and re-run until it exits 0.
-6. Read `${CLAUDE_PLUGIN_ROOT}/templates/DOCTRINE.snippet.md` and offer to
+6. Read `$ROOT/templates/DOCTRINE.snippet.md` and offer to
    append it to the workspace's instructions file — `CLAUDE.md` under Claude
    Code, `AGENTS.md` under Codex — creating the file if absent.
    Summarize the doctrine either way: the sweep comes first — before any

@@ -1,0 +1,59 @@
+# Copy to .github/workflows/tighten-baselines.yml. Configure the runner with
+# this repo's pinned toolchains and install Fluxpoint at FPL_PLUGIN_ROOT.
+name: Tighten measured baselines
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+concurrency: fluxpoint-tighten
+jobs:
+  tighten:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      # Add the same dependency/toolchain setup used by your full harness here.
+      - name: Verify main and tighten armed ratchets
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${FPL_PLUGIN_ROOT:?Install the pinned Fluxpoint plugin and set its root}"
+          git config user.name 'fluxpoint-baseline-bot'
+          git config user.email 'fluxpoint-baseline-bot@users.noreply.github.com'
+          # Local main commits are collected into the PR branch by the action below.
+          bash scripts/harness.sh --full
+          for kind in proof seam guard mutation metric; do
+            # Skip ratchets this repo has not armed. --tighten never arms one.
+            if ! python3 - "$kind" <<'PY'
+          import json, os, sys
+          kind = sys.argv[1]
+          file, section = {
+              'proof': ('.fluxpoint-proof-baseline.json', 'counts'),
+              'seam': ('.fluxpoint-proof-baseline.json', 'seams'),
+              'guard': ('.fluxpoint-guards-baseline.json', 'ids'),
+              'mutation': ('.fluxpoint-proof-baseline.json', 'mutation'),
+              'metric': ('.fluxpoint-metrics-baseline.json', 'metrics'),
+          }[kind]
+          sys.exit(0 if os.path.isfile(file) and section in json.load(open(file)) else 1)
+          PY
+            then continue; fi
+            python3 "$FPL_PLUGIN_ROOT/scripts/$kind-guard.py" --tighten
+            # A local commit keeps the next ratchet's clean-tree check honest.
+            # Every commit will appear together in the review PR below.
+            git add .fluxpoint-*-baseline.json
+            if ! git diff --cached --quiet; then
+              git commit -m "ratchet: tighten $kind baseline"
+            fi
+          done
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: automation/tighten-baselines
+          base: main
+          title: 'ratchet: lock in measured improvements'
+          body: 'Each tightening ran on a clean tree after the full harness passed. Review the per-category baseline changes.'
+          delete-branch: true

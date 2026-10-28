@@ -3,10 +3,12 @@ description: Scan a file (or all staged deliverables) for AI-writing smell befor
 ---
 
 Run the prose-smell gate on the file(s) the user names — or, with no
-argument, on every prose file changed in the working tree:
+argument, on every prose file changed in the working tree. Resolve `$ROOT`
+from `CLAUDE_PLUGIN_ROOT`, then `PLUGIN_ROOT`, or the parent of this loaded
+command's `commands/` directory:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/scripts/prose-smell.mjs" <files…>
+node "$ROOT/scripts/prose-smell.mjs" <files…>
 ```
 
 Exit 2 means HIGH findings — rewrite those sentences as plain declarative

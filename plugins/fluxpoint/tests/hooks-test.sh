@@ -181,9 +181,19 @@ if [ -f "$ws/repo/.claude/fluxpoint/attest.jsonl" ]; then
 else
   bad "exec-attest: attests in a repo BELOW a non-git project dir" "no log — resolved the workspace root"
 fi
-# ...and from a SUBDIRECTORY of that repo, since a gate is often run from one.
+# ...and from a session whose shell sits in a SUBDIRECTORY of that repo: the
+# hook still finds the repo. The gate itself must run at the project root
+# (a bare gate from the subdirectory would run only that subtree), so the
+# command cds there, as an agent in a subdirectory does.
 rm -rf "$ws/repo/.claude"; mkdir -p "$ws/repo/sub"
 ( cd "$ws/repo/sub" && ws_input "$ws/repo/sub" "scripts/harness.sh --full" 0 \
+  | CLAUDE_PROJECT_DIR="$ws" eval "$(hook_cmd PostToolUse 1)" >/dev/null 2>&1 )
+if [ -f "$ws/repo/.claude/fluxpoint/attest.jsonl" ]; then
+  bad "exec-attest: a bare gate from a subdirectory is not the project's gate" "recorded"
+else
+  ok "exec-attest: a bare gate from a subdirectory is not the project's gate" "not recorded"
+fi
+( cd "$ws/repo/sub" && ws_input "$ws/repo/sub" "cd $ws/repo && scripts/harness.sh --full" 0 \
   | CLAUDE_PROJECT_DIR="$ws" eval "$(hook_cmd PostToolUse 1)" >/dev/null 2>&1 )
 if [ -f "$ws/repo/.claude/fluxpoint/attest.jsonl" ]; then
   ok "exec-attest: attests from a subdirectory of the repo" "recorded"
@@ -334,6 +344,33 @@ for skip in README.md .claude/settings.json docs/notes.md; do
     bad "verify-changed: skips $skip" "rc=$rc marker=$([ -f .claude/fluxpoint/s.dirty ] && echo yes || echo no)"
   fi
 done
+
+# --- 5a. only paths inside the project arm the gate (#94) ---
+# An orchestrator writes scratch scripts outside the repository all the
+# time; arming on them made the gate write an Evidence row into the tree a
+# live graph was guarding.
+newrepo 1
+mkdir -p "$ROOT/scratch"
+printf 'print(1)\n' >"$ROOT/scratch/patch.py"
+post_input "$ROOT/scratch/patch.py" | eval "$(hook_cmd PostToolUse)" >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && [ ! -f .claude/fluxpoint/s.dirty ]; then
+  ok "verify-changed: a write outside the project does not arm" "no run, no marker"
+else
+  bad "verify-changed: a write outside the project does not arm" "rc=$rc"
+fi
+post_input "../scratch/patch.py" | eval "$(hook_cmd PostToolUse)" >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && [ ! -f .claude/fluxpoint/s.dirty ]; then
+  ok "verify-changed: nor does a relative path that escapes it" "no run, no marker"
+else
+  bad "verify-changed: nor does a relative path that escapes it" "rc=$rc"
+fi
+newrepo 0
+printf 'y = 2\n' >>src/app.py
+post_input "$ROOT/r/src/app.py" | eval "$(hook_cmd PostToolUse)" >/dev/null 2>&1
+[ -f .claude/fluxpoint/s.dirty ] && ok "verify-changed: an absolute path inside still arms" "marker written" \
+  || bad "verify-changed: an absolute path inside still arms" "no marker"
 
 # --- 6. no harness in the repo: mark dirty, stay silent, never fail the edit ---
 newrepo none

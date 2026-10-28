@@ -34,11 +34,15 @@ KINDS = {
     "wake-ready": "a parked wait cleared and the campaign can resume",
     "wake-expired": "a wake deadline passed with the condition unmet",
     "confirm-required": "an irreversible node refused to fire unconfirmed",
+    "plateau": "an unattended run stopped after metric progress stalled",
     "budget-exhausted": "an unattended run spent its iteration budget",
     "attest-mismatch": "a node's claimed gate exit contradicts the attested log",
     "cex-ingest-failed": "prover output could not be parsed into a counterexample",
     "cex-pin-inert": "a pinned counterexample was re-found, so its test does not bite",
     "mutation-stale": "the mutation score no longer describes this tree",
+    "box-unhealthy": "machine health degraded during a Workflow; operator inspection required",
+    "agent-stalled": "a live Workflow agent stopped producing transcript activity",
+    "agent-killed": "a failed Workflow agent needs inspection and a resume",
 }
 
 

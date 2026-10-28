@@ -1,13 +1,305 @@
 {
   "$id": "SliceV1",
   "type": "object",
-  "required": ["branch", "diffSummary", "testsAdded", "harnessCommand", "harnessExit", "evidence"],
+  "required": [
+    "branch",
+    "diffSummary",
+    "testsAdded",
+    "harnessCommand",
+    "harnessExit",
+    "evidence",
+    "sharedResources"
+  ],
   "properties": {
-    "branch": { "type": "string", "minLength": 1 },
-    "diffSummary": { "type": "string", "minLength": 20 },
-    "testsAdded": { "type": "array", "items": { "type": "string" } },
-    "harnessCommand": { "type": "string", "minLength": 1 },
-    "harnessExit": { "type": "integer" },
-    "evidence": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 10 } }
+    "branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "diffSummary": {
+      "type": "string",
+      "minLength": 20
+    },
+    "testsAdded": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "harnessCommand": {
+      "type": "string",
+      "minLength": 1
+    },
+    "harnessExit": {
+      "type": "integer"
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 10
+      }
+    },
+    "reframe": {
+      "type": "object",
+      "required": [
+        "classes",
+        "invariant",
+        "classRewire",
+        "disposition",
+        "measurement"
+      ],
+      "properties": {
+        "classes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "invariant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "classRewire": {
+          "type": "string",
+          "minLength": 1
+        },
+        "disposition": {
+          "enum": [
+            "adopt",
+            "refute",
+            "remove"
+          ]
+        },
+        "measurement": {
+          "type": "object",
+          "required": [
+            "command",
+            "result"
+          ],
+          "properties": {
+            "command": {
+              "type": "string",
+              "minLength": 1
+            },
+            "result": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "validated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "packetEdits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "file",
+          "anchor",
+          "op",
+          "text",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "anchor": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "op": {
+            "enum": [
+              "replace",
+              "append",
+              "insertAfter"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    "packetConflict": {
+      "type": "object",
+      "description": "An early locked-check contradiction. This only blocks for an operator ruling; it never authorizes changing a packet, skipping checks or narrowing requirements.",
+      "required": ["checks", "nodes", "counterexample"],
+      "additionalProperties": false,
+      "properties": {
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "counterexample": {"type": "string", "minLength": 1}
+      }
+    },
+    "sharedResources": {
+      "type": "array",
+      "description": "Every shared pool, executor, cache, lock or single-writer store to which this patch adds a writer or reader. Explicit [] means none. Name all affected users, including existing writers reached by a new reader.",
+      "items": {
+        "type": "object",
+        "required": [
+          "resource",
+          "writers",
+          "readers"
+        ],
+        "properties": {
+          "resource": {
+            "type": "string",
+            "minLength": 1
+          },
+          "writers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "readers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "siblings": {
+      "type": "array",
+      "description": "Sibling claims on the fixer; independent executed observations on the checker. finding is a pinned targetClasses identity. NOT-APPLICABLE cites inspected snapshot file:line.",
+      "items": {
+        "type": "object",
+        "required": [
+          "finding",
+          "invariant",
+          "axis",
+          "surface",
+          "attack",
+          "control",
+          "outcome",
+          "reason"
+        ],
+        "properties": {
+          "finding": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "invariant": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "surface": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "axis": {
+            "enum": [
+              "field",
+              "encoding",
+              "caller",
+              "network",
+              "role",
+              "path"
+            ]
+          },
+          "attack": {
+            "type": "object",
+            "required": [
+              "command",
+              "result"
+            ],
+            "properties": {
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "result": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          },
+          "control": {
+            "type": "object",
+            "required": [
+              "command",
+              "result"
+            ],
+            "properties": {
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "result": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          },
+          "outcome": {
+            "enum": [
+              "DEFENDED",
+              "NOT-APPLICABLE"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "outcome"
+              ],
+              "properties": {
+                "outcome": {
+                  "const": "NOT-APPLICABLE"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "pattern": "[^\\s:]+:[0-9]+"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
   }
 }

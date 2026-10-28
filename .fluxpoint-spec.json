@@ -2,8 +2,21 @@
   "version": 1,
   "goal": "Require researched decisions and executable requirements before Flux Point implementation campaigns",
   "asset": "The existing WORK.md compiler, harness, proof ratchets and shared Claude/Codex plugin",
-  "scope": ["Decision packet and freeze validation", "Mutating graph preflight and context", "Requirement checks in newly initialized loops", "Formal tool availability", "Statement exception validation"],
-  "outOfScope": ["Installing provers into consumer repositories", "Proving arbitrary program semantics", "Changing existing installed plugin caches", "Rewriting legacy consuming harnesses automatically"],
+  "scope": [
+    "Decision packet and freeze validation",
+    "Mutating graph preflight and context",
+    "Requirement checks in newly initialized loops",
+    "Formal tool availability",
+    "Statement exception validation",
+    "Issues #166–#172: graph lanes, ancestor-bound replay, explicit rejudgment, carried resume inputs, crash-pair and forge evidence, packet closure preflight, and diff-scoped repair verification",
+    "Issue #192: typed probe receipts so a graph whose isolated nodes run scripts can reach a SOUND audit"
+  ],
+  "outOfScope": [
+    "Installing provers into consumer repositories",
+    "Proving arbitrary program semantics",
+    "Changing existing installed plugin caches",
+    "Rewriting legacy consuming harnesses automatically"
+  ],
   "decisions": [
     {
       "id": "spec-boundary",
@@ -12,62 +25,652 @@
       "record": {
         "question": "How should decisions and requirements constrain implementation?",
         "options": [
-          {"option": "locked-packet", "argued_by": "model", "strongest_objection": "Adds a manifest and lock that must be revised when requirements change"},
-          {"option": "advisory-prose", "argued_by": "model", "strongest_objection": "The existing compiler accepts mutating graphs with no spec or decisions"},
-          {"option": "universal-proof", "argued_by": "model", "strongest_objection": "Would require new models and checker support for every implementation language"}
+          {
+            "option": "locked-packet",
+            "argued_by": "model",
+            "strongest_objection": "Adds a manifest and lock that must be revised when requirements change"
+          },
+          {
+            "option": "advisory-prose",
+            "argued_by": "model",
+            "strongest_objection": "The existing compiler accepts mutating graphs with no spec or decisions"
+          },
+          {
+            "option": "universal-proof",
+            "argued_by": "model",
+            "strongest_objection": "Would require new models and checker support for every implementation language"
+          }
         ],
         "chosen": "locked-packet",
         "rationale": "The actual compiler probe accepted a two-node mutating graph with no spec, while the repo already provides typed decisions, a harness and proof ratchets. A checked packet connects those existing parts.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
-        "evidence": ["2026-09-11: no-spec compiler CLI probe exited 0 on e4a497d", "Read DecisionV1.schema.json, spec-guard.py and templates/harness.sh", "User requested implementation and tests after the assessment"]
+        "evidence": [
+          "2026-09-11: no-spec compiler CLI probe exited 0 on e4a497d",
+          "Read DecisionV1.schema.json, spec-guard.py and templates/harness.sh",
+          "User requested implementation and tests after the assessment"
+        ]
       },
       "costs": [
-        {"option": "locked-packet", "cost": "Two tracked artifacts and requirement-specific check maintenance", "basis": "estimate", "evidence": ["Design scope; no elapsed implementation time estimate claimed"]},
-        {"option": "advisory-prose", "cost": "No new runtime checks; unmet requirements can remain invisible", "basis": "measured", "evidence": ["Mutating graph without spec compiled with exit 0"]},
-        {"option": "universal-proof", "cost": "Per-language proof and conformance work with unmeasured maintenance cost", "basis": "unknown", "evidence": ["Existing proof integrations have different semantics; no universal adapter exists in this repository"]}
+        {
+          "option": "locked-packet",
+          "cost": "Two tracked artifacts and requirement-specific check maintenance",
+          "basis": "estimate",
+          "evidence": [
+            "Design scope; no elapsed implementation time estimate claimed"
+          ]
+        },
+        {
+          "option": "advisory-prose",
+          "cost": "No new runtime checks; unmet requirements can remain invisible",
+          "basis": "measured",
+          "evidence": [
+            "Mutating graph without spec compiled with exit 0"
+          ]
+        },
+        {
+          "option": "universal-proof",
+          "cost": "Per-language proof and conformance work with unmeasured maintenance cost",
+          "basis": "unknown",
+          "evidence": [
+            "Existing proof integrations have different semantics; no universal adapter exists in this repository"
+          ]
+        }
       ]
     },
     {
-      "id": "review-procedure", "status": "defaulted", "dependsOn": ["spec-boundary"],
+      "id": "review-procedure",
+      "status": "defaulted",
+      "dependsOn": [
+        "spec-boundary"
+      ],
       "record": {
         "question": "Which parts of the Cardano red-team method should strengthen the shared reviewer?",
         "options": [
-          {"option": "adapt-method", "argued_by": "model", "strongest_objection": "Requires maintaining cross-domain coverage and stronger evidence instructions"},
-          {"option": "copy-workflow", "argued_by": "model", "strongest_objection": "The source reducer can return GREEN on missing execution and unresolved claims"},
-          {"option": "keep-checklist", "argued_by": "model", "strongest_objection": "Leaves coverage, committed-PR selection and skeptical reproduction implicit"}
+          {
+            "option": "adapt-method",
+            "argued_by": "model",
+            "strongest_objection": "Requires maintaining cross-domain coverage and stronger evidence instructions"
+          },
+          {
+            "option": "copy-workflow",
+            "argued_by": "model",
+            "strongest_objection": "The source reducer can return GREEN on missing execution and unresolved claims"
+          },
+          {
+            "option": "keep-checklist",
+            "argued_by": "model",
+            "strongest_objection": "Leaves coverage, committed-PR selection and skeptical reproduction implicit"
+          }
         ],
-        "chosen": "adapt-method", "rationale": "The source has explicit attack classes, composition and skeptical reproduction; executing its reducer with five incomplete-result fixtures returned GREEN. Preserve those methods with fail-closed synthesis and the existing RedTeamV1 halt gates.",
-        "overturned_prior": false, "frozen_by": "none", "reversible": true,
-        "evidence": ["Read cardano-agent-skills c4dc5de6 red-team and audit sources", "2026-09-11: five incomplete source-workflow fixtures returned GREEN", "User requested adapting stronger parts"]
+        "chosen": "adapt-method",
+        "rationale": "The source has explicit attack classes, composition and skeptical reproduction; executing its reducer with five incomplete-result fixtures returned GREEN. Preserve those methods with fail-closed synthesis and the existing RedTeamV1 halt gates.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Read cardano-agent-skills c4dc5de6 red-team and audit sources",
+          "2026-09-11: five incomplete source-workflow fixtures returned GREEN",
+          "User requested adapting stronger parts"
+        ]
       },
       "costs": [
-        {"option": "adapt-method", "cost": "Additional attack/control and reproduction work; elapsed campaign cost depends on scope", "basis": "unknown", "evidence": ["No production campaign timing measured"]},
-        {"option": "copy-workflow", "cost": "Cardano-specific executor maintenance and five reproduced false-GREEN paths", "basis": "measured", "evidence": ["Executed missing-results, unchecked, missing-class, null-verifier and invalid-precondition fixtures"]},
-        {"option": "keep-checklist", "cost": "No new instructions; existing evidence and coverage gaps remain", "basis": "estimate", "evidence": ["Read the existing reviewer and 14-line command"]}
+        {
+          "option": "adapt-method",
+          "cost": "Additional attack/control and reproduction work; elapsed campaign cost depends on scope",
+          "basis": "unknown",
+          "evidence": [
+            "No production campaign timing measured"
+          ]
+        },
+        {
+          "option": "copy-workflow",
+          "cost": "Cardano-specific executor maintenance and five reproduced false-GREEN paths",
+          "basis": "measured",
+          "evidence": [
+            "Executed missing-results, unchecked, missing-class, null-verifier and invalid-precondition fixtures"
+          ]
+        },
+        {
+          "option": "keep-checklist",
+          "cost": "No new instructions; existing evidence and coverage gaps remain",
+          "basis": "estimate",
+          "evidence": [
+            "Read the existing reviewer and 14-line command"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "oct19-execution-evidence",
+      "status": "defaulted",
+      "dependsOn": [
+        "spec-boundary",
+        "review-procedure"
+      ],
+      "record": {
+        "question": "How should the seven execution gaps be fixed while preserving verdict provenance?",
+        "options": [
+          {
+            "option": "structural-gates",
+            "argued_by": "model",
+            "strongest_objection": "Requires coordinated compiler, launcher and evidence-store changes with adversarial runtime fixtures"
+          },
+          {
+            "option": "prompt-only-guidance",
+            "argued_by": "model",
+            "strongest_objection": "Cannot refuse stale memo results, fabricated CI pointers or unchecked repair coverage"
+          }
+        ],
+        "chosen": "structural-gates",
+        "rationale": "The seven upstream reports identify missing mechanical boundaries in 1.45.0; deterministic helpers and recorder checks must corroborate emitted runtime receipts. Preserve existing behavior for graphs that do not opt into lanes or replay.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Read issue bodies #166–#172 against upstream c848f07b",
+          "User requested all seven fixed, repackaged and released",
+          "Workflow sandbox provides agent calls but no filesystem: dedicated fixed-command sentinels retain the existing tree-check trust boundary; record-time helpers independently re-read local files"
+        ]
+      },
+      "costs": [
+        {
+          "option": "structural-gates",
+          "cost": "Additional runtime sentinels, attacker/refuter calls and retained provenance; no production savings claimed before measurement",
+          "basis": "estimate",
+          "evidence": [
+            "Issue examples document repeated work and missing provenance; regression fixtures verify enforcement"
+          ]
+        },
+        {
+          "option": "prompt-only-guidance",
+          "cost": "Existing replay and false-green paths remain mechanically possible",
+          "basis": "measured",
+          "evidence": [
+            "Upstream reports cite 1.45.0 code paths and observed campaign records"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "probe-receipts",
+      "status": "defaulted",
+      "dependsOn": [
+        "spec-boundary"
+      ],
+      "record": {
+        "question": "How should graph-audit's isolated probe receipt a script command without trusting an interpreter wholesale?",
+        "options": [
+          {
+            "option": "typed-ir-declarations",
+            "argued_by": "model",
+            "strongest_objection": "Authors must declare each script command, and --check gains a Node.js dependency to run the audit's own grammar"
+          },
+          {
+            "option": "interpreter-allowlist",
+            "argued_by": "model",
+            "strongest_objection": "Admitting python or bash as read words lets any script, including a mutating one, read as probed"
+          },
+          {
+            "option": "append-help-to-every-command",
+            "argued_by": "model",
+            "strongest_objection": "A REMAINDER launcher forwards a --help placed after -- to its child after starting work"
+          }
+        ],
+        "chosen": "typed-ir-declarations",
+        "rationale": "A per-node probe object reviewed with the IR names how each script command is probed: read-only runs the exact command and may not run a writer, network tool, launcher, interpreter option, assignment or expanded program; shape runs a --help prefix (never -h) that must stop before any -- separator, child program or writer operand, never on a launcher, and with no interpreter option that can carry code; templates are discharged only by receipted concrete instances; <placeholder> and later-bound {{prev...}} or {{item...}} data take a typed fixed dummy inside a shape only. compile-graph.py --check runs the audit's own grammar section; it reads an unresolved {{A.x}} launch binding as the word A.x, so it agrees with the Probe phase only once the audit has the real resolved arguments. Graphs whose probed nodes run only grammar commands are unaffected.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Read issue #192 against upstream 2438d236 (fluxpoint 1.46.0): readOnlyWords admits no interpreter, so a probe over a script command is always incomplete and SOUND is unreachable",
+          "plugins/fluxpoint/scripts/longrun.py declares start's command with argparse.REMAINDER; 'longrun.py start --log L --help' printed usage, exited 0 and created no file",
+          "The audit resolved only flat {{A.key}} bindings; nested {{A._launch.root}} stayed literal and an unresolved token inside quotes passed the grammar",
+          "Review of a8f0d0f: the grammar section accepted 'python3 -c ... --help', 'node -e ... --help', 'bash -c ... --help', 'sh -c ... --help', 'python -Ic ... --help' and 'npx some-package --help' as shapes and 'rm -rf build' and 'curl -X POST ...' as read-only; all eight are refused after the fix",
+          "Review of aad99bab: read-only '/usr/bin/git reset --hard', \"'git' reset --hard\", 'git.exe push origin main' and '/usr/bin/git -C /scratch/repo reset --hard' were accepted, 'Before approving, execute `aiken check`.' and a quoted Windows python inside backticks left the inventory empty, and 'Run `git status`.' invented a '.' command",
+          "Review of 0ede089a: read-only '\"C:\\Tools\\git.exe\" reset --hard' passed because stripping backslashes named the program c:toolsgit; splitting on them instead would let 'r\\m -rf build' read as m"
+        ]
+      },
+      "costs": [
+        {
+          "option": "typed-ir-declarations",
+          "cost": "One reviewed probe entry per script command, and one node process per --check of a graph with probed nodes",
+          "basis": "measured",
+          "evidence": [
+            "compile-test.py runs --check over 26 probed nodes in one node process; the shipped templates need no declarations"
+          ]
+        },
+        {
+          "option": "interpreter-allowlist",
+          "cost": "No author work, but a mutating script reads as a probed read and the probe's receipt stops meaning anything",
+          "basis": "estimate",
+          "evidence": [
+            "readOnlyWords is the only barrier between a receipt and an arbitrary program"
+          ]
+        },
+        {
+          "option": "append-help-to-every-command",
+          "cost": "No author work, but a forwarded --help starts the child's work during an audit",
+          "basis": "measured",
+          "evidence": [
+            "longrun.py start forwards every argument after -- to the child it launches"
+          ]
+        }
       ]
     }
   ],
   "requirements": [
-    {"id": "decision-quality", "statement": "A packet requires resolved decisions with alternatives, evidence, costs and acyclic dependencies", "decisions": ["spec-boundary"], "checks": ["specification-tests"], "counterexample": "A blocked decision, empty evidence or missing option cost can be locked"},
-    {"id": "preflight", "statement": "A mutating graph requires a current locked packet and carries it into agent context", "decisions": ["spec-boundary"], "checks": ["specification-tests"], "counterexample": "A graph with no spec compiles or its emitted agents never receive requirement ids"},
-    {"id": "execution", "statement": "Declared check errors, timeouts, missing tools, unarmed formal escape-hatch ratchets and failed proof witnesses prevent success", "decisions": ["spec-boundary"], "checks": ["specification-tests"], "counterexample": "A failed check, unarmed proof ratchet or absent prover is silently treated as a pass"},
-    {"id": "provenance", "statement": "Spec edits, named obligation drift and proof baseline changes invalidate the lock, parsed packet and digest share one byte snapshot, and recording rejects an absent or stale identity", "decisions": ["spec-boundary"], "checks": ["specification-tests"], "counterexample": "A weaker theorem or a packet parsed before replacement is stamped with the replacement identity"},
-    {"id": "check-cleanup", "statement": "Before the next check or final identity validation, terminate check descendants in the POSIX process group or Windows job, including on timeout and early parent exit", "decisions": ["spec-boundary"], "checks": ["specification-tests"], "counterexample": "A timed-out check leaves a child that writes into the checkout after the runner returns"},
-    {"id": "bootstrap", "statement": "A WORK.md spec declaration arms the scaffolded harness and a mere Decisions mention cannot exempt statement drift", "decisions": ["spec-boundary"], "checks": ["specification-tests"], "counterexample": "Deleting a declared packet or mentioning an obligation leaves the gate green"},
-    {"id": "spec-budget", "statement": "The token estimate, emitted cost metadata and compilation ceiling account for the injected packet on every agent call that receives it", "decisions": ["spec-boundary"], "checks": ["specification-tests", "cost-tests"], "counterexample": "A large packet compiles below the declared cost ceiling because only graph orchestration was priced"},
-    {"id": "review-compatibility", "statement": "A RedTeamV1 BLOCK prevents a COMPLETE record even with empty findings and retains additional review evidence", "decisions": ["review-procedure"], "checks": ["review-verdict-tests"], "counterexample": "Missing coverage is reported as BLOCK with no invented vulnerability, but recording silently marks it COMPLETE"}
+    {
+      "id": "decision-quality",
+      "statement": "A packet requires resolved decisions with alternatives, evidence, costs and acyclic dependencies",
+      "decisions": [
+        "spec-boundary"
+      ],
+      "checks": [
+        "specification-tests"
+      ],
+      "counterexample": "A blocked decision, empty evidence or missing option cost can be locked"
+    },
+    {
+      "id": "preflight",
+      "statement": "A mutating graph requires a current locked packet and carries it into agent context",
+      "decisions": [
+        "spec-boundary"
+      ],
+      "checks": [
+        "specification-tests"
+      ],
+      "counterexample": "A graph with no spec compiles or its emitted agents never receive requirement ids"
+    },
+    {
+      "id": "execution",
+      "statement": "Declared check errors, timeouts, missing tools, unarmed formal escape-hatch ratchets and failed proof witnesses prevent success",
+      "decisions": [
+        "spec-boundary"
+      ],
+      "checks": [
+        "specification-tests"
+      ],
+      "counterexample": "A failed check, unarmed proof ratchet or absent prover is silently treated as a pass"
+    },
+    {
+      "id": "provenance",
+      "statement": "Spec edits, named obligation drift and proof baseline changes invalidate the lock, parsed packet and digest share one byte snapshot, and recording rejects an absent or stale identity",
+      "decisions": [
+        "spec-boundary"
+      ],
+      "checks": [
+        "specification-tests"
+      ],
+      "counterexample": "A weaker theorem or a packet parsed before replacement is stamped with the replacement identity"
+    },
+    {
+      "id": "check-cleanup",
+      "statement": "Before the next check or final identity validation, terminate check descendants in the POSIX process group or Windows job, including on timeout and early parent exit",
+      "decisions": [
+        "spec-boundary"
+      ],
+      "checks": [
+        "specification-tests"
+      ],
+      "counterexample": "A timed-out check leaves a child that writes into the checkout after the runner returns"
+    },
+    {
+      "id": "bootstrap",
+      "statement": "A WORK.md spec declaration arms the scaffolded harness and a mere Decisions mention cannot exempt statement drift",
+      "decisions": [
+        "spec-boundary"
+      ],
+      "checks": [
+        "specification-tests"
+      ],
+      "counterexample": "Deleting a declared packet or mentioning an obligation leaves the gate green"
+    },
+    {
+      "id": "spec-budget",
+      "statement": "The token estimate, emitted cost metadata and compilation ceiling account for the injected packet on every agent call that receives it",
+      "decisions": [
+        "spec-boundary"
+      ],
+      "checks": [
+        "specification-tests",
+        "cost-tests"
+      ],
+      "counterexample": "A large packet compiles below the declared cost ceiling because only graph orchestration was priced"
+    },
+    {
+      "id": "review-compatibility",
+      "statement": "A RedTeamV1 BLOCK prevents a COMPLETE record even with empty findings and retains additional review evidence",
+      "decisions": [
+        "review-procedure"
+      ],
+      "checks": [
+        "review-verdict-tests"
+      ],
+      "counterexample": "Missing coverage is reported as BLOCK with no invented vulnerability, but recording silently marks it COMPLETE"
+    },
+    {
+      "id": "lanes-and-replay",
+      "statement": "Opt-in lanes execute concurrently with explicit joins, mutation branch exclusion, budget reservations and shared halt; replay keys bind exact prompts, options, launch and ancestors, with fresh sentinel readings and independent source journal/transcript verification",
+      "decisions": [
+        "oct19-execution-evidence"
+      ],
+      "checks": [
+        "graph-compiler-tests",
+        "replay-provenance-tests",
+        "graph-lane-tests"
+      ],
+      "counterexample": "A live ancestor, moved branch, ambiguous transcript or forged memo reuses a green result"
+    },
+    {
+      "id": "resume-carry",
+      "statement": "Embedded args retain exact note text, reject inline overrides and silent dropping, and resume assembly accepts only named changes while verifying full evidence-file SHA-256 pins",
+      "decisions": [
+        "oct19-execution-evidence"
+      ],
+      "checks": [
+        "graph-compiler-tests",
+        "replay-provenance-tests",
+        "resume-input-tests"
+      ],
+      "counterexample": "An unchanged epoch drifts or a pinned evidence file changes without refusing launch"
+    },
+    {
+      "id": "gate-attempt-history",
+      "statement": "A green gate cannot hide an earlier red at the same tree and launch; one manifest-pinned classified crash may be closed only by one clean native and one digest-pinned reference execution with retained reverified logs",
+      "decisions": [
+        "oct19-execution-evidence"
+      ],
+      "checks": [
+        "attestation-tests",
+        "gate-fault-tests",
+        "forge-fault-race-tests"
+      ],
+      "counterexample": "Assertion failure or an unpaired red is silently superseded by a later green"
+    },
+    {
+      "id": "forge-witness",
+      "statement": "CI-backed claims re-read forge heads, all relevant status/check rows, pinned witness identities and unchanged coverage inputs at record time; dirty local evidence cannot back a claim",
+      "decisions": [
+        "oct19-execution-evidence"
+      ],
+      "checks": [
+        "attestation-tests",
+        "forge-witness-tests",
+        "forge-fault-race-tests"
+      ],
+      "counterexample": "A self-authored green row, moved PR head or modified pipeline helper admits a pass"
+    },
+    {
+      "id": "packet-repair-preflight",
+      "statement": "Packet locks include inferred tracked test-support closure, planned locked edits refuse, reachability preflight reports affected checks, and a packet conflict can only block work",
+      "decisions": [
+        "oct19-execution-evidence"
+      ],
+      "checks": [
+        "specification-tests",
+        "packet-closure-tests"
+      ],
+      "counterexample": "An imported fixture changes outside the trust base or a conflict authorizes a weaker check"
+    },
+    {
+      "id": "repair-diff-proof",
+      "statement": "Repair completion and checked-commit discharge require harness-defined patch SHA and added-hunk coverage, independent sibling attacks and structurally spawned attackers/refuters with no open blocking findings",
+      "decisions": [
+        "oct19-execution-evidence"
+      ],
+      "checks": [
+        "repair-acceptance-tests",
+        "repair-diff-tests"
+      ],
+      "counterexample": "A narrow original-attack PASS or forged diff receipt marks unchecked repair commits as checked"
+    },
+    {
+      "id": "typed-probe-receipts",
+      "statement": "A script command in a probed node is receipted only through a reviewed probe declaration: read-only runs the exact command and refuses writers, network tools, launchers, interpreter options, assignments and expanded programs; shape runs a --help prefix, never -h, placed before any -- separator, child program or writer operand, refused on a launcher or after an interpreter option that can carry code; templates complete only through receipted concrete instances; <placeholder> and later-bound {{...}} data take a typed dummy inside a shape only; nested bindings resolve before matching; every other case leaves the probe incomplete or is refused by --check; and the verdict names each shape-only receipt; Git counts only when spelled git, and a declared program word with a backslash is refused; and the inventory keeps every inline command whose first word names a known program or that directly follows run, execute, probe or invoke, without inventing commands from leftover punctuation",
+      "decisions": [
+        "probe-receipts"
+      ],
+      "checks": [
+        "graph-audit-tests",
+        "graph-compiler-tests",
+        "emission-tests"
+      ],
+      "counterexample": "An undeclared python command, a --help placed after --, a -h form, a python -c or npx shape, an rm declared read-only or an unreceipted template instance completes the probe, or a shape-only receipt goes unnamed in a SOUND verdict, a read-only /usr/bin/git reset --hard completes the probe, or 'execute `aiken check`' leaves the inventory empty"
+    }
   ],
   "checks": [
-    {"id": "specification-tests", "kind": "test", "argv": ["{python}", "plugins/fluxpoint/tests/specification-test.py"], "scope": "Execute packet CLI, graph compiler output, run recording and scaffolded harness regressions", "assumptions": ["The test runner and operating system are trusted", "These tests establish enforcement behavior, not mathematical correctness of arbitrary consumer code"], "timeoutSeconds": 120},
-    {"id": "cost-tests", "kind": "test", "argv": ["{python}", "plugins/fluxpoint/tests/cost-test.py"], "scope": "Packet input accounting across agent topologies and compilation budget boundaries", "assumptions": ["Token costs are conservative estimates with stated model multipliers, not measured usage"], "timeoutSeconds": 120},
-    {"id": "review-verdict-tests", "kind": "test", "argv": ["{python}", "plugins/fluxpoint/tests/proof-verdict-test.py"], "scope": "Existing review contracts preserve blocking outcomes and additional evidence", "assumptions": ["Schema compatibility does not prove reviewers followed the method; independent skill forward tests evaluate that separately"], "timeoutSeconds": 120}
+    {
+      "id": "specification-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/specification-test.py"
+      ],
+      "scope": "Execute packet CLI, graph compiler output, run recording and scaffolded harness regressions",
+      "assumptions": [
+        "The test runner and operating system are trusted",
+        "These tests establish enforcement behavior, not mathematical correctness of arbitrary consumer code"
+      ],
+      "timeoutSeconds": 120
+    },
+    {
+      "id": "cost-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/cost-test.py"
+      ],
+      "scope": "Packet input accounting across agent topologies and compilation budget boundaries",
+      "assumptions": [
+        "Token costs are conservative estimates with stated model multipliers, not measured usage"
+      ],
+      "timeoutSeconds": 120
+    },
+    {
+      "id": "review-verdict-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/proof-verdict-test.py"
+      ],
+      "scope": "Existing review contracts preserve blocking outcomes and additional evidence",
+      "assumptions": [
+        "Schema compatibility does not prove reviewers followed the method; independent skill forward tests evaluate that separately"
+      ],
+      "timeoutSeconds": 120
+    },
+    {
+      "id": "graph-compiler-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/compile-test.py"
+      ],
+      "scope": "Compiler contracts and emitted runtime orchestration",
+      "assumptions": [
+        "Fixture execution validates enforcement; it does not establish arbitrary agent or external runtime correctness"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "replay-provenance-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/replay-memo-test.py"
+      ],
+      "scope": "Source journal/transcript corroboration and tampered replay rejection",
+      "assumptions": [
+        "Fixture execution validates enforcement; it does not establish arbitrary agent or external runtime correctness"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "attestation-tests",
+      "kind": "test",
+      "argv": [
+        "bash",
+        "plugins/fluxpoint/tests/attest-test.sh"
+      ],
+      "scope": "Executed attestation and provenance enforcement",
+      "assumptions": [
+        "Fixture execution validates enforcement; it does not establish arbitrary agent or external runtime correctness"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "repair-acceptance-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/unchecked-repairs-test.py"
+      ],
+      "scope": "Checked repair commit refusal without coherent pinned evidence",
+      "assumptions": [
+        "Fixture execution validates enforcement; it does not establish arbitrary agent or external runtime correctness"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "graph-lane-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/graph-replay-test.py"
+      ],
+      "scope": "Execute concurrent joins, shared halt, fresh branch sentinels, replay keys and rejudgment",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "resume-input-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/resume-test.py"
+      ],
+      "scope": "Exercise source archives, exact embedded input carry and evidence pin refusal",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "gate-fault-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/fault-attempts-test.py"
+      ],
+      "scope": "Exercise crash floors, one native/reference pair, retained completion facts and red history",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "forge-witness-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/forge-evidence-test.py"
+      ],
+      "scope": "Exercise independent forge identities, source re-reads and pipeline coverage closure",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "packet-closure-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/packet-inputs-test.py"
+      ],
+      "scope": "Exercise tracked support closure, live drift, planned locked edits and reachability",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "repair-diff-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/repair-proof-test.py"
+      ],
+      "scope": "Exercise measured patches, witnessed sibling/coverage commands, attack/refutation seats and checked commit identity",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "forge-fault-race-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/forge-fault-race-test.py"
+      ],
+      "scope": "Completed local red dominates CI; only authenticated interruption yields to a freshly verified forge green; retained completion records prevent mutable log history laundering",
+      "assumptions": [
+        "GitHub transport uses fixture JSON; real git and supervised local commands execute"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "graph-audit-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/audit-workflow-test.py"
+      ],
+      "scope": "Execute the graph-audit workflow's probe receipts, declarations, templates, data placeholders, bindings and verdict text under stubbed agents",
+      "assumptions": [
+        "Stubbed agents return the receipts under test; the runtime isolation hook itself is not exercised"
+      ],
+      "timeoutSeconds": 300
+    },
+    {
+      "id": "emission-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/emission-test.py"
+      ],
+      "scope": "Every accepted IR field, including probe, changes validation, plan or emission",
+      "assumptions": [
+        "Fixture execution validates enforcement; it does not establish arbitrary agent or external runtime correctness"
+      ],
+      "timeoutSeconds": 180
+    }
   ],
   "challenges": [
-    {"claim": "A complete-looking spec can still express the wrong requirement", "resolution": "The grill pass records counterexamples and challenges; independent verification and real runtime checks remain required"},
-    {"claim": "An agent can rewrite both the packet and its lock", "resolution": "The lock is a drift boundary and a reviewable artifact; CI and review remain the external trust boundary"},
-    {"claim": "A missing response could be mistaken for authorization", "resolution": "Defaulted decisions remain model recommendations; genuine authority boundaries remain blocked"},
-    {"claim": "Installing a plugin might be mistaken for upgrading every consuming harness", "resolution": "New initialization requires integration; existing copied harnesses need an explicit update"}
+    {
+      "claim": "A complete-looking spec can still express the wrong requirement",
+      "resolution": "The grill pass records counterexamples and challenges; independent verification and real runtime checks remain required"
+    },
+    {
+      "claim": "An agent can rewrite both the packet and its lock",
+      "resolution": "The lock is a drift boundary and a reviewable artifact; CI and review remain the external trust boundary"
+    },
+    {
+      "claim": "A missing response could be mistaken for authorization",
+      "resolution": "Defaulted decisions remain model recommendations; genuine authority boundaries remain blocked"
+    },
+    {
+      "claim": "Installing a plugin might be mistaken for upgrading every consuming harness",
+      "resolution": "New initialization requires integration; existing copied harnesses need an explicit update"
+    },
+    {
+      "claim": "A reviewed shape form could still start work in a program that ignores --help",
+      "resolution": "The grammar refuses the known classes mechanically: -h, interpreter options that carry code, launchers that forward their trailing words, writers and network tools declared read-only, separators, child programs and writer operands before --help. Beyond those a declaration is the author's reviewed assertion, the probe runs it before any lens reads the IR, so the docs require reviewing the IR diff before the audit, and shape-only receipts are named in every verdict"
+    }
   ]
 }

@@ -29,7 +29,10 @@ sweep-before-build doctrine has something deterministic to sweep.
   statements only, and a stale manifest is reported, never commanded. A
   second `SessionStart` hook runs `memory-lint.mjs` over the workspace's
   memory files, and a `PostToolUse` hook on file writes runs the
-  prose-smell gate (both below).
+  prose-smell gate (both below). A `PreToolUse` hook on `Bash|PowerShell`
+  runs the opt-in mail-sender check described below.
+- `scripts/send-chokepoint.mjs` — detects recognized mail-send paths outside
+  the repository's declared sender. Dormant without `.send-chokepoint.json`.
 - `commands/` — `/substrate:init` (onboard a workspace), `/substrate:status`
   (run and interpret `--check`), `/substrate:emit` (regenerate, and keep the
   manifest edit in the same commit as the primitive it describes),
@@ -54,9 +57,10 @@ Codex:
 
 ```
 codex plugin marketplace add Flux-Point-Studios/fluxpoint-plugins
+codex plugin add substrate@fluxpoint
 ```
 
-then enable `substrate@fluxpoint`. Onboard with `/substrate:init <repo>`
+Onboard with `/substrate:init <repo>`
 (Claude Code) or `$substrate-init <repo>` (Codex) in the workspace that
 contains your repos.
 
@@ -79,8 +83,26 @@ the root:
 | `primitives[].status` | string | e.g. `live`, `core-only`. |
 | `primitives[].terminal` | boolean, optional | A delivered surface a human uses directly. Terminal primitives are listed in their own section and excluded from the orphan list, because zero in-edges is their correct end state rather than dormant value. |
 
-A repo without a manifest is silently ignored: by doctrine, that absence
-marks demos and pitch artifacts as outside the substrate.
+A repo without a manifest is silently ignored by the graph: by doctrine,
+that absence marks demos and pitch artifacts as outside the substrate.
+A `deliverables.json` in that directory is still checked.
+
+Discovery groups Git worktrees by their real common Git directory and uses
+one checkout: the main worktree when present, otherwise the first directory
+by name. Separate clones are also grouped when they share a normalized
+`remote.origin.url`, or a local clone's origin points at another discovered
+checkout. For a local clone, the source checkout takes precedence. All passes
+use that checkout's files, including the manifest, imports, staleness, and
+ledger; a note names the ignored directories in `--check`, `--json`, and
+`SUBSTRATE.md`. No fetch or other network access is needed.
+
+Directories with the same manifest `repo` label but no shared Git identity
+produce one problem naming their `substrate.json` files. Exclude unwanted
+copies with `excludeRepos`. The graph keeps the first directory's version of
+any colliding id and still validates the other manifests' consumes targets;
+the emit gate stays red until the directory conflict is resolved. Duplicate
+ids across different repo labels, or inside one manifest, remain problems
+naming the exact files.
 
 ## Config reference
 
@@ -89,7 +111,8 @@ Optional `substrate.config.json` at the workspace root:
 | Key | Default | Meaning |
 |---|---|---|
 | `graceHours` | `6` | A manifest edit within this many hours of the code change counts as the same shipment and never alarms. |
-| `excludeDirs` | `[]` | Extra directory names pruned from non-git staleness walks, on top of the built-ins: `node_modules`, `.git`, `dist`, `build`, `out`, `coverage`, `__pycache__`. |
+| `excludeDirs` | `[]` | Extra exact directory names excluded from top-level manifest and ledger discovery and pruned at every depth of import and non-git staleness walks, on top of the built-ins: `node_modules`, `.git`, `dist`, `build`, `out`, `coverage`, `__pycache__`. |
+| `excludeRepos` | `[]` | Top-level directory names or patterns (`*` and `?`) excluded from manifest and ledger discovery only, e.g. `["alpha-copy", "wt-*"]`. Matching names inside a retained repo are still scanned. |
 | `nonGitRepos` | `{}` | Map of non-git repo dirname → relative code paths its staleness check may walk. Undeclared non-git repos are skipped from staleness with a one-line note, never walked blind. |
 
 ## Staleness semantics
@@ -214,12 +237,18 @@ Memory files rot the same way manifests do: a memory cites a module that was
 since renamed, the index points at a deleted entry, a "still unsent" claim
 outlives the send it describes. `memory-lint.mjs` runs at session start over
 `~/.claude/projects/<key>/memory/` and alarms on the three staleness classes
-it can prove: a cited path whose anchor directory exists but whose file is
-gone, a `MEMORY.md` index entry pointing at a missing memory file, and an
-"unsent" claim contradicted by a `deliverables.json` `sentAt`. Detection is
+it can prove: a missing cited path within a repository at the root or along
+the cited path (marked by `.git`, including a worktree gitfile, or
+`substrate.json`), a `MEMORY.md` index entry pointing at a missing memory file,
+and an "unsent" claim contradicted by a `deliverables.json` `sentAt`. Detection is
 mechanical and precision-first — URLs, API-endpoint fragments, command lines
 with flags, and citations without a workspace anchor stay silent, because a
-false alarm teaches the reader to ignore the channel. The lint never rewrites
+false alarm teaches the reader to ignore the channel. A plain directory such
+as a home directory's `bin/` does not anchor a citation. For spans such as
+`tools/run.py check` and `tools/run.py:12 SYMBOL`, only the leading path is
+checked; later slash-bearing words do not create citations. Repeated references
+to the same normalized path in one memory count as one finding, including
+references with different line numbers or slash styles. The lint never rewrites
 a memory: the agent reading the alarm owns the repair, with the truth in
 front of it. Echoed content is control-character-stripped and capped, and the
 exit code is 0 unconditionally — a lint that can wedge a session start is
@@ -263,6 +292,35 @@ default, which fails. A malformed config, an unknown key, or an unknown
 mode is reported on stderr and ignored — the default applies — because a
 config that could silently switch the gate off would be the inverse of
 what a config is for.
+
+## Mail-sender gate
+
+Opt in with `.send-chokepoint.json` in the project or a parent directory:
+
+```json
+{
+  "sender": "tools/outbound_mail.py",
+  "exempt": ["services/mailer"],
+  "providers": ["graph.microsoft.com"]
+}
+```
+
+The `Bash|PowerShell` pre-tool hook checks inline commands, readable referenced
+scripts and their supported local imports for both a watched provider host and
+a recognized send verb. A detected send outside the declared paths exits 2
+before execution. `sender` is an exact path; each `exempt` entry also permits
+its descendants. Paths resolve against the configuration's directory, so a
+same-named file elsewhere does not inherit permission. Leading `cd` commands
+and Windows paths are covered by regression fixtures.
+
+Omit `providers` to use the built-in Microsoft Graph, Gmail, SendGrid, Mailgun,
+Postmark and Resend hosts. This is a static routing check: it does not send
+mail, grant authorization, verify recipients or prove that the approved
+sender enforces its own checks. Dynamic URLs and unsupported imports can
+escape detection. Missing configuration, malformed payloads and unreadable
+files allow execution; configuration problems are reported when observed.
+Do not treat it as an egress sandbox. Its tests use local fixture files and
+never contact mail providers.
 
 ## Honest limitations
 

@@ -107,6 +107,7 @@ PATTERNS = [
     ("lean.sorry",          (".lean",), r"\bsorry\b"),
     ("lean.axiom",          (".lean",), r"^\s*axiom\b"),
     ("lean.native_decide",  (".lean",), r"\bnative_decide\b"),
+    ("lean.blaster",        (".lean",), r"(?<!#)\bblaster\b|\bblasterProven\b"),
     # --- Coq / Rocq ----------------------------------------------------
     ("coq.admitted",        (".v",),    r"\b(Admitted|admit)\b"),
     ("coq.axiom",           (".v",),    r"^\s*(Axiom|Parameter|Hypothesis)\b"),
@@ -382,7 +383,12 @@ def main():
     g.add_argument("--scan", action="store_true")
     g.add_argument("--baseline", action="store_true")
     g.add_argument("--check", action="store_true")
+    g.add_argument("--tighten", action="store_true")
     args = ap.parse_args()
+    if args.tighten:
+        from ratchet import cli
+        return cli("proof", args.root)
+
     root = args.root
     bpath = os.path.join(root, BASELINE)
 
@@ -500,7 +506,7 @@ def main():
     if fell:
         print("proof-guard: green — and stronger than the baseline:")
         for cat, was, now in fell:
-            print(f"  {cat}: {was} -> {now} (re-record with --baseline to lock it in)")
+            print(f"  {cat}: {was} -> {now} (run --tighten on a clean green tree to lock it in)")
     else:
         print(f"proof-guard: green ({sum(counts.values())} hatch(es), none risen)")
     return 0

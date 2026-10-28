@@ -352,9 +352,14 @@ def main():
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--scan", action="store_true")
     mode.add_argument("--check", action="store_true")
+    mode.add_argument("--tighten", action="store_true")
     mode.add_argument("--verify", action="store_true")
     mode.add_argument("--baseline", action="store_true")
     args = ap.parse_args()
+    if args.tighten:
+        from ratchet import cli
+        return cli("guard", args.root)
+
 
     root = os.path.abspath(args.root)
     guards = load_manifest(root)

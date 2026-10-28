@@ -6,9 +6,10 @@ argument-hint: [one-line goal]
 Onboard this repository onto the fluxpoint harness. Work through every
 step; do not stop at copying files.
 
-1. Locate the plugin templates. Try `${CLAUDE_PLUGIN_ROOT}/templates`
-   first; if that expands empty in your shell, find them with
-   `find ~/.claude/plugins ~/.codex/plugins/cache -type d -path '*fluxpoint/templates' 2>/dev/null | head -1`.
+1. Locate the loaded plugin: `CLAUDE_PLUGIN_ROOT`, then `PLUGIN_ROOT`, or
+   the parent of this command's `commands/` directory. Call it `$ROOT` and
+   use `$ROOT/templates` and that installation's scripts throughout.
+   Do not choose the first recursive cache match; multiple versions can coexist.
 2. Copy, without overwriting anything that already exists:
    - `templates/harness.sh` → `scripts/harness.sh` (then `chmod +x`)
    - `templates/loop.sh` → `scripts/loop.sh` (then `chmod +x`)
@@ -124,6 +125,13 @@ step; do not stop at copying files.
    ```
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" seam-guard.py --baseline
    ```
+   This counts Python patches and HTTP/process doubles as well as JS/TS module
+   mocks. For provider fixtures, declare captures with provenance in
+   `.fluxpoint-recordings.json`, then run `seam-guard.py --check`; the manifest
+   enforces recursive shape conformance even before a count baseline is armed.
+   Follow [the recording format](../references/recordings.md), name the checked
+   recording in each provider test, and compare derived IDs/hashes against
+   recorded values independently of the code being tested.
    If the repo tracks proof-language files (`.ak`, `.dfy`, `.lean`, `.v`,
    `.thy`, `.tla`, or verified Rust) **or TypeScript**, arm the hatch
    ratchet; add the statement ratchet where a prover is involved:
@@ -178,18 +186,53 @@ step; do not stop at copying files.
    for, which is the surface an autonomous caller actually reaches:
    unvalidated change address, datum round-trip loss, stale protocol
    parameters, a replayable signed transaction, unbounded UTxO selection,
-   a missing script data hash, unbounded collateral. A class is specified
+   a missing script data hash, unbounded collateral, a fee below the ledger
+   minimum, a script purpose without a witness, missing collateral, and a
+   batch sharing spent inputs. Include a phase-1 ledger check: phase-2 script
+   evaluation alone cannot establish that a transaction can be submitted.
+   Validate the minimum fee against landed transaction data, including final
+   size, witnesses and tiered reference-script charges. A class is specified
    by a test whose title carries the class id, and the scan notes when
    that test uses no fast-check, because an example is weaker than a
    property over a generator.
+   The **python** taxonomy names hosted-service classes: outsider-row decode,
+   a whole read refusing over stranger rows, unbounded literals/nesting,
+   provider-read amplification, event-loop blocking, and shared-pool exhaustion.
+   A tracked `test_*.py`, `*_test.py`, or `.py` under `test/`, `tests/` or
+   `__tests__/` specifies a class with a real pytest `def test_<class-id>...`
+   or `async def test_<class-id>...` function (including methods on `Test*`
+   classes). Comments, strings and non-test helper names do not count. Files
+   importing Hypothesis are noted as properties; other matching tests are
+   examples. Review the actual generators, assertions and documented bounds.
    `spec-guard.py --check` is red for each unspecified class until the
    test exists or the taxonomy's own `waived` object gives it a reason of
    at least twenty characters. A waiver is scoped to its taxonomy, so an
    Aiken waiver never excuses a builder class. Write those tests now,
-   against this repo's real validators and its real builder, and then arm
+   against this repo's real validators, builder and hosted services, and then arm
    the ratchets so their signatures are hashed. A class that genuinely
    cannot apply is waived in the committed file, where review sees it; it
    is never left unspecified.
+   Keep all three taxonomies unless the repo has a reason to drop one. When the
+   repo tracks a language whose taxonomy is missing from the manifest,
+   `spec-guard.py` prints a `NO TAXONOMY` line naming the language, how
+   many classes the template holds for it and the first few ids. That line
+   is a note by default. Two optional top-level fields in
+   `.fluxpoint-attacks.json` change it:
+   ```json
+   {"version": 1, "requireAllLanguages": true, "languages": ["typescript"],
+    "taxonomies": [ … ]}
+   ```
+   `"requireAllLanguages": true` turns each `NO TAXONOMY` line into a
+   failure; set it once the manifest carries every half the repo needs.
+   `"languages"` lists the halves the repo gates on purpose. A tracked
+   language left off the list prints one `excluded by declaration` line
+   and never fails, even under `requireAllLanguages`. A language on the
+   list with no taxonomy is still reported as `NO TAXONOMY`, and a
+   taxonomy in the manifest keeps gating whether the list names it or not.
+   Both fields are validated: a `requireAllLanguages` that is not `true`
+   or `false`, a `languages` value that is not a non-empty list, or a name
+   in it that is neither a language spec-guard knows nor the language of
+   a taxonomy in the manifest makes the manifest unreadable, which is red.
    When a Definition-of-Done line rests on a proof, say which one:
    `- [x] withdraw never overdraws — proof: dafny:src/vault.dfy:Withdraw`.
    `spec-guard.py --check` refuses a checked box whose obligation does not
@@ -294,7 +337,39 @@ step; do not stop at copying files.
    with a pipe, a redirect, or a trailing `|| true` reports a different exit
    and is deliberately not attested, so it shows up as UNATTESTED rather
    than being credited to the gate. Commit the manifest; it is part of the
-   trust base.
+   trust base. A gate that outlives one tool call (600 s) runs through
+   `attest.py --run <gate>` in the background and is collected with
+   `attest.py --await <token>`, which attests the exit itself (from a worktree,
+   `--root <this project>` keeps it in this project's log; graph nodes are
+   handed it). A gate declared with a leading `cd <dir> &&` is matched only
+   when run in that directory. A leading `cd` is witnessed only when it
+   names a plain path inside this repository (its checkout or a linked
+   worktree) at the gate's declared place — not `cd "$VAR"`, `cd $(...)`,
+   a `~` form other than `~` and `~/...`, or a relative `cd` under
+   `CDPATH`, which the hook does not model; a gate with no `cd` runs at the
+   project root, not a subdirectory, and only a `bash ` prefix is dropped —
+   and a gate is one line of spaces and tabs. A command with quotes or
+   expansions must match the declared text exactly. The witness catches
+   transcribed, stale and borrowed exits; it is not a defence against an
+   agent that forges rows (the log is a file it can write) — a merge that
+   must hold against that rests on `prove:ci`. A gate may not be
+   named `ci`: that name is the forge's. If merges
+   rest on CI, add a `ci` section so `prove:ci` can cite the forge's own
+   commit statuses (`attest.py --ci --pr <n>`, GitHub via `gh`; the forge
+   names the commit):
+   ```json
+   {"version": 1, "gates": {"harness": "scripts/harness.sh --full"},
+    "ci": {"forge": "github", "repository": "your-org/your-repo", "contexts": ["harness"],
+           "witness": {"statusCreators": ["dedicated-ci-bot"], "checkRunApps": []}}}
+   ```
+   Pin the actual independent status creator or GitHub App IDs. Run
+   `attest.py --check-ci`: a creator matching the harness's own `gh api user`
+   login is refused with exit 2. Same-account CI needs a dedicated bot whose
+   token is absent from the agent host before any forge green can count.
+   Every forge citation re-reads the PR/ref and source verdict at record time.
+   See `references/forge-evidence.md` for safe per-step CI reuse.
+   Without `contexts`, every context the forge reports must pass and at
+   least one must exist.
 11. Fill in the Merge policy block, asking the user once: may green + SHIP
    PRs merge autonomously in this repo, and does merging trigger a deploy?
    If auto-merge is on, verify `gh` is authenticated and record the
