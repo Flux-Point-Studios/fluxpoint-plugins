@@ -43,7 +43,7 @@ class Isolation(unittest.TestCase):
         self.assertEqual(sources.notes(self.root)[0], {})
 
     def test_markdown_code_examples_cannot_reset_project_scope(self):
-        (self.mem / 'raw_memories.md').write_text(f'# Project: private-other\ncwd: {self.base}/other\n\nAn example document:\n```markdown\n# Project: report-service\nPRIVATE_CODE_EXAMPLE\n```\n')
+        (self.mem / 'raw_memories.md').write_text(f'# Project: private-other\ncwd: {self.base}/other\n\nAn example document:\n```markdown\n# Project: {self.root}\nPRIVATE_CODE_EXAMPLE\n```\n')
         self.assertEqual(sources.notes(self.root)[0], {})
 
     def test_local_cwd_link_cannot_escape_the_project_view(self):
@@ -64,7 +64,7 @@ class Isolation(unittest.TestCase):
         subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'base'], check=True)
         worktree = self.base / 'task-17'
         subprocess.run(['git', '-C', str(self.root), 'worktree', 'add', '-q', '--detach', str(worktree)], check=True)
-        (self.mem / 'MEMORY.md').write_text('# Project: report-service\n\nCanonical ordering knowledge\n')
+        (self.mem / 'MEMORY.md').write_text(f'# Project: {self.root}\n\nCanonical ordering knowledge\n')
         (self.mem / 'rollout_summaries/canonical.md').write_text(f'thread_id: canonical\ncwd: {self.root}/src\n\n# Ordering\nShared report evidence\n')
         canonical, _ = sources.notes(self.root); sibling, _ = sources.notes(worktree)
         self.assertEqual({n['text'] for n in sibling.values()}, {n['text'] for n in canonical.values()})
@@ -73,6 +73,33 @@ class Isolation(unittest.TestCase):
         unrelated = self.base / 'other'; unrelated.mkdir()
         self.assertNotEqual(recall.shared_index_dir(self.root), recall.shared_index_dir(unrelated))
         self.assertFalse(sources.notes(unrelated)[0])
+
+    def test_same_basename_needs_explicit_project_scope_mapping(self):
+        one = self.base / 'a/frontend'; two = self.base / 'b/frontend'
+        for root in (one, two):
+            root.mkdir(parents=True)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            subprocess.run(['git', '-C', str(root), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'base'], check=True)
+        (self.mem / 'MEMORY.md').write_text(f'# Project: frontend\n\nBASENAME_PRIVATE\n# Project: {one}\n\nOnly project A\n# Project: {two}\n\nOnly project B\n')
+        for root in (one, two):
+            nodes, _ = sources.notes(root)
+            self.assertFalse(any('BASENAME_PRIVATE' in n['text'] for n in nodes.values()))
+        self.assertFalse(any('Only project B' in n['text'] for n in sources.notes(one)[0].values()))
+        self.assertFalse(any('Only project A' in n['text'] for n in sources.notes(two)[0].values()))
+        self.cfg.write_text(json.dumps({'corpora': [{'path': str(self.mem), 'origin': 'codex',
+              'format': 'codex-memories', 'projectScopes': {'frontend': str(one)}}]}))
+        worktree = self.base / 'task-frontend'
+        subprocess.run(['git', '-C', str(one), 'worktree', 'add', '-q', '--detach', str(worktree)], check=True)
+        for root in (one, worktree):
+            self.assertTrue(any('BASENAME_PRIVATE' in n['text'] for n in sources.notes(root)[0].values()))
+        self.assertFalse(any('BASENAME_PRIVATE' in n['text'] for n in sources.notes(two)[0].values()))
+        self.assertEqual(recall.shared_index_dir(one), recall.shared_index_dir(worktree))
+        self.assertNotEqual(recall.shared_index_dir(one), recall.shared_index_dir(two))
+
+    def test_project_label_mapping_rejects_relative_and_ambiguous_targets(self):
+        for mapping in ({'frontend': 'relative/path'}, {'frontend': str(self.root), ' frontend ': str(self.base / 'other')}):
+            self.cfg.write_text(json.dumps({'corpora': [{'path': str(self.mem), 'format': 'codex-memories', 'projectScopes': mapping}]}))
+            with self.assertRaises(SystemExit): sources.notes(self.root)
 
     def test_reader_helper_changes_get_an_independent_schema_slot(self):
         alternate = self.base / 'alternate-scripts'; shutil.copytree(SCRIPTS, alternate)

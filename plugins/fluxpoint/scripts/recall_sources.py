@@ -59,10 +59,25 @@ def corpus_roots(root):
         aliases = row.get('pathAliases', {})
         if not isinstance(aliases, dict) or any(not isinstance(a, str) or not isinstance(b, str) for a, b in aliases.items()):
             raise SystemExit('recall: pathAliases must map source paths to local project paths')
+        scopes = row.get('projectScopes', {})
+        if not isinstance(scopes, dict) or any(not isinstance(label, str) or not label.strip()
+                or not isinstance(target, str) for label, target in scopes.items()):
+            raise SystemExit('recall: projectScopes must map nonempty labels to absolute local project paths')
+        normalized_scopes = {}
+        for label, target in scopes.items():
+            path = Path(os.path.expandvars(target)).expanduser()
+            if not path.is_absolute():
+                raise SystemExit('recall: projectScopes targets must be absolute local project paths')
+            if label.strip() in normalized_scopes:
+                raise SystemExit('recall: projectScopes labels must be unique after trimming whitespace')
+            try:
+                normalized_scopes[label.strip()] = str(path.resolve())
+            except (OSError, RuntimeError) as exc:
+                raise SystemExit('recall: projectScopes target cannot be resolved: ' + str(exc)) from exc
         if not isinstance(row.get('allowUnscoped', False), bool):
             raise SystemExit('recall: allowUnscoped must be true or false')
         roots.append({'path': str(folder.resolve()), 'origin': origin, 'format': fmt, 'weight': weight,
-                      'pathAliases': aliases, 'allowUnscoped': row.get('allowUnscoped', False)})
+                      'pathAliases': aliases, 'projectScopes': normalized_scopes, 'allowUnscoped': row.get('allowUnscoped', False)})
     codex = Path(os.environ.get('CODEX_HOME', Path.home() / '.codex')).expanduser() / 'memories'
     if codex.is_dir():
         roots.append({'path': str(codex.resolve()), 'origin': 'local-codex-' + hashlib.sha256(str(codex).encode()).hexdigest()[:10],
@@ -184,7 +199,7 @@ def _project_view(root):
         return view
 
 
-def _codex_scope(cwd, root, corpus):
+def _codex_target(cwd, corpus):
     source = _portable_path(cwd)
     for old, local in sorted(corpus.get('pathAliases', {}).items(), key=lambda row: -len(row[0])):
         old = _portable_path(old)
@@ -194,9 +209,34 @@ def _codex_scope(cwd, root, corpus):
     try:
         if Path(source).is_absolute(): source = _portable_path(Path(source).resolve())
     except (OSError, RuntimeError):
-        return False
+        return None
+    return source
+
+
+def _codex_scope(cwd, root, corpus):
+    source = _codex_target(cwd, corpus)
+    if source is None: return False
     view = corpus.get('_projectView') or project_view(root)
     return any(source == base or source.startswith(base + '/') for base in view['roots'])
+
+
+def _heading_scope(name, corpus, view):
+    """A bare display name has no ownership until explicitly mapped."""
+    labels = re.findall(r'\b(?:project|repo|repository):\s*(.*?)(?=\s+/\s+|$)', name, re.I)
+    if not labels: return None
+    decisions = []
+    for label in labels:
+        label = label.strip()
+        mapped = corpus.get('projectScopes', {}).get(label)
+        if mapped is not None:
+            decisions.append(_portable_path(mapped) in view['roots'])
+        elif label.startswith(('/', '\\')) or re.match(r'^[A-Za-z]:[/\\]', label):
+            decisions.append(_codex_target(label, corpus) in view['roots'])
+        else:
+            decisions.append(None)
+    # A contradictory explicit path/mapping cannot be overridden by a cwd.
+    if False in decisions: return False
+    return True if all(decision is True for decision in decisions) else None
 
 
 def _codex_passages(raw):
@@ -280,15 +320,13 @@ def _codex_nodes(root, corpus, p, raw, when):
         passages = _codex_sections(raw)
     out = {}
     view = corpus.get('_projectView') or project_view(root)
-    labels = view['names'] + view['roots']
-    project = re.compile(r'\b(?:project|repo|repository):\s*(?:' + '|'.join(re.escape(label) for label in labels) + r')(?=\s|/|$)', re.I)
-    project_header = re.compile(r'\b(?:project|repo|repository):\s*', re.I)
     for num, (name, passage, meta) in enumerate(passages, 1):
         if not rollout and not corpus.get('allowUnscoped'):
-            if project_header.search(name) and not project.search(name): continue
+            heading = _heading_scope(name, corpus, view)
+            if heading is False: continue
             if meta.get('cwd'):
                 if not _codex_scope(meta['cwd'], root, corpus): continue
-            elif not project.search(name):
+            elif heading is not True:
                 continue
         for part, start in enumerate(range(0, len(passage), 1200), 1):
             nid = f'note:{filekey}#{num}.{part}'

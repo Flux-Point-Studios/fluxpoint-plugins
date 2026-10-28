@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "sha256": "66460737d3d25eb934e29ca2ce88bae4f6788cdb9ad2952568743da3ef1a0fa4",
+  "sha256": "51232228fedc9dbe3150b6a4077a7dcb958bf5f51abe3ca4d80e45c2adc7dc12",
   "proofBaselineSha256": null,
   "harness": {
-    "plugins/fluxpoint/tests/recall-isolation-test.py": "44269d378c4c6b64d5eab1cde5ee9b2f64e9b3fd39f3d9ba16be3a9dadd637a6"
+    "plugins/fluxpoint/tests/recall-isolation-test.py": "211ce7f0de0e6c94bf438d443112352331425be12225e296f31129d8ad1736d1"
   },
   "lockFormat": 2
 }

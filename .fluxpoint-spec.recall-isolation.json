@@ -6,7 +6,8 @@
     "Per-section Codex metadata and immutable rollout header scope",
     "Clone-wide worktree project view without unrelated repository mixing",
     "Reader implementation changes isolate schema slots",
-    "Warm process keys include default configuration and cache environment"
+    "Warm process keys include default configuration and cache environment",
+    "Exact cwd/full-path scope by default and explicit projectScopes for basename labels"
   ],
   "outOfScope": [
     "Cross-host automatic synchronization",
@@ -64,7 +65,7 @@
   "requirements": [
     {
       "id": "isolated-recall-views",
-      "statement": "Unrelated aggregate or rollout sections never enter a project view; sibling worktrees share canonical project knowledge; reader policy revisions and default config roots cannot reuse a stale incompatible cache or daemon",
+      "statement": "Unrelated aggregate or rollout sections never enter a project view; basename labels need an explicit mapping to one canonical project; sibling worktrees share canonical project knowledge; reader policy revisions and config roots cannot reuse an incompatible cache or daemon",
       "decisions": [
         "recall-view-isolation"
       ],
@@ -93,6 +94,10 @@
     {
       "claim": "Can shared caches use one key for every checkout of the same clone?",
       "resolution": "Only when corpus configuration and canonical project scope agree; unrelated repositories retain distinct scope identities and source readers apply the full project view."
+    },
+    {
+      "claim": "Does a Project:frontend heading uniquely identify a repository?",
+      "resolution": "No. Exact cwd/full-path scope is required by default. A configured projectScopes label maps to one absolute local project root and its sibling worktrees; unrelated repositories with the same basename are excluded."
     }
   ]
 }

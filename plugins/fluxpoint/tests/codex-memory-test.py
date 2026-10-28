@@ -31,7 +31,7 @@ class CodexMemory(unittest.TestCase):
         (self.mem / file).write_text(text)
 
     def test_headings_and_rollouts_have_scope_and_provenance(self):
-        self.put('MEMORY.md', '# Project: report-service\n## Ordering\n### Export first\nReports wait for export.\n# Project: another\n## Secret\nOther project note.\n')
+        self.put('MEMORY.md', f'# Project: {self.root}\n## Ordering\n### Export first\nReports wait for export.\n# Project: another\n## Secret\nOther project note.\n')
         self.put('rollout_summaries/one.md', f'thread_id: aaa\nupdated_at: 2026-03-02T10:00:00Z\ncwd: {self.root}\nrollout_path: ignored.jsonl\n\n# Fixed ordering\nWait for the export.\n')
         self.put('rollout_summaries/other.md', 'thread_id: bbb\ncwd: /other/project\n\n# Other thread\nPrivate unrelated note.\n')
         nodes, diagnostics = sources.notes(self.root)

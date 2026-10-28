@@ -150,9 +150,28 @@ project is eligible. A configured corpus can map peer paths with
 `"pathAliases": {"/peer/work/report-service": "/local/report-service"}`.
 An explicit corpus entry overrides automatic discovery of that folder.
 
-Aggregate passages without `cwd` need an ancestor heading of the form
-`Project: <checkout-name>` (or `Repo:` / `Repository:`). Other passages are
-skipped to keep the user-wide Codex store from mixing unrelated projects.
+Aggregate passages without `cwd` need an ancestor heading with an exact
+absolute checkout path, for example `Project: /work/report-service` (or `Repo:` /
+`Repository:`). A bare name such as `Project: frontend` is excluded by default:
+unrelated repositories can share that basename. To use a display name, map it
+explicitly in the corpus configuration:
+
+```json
+{
+  "corpora": [{
+    "path": "/home/user/.codex/memories",
+    "origin": "local-codex",
+    "format": "codex-memories",
+    "projectScopes": {"frontend": "/work/customer-a/frontend"}
+  }]
+}
+```
+
+`projectScopes` values must be absolute local project root paths. The mapping
+admits that repository and its known sibling worktrees; an unrelated repository
+called `frontend` does not inherit it. Full-path headings and `cwd` can also use
+configured `pathAliases`. Unbound passages are skipped to keep the user-wide
+Codex store from mixing unrelated projects.
 Set `"allowUnscoped": true` on an explicit `codex-memories` corpus only when
 its global preferences and cross-project notes are intended for this index.
 This opt-in never disables the rollout `cwd` filter. Files stay read only;
