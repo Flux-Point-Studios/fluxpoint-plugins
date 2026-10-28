@@ -52,7 +52,7 @@ class Storage(unittest.TestCase):
 root=sys.argv[2];who=sys.argv[3]
 for i in range(10):
  rid=who+'-'+str(i)
- rows=[dict(tag='audit',dedupeKey='same',claim='concurrent finding '+who+' detail '*100,status='surviving',node='find')]
+ rows=[dict(tag='audit',dedupeKey='same-'+str(j),claim='concurrent finding '+who+' detail '*100,status='surviving',node='find') for j in range(30)]
  memory.append_from_summary(root,{'memory':rows},rid)
 """
         for who in ('a', 'b', 'c'):
@@ -63,9 +63,9 @@ for i in range(10):
         for proc in procs:
             self.assertEqual(proc.wait(timeout=40), 0)
         rows = memory.read(str(self.root))
-        self.assertEqual(len(rows), 30)
-        self.assertEqual(rows[-1]['arrivals'], 30)
-        self.assertEqual(sorted(r['arrivals'] for r in rows), list(range(1, 31)))
+        self.assertEqual(len(rows), 900)
+        for key in {r['dedupeKey'] for r in rows}:
+            self.assertEqual(sorted(r['arrivals'] for r in rows if r['dedupeKey'] == key), list(range(1, 31)))
 
     def test_worktree_lesson_and_run_survive_worktree_deletion(self):
         self.init()
@@ -102,6 +102,49 @@ for i in range(10):
         path.parent.mkdir(parents=True)
         path.write_text(''.join(json.dumps(r) + '\n' for r in rows))
         self.assertEqual(memory.current(str(self.root))[0]['provenance']['runId'], 'new')
+
+    def test_recurrence_includes_legacy_and_shared_rows(self):
+        self.init()
+        legacy = self.root / '.claude/fluxpoint/memory.jsonl'
+        legacy.parent.mkdir(parents=True)
+        older = dict(lesson(), status='surviving', provenance={'runId': 'old'}, establishedWhen='2026-01-01T00:00:00Z')
+        legacy.write_text(json.dumps(older) + '\n')
+        runs = self.record('new')
+        memory.append_from_summary(str(self.root), {'memory': [dict(lesson(), status='surviving')]}, 'new', str(runs))
+        module = importlib.util.spec_from_file_location('recurrence_guard', SCRIPTS / 'recurrence-guard.py')
+        guard = importlib.util.module_from_spec(module)
+        module.loader.exec_module(guard)
+        rows, bad, manifest = guard.load(str(self.root))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(bad, 0)
+        self.assertEqual(len(guard.promoted(rows)[0]['runs']), 2)
+
+    def test_metrics_includes_shared_run_and_lessons(self):
+        self.init()
+        run = {'runId': 'shared', 'when': '2026-01-01 00:00', 'outcome': 'COMPLETE', 'summary': {'campaign': 'audit', 'provenance': []}}
+        shared = Path(memory.runs_path(str(self.root)))
+        shared.mkdir(parents=True)
+        (shared / 'shared.json').write_text(json.dumps(run))
+        row = dict(lesson(), provenance={'runId': 'shared'}, establishedWhen='2026-01-01T00:00:00Z')
+        Path(memory.path_for(str(self.root))).write_text(json.dumps(row) + '\n')
+        proc = subprocess.run([sys.executable, str(SCRIPTS / 'metrics.py'), '--root', str(self.root), '--json'], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data['campaigns']['audit']['runs'], 1)
+        self.assertEqual(data['campaigns']['audit']['lessons']['filed'], 1)
+
+    def test_decision_lookup_reads_shared_and_legacy_runs_once(self):
+        self.init()
+        import decision
+        local = self.record('legacy')
+        record = {'chosen': 'retain the verified result'}
+        row = {'runId': 'legacy', 'when': '2026-01-01 00:00', 'summary': {'decisions': {'storage': record}}}
+        (local / 'legacy.json').write_text(json.dumps(row))
+        memory.retain_run(str(self.root), 'legacy', local / 'legacy.json')
+        shared = Path(memory.runs_path(str(self.root)))
+        (shared / 'sibling.json').write_text(json.dumps({'runId': 'sibling', 'when': '2026-03-02 00:00', 'summary': {'decisions': {'storage': record}}}))
+        found = decision.find(str(self.root), 'storage')
+        self.assertEqual([hit[1] for hit in found], ['legacy', 'sibling'])
 
     def test_corrupt_memory_does_not_drop_evidence(self):
         path = Path(memory.path_for(str(self.root)))
