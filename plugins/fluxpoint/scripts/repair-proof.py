@@ -185,7 +185,7 @@ def check_packet(snapshot, token, spec, timeout=600):
         marker.unlink()
         raise
     argv = [sys.executable, str(Path(__file__).with_name('specification.py')),
-            '--root', str(path), '--spec', str(packet), '--run']
+            '--root', str(path), '--spec', str(packet), '--run', '--strict-harness']
     start, drained, tree = time.monotonic(), False, None
     try:
         with tempfile.TemporaryFile() as output:
