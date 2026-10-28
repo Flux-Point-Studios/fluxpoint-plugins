@@ -241,6 +241,30 @@ class PacketInputsTests(unittest.TestCase):
         self.save()
         self.assertEqual(self.cli('--lock').returncode, 1)
 
+    def test_go_package_patterns_are_not_directories(self):
+        # Win32 strips a component's trailing dots, so on Windows '<root>/...' names the root.
+        self.write('go.mod', 'module example.com/signer\n')
+        self.write('pkg/sign_test.go', 'package pkg\n')
+        self.commit()
+        for argv in (['go', 'test', './...'], ['go', 'test', './pkg/...'], ['go', 'test', './pkg ']):
+            with self.subTest(argv=argv):
+                self.doc['checks'][0]['argv'] = argv
+                self.save()
+                self.assertEqual([p for p in self.lock()['harness'] if '...' in p], [])
+        self.doc['checks'][0]['argv'] = ['go', 'test', './pkg']
+        self.save()
+        self.assertIn('pkg/sign_test.go', self.lock()['harness'])
+        self.doc['checks'][0]['argv'] = ['node', 'adapter.js', '--path', './pkg/...']
+        self.save()
+        refused = self.cli('--lock')
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn('check input does not exist: ./pkg/...', refused.stderr)
+        self.doc['checks'][0]['argv'] = ['go', 'test', '../pkg']
+        self.save()
+        refused = self.cli('--lock')
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn('packet input must stay inside the repository', refused.stderr)
+
     def frontend(self, cwd=True):
         self.write('frontend/package.json', '{"name":"front"}')
         self.write('frontend/tests/landing/sign.test.ts', "import { value } from './helper'\n")
