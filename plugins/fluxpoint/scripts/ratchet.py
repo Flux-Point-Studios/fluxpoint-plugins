@@ -35,7 +35,7 @@ def green(root):
     return checked_head
 
 
-def tighten(kind, root, src=None):
+def tighten(kind, root, src=None, source_head=None):
     """Measure before writing; preserve all sibling baseline sections."""
     import importlib.util
     import json
@@ -55,7 +55,7 @@ def tighten(kind, root, src=None):
                 or not math.isfinite(prior['score']) or not 0 <= prior['score'] <= 1
                 or type(prior.get('survived')) is not int or prior['survived'] < 0):
             raise ValueError('--tighten requires an existing valid mutation score and survivor count')
-        rec = mod.measure(root, cfg, False, '', src, persist=False)
+        rec = mod.measure(root, cfg, False, '', src, persist=False, source_head=source_head)
         if (not isinstance(rec, dict) or rec['score'] < prior['score']
                 or rec['survived'] > prior['survived']):
             # --measure tolerates rounding noise; automatic tightening cannot
@@ -115,9 +115,9 @@ def tighten(kind, root, src=None):
     return 0
 
 
-def cli(kind, root, src=None):
+def cli(kind, root, src=None, source_head=None):
     try:
-        return tighten(kind, root, src)
+        return tighten(kind, root, src, source_head=source_head)
     except (ValueError, OSError, subprocess.SubprocessError) as e:
         import sys
         print(f'{kind}-guard: {e}', file=sys.stderr)

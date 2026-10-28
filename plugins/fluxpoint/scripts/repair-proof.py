@@ -15,13 +15,13 @@ import os
 from pathlib import Path
 import re
 import secrets
-import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
 
+from process_tree import remove_tree
 from repair_diff import manifest
 
 
@@ -75,7 +75,7 @@ def materialize(root, base, patch, digest, item, round_):
         (parent / 'witness.json').write_text(json.dumps(info), encoding='utf-8')
         return info
     except BaseException:
-        shutil.rmtree(parent)
+        remove_tree(parent)
         raise
 
 
@@ -97,9 +97,10 @@ def cleanup(snapshot, token):
         raise ValueError('snapshot has an undrained or unconfirmed command tree; preserve it')
     log = path.parent / 'observations.jsonl'
     observations = [json.loads(line) for line in log.read_text(encoding='utf-8').splitlines()] if log.exists() else []
-    shutil.rmtree(path.parent)
-    if path.parent.exists():
-        raise ValueError('snapshot cleanup could not be confirmed')
+    # The tree goes first: if part of it cannot, the witness keeps the snapshot
+    # owned, so a later cleanup with the same token can retry.
+    remove_tree(path)
+    remove_tree(path.parent)
     return dict(status='CLEANED', snapshot=snapshot, token=token, observations=observations)
 
 

@@ -36,6 +36,8 @@ class Ratchets(unittest.TestCase):
         self.git('commit', '-qm', 'fixture')
 
     def cli(self, script, *args, ok=True):
+        if script == 'mutation-guard' and '--from' in args:
+            args = (*args, '--from-head', self.git('rev-parse', 'HEAD').stdout.decode().strip())
         r = subprocess.run([sys.executable, str(SCRIPTS / (script + '.py')), '--root', str(self.root), *args],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode == 0, ok, r.stdout + r.stderr)
@@ -238,7 +240,7 @@ print(Path('value').read_text())
     def test_mutation_tightens_without_loosening_other_dimension(self):
         self.json('.fluxpoint-mutation.json', {'version': 1, 'tool': 'stryker'})
         def report(killed, survived):
-            self.json('report.json', {'files': {'a.js': {'mutants': [
+            self.json('report.json', {'schemaVersion': '1.0', 'files': {'a.js': {'mutants': [
                 *[{'status': 'Killed'} for _ in range(killed)],
                 *[{'status': 'Survived'} for _ in range(survived)]]}}})
         report(8, 2)
@@ -258,7 +260,7 @@ print(Path('value').read_text())
     def test_partial_mutation_measurement_cannot_tighten(self):
         self.json('.fluxpoint-mutation.json', {'version': 1, 'tool': 'stryker'})
         def report(statuses):
-            self.json('report.json', {'files': {'a.js': {'mutants': [{'status': s} for s in statuses]}}})
+            self.json('report.json', {'schemaVersion': '1.0', 'files': {'a.js': {'mutants': [{'status': s} for s in statuses]}}})
         report(['Killed'] * 8 + ['Survived'] * 2)
         self.commit()
         self.cli('mutation-guard', '--measure', '--from', str(self.root / 'report.json'))
@@ -272,7 +274,7 @@ print(Path('value').read_text())
 
     def test_mutation_tighten_never_lowers_a_floor_within_measurement_tolerance(self):
         self.json('.fluxpoint-mutation.json', {'version': 1, 'tool': 'stryker'})
-        self.json('report.json', {'files': {'a.js': {'mutants': [
+        self.json('report.json', {'schemaVersion': '1.0', 'files': {'a.js': {'mutants': [
             *[{'status': 'Killed'} for _ in range(9)], {'status': 'Survived'}]}}})
         self.commit()
         self.cli('mutation-guard', '--measure', '--from', str(self.root / 'report.json'))

@@ -46,7 +46,10 @@ GitHub workflows, provide the same pinned tools as its full harness, and set
 `main`, makes local commits between ratchets to preserve the clean-tree
 requirement, and opens one review PR. It never pushes directly to `main`.
 Mutation tightening re-runs the configured tool; to reuse a CI measurement,
-pass its report with `mutation-guard.py --tighten --from <report.json>`.
+pass its report with `mutation-guard.py --tighten --from <report.json>
+--from-head <producer-commit>`. The producer commit must be the current clean
+HEAD. The same binding is required by `--measure --from`; incomplete reports
+never update a baseline.
 Generated reports and build output must already be ignored by the repo; any
 unexpected dirty output causes tightening to refuse.
 
