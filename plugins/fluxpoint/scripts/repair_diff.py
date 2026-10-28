@@ -65,6 +65,9 @@ def manifest(data):
                 obligations.append('alarm-rate')
             if re.search(r'rate.?limit|token.?bucket|burst', content, re.I | re.ASCII):
                 obligations.append('provider-pool')
+            test_path = bool(re.search(r'(?:^|/)(?:tests?|__tests__)(?:/|$)|(?:^|/)(?:test_[^/]*|[^/]*[._](?:test|spec)\.[^/]+)$', path, re.I | re.ASCII))
+            if test_path:
+                obligations = []
             hunks.append(dict(id='h' + str(i), path=path, newStart=int(match[1]),
                               newLines=int(match[2]) if match[2] else 1,
                               added=added, surfaces=classified, obligations=obligations))
@@ -118,7 +121,7 @@ def sibling_issue(rows, targets, fixer_rows=()):
     return None
 
 
-def coverage_issue(coverage, measured, resources=(), live_series=False):
+def coverage_issue(coverage, measured, resources=(), live_series=False, bounds=None):
     if not isinstance(coverage, dict) or coverage.get('patchSha256') != measured['patchSha256']:
         return 'DIFF-UNPROVEN: coverage must name the harness-measured patch SHA-256'
     rows = coverage.get('hunks')
@@ -130,18 +133,29 @@ def coverage_issue(coverage, measured, resources=(), live_series=False):
     if any(r.get('surface') not in SURFACES or not observation(r.get('attack')) or not observation(r.get('control')) for r in rows):
         return 'DIFF-UNPROVEN: hunk surface, attack and control observations are required'
     obligations = {v for h in measured['hunks'] for v in h['obligations']}
+    bounds = bounds or {}
     operational = coverage.get('operational') or {}
     if not isinstance(operational, dict):
         return 'DIFF-UNPROVEN: operational measurements must be an object'
     if 'latency' in obligations:
         row = operational.get('latency')
+        if not finite(bounds.get('deadlineMs'), True) or not isinstance(row, dict) or row.get('deadlineMs') != bounds['deadlineMs']:
+            return 'DIFF-UNPROVEN: latency deadline must equal the pinned operationalBounds.deadlineMs'
         if (not observation(row) or not finite(row.get('deadlineMs'), True) or not finite(row.get('observedMs'))
                 or row['observedMs'] > row['deadlineMs']):
             return 'DIFF-UNPROVEN: latency must be measured within a declared deadline'
+        outbound = any('outbound-calls' in h['surfaces'] and h['added'] for h in measured['hunks'])
+        pools = bounds.get('providerPools')
+        if outbound and not isinstance(pools, list):
+            return 'DIFF-UNPROVEN: outbound calls need pinned operationalBounds.providerPools (use [] for none)'
+        if outbound and pools and (row.get('pool') not in pools or any(not any(isinstance(r, dict) and r.get('resource') == pool for r in resources) for pool in pools)):
+            return 'DIFF-UNPROVEN: every pinned rate-limited pool must remain in sharedResources'
         if 'provider-pool' in obligations and (not text(row.get('pool')) or not any(isinstance(r, dict) and r.get('resource') == row['pool'] for r in resources)):
             return 'DIFF-UNPROVEN: rate-limited provider pool must be declared in sharedResources'
     if 'alarm-rate' in obligations:
         row = operational.get('alarmRate')
+        if not finite(bounds.get('maxPerDay')) or not isinstance(row, dict) or row.get('maxPerDay') != bounds['maxPerDay']:
+            return 'DIFF-UNPROVEN: alarm acceptance must equal pinned operationalBounds.maxPerDay'
         if (not observation(row) or not text(row.get('seriesPath')) or not Path(row['seriesPath']).is_absolute()
                 or not isinstance(row.get('seriesSha256'), str) or not re.fullmatch('[0-9a-f]{64}', row['seriesSha256'])
                 or not finite(row.get('durationSeconds'), True) or type(row.get('falsePositives')) is not int or row['falsePositives'] < 0
@@ -149,9 +163,14 @@ def coverage_issue(coverage, measured, resources=(), live_series=False):
             return 'DIFF-UNPROVEN: alarm rate needs a recorded production series and measured acceptable false-positive rate'
         if live_series:
             try:
-                if hashlib.sha256(Path(row['seriesPath']).read_bytes()).hexdigest() != row['seriesSha256']:
+                data = Path(row['seriesPath']).read_bytes()
+                if hashlib.sha256(data).hexdigest() != row['seriesSha256']:
                     return 'DIFF-UNPROVEN: production series digest differs from the recorded measurement'
-            except OSError:
+                from repair_metrics import series_metrics
+                metrics = series_metrics(data)
+                if any(row.get(k) != metrics[k] for k in ('durationSeconds', 'falsePositives')):
+                    return 'DIFF-UNPROVEN: alarm counts differ from the retained production series'
+            except (OSError, ValueError):
                 return 'DIFF-UNPROVEN: recorded production series cannot be read'
     return None
 
@@ -304,7 +323,7 @@ def checker_evidence_issue(check, context, measured, node, integration, read_non
     if 'alarmRate' in op:
         row = op['alarmRate']
         if not any(same(row, o['attack']) and row.get('seriesPath') == o.get('seriesPath') and row.get('seriesSha256') == o.get('seriesSha256')
-                   and isinstance(o.get('metrics'), dict) and all(row.get(k) == o['metrics'].get(k) for k in ('durationSeconds', 'falsePositives', 'maxPerDay')) for o in observations):
+                   and o.get('seriesFormat') == 'RepairAlarmSeriesV1' and isinstance(o.get('metrics'), dict) and all(row.get(k) == o['metrics'].get(k) for k in ('durationSeconds', 'falsePositives')) for o in observations):
             return 'CHECKER-UNPROVEN: alarm measurement differs from executed JSON and helper-read production series'
     return None
 

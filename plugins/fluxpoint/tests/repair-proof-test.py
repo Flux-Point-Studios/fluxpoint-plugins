@@ -48,7 +48,7 @@ class RepairProof(unittest.TestCase):
         self.prepare('flag = True\n')
         self.ir = {'version': 1, 'campaign': 'repair proof', 'treeGuard': False,
                    'budget': {'maxNodes': 200, 'cacheTtl': '1h'},
-                   'lists': {'slices': [{'key': 'slice', 'targetClasses': ['decode']}]},
+                   'lists': {'slices': [{'key': 'slice', 'targetClasses': ['decode'], 'operationalBounds': {'deadlineMs': 10000, 'maxPerDay': 1, 'providerPools': ['provider-pool']}}]},
                    'nodes': [
                        {'id': 'fix', 'foreach': 'slices', 'mutates': True, 'contract': 'SliceV1',
                         'prompt': 'Fix ORIGINAL_SECRET_REASON {{roundDir}} {{lastCheck}}'},
@@ -76,7 +76,7 @@ class RepairProof(unittest.TestCase):
                 path.write_bytes(self.data)
                 self.patches.append(path)
         self.series = self.root / 'production-series.json'
-        self.series.write_text('[0,22,41,187,230]\n', encoding='utf-8')
+        self.series.write_text(json.dumps({'version': 1, 'startedAt': '2026-10-27T00:00:00Z', 'endedAt': '2026-10-28T00:00:00Z', 'events': []}), encoding='utf-8')
 
     def run_graph(self, mode='pass', integration=False, rounds=1, nonce='1' * 64, specification=None):
         ir = copy.deepcopy(self.ir)
@@ -103,7 +103,7 @@ const args=ARGS, mode=MODE, calls=[];
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async xs=>Promise.all(xs.map(f=>f()));
 const obs={command:'python attack.py',result:'exit 0: defended'},ctl={command:'python valid.py',result:'exit 0: valid control'};
-const slice={patchSha256:PATCH_SHA,branch:'repair',diffSummary:'complete patch against pinned launch base',testsAdded:['test_attack'],harnessCommand:'pytest',harnessExit:0,evidence:['checked original attack and valid control'],sharedResources:[],siblings:[]};
+const slice={patchSha256:PATCH_SHA,branch:'repair',diffSummary:'complete patch against pinned launch base',testsAdded:['test_attack'],harnessCommand:'pytest',harnessExit:0,evidence:['checked original attack and valid control'],sharedResources:[{resource:'provider-pool',writers:['caller'],readers:['checker']}],siblings:[]};
 const axes=['field','encoding','caller','network','role','path'];
 const sibling=(finding,axis,surface='checker-'+axis)=>({finding,invariant:'authoritative invariant',axis,surface,attack:obs,control:ctl,outcome:'DEFENDED',reason:'independent attack and valid control executed'});
 const executeProof=(p,harm=false)=>{
@@ -134,7 +134,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
   const execution=mode==='no-checker-execution'?{attack:obs,control:ctl,metrics:{durationSeconds:86400,falsePositives:0,maxPerDay:1},seriesPath:SERIES,seriesSha256:SERIES_SHA}:executeProof(p,mode==='checker-reproduces');
   const r={verdict:'PASS',findings:[],blockers:[],evidence:['independent checker executed original case, control and full suite'],commits:[HEAD],targetClasses:c.targetClasses,
    siblings:c.targetClasses.flatMap(finding=>axes.map(axis=>({...sibling(finding,axis),attack:execution.attack,control:execution.control}))),
-   diffCoverage:{patchSha256:m.patchSha256,hunks:m.hunks.map(h=>({id:h.id,surface:h.surfaces[0],attack:execution.attack,control:execution.control})),operational:{latency:{...execution.attack,deadlineMs:10000,observedMs:execution.attack.elapsedMs,pool:'provider-pool'},alarmRate:{...execution.attack,seriesPath:execution.seriesPath,seriesSha256:execution.seriesSha256,...execution.metrics}}}};
+   diffCoverage:{patchSha256:m.patchSha256,hunks:m.hunks.map(h=>({id:h.id,surface:h.surfaces[0],attack:execution.attack,control:execution.control})),operational:{latency:{...execution.attack,deadlineMs:10000,observedMs:execution.attack.elapsedMs,pool:'provider-pool'},alarmRate:{...execution.attack,seriesPath:execution.seriesPath,seriesSha256:execution.seriesSha256,maxPerDay:1,...execution.metrics}}}};
   if(mode==='missing-siblings')delete r.siblings;
   if(mode==='empty-siblings')r.siblings=[];
   if(mode==='missing-axis')r.siblings.pop();
@@ -482,6 +482,38 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         with self.assertRaisesRegex(ValueError, 'changed the pinned repair snapshot'):
             PROOF.check_packet(snapshot['snapshot'], snapshot['token'], '.fluxpoint-spec.json')
 
+    def test_operational_limits_are_pinned_and_alarm_counts_come_from_series(self):
+        from repair_diff import coverage_issue
+        measured = manifest(b'diff --git a/service.py b/service.py\n--- a/service.py\n+++ b/service.py\n@@ -0,0 +1 @@\n+client.get(url, timeout=5); notify(operator)\n')
+        self.assertIn('latency', measured['hunks'][0]['obligations'])
+        observation = {'command': 'check service.py', 'result': 'defended'}
+        row = {'patchSha256': measured['patchSha256'], 'hunks': [{'id': measured['hunks'][0]['id'], 'surface': 'outbound-calls', 'attack': observation, 'control': observation}],
+            'operational': {'latency': dict(observation, deadlineMs=10000, observedMs=1, pool='pool'),
+                'alarmRate': dict(observation, seriesPath=str(self.series), seriesSha256=__import__('hashlib').sha256(self.series.read_bytes()).hexdigest(), durationSeconds=86400, falsePositives=0, maxPerDay=1)}}
+        bounds = {'deadlineMs': 5000, 'maxPerDay': 0, 'providerPools': ['pool']}
+        self.assertIn('pinned', coverage_issue(row, measured, [], True, bounds=bounds))
+        row['operational']['latency']['deadlineMs'] = 5000
+        row['operational']['alarmRate']['maxPerDay'] = 0
+        self.assertIn('sharedResources', coverage_issue(row, measured, [], True, bounds=bounds))
+        self.assertIsNone(coverage_issue(row, measured, [{'resource': 'pool'}], True, bounds=bounds))
+        self.assertEqual(PROOF.series_metrics(self.series.read_bytes()), {'durationSeconds': 86400.0, 'falsePositives': 0})
+
+    def test_helper_counts_alarm_events_instead_of_trusting_stdout(self):
+        series = {'version': 1, 'startedAt': '2026-10-27T00:00:00Z', 'endedAt': '2026-10-28T00:00:00Z',
+            'durationSeconds': 1, 'events': [{'id': 'alarm-1', 'at': '2026-10-27T12:00:00Z', 'falsePositive': True}]}
+        self.series.write_text(json.dumps(series))
+        snapshot = PROOF.materialize(self.root, self.base, str(self.patches[0]), manifest(self.data)['patchSha256'], 'slice', 1)
+        self.addCleanup(lambda: PROOF.cleanup(snapshot['snapshot'], snapshot['token']))
+        control = shlex.join([sys.executable, '-c', 'print("valid")'])
+        fiction = shlex.join([sys.executable, '-c', 'print(\'{"durationSeconds":1,"falsePositives":0,"maxPerDay":9999}\')'])
+        result = PROOF.execute(snapshot['snapshot'], snapshot['token'], control, fiction, 10, str(self.series))
+        self.assertEqual(result['metrics'], {'durationSeconds': 86400.0, 'falsePositives': 1})
+        self.assertEqual(result['seriesFormat'], 'RepairAlarmSeriesV1')
+
+    def test_test_only_keywords_do_not_require_production_alarm_series(self):
+        measured = manifest(b'diff --git a/tests/test_page.py b/tests/test_page.py\n--- a/tests/test_page.py\n+++ b/tests/test_page.py\n@@ -0,0 +1 @@\n+assert page == 2\n')
+        self.assertEqual(measured['hunks'][0]['obligations'], [])
+
     def test_surface_classification_matches_ascii_javascript_boundaries(self):
         from repair_diff import surfaces
         values = ['jsonñ = 1', 'ſleep(1)', 'Kif', 'json = 1']
@@ -580,11 +612,11 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         c = {'patchSha256': measured['patchSha256'], 'hunks': [{'id': measured['hunks'][0]['id'], 'surface': 'outbound-calls', 'attack': {'command': 'a', 'result': 'r'}, 'control': {'command': 'c', 'result': 'r'}}],
              'operational': {'latency': {'command': 'a', 'result': 'r', 'deadlineMs': 10, 'observedMs': 1, 'pool': 'provider-pool'},
                              'alarmRate': {'command': 'a', 'result': 'r', 'seriesPath': str(self.series), 'seriesSha256': digest, 'durationSeconds': 86400, 'falsePositives': 0, 'maxPerDay': 1}}}
-        self.assertIn('sharedResources', coverage_issue(c, measured, [], True))
+        self.assertIn('sharedResources', coverage_issue(c, measured, [], True, bounds={'deadlineMs': 10, 'maxPerDay': 1, 'providerPools': ['provider-pool']}))
         resources = [{'resource': 'provider-pool'}]
-        self.assertIsNone(coverage_issue(c, measured, resources, True))
+        self.assertIsNone(coverage_issue(c, measured, resources, True, bounds={'deadlineMs': 10, 'maxPerDay': 1, 'providerPools': ['provider-pool']}))
         self.series.write_text('changed')
-        self.assertIn('digest differs', coverage_issue(c, measured, resources, True))
+        self.assertIn('digest differs', coverage_issue(c, measured, resources, True, bounds={'deadlineMs': 10, 'maxPerDay': 1, 'providerPools': ['provider-pool']}))
 
 
 if __name__ == '__main__':

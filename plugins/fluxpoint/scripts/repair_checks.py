@@ -69,7 +69,8 @@ def descriptors(ir):
             result[loop['id']] = {'contract': 'FixCheckV1', 'independent': True,
                 'verifies': fixer['id'], 'after': fixer['id'],
                 'fixer': {'id': fixer['id'], 'mutates': True}, 'loop': loop['id'],
-                'maxRounds': limit, 'items': keys, 'targetClasses': targets, 'integration': False}
+                'maxRounds': limit, 'items': keys, 'targetClasses': targets, 'integration': False,
+                'operationalBounds': {item['key']: item.get('operationalBounds') for item in items}}
         integration = repeat.get('integrate')
         if not isinstance(integration, list) or len(integration) != 2 or not all(isinstance(k, str) for k in integration):
             continue
@@ -83,7 +84,8 @@ def descriptors(ir):
                 'verifies': merge['id'], 'after': merge['id'],
                 'fixer': {'id': merge['id'], 'mutates': True}, 'loop': loop['id'],
                 'integrationNodes': integration, 'maxRounds': limit,
-                'items': keys, 'targetClasses': targets, 'integration': True}
+                'items': keys, 'targetClasses': targets, 'integration': True,
+                'operationalBounds': {item['key']: item.get('operationalBounds') for item in items}}
     return result
 
 
@@ -241,6 +243,11 @@ def receipt_issue(row, descriptor, summary, retained=None, root=None):
         return 'receipt does not identify unique actual round patches'
     target_items = {p['item'] for p in patches} if integration else {item}
     expected_targets = {v for key in target_items for v in descriptor['targetClasses'][key]}
+    from repair_metrics import combine_bounds
+    bounds_map = descriptor.get('operationalBounds') or {}
+    expected_bounds = combine_bounds([bounds_map.get(key) for key in target_items]) if integration else bounds_map.get(item)
+    if context.get('operationalBounds') != expected_bounds:
+        return 'DIFF-UNPROVEN: operational bounds differ from the frozen repair inputs'
     if not classes(context.get('targetClasses')) or set(context['targetClasses']) != expected_targets:
         return 'receipt target classes differ from the frozen repair inputs'
     current = context.get('integrated' if integration else 'current')
@@ -282,7 +289,7 @@ def receipt_issue(row, descriptor, summary, retained=None, root=None):
             except (OSError, ValueError) as exc:
                 return 'DIFF-UNPROVEN: retained alarm series unavailable: ' + str(exc)
     issue = (sibling_issue(check.get('siblings'), sorted(expected_targets), row.get('fixerSiblings') or [])
-             or coverage_issue(coverage, measured, row.get('sharedResources') or [], live_series=True)
+             or coverage_issue(coverage, measured, row.get('sharedResources') or [], live_series=True, bounds=expected_bounds)
              or checker_evidence_issue(check, context, measured, row['node'], integration, summary['repairReadNonce'])
              or diff_receipt_issue(proof, context, measured)
              or checked_commits_issue(root or launch['root'], context['base'], data, check.get('commits') or []))

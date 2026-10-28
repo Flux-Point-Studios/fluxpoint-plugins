@@ -284,3 +284,21 @@ The 13M estimated-token ceiling includes the expanded locked packet and leaves
 headroom above this template's declared worst-case token estimate. Run `--check`
 against the consuming repository's packet, slices and expected findings before
 launch; runtime substitutions listed as unpriced still need their own allowance.
+
+Operational limits are graph input, independent of the checker. Add a reviewed
+`operationalBounds` to each affected slice: `deadlineMs`, `maxPerDay`, and
+`providerPools` (explicitly `[]` when no rate-limited pool applies). A new
+outbound call requires that pool declaration even if the limiter lives in
+unchanged code. Every pinned pool must remain in `sharedResources`. A missing
+limit makes the operational check incomplete; the checker cannot choose a
+larger deadline or alarm allowance. Integration uses the smallest declared
+deadline/rate and the union of pinned pools. Test-only keyword mentions do not
+create production alarm obligations.
+
+Recorded alarm data uses `RepairAlarmSeriesV1`: an object with `version: 1`,
+UTC or offset-aware `startedAt` and `endedAt`, and `events` containing unique
+`id`, timestamp `at`, and boolean `falsePositive`. The fixed helper validates
+the window and event identities, computes its duration and false-positive
+count from the frozen data, and ignores statistics printed by the attack
+command. The operator's event adjudications remain the data assumption; the
+helper does not establish that an event label is true.

@@ -922,6 +922,10 @@ def validate_repair(n, seen, ir, contracts):
     if any(x.get("contract") == "FixCheckV1" for x in origin_checks):
         for item in items:
             targets = item.get("targetClasses") if isinstance(item, dict) else None
+            if isinstance(item, dict):
+                bound_issue = _sibling('repair_metrics').bounds_issue(item.get('operationalBounds'))
+                if bound_issue:
+                    f.append(f"{where}: {bound_issue}")
             if (not isinstance(targets, list) or not all(isinstance(c, str) and c.strip() for c in targets)
                     or len(set(targets)) != len(targets)):
                 f.append(f"{where}: repair slice targetClasses must be an explicit unique array of nonblank classes (use [] for none)")
@@ -4406,7 +4410,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     origin_checks = [n] + [by_id[k] for k in repair_integrations(n)]
     if any(x.get("contract") == "FixCheckV1" for x in origin_checks):
         a(f"if ({list_var(n['foreach'])}.some(item => !item || !repairTargets(item.targetClasses))) {{ note({js_str(nid)}, 'INVALID-TARGET-CLASSES', 'repair slices require explicit pinned targetClasses arrays'); return summary('INCOMPLETE') }}")
-    a(f"let pending_{var} = {list_var(n['foreach'])}.map((item, i) => ({{ item, i, lastCheck: null, targetClasses: Array.isArray(item.targetClasses) ? [...item.targetClasses] : [] }}))")
+    a(f"let pending_{var} = {list_var(n['foreach'])}.map((item, i) => ({{ item, i, lastCheck: null, targetClasses: Array.isArray(item.targetClasses) ? [...item.targetClasses] : [], operationalBounds: item.operationalBounds || null }}))")
     a(f"let passed_{var} = [], round_{var} = 0, integrationLast_{var} = null, integrationStreaks_{var} = [], integrationRecurring_{var} = []")
     a(f"const {var} = []")
     a(f"const validReframe_{var} = (r, classes, independent = false) => !!r && (!independent || r.validated === true) && Array.isArray(r.classes) && classes.every(c => r.classes.includes(c)) && ['adopt', 'refute', 'remove'].includes(r.disposition) && ['invariant', 'classRewire'].every(k => typeof r[k] === 'string' && r[k].trim()) && r.measurement && ['command', 'result'].every(k => typeof r.measurement[k] === 'string' && r.measurement[k].trim())")
@@ -4432,7 +4436,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     a("    const contextIssue = repairContextIssue(fixed)")
     a(f"    if (contextIssue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'CONTEXT-LIMIT', contextIssue); return {{ ...state, fixed, roundDir }} }}")
     a(f"    const patches = [...(state.patches || []), {{ item: item.key, round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: fixed.patchSha256 }}]")
-    a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: [...state.targetClasses] }}")
+    a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: [...state.targetClasses], operationalBounds: state.operationalBounds }}")
     a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay the reproduction and its valid control on the bare launch base and EACH listed complete patch in a fresh base archive, not cumulatively. Use repair-replay.py to obtain originEvidence. New code location or identifier age is not origin evidence. Missing replay/control means INCOMPLETE. Attack every sharedResources writer and reader supplied by the fixer, including existing writers reached by a new reader.\\n'")
 
     a(f"    if (requiredClasses.length && !validReframe_{var}(fixed.reframe, requiredClasses)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: third narrow patch refused`, {{ classes: requiredClasses }}); return {{ ...state, fixed, roundDir }} }}")
@@ -4454,7 +4458,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
         a("    if (checked.verdict === 'PASS') {")
         a("      const coherent = repairCheckOrigins(checked, originContext)")
         a(f"      if (coherent.issue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'ORIGIN-UNPROVEN', coherent.issue); return {{ ...state, fixed, roundDir, lastCheck: checked, patches }} }}")
-        a("      const proofIssue = repairSiblingIssue(checked, originContext, fixed) || repairCoverageIssue(checked, patchManifest, fixed) || repairCheckerEvidenceIssue(checked, originContext, patchManifest)")
+        a("      const proofIssue = repairSiblingIssue(checked, originContext, fixed) || repairCoverageIssue(checked, patchManifest, fixed, originContext) || repairCheckerEvidenceIssue(checked, originContext, patchManifest)")
         a(f"      if (proofIssue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, proofIssue.split(':')[0], proofIssue); return {{ ...state, fixed, roundDir, lastCheck: checked, patches }} }}")
         a(f"      const review = await repairDiffAttack(originContext, patchManifest, {js_str(phase_name)})")
         a("      diffAttack = review.receipt")
@@ -4514,7 +4518,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
             a(f"    if (resourceIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: '_integration', round: round_{var} }}); return summary('HALTED') }}")
         a("    const mergedIssue = repairContextIssue(merged)")
         a(f"    if (mergedIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'CONTEXT-LIMIT', mergedIssue); return summary('INCOMPLETE') }}")
-        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: merged.patchSha256 }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))] }}")
+        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: merged.patchSha256 }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))], operationalBounds: repairCombineBounds(passed_{var}.map(state => state.operationalBounds)) }}")
         a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay bare base and EVERY component patch separately on fresh base archives, then the complete integrated patch. Only a harm absent from base and all component patches but reproduced on the integrated patch is cross-slice. Attack the complete sharedResources writer/reader list from the integration result.\\n'")
 
         a(f"    if (requiredClasses.length && !validReframe_{var}(merged.reframe, requiredClasses)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'third narrow integration patch refused'); return summary('REFRAME-REQUIRED') }}")
@@ -4541,7 +4545,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
             a("    if (integrated.verdict === 'PASS') {")
             a("      const coherent = repairCheckOrigins(integrated, originContext)")
             a(f"      if (coherent.issue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'ORIGIN-UNPROVEN', coherent.issue); return summary('INCOMPLETE') }}")
-            a("      const proofIssue = repairSiblingIssue(integrated, originContext, merged) || repairCoverageIssue(integrated, patchManifest, merged) || repairCheckerEvidenceIssue(integrated, originContext, patchManifest)")
+            a("      const proofIssue = repairSiblingIssue(integrated, originContext, merged) || repairCoverageIssue(integrated, patchManifest, merged, originContext) || repairCheckerEvidenceIssue(integrated, originContext, patchManifest)")
             a(f"      if (proofIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, proofIssue.split(':')[0], proofIssue); return summary('INCOMPLETE') }}")
             a(f"      const review = await repairDiffAttack(originContext, patchManifest, {js_str(review.get('phase', phase_name))})")
             a("      diffAttack = review.receipt")

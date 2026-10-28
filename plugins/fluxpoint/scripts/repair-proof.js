@@ -74,6 +74,7 @@ function repairManifest(bytes) {
       if (surfaces.some(s => ['outbound-calls', 'timers'].includes(s))) obligations.push('latency')
       if (surfaces.includes('alarms')) obligations.push('alarm-rate')
       if (/rate.?limit|token.?bucket|burst/i.test(content)) obligations.push('provider-pool')
+      if (/(?:^|\/)(?:tests?|__tests__)(?:\/|$)|(?:^|\/)(?:test_[^/]*|[^/]*[._](?:test|spec)\.[^/]+)$/i.test(path)) obligations.length = 0
       hunks.push({ id:'h'+i, path, newStart:Number(m[1]), newLines:m[2] === undefined ? 1 : Number(m[2]), added, surfaces, obligations })
     } else if (line === 'GIT binary patch' || line.startsWith('Binary files ')) {
       if (path === null) throw new Error('binary patch lacks file identity')
@@ -88,6 +89,14 @@ function repairCanonical(value) {
   return JSON.stringify(sorted(value)).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4,'0'))
 }
 function repairManifestDigest(measured) { return repairSHA256([...repairCanonical(measured)].map(c => c.charCodeAt(0))) }
+
+function repairCombineBounds(values) {
+  values = values.filter(v => v && typeof v === 'object')
+  const result = {}
+  for (const key of ['deadlineMs','maxPerDay']) { const found=values.filter(v => v[key] !== undefined).map(v => v[key]); if(found.length)result[key]=Math.min(...found) }
+  if(values.some(v=>v.providerPools!==undefined))result.providerPools=[...new Set(values.flatMap(v=>v.providerPools||[]))].sort()
+  return Object.keys(result).length ? result : null
+}
 
 function repairFeedback(check) {
   if (!check || typeof check !== 'object') return check
@@ -115,19 +124,24 @@ function repairSiblingIssue(check, context, fixed) {
   if (context.targetClasses.some(finding => REPAIR_AXES.some(axis => !rows.some(r => r.finding === finding && r.axis === axis && !listed.has(key(r)))))) return 'SIBLINGS-UNPROVEN: each class needs an unlisted sibling on every axis'
   return null
 }
-function repairCoverageIssue(check, measured, fixed) {
+function repairCoverageIssue(check, measured, fixed, context = {}) {
   const c = check.diffCoverage, rows = c?.hunks
   if (!c || c.patchSha256 !== measured.patchSha256) return 'DIFF-UNPROVEN: coverage names another patch SHA-256'
   if (!Array.isArray(rows) || rows.length !== measured.hunks.length || rows.some(r => !r) || new Set(rows.map(r => r.id)).size !== rows.length || measured.hunks.some(h => !rows.some(r => r.id === h.id))) return 'DIFF-UNPROVEN: every harness-listed hunk needs exactly one row'
   if (rows.some(r => !REPAIR_SURFACES.includes(r.surface) || !repairObservation(r.attack) || !repairObservation(r.control))) return 'DIFF-UNPROVEN: each hunk needs a surface, attack and control'
-  const obligations = measured.hunks.flatMap(h => h.obligations), operational = c.operational || {}
+  const obligations = measured.hunks.flatMap(h => h.obligations), operational = c.operational || {}, bounds = context.operationalBounds || {}
   if (obligations.includes('latency')) {
     const r = operational.latency
+    if (!repairFinite(bounds.deadlineMs,true) || r?.deadlineMs !== bounds.deadlineMs) return 'DIFF-UNPROVEN: latency deadline must equal pinned operationalBounds.deadlineMs'
     if (!repairObservation(r) || !repairFinite(r.deadlineMs,true) || !repairFinite(r.observedMs) || r.observedMs > r.deadlineMs) return 'DIFF-UNPROVEN: latency must meet a declared measured deadline'
+    const outbound = measured.hunks.some(h => h.added && h.surfaces.includes('outbound-calls')), pools = bounds.providerPools
+    if (outbound && !Array.isArray(pools)) return 'DIFF-UNPROVEN: outbound calls need pinned operationalBounds.providerPools (use [] for none)'
+    if (outbound && pools.length && (!pools.includes(r.pool) || pools.some(pool => !(fixed.sharedResources || []).some(p => p?.resource === pool)))) return 'DIFF-UNPROVEN: every pinned rate-limited pool must remain in sharedResources'
     if (obligations.includes('provider-pool') && (!repairText(r.pool) || !(Array.isArray(fixed.sharedResources)?fixed.sharedResources:[]).some(p => p?.resource === r.pool))) return 'DIFF-UNPROVEN: rate-limited provider needs a declared shared pool'
   }
   if (obligations.includes('alarm-rate')) {
     const r = operational.alarmRate
+    if (!repairFinite(bounds.maxPerDay) || r?.maxPerDay !== bounds.maxPerDay) return 'DIFF-UNPROVEN: alarm acceptance must equal pinned operationalBounds.maxPerDay'
     if (!repairObservation(r) || !repairText(r.seriesPath) || !/^(?:[A-Za-z]:[\\/]|[\\/])/.test(r.seriesPath) || typeof r.seriesSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(r.seriesSha256) || !repairFinite(r.durationSeconds,true) || !Number.isSafeInteger(r.falsePositives) || r.falsePositives < 0 || !repairFinite(r.maxPerDay) || r.falsePositives*86400/r.durationSeconds > r.maxPerDay) return 'DIFF-UNPROVEN: alarm rate needs recorded series provenance and an acceptable measured rate'
   }
   return null
@@ -182,11 +196,11 @@ function repairCheckerEvidenceIssue(check, context, measured) {
   if (pairs.some(r => !observations.some(o => o.reproduces === false && same(r.attack,o.attack) && same(r.control,o.control)))) return 'CHECKER-UNPROVEN: every defended sibling and hunk row must match an actually defended checker execution'
   const operational = check.diffCoverage?.operational || {}, latency = operational.latency, alarm = operational.alarmRate
   if (latency && !observations.some(o => same(latency,o.attack) && repairFinite(o.attack.elapsedMs) && latency.observedMs === o.attack.elapsedMs)) return 'CHECKER-UNPROVEN: latency must use the helper-measured elapsed time'
-  if (alarm && !observations.some(o => same(alarm,o.attack) && alarm.seriesPath === o.seriesPath && alarm.seriesSha256 === o.seriesSha256 && o.metrics && ['durationSeconds','falsePositives','maxPerDay'].every(k => alarm[k] === o.metrics[k]))) return 'CHECKER-UNPROVEN: alarm measurements must match executed JSON output and the helper-read production series'
+  if (alarm && !observations.some(o => same(alarm,o.attack) && alarm.seriesPath === o.seriesPath && alarm.seriesSha256 === o.seriesSha256 && o.seriesFormat === 'RepairAlarmSeriesV1' && o.metrics && ['durationSeconds','falsePositives'].every(k => alarm[k] === o.metrics[k]))) return 'CHECKER-UNPROVEN: alarm measurements must match executed JSON output and the helper-read production series'
   return null
 }
 function repairSnapshotBrief(snapshot) {
-  return 'SNAPSHOT IDENTITY: '+JSON.stringify(snapshot)+'\nThe harness already applied the complete current patch to this fresh archive of the exact launch base. Work only there; no second snapshot or second patch application. Run ALL attack/control cases through '+repairHelperCommand('execute')+' --snapshot '+repairQuote(snapshot.snapshot)+' --token '+repairQuote(snapshot.token)+' --control <valid-command> --attack <case-command>. Copy the actual command/result observations into each sibling and hunk row. Latency observedMs must copy attack.elapsedMs; for alarms pass --series <absolute-production-series>, read its frozen copy from FPL_PRODUCTION_SERIES, and have the command print JSON {durationSeconds,falsePositives,maxPerDay}, then copy its measured output and helper-read series digest. These actual executions, not descriptions, are independently logged outside the snapshot and collected by the cleanup sentinel.\n'
+  return 'SNAPSHOT IDENTITY: '+JSON.stringify(snapshot)+'\nThe harness already applied the complete current patch to this fresh archive of the exact launch base. Work only there; no second snapshot or second patch application. Run ALL attack/control cases through '+repairHelperCommand('execute')+' --snapshot '+repairQuote(snapshot.snapshot)+' --token '+repairQuote(snapshot.token)+' --control <valid-command> --attack <case-command>. Copy the actual command/result observations into each sibling and hunk row. Latency observedMs must copy attack.elapsedMs; for alarms pass --series <absolute-production-series>, read its frozen copy from FPL_PRODUCTION_SERIES, provide RepairAlarmSeriesV1 {version:1,startedAt,endedAt,events:[{id,at,falsePositive}]} and copy the helper-computed duration/count and series digest. The helper derives alarm statistics from frozen event data, never from command stdout. Acceptance limits must equal the pinned slice operationalBounds. These actual executions, not descriptions, are independently logged outside the snapshot and collected by the cleanup sentinel.\n'
 }
 async function repairCheckedSpawn(context, measured, prompt, options) {
   const snapshot = await repairSentinel('materialize',context,{sha256:measured.patchSha256,'manifest-sha256':measured.manifestSha256},options.label)

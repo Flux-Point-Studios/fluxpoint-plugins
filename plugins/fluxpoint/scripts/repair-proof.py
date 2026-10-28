@@ -22,6 +22,7 @@ import time
 
 from process_tree import remove_tree
 from repair_diff import compact_manifest, manifest_digest
+from repair_metrics import series_metrics
 
 
 def git(root, *args):
@@ -147,9 +148,11 @@ def execute(snapshot, token, control, attack, timeout, series=None):
                 raise ValueError('production series changed during the experiment')
             result['seriesPath'] = str(series_path)
             result['seriesSha256'] = hashlib.sha256(series_data).hexdigest()
+            result['seriesFormat'] = 'RepairAlarmSeriesV1'
+            result['metrics'] = series_metrics(series_data)
         try:
             metrics = json.loads(attack_result.split(': ', 1)[1])
-            if isinstance(metrics, dict):
+            if isinstance(metrics, dict) and not series:
                 result['metrics'] = metrics
         except (ValueError, IndexError):
             pass
