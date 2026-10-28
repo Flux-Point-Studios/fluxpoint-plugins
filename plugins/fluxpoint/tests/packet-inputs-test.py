@@ -323,6 +323,43 @@ class PacketInputsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('inside the repository', result.stderr)
 
+    def test_import_text_in_comments_and_strings_is_not_an_import(self):
+        self.frontend()
+        self.write('frontend/tests/landing/sign.test.ts',
+                   "// Type-only re-exports keep `import type { ... } from '.../provider'` working.\n"
+                   "// re-exported from '../../../../shared'\n"
+                   "const example = \"import { y } from '../../../../outside'\""
+                   " /* import { x } from '../../../../elsewhere/x' */\n"
+                   "const trim = (s) => s.replace(/\\/*$/, '')\n"
+                   "const tests = (dir) => `${dir}/*.test.ts`\n"
+                   "const label = `${trim('a/')}` + '//'\n"
+                   "const outside = '../../../../outside'\n"
+                   "import { value } from '../support/helper'\n")
+        self.write('frontend/tests/support/helper.ts', 'export const value = 1\n')
+        self.commit()
+        self.assertIn('frontend/tests/support/helper.ts', self.lock()['harness'])
+        self.assertIn('frontend/tests/support/helper.ts',
+                      {row['path'] for row in self.report('--inputs', '--closure')['inputs']})
+
+    def test_regex_after_control_condition_does_not_hide_following_import(self):
+        self.frontend()
+        self.write('frontend/tests/landing/sign.test.ts',
+                   "if ((true)) /[/*]/.test('x');\n"
+                   "while (false) /[/*]/.test('x');\n"
+                   "import { value } from '../support/helper'\n")
+        self.write('frontend/tests/support/helper.ts', 'export const value = 1\n')
+        self.commit()
+        self.assertIn('frontend/tests/support/helper.ts', self.lock()['harness'])
+        self.assertIn('frontend/tests/support/helper.ts',
+                      {row['path'] for row in self.report('--inputs', '--closure')['inputs']})
+
+    def test_dots_only_segment_under_an_existing_directory_is_not_an_import(self):
+        self.frontend()
+        self.write('frontend/tests/landing/helper.ts', "export { p } from './.../provider'\nexport const value = 1\n")
+        self.commit()
+        self.assertEqual([p for p in self.lock()['harness'] if '...' in p], [])
+        self.assertEqual(specification.harness_record(self.root)['changedPaths'], [])
+
     def test_explicit_package_cwd_does_not_fall_back_to_a_root_test_path(self):
         self.frontend()
         self.doc['checks'][0]['argv'][-1] = 'tests/root-only'

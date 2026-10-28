@@ -36,9 +36,107 @@ def sha(path):
     return hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest() if path.is_file() else None
 
 
+def resolved(path):
+    """resolve() in the spelling of a resolved root. For a missing path whose parent
+    exists, Windows can return an extended-length \\\\?\\ path, e.g. once Win32 has
+    dropped a '...' segment, and that spelling is never relative to the root."""
+    text = str(Path(path).resolve())
+    if text.startswith('\\\\?\\UNC\\'):
+        return Path('\\\\' + text[8:])
+    return Path(text[4:] if text.startswith('\\\\?\\') else text)
+
+
+# A '/' after one of these starts a regex literal; after anything else it divides.
+REGEX_AFTER = ({('punct', p) for p in '(,=:[!&|?{};+-*%<>~^'}
+               | {('word', w) for w in ('return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete',
+                                        'void', 'throw', 'case', 'do', 'else', 'yield', 'await')})
+
+
+def js_tokens(text):
+    """Words, punctuation and string literals of JS/TS source. Comments are dropped,
+    so prose that quotes an import is never read as one; template and regex
+    literals become opaque tokens, so a '/*' or quote inside them hides no code."""
+    tokens, templates, parens, i, n = [], [], [], 0, len(text)
+    control_end = -1
+    while i < n:
+        c = text[i]
+        if c == '`' or (c == '}' and templates and templates[-1] == 0):
+            if c == '}':
+                templates.pop()
+            j = i + 1
+            while j < n and text[j] != '`' and not text.startswith('${', j):
+                j += 2 if text[j] == '\\' else 1
+            if text.startswith('${', j):
+                templates.append(0)
+                i = j + 2
+            else:
+                tokens.append(('template', ''))
+                i = j + 1
+        elif c.isspace():
+            i += 1
+        elif text.startswith('//', i):
+            end = text.find('\n', i)
+            i = n if end < 0 else end
+        elif text.startswith('/*', i):
+            end = text.find('*/', i + 2)
+            i = n if end < 0 else end + 2
+        elif c in '\'"':
+            j = i + 1
+            while j < n and text[j] not in (c, '\n'):
+                j += 2 if text[j] == '\\' else 1
+            tokens.append(('string', text[i + 1:j]))
+            i = j + 1
+        elif c == '/' and (not tokens or tokens[-1] in REGEX_AFTER or len(tokens) - 1 == control_end):
+            j, klass = i + 1, False
+            while j < n and text[j] != '\n' and (klass or text[j] != '/'):
+                klass = (klass or text[j] == '[') and text[j] != ']'
+                j += 2 if text[j] == '\\' else 1
+            if j < n and text[j] == '/':
+                tokens.append(('regex', ''))
+                i = j + 1
+            else:
+                tokens.append(('punct', c))
+                i += 1
+        elif c.isalnum() or c in '_$':
+            j = i
+            while j < n and (text[j].isalnum() or text[j] in '_$'):
+                j += 1
+            tokens.append(('word', text[i:j]))
+            i = j
+        else:
+            if c == '(':
+                # A regex can start a statement after if/while/etc. conditions,
+                # but a slash after a function call still means division.
+                control = (bool(tokens) and tokens[-1] in
+                           {('word', w) for w in ('if', 'while', 'for', 'with', 'switch', 'catch')}
+                           and (len(tokens) < 2 or tokens[-2] != ('punct', '.')))
+                parens.append(control)
+            elif c == ')' and parens and parens.pop():
+                control_end = len(tokens)
+            if templates and c == '{':
+                templates[-1] += 1
+            elif templates and c == '}':
+                templates[-1] -= 1
+            tokens.append(('punct', c))
+            i += 1
+    return tokens
+
+
+def js_specifiers(text):
+    """Relative specifiers of literal import, export-from, import() and require()."""
+    tokens = js_tokens(text)
+    for k, (kind, value) in enumerate(tokens):
+        if kind != 'string' or len(value) < 2 or not value.startswith('.'):
+            continue
+        before = tokens[k - 1] if k else None
+        if before in (('word', 'from'), ('word', 'import')) or (
+                before == ('punct', '(') and k > 1 and tokens[k - 2] in (('word', 'import'), ('word', 'require'))):
+            yield value
+
+
 class Inputs:
     def __init__(self, root, doc, closure=True, allow_missing=False):
-        self.root = Path(root).resolve()
+        self.root = resolved(root)
         self.doc, self.closure, self.allow_missing = doc, closure, allow_missing
         self.reasons, self.owners, self.seeds, self.edges, self.trees = {}, {}, {}, {}, {}
         self.search = {self.root, self.root / 'src'}
@@ -58,7 +156,7 @@ class Inputs:
                 or '\\' in rel or '\0' in rel or re.match(r'^[A-Za-z]:', rel)):
             raise ValueError('packet input must stay inside the repository: ' + repr(rel))
         path = self.root / path
-        if not path.resolve().is_relative_to(self.root):
+        if not resolved(path).is_relative_to(self.root):
             raise ValueError('packet input must stay inside the repository: ' + repr(rel))
         return path
 
@@ -69,12 +167,12 @@ class Inputs:
 
     def local(self, path):
         """Normalize valid relative imports without erasing symlink spelling."""
-        physical = path.resolve()
+        physical = resolved(path)
         path = Path(os.path.abspath(path))
         if (not path.is_relative_to(self.root) or not physical.is_relative_to(self.root)
-                or not path.resolve().is_relative_to(self.root)):
+                or not resolved(path).is_relative_to(self.root)):
             raise ValueError('import/config path must stay inside the repository: ' + str(path))
-        if path.resolve() != physical:
+        if resolved(path) != physical:
             raise ValueError('ambiguous parent traversal through a symlink in import/config path: ' + str(path))
         return path
 
@@ -364,9 +462,8 @@ class Inputs:
     def js_imports(self, rel):
         text, result = self.path(rel).read_text(encoding='utf-8'), set()
         # Literal imports only; dynamic loaders remain explicit harnessInputs.
-        pattern = r'(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)[\'\"](\.[^\'\"]+)[\'\"]'
-        for match in re.finditer(pattern, text):
-            base = self.local(self.path(rel).parent / match[1])
+        for specifier in js_specifiers(text):
+            base = self.local(self.path(rel).parent / specifier)
             candidates = [base] + [Path(str(base) + suffix) for suffix in JS_SUFFIXES]
             candidates += [base / ('index' + suffix) for suffix in JS_SUFFIXES]
             result.update(self.rel(p) for p in candidates if p.is_file())
