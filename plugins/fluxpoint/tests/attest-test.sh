@@ -662,15 +662,18 @@ cat >"$ROOT/bin/gh" <<'SH'
 #!/usr/bin/env bash
 # A stand-in forge: the state of every context comes from FAKE_CI.
 case "$*" in
+  "auth status"*) printf '{"hosts":{}}' ;;
   "api user"*) printf '{"login":"harness-agent"}' ;;
   *"/statuses"*) printf '[{"id":1,"context":"harness","state":"%s","creator":{"login":"ci-bot"}}]' "${FAKE_CI:-success}" ;;
   *"/check-runs"*) printf '{"total_count":1,"check_runs":[{"id":2,"name":"lint","status":"completed","conclusion":"success","app":{"id":42},"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}' ;;
+  *"/git/trees/"*) printf '{"truncated":false,"tree":[{"path":".ci.yml","type":"blob","mode":"100644","sha":"649b28667d91ccfc793e3e192ca795dc5cbf91f0"}]}' ;;
+  *"/git/blobs/"*) printf '{"sha":"649b28667d91ccfc793e3e192ca795dc5cbf91f0","encoding":"base64","size":13,"content":"Y29tbWFuZHM6IFtdCg=="}' ;;
   *"/pulls/"*) printf '{"head":{"sha":"%s"}}' "${FAKE_HEAD:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" ;;
   *) exit 1 ;;
 esac
 SH
 chmod +x "$ROOT/bin/gh"
-printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"},"ci":{"forge":"github","repository":"fixture/repo","witness":{"statusCreators":["ci-bot"],"checkRunApps":[42]},"contexts":["harness","lint"]}}' \
+printf '{"version":1,"gates":{"harness":"scripts/harness.sh --full"},"ci":{"forge":"github","repository":"fixture/repo","witness":{"statusCreators":["ci-bot"],"checkRunApps":[42]},"contexts":["harness","lint"],"packetSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","config":[".ci.yml"]}}' \
   >"$ROOT/r/.fluxpoint-gates.json"
 PATH="$ROOT/bin:$PATH" "$FPL_PY" "$ATTEST" --root "$ROOT/r" --ci --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1; rc=$?
 check "--ci over green statuses exits 0" 0 "$rc"
@@ -885,6 +888,7 @@ page="$(printf '%s' "$*" | sed -n 's/.*[?&]page=\([0-9]*\).*/\1/p')"; page="${pa
 per="$(printf '%s' "$*" | sed -n 's/.*per_page=\([0-9]*\).*/\1/p')"; per="${per:-30}"
 [ -n "${FAKE_IGNORE_PAGING:-}" ] && { page=1; per=30; }
 case "$*" in
+  "auth status"*) printf '{"hosts":{}}' ;;
   "api user"*) printf '{"login":"harness-agent"}' ;;
   *"/statuses"*) printf '[]' ;;
   *"/check-runs"*)

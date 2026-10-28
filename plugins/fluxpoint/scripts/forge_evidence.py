@@ -348,6 +348,8 @@ class GitHub:
         inputs. An unreadable provider record cannot substantiate a green.
         """
         url = row.get('target_url') or ''
+        if not isinstance(url, str):
+            raise ValueError('invalid pipeline status URL')
         parsed = urlsplit(url)
         match = re.fullmatch(r'/repos/([1-9][0-9]*)/pipeline/([1-9][0-9]*)(?:/[1-9][0-9]*)?/?', parsed.path)
         if not match:
@@ -375,7 +377,8 @@ class GitHub:
                 raise ValueError('cannot establish pipeline launch provenance: ' + str(exc)) from exc
         if (not isinstance(pipeline, dict) or type(pipeline.get('parent')) is not int
                 or pipeline['parent'] != 0 or pipeline.get('event') not in ('push', 'pull_request')
-                or pipeline.get('commit') != sha or pipeline.get('number') != int(match[2])
+                or pipeline.get('commit') != sha or type(pipeline.get('number')) is not int
+                or pipeline['number'] != int(match[2])
                 or pipeline.get('status') != 'success'):
             raise ValueError('pipeline is restarted, manual, incomplete or for another commit')
         return {'provider': 'woodpecker', 'url': endpoint, 'number': pipeline['number'],

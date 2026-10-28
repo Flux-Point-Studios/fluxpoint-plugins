@@ -1,8 +1,9 @@
 {
   "version": 1,
-  "sha256": "5ce9e453a267f93a848a88bdd2b5ef98b6f2d81ada4d3a7e8cb7f0016d69be54",
+  "sha256": "54a681e460651a52696e9755213bf5d8eb607b38e1e1507a7a7beabb4e699276",
   "proofBaselineSha256": null,
   "harness": {
-    "plugins/fluxpoint/tests/forge-coverage-test.py": "4aae6128476bac4610c3fe3726e241d26cf751645676d2186db08507ca131ee5"
+    "plugins/fluxpoint/tests/forge-coverage-test.py": "4aae6128476bac4610c3fe3726e241d26cf751645676d2186db08507ca131ee5",
+    "plugins/fluxpoint/tests/forge-evidence-test.py": "0b4dcd58320f46ccda9a2a2bf5d90f7a12b2c592b3825ccbf05c77f16c38c0a2"
   }
 }

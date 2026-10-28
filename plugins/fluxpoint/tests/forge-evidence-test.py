@@ -96,7 +96,8 @@ class ForgeTests(unittest.TestCase):
             # only when the caller has not selected an explicit transport codec.
             kwargs.setdefault('encoding', 'cp1252')
             return real_run([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(' + repr(data) + ')'], **kwargs)
-        with patch.object(forge.subprocess, 'run', side_effect=github_json):
+        with patch.object(forge.subprocess, 'run', side_effect=github_json), \
+                patch.object(forge.GitHub, 'stored_logins', return_value=set()):
             got = forge.observe('.', self.ci, 'pr:7')
             self.assertEqual(got['exit'], 0)
             self.assertEqual(got['contexts'], {status_name: 'success', check_name: 'success'})
@@ -228,7 +229,7 @@ class CLITests(unittest.TestCase):
         self.bin = self.root / 'bin'
         self.bin.mkdir()
         gh = self.bin / 'gh'
-        gh.write_text('#!' + sys.executable + '\nimport json,os,sys\nd=json.load(open(os.environ["FORGE_FIXTURE"]))\nif sys.argv[3:] != ["--hostname","github.com"]: sys.exit(2)\np=sys.argv[2].replace("repos/fixture/repo/","repos/{owner}/{repo}/")\nif p not in d: sys.exit(1)\nprint(json.dumps(d[p]))\n')
+        gh.write_text('#!' + sys.executable + '\nimport json,os,sys\nd=json.load(open(os.environ["FORGE_FIXTURE"]))\nif sys.argv[1:3] == ["auth","status"]: print(json.dumps({"hosts":{}})); sys.exit(0)\nif sys.argv[3:] != ["--hostname","github.com"]: sys.exit(2)\np=sys.argv[2].replace("repos/fixture/repo/","repos/{owner}/{repo}/")\nif p not in d: sys.exit(1)\nprint(json.dumps(d[p]))\n')
         gh.chmod(0o755)
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ.get('PATH', ''), FORGE_FIXTURE=str(self.fixture))
         self.write()
@@ -257,6 +258,7 @@ class CLITests(unittest.TestCase):
             # Windows cannot execute a shebang gh stub. Mock only transport
             # inside the real CLI process; all validation/recording is actual.
             script = ('import sys,json,os;sys.path.insert(0,' + repr(str(SCRIPTS)) + ');import attest;'
+                      'attest.forge.GitHub.stored_logins=lambda self:set();'
                       'attest.forge.GitHub.request=lambda self,path,timeout: json.load(open(os.environ["FORGE_FIXTURE"]))[path.replace("repos/fixture/repo/","repos/{owner}/{repo}/")];'
                       'sys.exit(attest.main())')
             command = [sys.executable, '-c', script, '--root', str(self.root), *args]
@@ -356,6 +358,7 @@ class CLITests(unittest.TestCase):
         command = [sys.executable, str(SCRIPTS / 'record-run.py'), *args]
         if os.name == 'nt':
             code = ('import sys,json,os,runpy;sys.path.insert(0,' + repr(str(SCRIPTS)) + ');import forge_evidence;'
+                    'forge_evidence.GitHub.stored_logins=lambda self:set();'
                     'forge_evidence.GitHub.request=lambda self,path,timeout: json.load(open(os.environ["FORGE_FIXTURE"]))[path.replace("repos/fixture/repo/","repos/{owner}/{repo}/")];'
                     'sys.argv=[' + repr(str(SCRIPTS / 'record-run.py')) + ']+sys.argv[1:];'
                     'runpy.run_path(sys.argv[0],run_name="__main__")')

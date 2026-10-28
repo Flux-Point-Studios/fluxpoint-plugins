@@ -105,5 +105,8 @@
       "claim": "Can a commit status prove its entire CI environment?",
       "resolution": "No. Operator credential isolation remains required; observable restarted/manual Woodpecker pipelines are refused and unavailable metadata cannot green."
     }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/tests/forge-evidence-test.py"
   ]
 }
