@@ -3,7 +3,11 @@ import ctypes
 import os
 import secrets
 import shutil
+
+
+import stat
 import subprocess
+import sys
 import time
 
 
@@ -51,6 +55,33 @@ def shell_argv(cmd, platform=None):
     if (platform or os.name) == 'nt':
         return [bash_path(), '-c', cmd]
     return ['/bin/sh', '-c', cmd]
+
+
+def remove_tree(path):
+    """Delete a command's scratch tree. Windows will not delete a read-only file and
+    git writes every object read-only, so clear the bit and retry; anything still
+    present is named in a CleanupPending, so the caller preserves the tree."""
+    failed = {}
+
+    def retry(func, name, info):
+        error = info[1] if isinstance(info, tuple) else info
+        if func in (os.unlink, os.rmdir):
+            try:
+                os.chmod(name, os.stat(name).st_mode | stat.S_IWRITE)
+                func(name)
+                return
+            except OSError as exc:
+                error = exc
+        failed[name] = error
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=retry)
+    else:
+        shutil.rmtree(path, onerror=retry)
+    if os.path.lexists(path):
+        raise CleanupPending('could not remove {}: {}'.format(path, '; '.join(
+            '{} ({})'.format(name, getattr(error, 'strerror', None) or error)
+            for name, error in failed.items() if os.path.lexists(name))))
 
 
 def identity(pid):

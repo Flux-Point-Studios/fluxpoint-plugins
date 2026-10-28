@@ -18,14 +18,13 @@ import locale
 import math
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
 
-from process_tree import CleanupPending, ProcessTree, shell_argv
+from process_tree import CleanupPending, ProcessTree, shell_argv, remove_tree
 
 
 def text(value):
@@ -101,7 +100,7 @@ def observe(archive, patch, control, command, timeout):
         raise CleanupPending('{}; snapshot preserved at {}'.format(exc, scratch)) from exc
     finally:
         if cleanup:
-            shutil.rmtree(scratch)
+            remove_tree(scratch)
 
 
 def replay(root, context, defect_class, targets, control, command, timeout):
