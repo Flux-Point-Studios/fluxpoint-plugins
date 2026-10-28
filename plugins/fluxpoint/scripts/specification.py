@@ -369,6 +369,24 @@ def project(root, edits, spec=None, graph=None):
             if packet_paths(root, headers(projected).get('SPEC'))[0].resolve() != packet_file.resolve():
                 raise ValueError(f'packetEdits cannot redirect graph {rel} to a different SPEC packet')
             allowed.add(rel)
+    # Contract overlays are part of the same reviewable graph proposal. Allow
+    # only schemas under an explicitly named, repository-contained overlay.
+    graphs = [root / rel for rel in allowed if rel.endswith('.md')]
+    overlays = set()
+    for path in graphs:
+        for contents in (file_snapshot(root, path), file_snapshot(root, path, snapshots)):
+            if not re.search(r'^```json[ \t]+graph-ir[ \t]*$', contents.decode('utf-8'), re.M):
+                continue
+            declaration = headers(contents.decode('utf-8')).get('CONTRACTS')
+            if declaration:
+                directory = (root / in_repo(declaration, 'CONTRACTS:')).resolve()
+                if not directory.is_relative_to(root):
+                    raise ValueError('CONTRACTS: overlay must stay inside the repository')
+                overlays.add(directory)
+    for rel in set(snapshots) - allowed:
+        path = (root / rel).resolve()
+        if path.name.endswith('.schema.json') and any(path.parent == directory for directory in overlays):
+            allowed.add(rel)
     if set(snapshots) - allowed:
         raise ValueError('packetEdits target files outside this packet, its references and graph: '
                          + ', '.join(sorted(set(snapshots) - allowed)))

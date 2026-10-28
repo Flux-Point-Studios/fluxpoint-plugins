@@ -60,6 +60,26 @@ class PacketProjectionTests(unittest.TestCase):
         self.assertIsNotNone(match, result.stdout)
         return tuple(int(v.replace(',', '')) for v in match.groups())
 
+    def test_graph_and_overlay_contract_are_projected_as_one_proposal(self):
+        overlay = self.root / 'contracts'
+        overlay.mkdir()
+        schema = json.loads((PLUGIN / 'contracts/HarnessCheckV1.schema.json').read_text())
+        original = json.dumps(schema, indent=2)
+        (overlay / 'HarnessCheckV1.schema.json').write_text(original)
+        self.graph()
+        graph = self.root / 'WORK.md'
+        graph.write_text('CONTRACTS: contracts\n' + graph.read_text())
+        edit_graph = self.edit('exit != 0', 'rowExit != 0', file='WORK.md')
+        rejected = self.compile('--check', '--packet-edits', self.proposals([edit_graph]))
+        self.assertNotEqual(rejected.returncode, 0)
+        changed = json.loads(original)
+        changed['properties']['rowExit'] = {'type': 'integer'}
+        proposals = [edit_graph, self.edit(original, json.dumps(changed, indent=2), file='contracts/HarnessCheckV1.schema.json')]
+        result = self.compile('--check', '--packet-edits', self.proposals(proposals))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('projected contracts: contracts/HarnessCheckV1.schema.json', result.stdout)
+        self.assertEqual((overlay / 'HarnessCheckV1.schema.json').read_text(), original)
+
     def test_projection_matches_landed_utf8_size_and_writes_no_packet_or_lock(self):
         anchor = self.doc['checks'][0]['scope']
         replacement = anchor + ' — π and precise scope clauses' * 20

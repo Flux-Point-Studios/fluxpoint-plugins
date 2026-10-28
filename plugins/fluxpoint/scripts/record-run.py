@@ -349,6 +349,10 @@ def derive(summary):
                     # Worst exit across every harness node: one red run is
                     # the campaign's answer, whatever a later one says.
                     harness = e if harness in (None, 0) else harness
+            if c == "FixCheckV1" and isinstance(r.get("packetCheck"), dict):
+                e = r["packetCheck"].get("exit")
+                if type(e) is int:
+                    harness = e if harness in (None, 0) else harness
             if node not in exempt and (c == "RedTeamV1" or (c is None and r.get("verdict") in ("SHIP", "BLOCK"))):
                 v = r.get("verdict")
                 why = red_team_incoherent(r)
@@ -368,14 +372,14 @@ def derive(summary):
     return harness, verdict, blocked, proof, proof_surface, incoherent
 
 
-def repair_receipts(summary, graph):
+def repair_receipts(summary, graph, root=None):
     """Freeze the actual graph's independent checker descriptors at recording."""
     import importlib.util
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "repair_checks.py")
     spec = importlib.util.spec_from_file_location("repair_checks_recorder", path)
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
-    frozen = helper.from_graph(graph)
+    frozen = helper.from_graph(graph, root=root)
     commits, problems = helper.checked(summary, frozen)
     return frozen, commits, problems
 
@@ -550,6 +554,13 @@ def main():
         # No checker ran. That is the same sentence as a prove: node that
         # cited no attestation: the declared verification did not happen.
         outcome = "INCOMPLETE"
+
+    if d_harness not in (None, 0) and any(
+            contracts == "FixCheckV1" and any(isinstance(r.get("packetCheck"), dict)
+                and r["packetCheck"].get("exit") != 0 for r in _each((summary.get("results") or {}).get(node)))
+            for node, contracts in (summary.get("contracts") or {}).items()):
+        if outcome in ("COMPLETE", "UNKNOWN"):
+            outcome = "INCOMPLETE"
 
     # 1a. Irreversible effects were filed into the once-only ledger at step
     # 0, before anything in this script could refuse the record.
@@ -730,9 +741,11 @@ def main():
         replay_problems.append(str(exc))
         outcome = "REFUSED-REPLAY"
         print("record-run: REPLAY-PROVENANCE — " + str(exc), file=sys.stderr)
-    repair_checkers, checked, repair_problems = repair_receipts(summary, args.graph)
+    repair_checkers, checked, repair_problems = repair_receipts(summary, args.graph, root=args.root)
     for issue in repair_problems:
         print("record-run: checked commit refused — " + issue, file=sys.stderr)
+    if repair_problems and outcome in ("COMPLETE", "UNKNOWN"):
+        outcome = "INCOMPLETE"
     os.makedirs(args.state_dir, exist_ok=True)
     art = os.path.join(args.state_dir, f"{args.run_id}.json")
     artifact_data = {

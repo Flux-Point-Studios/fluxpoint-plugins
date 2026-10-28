@@ -83,10 +83,19 @@ def descriptors(ir):
     return result
 
 
-def from_graph(path):
+def from_graph(path, root=None):
     try:
-        blocks = FENCE.findall(Path(path).read_text(encoding='utf-8'))
-        return descriptors(json.loads(blocks[0])) if len(blocks) == 1 else {}
+        contents = Path(path).read_text(encoding='utf-8')
+        blocks = FENCE.findall(contents)
+        frozen = descriptors(json.loads(blocks[0])) if len(blocks) == 1 else {}
+        import specification
+        packet = specification.headers(contents).get('SPEC')
+        if packet is None and (Path(root) if root is not None else Path(path).parent).joinpath(specification.SPEC).is_file():
+            packet = specification.SPEC
+        if packet:
+            for descriptor in frozen.values():
+                descriptor['packetPath'] = str(specification.in_repo(packet, 'SPEC:'))
+        return frozen
     except (OSError, ValueError, TypeError):
         return {}
 
@@ -161,7 +170,7 @@ def receipt_issue(row, descriptor, summary):
         if not isinstance(patch, dict) or patch.get('item') not in allowed:
             return False
         r = patch.get('round')
-        expected = root + '/.claude/fluxpoint/rounds/' + launch['nonce'] + '/' + patch['item'] + '/r' + str(r) + '/patch.diff'
+        expected = root + '/.claude/fluxpoint/rounds/' + launch['nonce'] + '/' + str(summary.get('repairReadNonce', '')) + '/' + patch['item'] + '/r' + str(r) + '/patch.diff'
         return (type(r) is int and 1 <= r <= number and isinstance(patch.get('patch'), str)
                 and patch['patch'].replace('\\', '/') == expected)
 
@@ -184,9 +193,18 @@ def receipt_issue(row, descriptor, summary):
     try:
         data = Path(current['patch']).read_bytes()
         measured = manifest(data)
+        from repair_diff import compact_manifest, manifest_digest
+        expected_manifest = manifest_digest(compact_manifest(data))
+        if current.get('patchSha256') != measured['patchSha256']:
+            return 'DIFF-UNPROVEN: fixer identity differs from live patch bytes'
     except (OSError, ValueError, UnicodeError) as exc:
         return 'DIFF-UNPROVEN: live patch cannot be read: ' + str(exc)
+    packet_path = descriptor.get('packetPath') or summary.get('specificationPath')
+    if packet_path and (not isinstance(check.get('packetCheck'), dict) or check['packetCheck'].get('spec') != packet_path):
+        return 'PACKET-CHECK-UNPROVEN: fixed check for the declared packet is missing'
     proof = row.get('diffAttack')
+    if isinstance(proof, dict) and proof.get('manifestSha256') != expected_manifest:
+        return 'DIFF-UNPROVEN: recorded manifest differs from live patch bytes'
     if proof != check.get('diffAttack') or not isinstance(summary.get('repairDiffReviews'), list) or proof not in summary['repairDiffReviews']:
         return 'DIFF-ATTACK-UNPROVEN: full checker and harness summary lack the same diff receipt'
     if not isinstance(proof, dict) or proof.get('readNonce') != summary.get('repairReadNonce') or not isinstance(proof.get('readNonce'), str) or not re.fullmatch('[0-9a-f]{64}', proof['readNonce']):

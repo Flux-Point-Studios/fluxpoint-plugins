@@ -1,5 +1,6 @@
 """Deterministic repair-patch identity and PASS coverage checks (#172)."""
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -20,7 +21,7 @@ SURFACE_PATTERNS = (
 
 
 def surfaces(content):
-    return [name for name, pattern in SURFACE_PATTERNS if re.search(pattern, content, re.I)] or ['other']
+    return [name for name, pattern in SURFACE_PATTERNS if re.search(pattern, content, re.I | re.ASCII)] or ['other']
 
 
 def text(value):
@@ -55,19 +56,18 @@ def manifest(data):
                     break
                 if body.startswith('+'):
                     added.append(body[1:])
-            if added:
-                content = '\n'.join(added)
-                classified = surfaces(content)
-                obligations = []
-                if any(s in classified for s in ('outbound-calls', 'timers')):
-                    obligations.append('latency')
-                if 'alarms' in classified:
-                    obligations.append('alarm-rate')
-                if re.search(r'rate.?limit|token.?bucket|burst', content, re.I):
-                    obligations.append('provider-pool')
-                hunks.append(dict(id='h' + str(i), path=path, newStart=int(match[1]),
-                                  newLines=int(match[2]) if match[2] else 1,
-                                  added=added, surfaces=classified, obligations=obligations))
+            content = '\n'.join(added)
+            classified = surfaces(content)
+            obligations = []
+            if any(s in classified for s in ('outbound-calls', 'timers')):
+                obligations.append('latency')
+            if 'alarms' in classified:
+                obligations.append('alarm-rate')
+            if re.search(r'rate.?limit|token.?bucket|burst', content, re.I | re.ASCII):
+                obligations.append('provider-pool')
+            hunks.append(dict(id='h' + str(i), path=path, newStart=int(match[1]),
+                              newLines=int(match[2]) if match[2] else 1,
+                              added=added, surfaces=classified, obligations=obligations))
         elif line == 'GIT binary patch' or line.startswith('Binary files '):
             if path is None:
                 raise ValueError('binary patch lacks file identity')
@@ -75,6 +75,19 @@ def manifest(data):
                               added=[], surfaces=['other'], obligations=[], binary=True))
     changed = '\n'.join(line[1:] for line in lines if line.startswith(('+', '-')) and not line.startswith(('+++ ', '--- ')))
     return dict(patchSha256=digest, hunks=hunks, changedSurfaces=surfaces(changed))
+
+
+def compact_manifest(data):
+    """Bounded review inventory; source lines stay in the patch artifact."""
+    result = manifest(data)
+    for hunk in result['hunks']:
+        hunk['added'] = bool(hunk['added'])
+    return result
+
+
+def manifest_digest(measured):
+    canonical = json.dumps(measured, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('ascii')).hexdigest()
 
 
 def sibling_issue(rows, targets, fixer_rows=()):
@@ -259,7 +272,14 @@ def checker_evidence_issue(check, context, measured, node, integration, read_non
             or w.get('base') != context['base'] or w.get('patchSha256') != measured['patchSha256'] or w.get('readNonce') != read_nonce
             or not text(w.get('snapshot')) or not isinstance(w.get('token'), str) or not re.fullmatch('[0-9a-f]{64}', w['token'])):
         return 'CHECKER-UNPROVEN: missing independent checker archive/cleanup witness'
-    observations = w.get('observations')
+    all_observations = w.get('observations')
+    packet = check.get('packetCheck')
+    if packet is not None and (not isinstance(packet, dict) or packet.get('kind') != 'packet-check'
+            or packet.get('status') != 'CHECKED' or packet.get('exit') != 0
+            or packet.get('base') != context['base'] or packet.get('patchSha256') != measured['patchSha256']
+            or not isinstance(all_observations, list) or packet not in all_observations):
+        return 'PACKET-CHECK-UNPROVEN: fixed packet check did not pass on the exact repair snapshot'
+    observations = [o for o in all_observations if not isinstance(o, dict) or o.get('kind') != 'packet-check'] if isinstance(all_observations, list) else all_observations
     if (not isinstance(observations, list) or not observations
             or any(not isinstance(o, dict) or o.get('base') != context['base'] or o.get('patchSha256') != measured['patchSha256']
                    or o.get('reproduces') is not False or not observation(o.get('attack')) or not observation(o.get('control')) for o in observations)):

@@ -11,6 +11,11 @@
     "sharedResources"
   ],
   "properties": {
+    "patchSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Required by repair loops: SHA-256 of the complete patch artifact written as the final fixer/integrator step."
+    },
     "branch": {
       "type": "string",
       "minLength": 1

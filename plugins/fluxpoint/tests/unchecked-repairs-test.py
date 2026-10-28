@@ -73,7 +73,7 @@ class UncheckedRepairsTests(unittest.TestCase):
                  'evidence': ['pytest regression.py: original attack rejected, valid control passed'],
                  'commits': commits}
         patch = {'item': 'slice', 'round': 1,
-                 'patch': str(self.root) + '/.claude/fluxpoint/rounds/launch/slice/r1/patch.diff'}
+                 'patch': str(self.root) + '/.claude/fluxpoint/rounds/launch/' + '1' * 64 + '/slice/r1/patch.diff'}
         row = {'node': 'check', 'item': 'slice', 'round': 1,
                'verdict': 'PASS', 'findings': [], 'blockers': [],
                'evidence': check['evidence'], 'commits': commits, 'check': check,
@@ -91,6 +91,8 @@ class UncheckedRepairsTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         measured = manifest(data)
+        from repair_diff import compact_manifest, manifest_digest
+        patch['patchSha256'] = measured['patchSha256']
         observed = {'command': 'pytest regression.py', 'result': 'executed attack and valid control passed'}
         check['targetClasses'] = ['legacy-defect']
         check['siblings'] = [dict(finding='legacy-defect', invariant='all sibling paths preserve the invariant',
@@ -104,7 +106,7 @@ class UncheckedRepairsTests(unittest.TestCase):
                                        snapshot='/snapshot/checker', token='f' * 64,
                                        observations=[dict(base=self.base, patchSha256=measured['patchSha256'], attack=observed, control=observed, reproduces=False)])
         proof = dict(version=1, base=self.base, item='slice', round=1, patch=patch['patch'],
-                     patchSha256=measured['patchSha256'], readNonce=nonce, clean=True, blockers=[], refuters=[], findings=[])
+                     patchSha256=measured['patchSha256'], manifestSha256=manifest_digest(compact_manifest(data)), readNonce=nonce, clean=True, blockers=[], refuters=[], findings=[])
         lenses = ['authority', 'value', 'state', 'input', 'operations', 'composition', 'coverage-skeptic']
         proof['attackers'] = [dict(spawnId='repair-diff:slice:r1:attack:' + lens, lens=lens, completed=True,
                                    base=self.base, patchSha256=measured['patchSha256'], observations=[

@@ -181,7 +181,7 @@ def extract_ir(md_text):
         raise GraphError(f"IR block is not valid JSON: {e}")
 
 
-def load_contracts(contracts_dir):
+def load_contracts(contracts_dir, snapshots=None, root="."):
     """{$id: schema} for a directory. Two files claiming one $id is an error:
     which one binds used to depend on the loader — the compiler kept the
     last in sorted order, release.py the first — so a park could be released
@@ -191,8 +191,12 @@ def load_contracts(contracts_dir):
         return out
     for fn in sorted(os.listdir(contracts_dir)):
         if fn.endswith(".schema.json"):
-            with open(os.path.join(contracts_dir, fn), encoding="utf-8") as fh:
-                schema = json.load(fh)
+            if snapshots is None:
+                with open(os.path.join(contracts_dir, fn), encoding="utf-8") as fh:
+                    schema = json.load(fh)
+            else:
+                import specification
+                schema = json.loads(specification.file_snapshot(root, os.path.join(contracts_dir, fn), snapshots).decode("utf-8"))
             cid = schema.get("$id", fn.split(".")[0])
             if cid in where:
                 raise GraphError(f"{contracts_dir}: {where[cid]} and {fn} both declare "
@@ -202,7 +206,7 @@ def load_contracts(contracts_dir):
     return out
 
 
-def resolve_contracts(shipped_dir, header=None, explicit=None, root="."):
+def resolve_contracts(shipped_dir, header=None, explicit=None, root=".", snapshots=None):
     """(contracts, description) for one compile.
 
     `--contracts` replaces the set wholesale, as it always has. A graph
@@ -222,7 +226,7 @@ def resolve_contracts(shipped_dir, header=None, explicit=None, root="."):
     import specification
     rel = str(specification.in_repo(header, "CONTRACTS:"))
     local_dir = os.path.join(root or ".", rel)
-    local = load_contracts(local_dir)
+    local = load_contracts(local_dir, snapshots=snapshots, root=root)
     if not local:
         raise GraphError(
             f"CONTRACTS: {header} names no directory of *.schema.json contracts "
@@ -1001,6 +1005,8 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
                 f.append(f"{where}: cites requires independent:true")
             elif gates is None or getattr(gates, 'findings', ()) or any(gate not in gates for gate in cites):
                 f.append(f"{where}: cites needs valid manifest-declared gates")
+            if nid in repair_scoped:
+                f.append(f"{where}: repair nodes cannot use cites; repair checks use fixed snapshot packet evidence")
             if ir.get('treeGuard') is False:
                 f.append(f"{where}: cites requires the tree guard for manifest witness/coverage policy")
             if n.get('reduce') or n.get('actor', 'agent') != 'agent':
@@ -3194,7 +3200,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("")
     if repair_loops(ir):
         a("const REPAIR_LAUNCH = A._launch")
-        a("function repairRoundDir(key, round) { return REPAIR_LAUNCH.root.replace(/[/\\\\]$/, '') + '/.claude/fluxpoint/rounds/' + REPAIR_LAUNCH.nonce + '/' + key + '/r' + round + '/'; }")
+        a("const REPAIR_PACKET = " + json.dumps(specification.get("path") if specification else None))
+        a("function repairRoundDir(key, round) { return REPAIR_LAUNCH.root.replace(/[/\\\\]$/, '') + '/.claude/fluxpoint/rounds/' + REPAIR_LAUNCH.nonce + '/' + A._replayLaunchNonce + '/' + key + '/r' + round + '/'; }")
         a("const FIX_ORIGINS = []")
         with open(os.path.join(os.path.dirname(__file__), "repair-origins.js"), encoding="utf-8") as helpers:
             a(helpers.read())
@@ -4240,7 +4247,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
         a(f"    if (Object.prototype.hasOwnProperty.call(fixed, 'packetConflict')) {{ abort_{var} = 'HALTED'; note({js_str(fixer['id'])}, 'PACKET-CONFLICT', 'Locked-check conflict requires a recorded operator ruling'); return {{ ...state, fixed, roundDir }} }}")
         a(f"    const resourceIssue = repairResourcesIssue(fixed)")
         a(f"    if (resourceIssue) {{ abort_{var} = 'HALTED'; note({js_str(nid)}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: item.key, round: round_{var} }}); return {{ ...state, fixed, roundDir }} }}")
-    a(f"    const patches = [...(state.patches || []), {{ item: item.key, round: round_{var}, patch: roundDir + 'patch.diff' }}]")
+    a(f"    const patches = [...(state.patches || []), {{ item: item.key, round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: fixed.patchSha256 }}]")
     a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: [...state.targetClasses] }}")
     a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay the reproduction and its valid control on the bare launch base and EACH listed complete patch in a fresh base archive, not cumulatively. Use repair-replay.py to obtain originEvidence. New code location or identifier age is not origin evidence. Missing replay/control means INCOMPLETE. Attack every sharedResources writer and reader supplied by the fixer, including existing writers reached by a new reader.\\n'")
 
@@ -4305,20 +4312,21 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     if integration:
         merge, review = (by_id[k] for k in integration)
         mfield, mop, mlit = halt_parts(review)
-        a(f"  if (passed_{var}.length) {{")
+        a(f"  if (passed_{var}.length && (!pending_{var}.length || round_{var} < {int(rep['maxRounds'])})) {{")
         a(f"    const roundDir = repairRoundDir('_integration', round_{var})")
         a(f"    const lastCheck = integrationLast_{var}")
         a(f"    const requiredClasses = integrationRecurring_{var}")
         a("    const reframeBrief = requiredClasses.length ? 'REFRAME REQUIRED for merged-tree classes ' + JSON.stringify(requiredClasses) + ': state the authoritative invariant and adopt/refute the class rewire with a command and measured result, or remove the mechanism. Return structured reframe evidence; the independent review must validate it.\\n' : ''")
         a(f"    if (!affordable({js_str(merge['id'])})) {{ INCOMPLETE = true; return summary('BUDGET-EXHAUSTED') }}")
-        a(f"    const merged = await spawn(reframeBrief + {prompt(merge, 'passed_' + var)}, {opts(merge, ir, merge.get('phase', phase_name), '`' + merge['id'] + ':r${round_' + var + '}`')})")
+        a(f"    const integrationInputs = passed_{var}.map(s => ({{ item: s.item.key, patches: s.patches, packetEdits: s.fixed.packetEdits || [], siblings: s.fixed.siblings || [], sharedResources: s.fixed.sharedResources || [] }}))")
+        a(f"    const merged = await spawn(reframeBrief + {prompt(merge, 'integrationInputs')}, {opts(merge, ir, merge.get('phase', phase_name), '`' + merge['id'] + ':r${round_' + var + '}`')})")
         a(f"    RESULTS[{js_str(merge['id'])}] = merged")
         a("    if (!merged) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
         if merge.get("contract") == "SliceV1":
             a(f"    if (Object.prototype.hasOwnProperty.call(merged, 'packetConflict')) {{ INCOMPLETE = true; note({js_str(merge['id'])}, 'PACKET-CONFLICT', 'Locked-check conflict requires a recorded operator ruling'); return summary('HALTED') }}")
             a("    const resourceIssue = repairResourcesIssue(merged)")
             a(f"    if (resourceIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: '_integration', round: round_{var} }}); return summary('HALTED') }}")
-        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff' }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))] }}")
+        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: merged.patchSha256 }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))] }}")
         a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay bare base and EVERY component patch separately on fresh base archives, then the complete integrated patch. Only a harm absent from base and all component patches but reproduced on the integrated patch is cross-slice. Attack the complete sharedResources writer/reader list from the integration result.\\n'")
 
         a(f"    if (requiredClasses.length && !validReframe_{var}(merged.reframe, requiredClasses)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'third narrow integration patch refused'); return summary('REFRAME-REQUIRED') }}")
@@ -4890,7 +4898,8 @@ def main():
             header = projected_header
         ir = extract_ir(text)
         contracts, contracts_desc = resolve_contracts(
-            shipped_dir, header.get("CONTRACTS"), args.contracts, args.gates_root)
+            shipped_dir, header.get("CONTRACTS"), args.contracts, args.gates_root,
+            snapshots=projection[2] if projection else None)
     except (OSError, GraphError, ValueError, TypeError) as e:
         print(f"graph-compile: {e}", file=sys.stderr)
         return 1
@@ -4940,6 +4949,9 @@ def main():
         identity_sha = hashlib.sha256(json.dumps(projection[1], sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
         print(f"graph-compile: projection only — current packet {projection[3]['sha256']}; "
               f"projected packet {projection[1]['sha256']}; projected identity {identity_sha}; no packet or lock written")
+        contract_edits = sorted(rel for rel in projection[2] if rel.endswith('.schema.json'))
+        if contract_edits:
+            print('graph-compile: projected contracts: ' + ', '.join(contract_edits))
         try:
             spec_mod.load(args.gates_root, spec=spec_path)
         except (OSError, ValueError, TypeError) as exc:
