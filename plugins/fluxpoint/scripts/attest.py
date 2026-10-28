@@ -1420,6 +1420,12 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
             or r["sha"] != row.get("treeSha")):
         return {**base, "status": "MISMATCH",
                 "detail": "local claim must name the exact commit the gate judged (sha)"}
+    if row.get('witness') not in ('forge', 'reuse') and root and (launch or {}).get('manifestSha256'):
+        expected_manifest = launch['manifestSha256']
+        if (row.get('manifestSha256') != expected_manifest
+                or fault_policy.manifest_sha(root) != expected_manifest):
+            return {**base, 'status': 'MISMATCH',
+                    'detail': 'gate manifest differs from the consumed launch policy'}
     if row.get('cancelled'):
         return {**base, "status": "STALE", "detail": "cancelled execution is not a gate verdict"}
     if row.get('witness') not in ('forge', 'reuse') and root:

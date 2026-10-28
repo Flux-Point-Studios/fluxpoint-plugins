@@ -81,6 +81,18 @@ class RetentionFollowups(unittest.TestCase):
         self.assertIs(row['dirty'], False, row.get('dirtyPaths'))
         self.assertEqual(self.claim(row)['status'], 'ATTESTED')
 
+    def test_clean_linked_tree_cannot_use_a_changed_coordinator_manifest(self):
+        tree = Path(self.f.tmp.name) / 'gate-tree'
+        self.f.git('worktree', 'add', '--detach', str(tree), 'HEAD')
+        self.f.doc['gates']['suite'] = 'true'
+        self.f.write_manifest()
+        self.assertEqual(at.run_gate(str(self.root), 'suite', tree=str(tree), nonce=self.f.launch['nonce']), 0)
+        row = self.f.rows()[-1]
+        self.assertIs(row['dirty'], False)
+        check = self.claim(row)
+        self.assertEqual(check['status'], 'MISMATCH', check)
+        self.assertIn('manifest', check['detail'])
+
     def test_failure_hook_records_runtime_error_shape_and_retains_it(self):
         payload = dict(hook_event_name='PostToolUseFailure', cwd=str(self.root), tool_name='Bash',
                        tool_use_id='failure-hook', tool_input={'command': self.f.doc['gates']['suite']},
