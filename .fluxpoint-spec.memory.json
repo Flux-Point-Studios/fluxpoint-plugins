@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "goal": "Serialize durable campaign lessons and share their retained provenance across worktrees",
+  "asset": "Existing LessonV1 append-only memory and recorded run artifacts",
+  "scope": [
+    "Cross-process lesson append locking and newest-by-time serving",
+    "Clone-shared git-common-dir storage with explicit override and legacy adoption",
+    "Retained shared run copies for lesson provenance",
+    "Evidence recording survives malformed lesson stores"
+  ],
+  "outOfScope": [
+    "Automatic synchronization between hosts",
+    "Repairing malformed historical JSONL by guessing missing bytes",
+    "Recall index writer serialization handled in separate change"
+  ],
+  "decisions": [
+    {
+      "id": "shared-memory",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "Where should parallel worktrees retain lessons safely?",
+        "options": [
+          {
+            "option": "clone-shared-lock",
+            "argued_by": "model",
+            "strongest_objection": "Needs compatible legacy reads and serialized append transactions"
+          },
+          {
+            "option": "checkout-local",
+            "argued_by": "model",
+            "strongest_objection": "Removing a worktree deletes its lessons and siblings cannot seed them"
+          }
+        ],
+        "chosen": "clone-shared-lock",
+        "rationale": "Use the existing cross-platform workfile lock and git common directory so worktrees share durable local knowledge.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issues #160 and #165 include measured concurrent tearing and deletion repros",
+          "Existing workfile_lock handles POSIX flock and Windows msvcrt"
+        ]
+      },
+      "costs": [
+        {
+          "option": "clone-shared-lock",
+          "cost": "One filesystem lock per append and one shared run copy",
+          "basis": "estimate",
+          "evidence": [
+            "Existing cross-platform lock and immutable run artifacts are reusable"
+          ]
+        },
+        {
+          "option": "checkout-local",
+          "cost": "Repeated discovery after worktree deletion",
+          "basis": "measured",
+          "evidence": [
+            "Issue #165 repro loses worktree lessons"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "lesson-storage",
+      "statement": "Concurrent appends preserve complete rows and cumulative arrivals; linked worktrees share surviving lessons and retained provenance; legacy adoption preserves original files",
+      "decisions": [
+        "shared-memory"
+      ],
+      "checks": [
+        "memory-storage-tests"
+      ],
+      "counterexample": "Two simultaneous writers tear a row or count a third arrival as two, or deleting the filing worktree loses its lesson"
+    },
+    {
+      "id": "evidence-retention",
+      "statement": "A malformed lesson store remains a hard error to memory readers but cannot suppress a run Evidence row",
+      "decisions": [
+        "shared-memory"
+      ],
+      "checks": [
+        "memory-storage-tests"
+      ],
+      "counterexample": "SystemExit during lesson filing terminates record-run before Evidence is appended"
+    }
+  ],
+  "checks": [
+    {
+      "id": "memory-storage-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/memory-storage-test.py"
+      ],
+      "scope": "Execute multiprocessing writers, linked worktree deletion/adoption and record-run with corrupt memory",
+      "assumptions": [
+        "Filesystem advisory locks are honored by cooperating memory writers",
+        "No remote host synchronization is claimed"
+      ],
+      "timeoutSeconds": 180
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does a shared store imply cross-host synchronization?",
+      "resolution": "No. FPL_MEMORY_HOME selects an explicitly synchronized location; synchronization remains external."
+    },
+    {
+      "claim": "Should corrupt JSONL be silently skipped?",
+      "resolution": "No. Readers still refuse corruption; record-run isolates that failure so Evidence survives."
+    }
+  ]
+}

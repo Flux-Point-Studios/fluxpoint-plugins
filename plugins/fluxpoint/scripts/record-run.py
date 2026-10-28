@@ -757,6 +757,7 @@ def main():
     lessons = None
     try:
         import memory as _memory
+        _memory.retain_run(args.root, args.run_id, art)
         written, mfindings = _memory.append_from_summary(
             args.root, summary, args.run_id, args.state_dir)
         for f in mfindings:
@@ -765,7 +766,7 @@ def main():
             killed = sum(1 for r in written if r["status"] == "killed")
             lessons = {"filed": len(written), "killed": killed}
             print(f"record-run: filed {len(written)} lesson(s), {killed} killed")
-    except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - never lose the Evidence row over this
         print(f"record-run: lesson filing failed: {e}", file=sys.stderr)
 
     # 1e. The recall index, refreshed after the lessons landed so the next

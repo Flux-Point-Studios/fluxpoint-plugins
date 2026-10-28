@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "sha256": "8becc0c2ce561973963438eab3815d3244cc578bb3b08a0812629a3c43bbb3b0",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/memory-storage-test.py": "90d4102f14a74190130e7547b6934d97a41b53d1c9cb52243327068bddee03f5"
+  }
+}
