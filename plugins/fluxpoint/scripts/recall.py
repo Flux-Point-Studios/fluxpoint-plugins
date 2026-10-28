@@ -13,8 +13,10 @@ This tool closes that gap without adding a store or a writer. It compiles a
 DERIVED index — a typed graph plus a lexical index plus optional dense
 vectors — from the append-only stores that already exist, the way
 compile-graph.py compiles the IR: deterministically, with no model in the
-loop, byte-identical for identical sources. The index lives under
-gitignored .claude/fluxpoint/index/ and is a rebuildable cache; the stores
+loop, byte-identical for identical sources. Repository indexes live under
+gitignored .claude/fluxpoint/index/<schema>/; external corpus indexes live
+once in the user's cache directory and are fused at read time. Both are
+rebuildable caches; the stores
 stay the only truth, and a malformed line in a SOURCE store is still a hard
 error, while a damaged INDEX file is deleted and rebuilt out loud.
 
@@ -47,6 +49,7 @@ import atexit
 import datetime
 import json
 import math
+import inspect
 import os
 import re
 import subprocess
@@ -63,7 +66,7 @@ import embedder  # noqa: E402
 import recall_sources  # noqa: E402
 from workfile_lock import workfile_lock  # noqa: E402
 
-INDEX_DIR = os.path.join(".claude", "fluxpoint", "index")
+INDEX_BASE = os.path.join(".claude", "fluxpoint", "index")
 RUNS_DIR = os.path.join(".claude", "fluxpoint", "runs")
 CEX = ".fluxpoint-cex.jsonl"
 _REFRESH_CHILDREN = []
@@ -162,6 +165,31 @@ def tokenize(text):
             if len(piece) >= 2 and piece != whole:
                 toks.append(piece)
     return toks
+
+
+def index_dir(root):
+    return os.path.abspath(os.path.join(root, INDEX_BASE, INDEX_SCHEMA))
+
+
+def shared_index_dir(root):
+    corpora = sorted(recall_sources.corpus_roots(root), key=_dumps)
+    identity = {"corpora": corpora}
+    # Codex has a user-wide store but its reader applies a project cwd policy.
+    # Different policy views must never reuse each other's private passages.
+    if any(c["format"] == "codex-memories" for c in corpora):
+        identity["scope"] = os.path.normcase(os.path.realpath(root))
+    key = hashlib.sha256(_dumps(identity).encode()).hexdigest()
+    cache = os.environ.get("XDG_CACHE_HOME") or (os.path.join(os.environ["LOCALAPPDATA"], "Cache") if os.name == "nt" and os.environ.get("LOCALAPPDATA") else os.path.join(os.path.expanduser("~"), ".cache"))
+    return os.path.abspath(os.path.join(cache, "fluxpoint", "recall", INDEX_SCHEMA, key))
+
+
+def writer_identity():
+    try:
+        with open(os.path.join(HERE, "..", "plugin.json"), encoding="utf-8") as source:
+            version = json.load(source).get("version", "unknown")
+    except (OSError, ValueError):
+        version = "unknown"
+    return {"version": version, "schema": INDEX_SCHEMA}
 
 
 # ---------------------------------------------------------------- sources
@@ -269,8 +297,32 @@ def _source_fingerprints(root):
                 if filename.endswith(".json"):
                     parts.append(f"{directory}/{filename}:{_sha_file(os.path.join(directory, filename))}")
     fp["runs"] = hashlib.sha256("|".join(parts).encode()).hexdigest() if any(os.path.isdir(d) for d in directories) else "absent"
-    fp["notes"] = recall_sources.fingerprints(root)
     return fp
+
+
+def _corpus_fingerprints(root):
+    rows = []
+    for corpus in sorted(recall_sources.corpus_roots(root), key=_dumps):
+        files = []
+        for path in recall_sources.files(corpus):
+            try:
+                stat = path.stat()
+                files.append([path.relative_to(corpus["path"]).as_posix(), stat.st_size, stat.st_mtime_ns])
+            except OSError:
+                files.append([str(path), "unreadable"])
+        rows.append({**corpus, "files": files})
+    return hashlib.sha256(_dumps(rows).encode()).hexdigest()
+
+
+# Schema identity describes everything needed to interpret derived files. Older
+# plugin versions keep their own slot and never overwrite this reader's cache.
+INDEX_SCHEMA = hashlib.sha256(_dumps({
+    "format": 2, "docs": sorted(DOC_KINDS), "nodes": sorted(NODE_KINDS),
+    "edges": sorted(EDGE_KINDS), "tokenizer": inspect.getsource(tokenize),
+    "fingerprints": inspect.getsource(_source_fingerprints) + inspect.getsource(_corpus_fingerprints),
+    "corpusReader": inspect.getsource(recall_sources.notes),
+}).encode()).hexdigest()[:20]
+INDEX_DIR = os.path.join(INDEX_BASE, INDEX_SCHEMA)
 
 
 def _source_doc_counts(root):
@@ -314,11 +366,118 @@ def _atomic_json(path, obj):
     _atomic_text(path, _dumps(obj))
 
 
+def _compile_lex(nodes):
+    lex_docs, df = {}, {}
+    for nid, node in sorted(nodes.items()):
+        if node.get("kind") not in DOC_KINDS:
+            continue
+        toks = tokenize(node.get("text") or "")
+        tf = {}
+        for token in toks:
+            tf[token] = tf.get(token, 0) + 1
+        lex_docs[nid] = {"len": len(toks), "tf": tf}
+        for token in tf:
+            df[token] = df.get(token, 0) + 1
+    count = len(lex_docs)
+    return {"version": 1, "tokenizer": "fpl-ident-v1", "k1": K1, "b": B,
+            "N": count, "avgdl": sum(d["len"] for d in lex_docs.values()) / count if count else 0.,
+            "df": df, "docs": lex_docs}
+
+
+def _slot_stale(slot, sources):
+    meta = _read_json_path(os.path.join(slot, META_F))
+    if not isinstance(meta, dict) or meta.get("sources") != sources:
+        return True
+    for filename, expected in (meta.get("files") or {}).items():
+        try:
+            stat = os.stat(os.path.join(slot, filename))
+            if [stat.st_size, stat.st_mtime_ns] != expected:
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _shared_index(root):
+    slot = shared_index_dir(root)
+    graph, lex, meta = [_read_json_path(os.path.join(slot, fn)) for fn in (GRAPH_F, LEX_F, META_F)]
+    if any(not isinstance(obj, dict) for obj in (graph, lex, meta)):
+        return None, None, "shared memory index not built yet"
+    if not isinstance(graph.get("nodes"), dict) or not isinstance(lex.get("docs"), dict):
+        return None, None, "shared memory index schema mismatch; rebuild pending"
+    if len({obj.get("generation") for obj in (graph, lex, meta)}) != 1:
+        return None, None, "shared memory index generation mismatch; rebuild pending"
+    if any(node.get("kind") not in NODE_KINDS for node in graph.get("nodes", {}).values()):
+        return None, None, "shared memory index schema mismatch; rebuild pending"
+    return graph, lex, None
+
+
+def _meta_view(root):
+    meta = _load_json(root, META_F)
+    if meta is None:
+        return None
+    meta = dict(meta)
+    meta["kinds"] = dict(meta.get("kinds") or {})
+    if not meta["kinds"]:
+        graph = _load_json(root, GRAPH_F) or {}
+        meta["kinds"] = {kind: 0 for kind in DOC_KINDS}
+        for node in graph.get("nodes", {}).values():
+            kind = node.get("kind")
+            if kind in meta["kinds"]:
+                meta["kinds"][kind] += 1
+    shared = _read_json_path(os.path.join(shared_index_dir(root), META_F)) or {}
+    for key in ("docs", "nodes", "edges", "pending"):
+        meta[key] = meta.get(key, 0) + shared.get(key, 0)
+    for kind, count in shared.get("kinds", {}).items():
+        meta["kinds"][kind] = meta["kinds"].get(kind, 0) + count
+    return meta
+
+
+def _build_shared(root, embed_backfill=False, transport=None):
+    slot = shared_index_dir(root)
+    os.makedirs(slot, mode=0o700, exist_ok=True)
+    with workfile_lock(os.path.join(slot, "build")):
+        source_fp = {"notes": _corpus_fingerprints(root)}
+        dense_spec = embedder.resolve()
+        if not _slot_stale(slot, source_fp):
+            meta = _read_json_path(os.path.join(slot, META_F))
+            if not embed_backfill and meta.get("denseSpec") == dense_spec:
+                return meta
+            nodes = _read_json_path(os.path.join(slot, GRAPH_F))["nodes"]
+            meta.update(_sync_vectors(root, nodes, embed_backfill, transport, slot=slot))
+            meta.update(writer=writer_identity(), denseSpec=dense_spec)
+            _atomic_json(os.path.join(slot, META_F), meta)
+            return meta
+        nodes, diagnostics = recall_sources.notes(root)
+        for diagnostic in diagnostics:
+            print("recall: " + diagnostic, file=sys.stderr)
+        graph = {"version": 1, "nodes": nodes, "edges": []}
+        lex = _compile_lex(nodes)
+        generation = hashlib.sha256(_dumps({"sources": source_fp, "graph": graph, "lex": lex}).encode()).hexdigest()
+        graph["generation"] = lex["generation"] = generation
+        for filename, obj in ((GRAPH_F, graph), (LEX_F, lex)):
+            _atomic_json(os.path.join(slot, filename), obj)
+        dense = _sync_vectors(root, nodes, embed_backfill, transport, slot=slot)
+        meta = {"version": 2, "writer": writer_identity(), "sources": source_fp,
+                "generation": generation, "docs": lex["N"], "nodes": len(nodes), "edges": 0,
+                "kinds": {"note": len(nodes)}, "denseSpec": dense_spec, **dense,
+                "files": {fn: [os.stat(os.path.join(slot, fn)).st_size, os.stat(os.path.join(slot, fn)).st_mtime_ns]
+                          for fn in (GRAPH_F, LEX_F)}}
+        _atomic_json(os.path.join(slot, META_F), meta)
+        return meta
+
+
 def build(root, embed_backfill=False, transport=None):
-    idx = os.path.join(root, INDEX_DIR)
+    idx = index_dir(root)
     os.makedirs(idx, exist_ok=True)
     with workfile_lock(os.path.join(idx, "build")):
-        return _build(root, embed_backfill, transport)
+        stats = _build(root, embed_backfill, transport)
+    shared = _build_shared(root, embed_backfill, transport)
+    for key in ("docs", "nodes", "edges", "pending"):
+        stats[key] += shared.get(key, 0)
+    for kind, count in shared.get("kinds", {}).items():
+        stats["kinds"][kind] = stats["kinds"].get(kind, 0) + count
+    return stats
 
 
 def _build(root, embed_backfill=False, transport=None):
@@ -490,35 +649,18 @@ def _build(root, embed_backfill=False, transport=None):
     # never dropped or down-ranked — because a finding that comes back
     # after the code moved is exactly the regression a sweep exists to
     # catch, and hiding the kill would hide it.
-    note_nodes, note_diagnostics = recall_sources.notes(root)
-    nodes.update(note_nodes)
-    for diagnostic in note_diagnostics:
-        print("recall: " + diagnostic, file=sys.stderr)
     stale_kills = _mark_stale_kills(root, nodes, edges)
 
     graph = {"version": 1, "nodes": nodes,
              "edges": sorted(list(e) for e in edges)}
 
     docs = {nid: n for nid, n in nodes.items() if n["kind"] in DOC_KINDS}
-    lex_docs, df = {}, {}
-    for nid in sorted(docs):
-        toks = tokenize(docs[nid].get("text") or "")
-        tf = {}
-        for t in toks:
-            tf[t] = tf.get(t, 0) + 1
-        lex_docs[nid] = {"len": len(toks), "tf": tf}
-        for t in tf:
-            df[t] = df.get(t, 0) + 1
-    n_docs = len(lex_docs)
-    lex = {"version": 1, "tokenizer": "fpl-ident-v1", "k1": K1, "b": B,
-           "N": n_docs,
-           "avgdl": (sum(d["len"] for d in lex_docs.values()) / n_docs)
-           if n_docs else 0.0,
-           "df": df, "docs": lex_docs}
+    lex = _compile_lex(docs)
+    n_docs = lex["N"]
 
     generation = hashlib.sha256(_dumps({"sources": source_fp, "graph": graph, "lex": lex}).encode()).hexdigest()
     graph["generation"] = lex["generation"] = generation
-    idx = os.path.join(root, INDEX_DIR)
+    idx = index_dir(root)
     os.makedirs(idx, exist_ok=True)
     ignore = os.path.join(root, ".claude", "fluxpoint", ".gitignore")
     if not os.path.exists(ignore):
@@ -534,7 +676,7 @@ def _build(root, embed_backfill=False, transport=None):
              "pending": 0, "provider": "none"}
     stats.update(_sync_vectors(root, docs, embed_backfill, transport))
 
-    meta = {"version": 1, "sources": source_fp, "generation": generation,
+    meta = {"version": 2, "writer": writer_identity(), "sources": source_fp, "generation": generation,
             "files": {fn: [os.stat(os.path.join(idx, fn)).st_size, os.stat(os.path.join(idx, fn)).st_mtime_ns] for fn in (GRAPH_F, LEX_F)},
             "docs": n_docs, "pending": stats["pending"],
             "provider": stats["provider"],
@@ -575,17 +717,17 @@ def _mark_stale_kills(root, nodes, edges):
     return marked
 
 
-def _vec_path(root, spec):
+def _vec_path(root, spec, slot=None):
     safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", spec["model"])
-    return os.path.join(root, INDEX_DIR,
+    return os.path.join(slot or index_dir(root),
                         f"vec-{spec['provider']}-{safe_model}-{spec['dims']}.jsonl")
 
 
-def _load_vectors(root, spec):
+def _load_vectors(root, spec, slot=None):
     """{docId: {sha, vec}} from the active provider's file. A damaged
     vector file is a cache, not a store: it is discarded out loud and the
     rows become pending, because a hook must never die on it."""
-    p = _vec_path(root, spec)
+    p = _vec_path(root, spec, slot)
     if not os.path.exists(p):
         return {}
     out = {}
@@ -611,11 +753,11 @@ def _load_vectors(root, spec):
     return out
 
 
-def _sync_vectors(root, docs, backfill, transport):
+def _sync_vectors(root, docs, backfill, transport, slot=None):
     spec = embedder.resolve()
     if spec["provider"] == "none":
         return {"pending": len(docs), "provider": "none"}
-    have = _load_vectors(root, spec)
+    have = _load_vectors(root, spec, slot)
     want = {nid: (docs[nid].get("text") or "") for nid in sorted(docs)
             if docs[nid].get("kind") != "note" or os.environ.get("FPL_EMBEDDER") not in (None, "", "none")}
     keep, missing = {}, []
@@ -637,7 +779,7 @@ def _sync_vectors(root, docs, backfill, transport):
         except embedder.EmbedError as e:
             print(f"recall: dense backfill failed ({e}); "
                   f"{len(missing)} card(s) stay pending", file=sys.stderr)
-    p = _vec_path(root, spec)
+    p = _vec_path(root, spec, slot)
     lines = [_dumps({"version": 1, "provider": spec["provider"],
                      "model": spec["model"], "dims": spec["dims"],
                      "dtype": "f32", "normalized": True})]
@@ -652,7 +794,10 @@ def _sync_vectors(root, docs, backfill, transport):
 # ------------------------------------------------------------------- load
 
 def _load_json(root, fn):
-    p = os.path.join(root, INDEX_DIR, fn)
+    return _read_json_path(os.path.join(index_dir(root), fn))
+
+
+def _read_json_path(p):
     if not os.path.exists(p):
         return None
     try:
@@ -671,10 +816,10 @@ def is_stale(root):
     if meta.get("sources") != _source_fingerprints(root): return True
     for filename, expected in (meta.get("files") or {}).items():
         try:
-            actual = os.stat(os.path.join(root, INDEX_DIR, filename))
+            actual = os.stat(os.path.join(index_dir(root), filename))
             if [actual.st_size, actual.st_mtime_ns] != expected: return True
         except OSError: return True
-    return False
+    return _slot_stale(shared_index_dir(root), {"notes": _corpus_fingerprints(root)})
 
 
 def ensure_index(root, offline=True, allow_rebuild=True):
@@ -713,12 +858,32 @@ def ensure_index(root, offline=True, allow_rebuild=True):
             raise SystemExit(
                 f"recall: {nid} has unknown kind {n.get('kind')!r} — the "
                 f"index registry is closed; rebuild with --build")
+    shared, shared_lex, shared_note = _shared_index(root)
+    if shared_note:
+        return None, None, shared_note
+    if shared is not None:
+        generation = hashlib.sha256((graph["generation"] + shared["generation"]).encode()).hexdigest()
+        graph = {**graph, "nodes": {**graph["nodes"], **shared["nodes"]},
+                 "edges": graph["edges"] + shared["edges"], "generation": generation}
+        docs = {**lex["docs"], **shared_lex["docs"]}
+        df = dict(lex["df"])
+        for token, count in shared_lex["df"].items():
+            df[token] = df.get(token, 0) + count
+        lex = {"version": 1, "tokenizer": "fpl-ident-v1", "k1": K1, "b": B,
+               "N": len(docs), "avgdl": sum(d["len"] for d in docs.values()) / len(docs) if docs else 0.,
+               "docs": docs, "df": df, "partitions": [lex, shared_lex], "generation": generation}
     return graph, lex, note
 
 
 # -------------------------------------------------------------------- legs
 
 def bm25(lex, query_tokens, limit=50):
+    if lex.get("partitions"):
+        scores = {}
+        for partition in lex["partitions"]:
+            for rank, (nid, _) in enumerate(bm25(partition, query_tokens, limit)):
+                scores[nid] = scores.get(nid, 0) + 1 / (RRF_K + rank + 1)
+        return sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:limit]
     if not query_tokens or not lex["N"]:
         return []
     scores = {}
@@ -751,6 +916,7 @@ def dense_leg(root, query, offline, diagnostics, limit=50):
                            f"{spec['provider']} configured)")
         return []
     vecs = _load_vectors(root, spec)
+    vecs.update(_load_vectors(root, spec, shared_index_dir(root)))
     if not vecs:
         diagnostics.append(f"dense leg empty (no vectors cached for "
                            f"{spec['provider']} {spec['model']}; run --build --embed)")
@@ -1122,7 +1288,7 @@ def for_session(root, refresh_index=False):
             return 0
         if not source_docs:
             return 0
-        meta = _load_json(root, META_F) or {}
+        meta = _meta_view(root) or {}
         indexed = int(meta.get("docs") or 0)
         if not meta:
             print(f"- FluxPoint recall has {source_docs} source document(s) "
@@ -1251,7 +1417,7 @@ def for_prompt(root):
                       "document(s) available. Run /fluxpoint:recall build.")
         return 0
     strong = []
-    lex = _load_json(root, LEX_F)
+    _, lex, _ = ensure_index(root, offline=True, allow_rebuild=False)
     for r in records:
         independent = {"lex", "dense", "ident"} & set(r.get("legs") or [])
         if (len(independent) >= 2
@@ -1320,7 +1486,7 @@ def request_refresh(root):
     have_sources = have_sources or any(os.path.isdir(d) and any(f.endswith(".json") for f in os.listdir(d)) for d in _run_directories(root))
     have_sources = have_sources or any(recall_sources.files(c) for c in recall_sources.corpus_roots(root))
     if not have_sources: return False
-    idx = os.path.abspath(os.path.join(root, INDEX_DIR))
+    idx = index_dir(root)
     os.makedirs(idx, exist_ok=True)
     lock = os.path.join(idx, "refresh.lock")
     try:
@@ -1428,7 +1594,7 @@ def main():
                                ("runs", "runs"),
                                ("cex.jsonl", ".fluxpoint-cex.jsonl"),
                                ("substrate.json", "substrate.json")))
-        meta = _load_json(a.root, META_F)
+        meta = _meta_view(a.root)
         if not meta:
             print("recall: no index built yet — run --build; recognized "
                   f"sources: {source_state}")
@@ -1451,6 +1617,8 @@ def main():
               f"counterexamples {kinds.get('cex', 0)}, "
               f"primitives {kinds.get('primitive', 0)}, notes {kinds.get('note', 0)}; recognized sources: "
               f"{source_state}")
+        corpus_writer = (_read_json_path(os.path.join(shared_index_dir(a.root), META_F)) or {}).get("writer", "not built")
+        print(f"recall: schema {INDEX_SCHEMA}; repo writer {meta.get('writer', writer_identity())}; repo slot {index_dir(a.root)}; corpus writer {corpus_writer}; corpus slot {shared_index_dir(a.root)}")
         return 0
 
     if a.format == "seedmap" and not a.tag:

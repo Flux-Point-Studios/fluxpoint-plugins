@@ -57,7 +57,8 @@ Compact/Midnight attack classes and their property-test or waiver requirements.
 The [documentation audit](documentation-audit.md) records the checked surfaces,
 corrections and verification limits of the October 2026 review.
 
-Recall corpus configuration, detached refresh, embedding consent, worker briefs and
+Recall corpus configuration, shared schema-specific indexes, detached refresh,
+embedding consent, worker briefs and
 shared worktree memory are described in [memory recall](memory-recall.md#corpus-configuration-and-safe-refresh).
 
 [Compiled witness identity](witness-identity.md) documents plugin pins across

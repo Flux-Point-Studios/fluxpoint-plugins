@@ -23,7 +23,9 @@ older design decisions are preserved in `DESIGN-NOTES.md` and `ROADMAP.md`.
 
 Recall reads Claude Code topic notes and configured peer Markdown corpora, supports
 worker briefs, and refreshes its derived index in the background without embedding
-documents. Campaign lessons survive worktree deletion in a clone-wide store. See
+documents. External corpora share schema-specific user-cache indexes instead of
+copying note text into each checkout; retrieval fuses them with repository stores.
+Campaign lessons survive worktree deletion in a clone-wide store. See
 [corpus configuration and durable storage](../../docs/memory-recall.md#corpus-configuration-and-safe-refresh).
 
 Compiled graphs pin the plugin witness by root, version and code hashes. Gate

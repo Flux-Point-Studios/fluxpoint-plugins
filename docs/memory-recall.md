@@ -123,8 +123,23 @@ Settings survive plugin upgrades in
 only; recall does not synchronize them. Each origin must be unique and use
 letters, numbers, dots, underscores or dashes. IDs include the origin, so files
 with the same basename in two corpora remain distinct. `weight` defaults to 1
-and must be greater than zero and at most 2. User-level corpora still share the
-checkout's derived index; separate corpus indexes remain future work.
+and must be greater than zero and at most 2.
+
+Repository stores build a small index under
+`.claude/fluxpoint/index/<schema>/`. External note corpora build once under
+`$XDG_CACHE_HOME/fluxpoint/recall/<schema>/<corpus-hash>/`, falling back to the
+user's platform cache directory. Checkouts that resolve to the same corpus
+roots and options share that slot; note bodies and vectors are not written into
+their repository indexes. Codex corpora also include the project scope in the
+key, because different projects must not reuse each other's filtered passages.
+Search fuses each slot's lexical ranks before combining its retrieval legs.
+
+The schema hash binds the kind registry, tokenizer and source fingerprint
+implementation. A different schema gets a different slot, so plugin versions
+can read their own caches without rewriting another version's files. `--stats`
+prints both slots, their schema and the plugin version that last built each.
+Legacy unversioned caches are ignored and remain disposable derived files;
+source memory and corpus folders are never rewritten by this migration.
 
 Codex stores are discovered through `$CODEX_HOME/memories` (default
 `~/.codex/memories`) in either runtime. The `codex-memories` format reads

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "sha256": "d87e5a2d416ee5c4899d1d8702dc03fcec215973f29a1e211ddf85243ae34a00",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/recall-shared-index-test.py": "bddae76f77f9740ef05d6a5d6efe0ce53d143277a022ab464da5a84928bd730c"
+  }
+}

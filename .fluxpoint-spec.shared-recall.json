@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "goal": "Share external recall corpora outside checkouts and isolate derived indexes by schema",
+  "asset": "Derived recall index and session context",
+  "scope": [
+    "External note corpus cache reuse across project roots",
+    "Schema-separated local and shared index slots",
+    "Fused repository and corpus retrieval, freshness and writer metadata"
+  ],
+  "outOfScope": [
+    "Synchronizing source memory between machines",
+    "Serving Codex passages outside their declared project scope"
+  ],
+  "decisions": [
+    {
+      "id": "recall-derived-maintenance",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How can roots share corpus indexes without exposing note text inside worktrees or overwriting another reader schema?",
+        "options": [
+          {
+            "option": "schema-separated-derived-slots",
+            "argued_by": "model",
+            "strongest_objection": "Requires separate freshness and rank fusion for two cache slots"
+          },
+          {
+            "option": "one-index-per-checkout",
+            "argued_by": "model",
+            "strongest_objection": "Copies private corpus content into each checkout and plugin versions overwrite incompatible schemas"
+          }
+        ],
+        "chosen": "schema-separated-derived-slots",
+        "rationale": "Store repo data in a small schema-specific local index and external corpus content in a shared user cache. Fuse rankings at read time; include scoped corpus policy in slot identity.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Open issue reproductions #147-152 #159 #161 #163 and current source inspection"
+        ]
+      },
+      "costs": [
+        {
+          "option": "schema-separated-derived-slots",
+          "cost": "One shared cache builder and read-time fusion",
+          "basis": "estimate",
+          "evidence": [
+            "Existing graph/lex/vector caches and rank fusion can be reused"
+          ]
+        },
+        {
+          "option": "one-index-per-checkout",
+          "cost": "Repeated builds and stale incompatible corpus copies",
+          "basis": "measured",
+          "evidence": [
+            "Issue #162 reports three ~7.5MB indexes for one source"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "shared-schema-slots",
+      "statement": "Identical external corpora share a schema-specific user cache while repository indexes persist no note text; changed schema slots coexist, retrieval includes both stores and stats identify writer and slot",
+      "decisions": [
+        "recall-derived-maintenance"
+      ],
+      "checks": [
+        "shared-index-tests"
+      ],
+      "counterexample": "Two checkouts rebuild one corpus twice, note bodies appear inside a worktree, or an incompatible schema overwrites the existing reader cache"
+    }
+  ],
+  "checks": [
+    {
+      "id": "shared-index-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/recall-shared-index-test.py"
+      ],
+      "scope": "Real source corpora and derived files across separate roots exercise reuse, fusion, freshness and schema isolation",
+      "assumptions": [
+        "Cache directories follow host user filesystem permissions; source corpus metadata remains authoritative"
+      ],
+      "timeoutSeconds": 90
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does a detached rebuild or configured corpus authorize document embeddings?",
+      "resolution": "No. Refresh and ordinary queries rebuild keyless; explicit build --embed is required for document backfill, and external notes require explicit FPL_EMBEDDER selection."
+    }
+  ]
+}
