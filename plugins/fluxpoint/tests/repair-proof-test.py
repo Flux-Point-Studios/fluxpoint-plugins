@@ -171,9 +171,9 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
                   'BASH_EXEC': os.environ.get('FPL_BASH') or ('C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else 'bash'),
                   'SERIES_SHA': __import__('hashlib').sha256(self.series.read_bytes()).hexdigest(), 'SERIES': str(self.series),
                   'PYTHON_EXEC': sys.executable, 'HELPER_SCRIPT': str(SCRIPTS / 'repair-proof.py'),
-                  'CONTROL_COMMAND': subprocess.list2cmdline([sys.executable, '-c', 'print("valid control")']) if os.name == 'nt' else shlex.join([sys.executable, '-c', 'print("valid control")']),
-                  'HARM_COMMAND': subprocess.list2cmdline([sys.executable, '-c', 'import sys; print(\'{"durationSeconds":86400,"falsePositives":0,"maxPerDay":1}\'); sys.exit(1)']) if os.name == 'nt' else shlex.join([sys.executable, '-c', 'import sys; print(\'{"durationSeconds":86400,"falsePositives":0,"maxPerDay":1}\'); sys.exit(1)']),
-                  'ATTACK_COMMAND': subprocess.list2cmdline([sys.executable, '-c', 'print(\'{"durationSeconds":86400,"falsePositives":0,"maxPerDay":1}\')']) if os.name == 'nt' else shlex.join([sys.executable, '-c', 'print(\'{"durationSeconds":86400,"falsePositives":0,"maxPerDay":1}\')'])}
+                  'CONTROL_COMMAND': shlex.join([sys.executable, '-c', 'print("valid control")']),
+                  'HARM_COMMAND': shlex.join([sys.executable, '-c', 'import sys; print(\'{"durationSeconds":86400,"falsePositives":0,"maxPerDay":1}\'); sys.exit(1)']),
+                  'ATTACK_COMMAND': shlex.join([sys.executable, '-c', 'print(\'{"durationSeconds":86400,"falsePositives":0,"maxPerDay":1}\')'])}
         for key, value in values.items():
             prefix = prefix.replace(key, json.dumps(value))
         script, out = self.root / 'run.mjs', self.root / 'out.json'
@@ -415,7 +415,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         self.assertEqual((Path(s['snapshot']) / 'state.py').read_text(), 'flag = True\n')
         self.assertFalse((Path(s['snapshot']) / '.git').exists())
         code = 'import pathlib; assert pathlib.Path("state.py").read_text()=="flag = True\\n"'
-        command = subprocess.list2cmdline([sys.executable, '-c', code]) if os.name == 'nt' else shlex.join([sys.executable, '-c', code])
+        command = shlex.join([sys.executable, '-c', code])
         observed = PROOF.execute(s['snapshot'], s['token'], command, command, 10)
         self.assertFalse(observed['reproduces'])
         marker = Path(s['snapshot']).parent / 'active-command'

@@ -59,6 +59,8 @@ import re
 import subprocess
 import sys
 
+from process_tree import shell_argv
+
 MANIFEST = ".fluxpoint-blueprint.json"
 BLUEPRINT = "plutus.json"
 PURPOSES = ("datum", "redeemer")
@@ -499,7 +501,7 @@ def load_manifest(root):
 def run_producer(root, cmd):
     """(hex_lines, error). The producer prints one PlutusData hex per line."""
     try:
-        r = subprocess.run(cmd, shell=True, cwd=root, capture_output=True,
+        r = subprocess.run(shell_argv(cmd), cwd=root, capture_output=True,
                            text=True, timeout=600)
     except (OSError, subprocess.SubprocessError) as e:
         return [], f"could not run {cmd!r}: {e}"
