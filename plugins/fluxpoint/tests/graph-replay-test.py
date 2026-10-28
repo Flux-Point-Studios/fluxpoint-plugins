@@ -347,8 +347,11 @@ class ReplayFollowup(unittest.TestCase):
     def test_inline_memo_is_rejected_when_state_is_compiled(self):
         ir = graph([node('a', fresh=False)])
         source = c.emit(ir, CONTRACTS, replay_state={})
-        harness = 'const f=new (Object.getPrototypeOf(async function(){}).constructor)("args","agent","budget","parallel","phase","log",JSON.parse(process.argv[1]));f(JSON.parse(process.argv[2]),async()=>({}),{total:0},async()=>[],()=>{},()=>{}).catch(e=>{console.log(String(e))})'
-        run = subprocess.run(['node', '-e', harness, json.dumps(source.replace('export const meta =', 'const meta =')), json.dumps(dict(BASE, _memo={'forged': {'result': {'exit': 0}}}))], text=True, capture_output=True, check=True)
+        harness = 'const input=JSON.parse(require("fs").readFileSync(0,"utf8"));const f=new (Object.getPrototypeOf(async function(){}).constructor)("args","agent","budget","parallel","phase","log",input.source);f(input.args,async()=>({}),{total:0},async()=>[],()=>{},()=>{}).catch(e=>{console.log(String(e))})'
+        # Compiled graphs exceed Windows CreateProcess's command-line limit.
+        payload = {'source': source.replace('export const meta =', 'const meta ='),
+                   'args': dict(BASE, _memo={'forged': {'result': {'exit': 0}}})}
+        run = subprocess.run(['node', '-e', harness], input=json.dumps(payload), text=True, encoding='utf-8', capture_output=True, check=True)
         self.assertIn('compiled replay state cannot be overridden inline', run.stdout)
 
     def test_ledger_uses_sha256_and_replays_prior_fnv_key(self):

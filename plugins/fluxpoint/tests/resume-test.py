@@ -5,6 +5,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import locale
 import os
 from pathlib import Path
 import shutil
@@ -527,14 +528,17 @@ class PlanCleanup(Fixture):
         subprocess.run(['git', 'commit', '-qm', 'base'], cwd=self.root, check=True)
         ir = {'version': 1, 'name': 'legacy', 'campaign': 'legacy', 'treeGuard': False, 'budget': {'maxNodes': 3},
               'nodes': [{'id': 'n' + str(i), 'contract': 'FindingsV1', 'prompt': 'Read {{A.' + key + '}}.'} for i, key in enumerate(['a', 'b', 'c'])]}
-        public = {'a': 'A', 'b': 'B', 'c': 'C'}
+        public = {'a': r'C:\Program Files\café\state.json', 'b': 'B', 'c': 'C'}
         results = {'n' + str(i): {'findings': []} for i in range(3)}
         contracts = compiler.load_contracts(str(SCRIPTS.parent / 'contracts'))
         source = compiler.emit(ir, contracts, embedded_args=public)
         launch = {'nonce': 'old', 'since': '2026-10-28T00:00:00Z'}
         body = dict(source=source, args={'_base': resume.fresh_base(self.root)}, results=results, readings=[])
-        dry = subprocess.run(['node', str(SCRIPTS / 'graph-plan.js')], input=json.dumps(body), text=True, capture_output=True, check=True)
+        # Node writes UTF-8 even when Windows Python defaults pipes to cp1252.
+        with mock.patch.object(locale, 'getpreferredencoding', return_value='cp1252'), mock.patch.object(locale, 'getencoding', return_value='cp1252', create=True):
+            dry = subprocess.run(['node', str(SCRIPTS / 'graph-plan.js')], input=json.dumps(body), text=True, encoding='utf-8', capture_output=True, check=True)
         calls = json.loads(dry.stdout)['calls']
+        self.assertEqual(calls[0]['prompt'], compiler.LONG_PREAMBLE + 'Read ' + public['a'] + '.')
         prefix = [dict(promptSha256=hashlib.sha256(c['prompt'].encode()).hexdigest(), optsSha256=replay_memo.memo_key(c['opts']), label=c['opts']['label']) for c in calls]
         artifact = {'summary': {'launch': launch, 'inputs': public, 'results': results}}
         real_sibling = compiler._sibling
