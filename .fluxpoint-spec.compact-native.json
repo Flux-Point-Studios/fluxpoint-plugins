@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "goal": "Add native Compact source obligations, compiler relation and artifact pins, cost ceilings and mutation verification",
+  "asset": "Proof, statement, mutation and cost ratchets with pinned native Midnight verification",
+  "scope": [
+    "Compact source escape hatches and circuit obligation identities",
+    "Pinned compactc/runtime/ledger compilation and generated relation/artifact freshness",
+    "Real native verifier positive/negative controls and per-circuit measured ceilings",
+    "Isolated circuit assert/comparison/disclosure mutants through the real proof-test adapter"
+  ],
+  "outOfScope": [
+    "Automatic toolchain installation in consumer projects",
+    "Claiming JavaScript ledger WASM verifies cryptographic proofs",
+    "Network deployment or real user witnesses"
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/scripts/spec-guard.py",
+    "plugins/fluxpoint/scripts/specification.py",
+    "plugins/fluxpoint/templates/harness.sh"
+  ],
+  "decisions": [
+    {
+      "id": "compact-native-evidence",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should Compact obligations be checked without treating simulation or arbitrary process success as native proof verification?",
+        "options": [
+          {
+            "option": "pinned-native-adapter",
+            "argued_by": "model",
+            "strongest_objection": "Requires a project-owned generated-state/proof driver and native verifier toolchain"
+          },
+          {
+            "option": "source-only-scanner",
+            "argued_by": "model",
+            "strongest_objection": "Cannot detect changed compiled relations, verifier pins or native proof test gaps"
+          }
+        ],
+        "chosen": "pinned-native-adapter",
+        "rationale": "Keep source ratchets cheap and explicit while a separate fail-closed adapter compiles pinned circuits, validates actual native request controls and measures artifact/IR costs. Mutants run in independent snapshots against the same adapter.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue #185 names immutable ledger-8 deployment obligations",
+          "Official compactc0.31.1 release SHA256 verified and native compiler executed",
+          "Orynq SDK pins native ledger8.1.3 proof-verifying and real proof fixture controls"
+        ]
+      },
+      "costs": [
+        {
+          "option": "pinned-native-adapter",
+          "cost": "Maintain a small Python adapter, source scanner and native test recipe",
+          "basis": "estimate",
+          "evidence": [
+            "Public compiler/SRS pins and native ledger proof fixture are available"
+          ]
+        },
+        {
+          "option": "source-only-scanner",
+          "cost": "Native proof, relation and cost changes remain unchecked",
+          "basis": "measured",
+          "evidence": [
+            "Issue #185 gap and existing scanner suffix inventory"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "compact-source",
+      "statement": "Count Compact TODO, constant asserts, exported circuits without assertions and unjustified disclosures without counting quoted prose; circuit signatures/assertions have statement identities",
+      "decisions": [
+        "compact-native-evidence"
+      ],
+      "checks": [
+        "compact-tests"
+      ],
+      "counterexample": "An assert is deleted or disclose added without a source/statement ratchet change"
+    },
+    {
+      "id": "compact-native",
+      "statement": "Tracked stateful/witness Compact tokens require complete manifest coverage and explicitly declared native proof checks require arming; pinned compiler, runtime and ledger identity produce nonempty expected proof circuits; exact normalized IR and generated code/key/state pins and measured cost ceilings reject drift; native positive and negative controls must complete with expected verified outcomes",
+      "decisions": [
+        "compact-native-evidence"
+      ],
+      "checks": [
+        "compact-tests"
+      ],
+      "counterexample": "Simulation or a zero-exit no-op passes, a key or relation changes, or a metric exceeds its ceiling"
+    },
+    {
+      "id": "compact-mutations",
+      "statement": "Compile isolated assert/comparison/disclosure mutants and score only viable complete proof-test outcomes after a passing native baseline, preserving clean HEAD and existing mutation ratchet semantics",
+      "decisions": [
+        "compact-native-evidence"
+      ],
+      "checks": [
+        "compact-tests"
+      ],
+      "counterexample": "A failed baseline, unviable mutant or incomplete native run is published as a killed mutant"
+    }
+  ],
+  "checks": [
+    {
+      "id": "compact-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/compact-native-test.py"
+      ],
+      "scope": "Adapter protocol, isolation, source/statement scanner and existing mutation CLI routing; separate actual compiler/native fixture runs recorded in evidence",
+      "assumptions": [
+        "Project proof driver and pinned native verifier are reviewed trusted programs; protocol fixtures validate adapter enforcement, not cryptographic implementation"
+      ],
+      "timeoutSeconds": 120
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does the JavaScript ledger flag verify real proofs?",
+      "resolution": "No. Native verification must use the pinned ledger build with proof-verifying and without mock-verify; native controls distinguish actual valid and corrupted proof requests."
+    },
+    {
+      "claim": "Can source-only scanner changes close this feature?",
+      "resolution": "No. Actual compiler/native positive and mutant-negative evidence is required before calling the native adapter complete."
+    }
+  ]
+}

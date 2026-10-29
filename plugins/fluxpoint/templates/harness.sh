@@ -384,6 +384,30 @@ full() {
   if need_gate proof-guard.py .fluxpoint-proof-baseline.json; then
     "$FPL_PY" "$FPL_GATE" --check
   fi
+  # Compact's native adapter compiles pinned circuits, checks real native proof
+  # controls, and binds generated relations, artifact pins and cost ceilings.
+  # A tracked state/witness declaration also arms missing-tool detection. Keep
+  # this tiny token inventory local so removing the plugin cannot disarm it.
+  compact_source="$("$FPL_PY" - <<'PY'
+from pathlib import Path
+import re
+import subprocess
+tracked = subprocess.check_output(['git', 'ls-files', '-z', '*.compact']).decode('utf-8')
+tokens = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+for name in filter(None, tracked.split('\0')):
+    if re.search(r'\b(?:ledger|witness)\b', tokens.sub(' ', Path(name).read_text(encoding='utf-8'))):
+        print(name)
+        break
+PY
+  )"
+  if need_gate compact-guard.py .fluxpoint-compact.json .fluxpoint-compact-baseline.json "$compact_source"; then
+    if [ -f .fluxpoint-compact.json ] || [ -f .fluxpoint-compact-baseline.json ]; then
+      "$FPL_PY" "$FPL_GATE" --check --require-armed
+    else
+      "$FPL_PY" "$FPL_GATE" --check
+    fi
+  fi
+  unset compact_source
   # Statement ratchet. The hatch counts above police proof bodies; this
   # polices what is being proved, because dropping a conjunct from an
   # `ensures` or deleting a property test moves no count and keeps every

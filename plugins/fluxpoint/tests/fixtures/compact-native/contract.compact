@@ -1,0 +1,11 @@
+pragma language_version 0.23;
+import CompactStandardLibrary;
+
+export ledger commitment: Bytes<32>;
+witness capability(): Bytes<32>;
+
+export circuit check(expected: Bytes<32>, context: Bytes<32>): [] {
+  assert(persistentHash<Vector<2, Bytes<32>>>([capability(), context]) == expected, "capability mismatch");
+  // disclose: The expected commitment is the public statement of this circuit.
+  commitment = disclose(expected);
+}

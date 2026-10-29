@@ -48,7 +48,10 @@ That default is not timidity: a gate that goes red because an expensive job
 has not been re-run yet is a gate people switch off, and it would take the
 rest of the harness with it.
 
-Coverage: `cargo-mutants` today. Other toolchains are declared unsupported
+Coverage: `cargo-mutants`, Stryker and the native Compact adapter. Compact
+requires live genuine/corrupted native proof controls and semantic bad-input
+cases before compiling source mutants; imported Compact reports are refused.
+Other toolchains are declared unsupported
 by name rather than silently skipped, because a mutation guard that quietly
 measures nothing is worse than none at all.
 
@@ -86,7 +89,7 @@ import sys
 BASELINE = ".fluxpoint-proof-baseline.json"
 CONFIG = ".fluxpoint-mutation.json"
 CONFIG_FIELDS = {"version", "tool", "failWhenStale", "maxStaleCommits", "args", "workDir"}
-SUPPORTED = {"cargo-mutants", "stryker"}
+SUPPORTED = {"cargo-mutants", "stryker", "compact"}
 FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # Named so a repo using one of these is told it is not covered, rather than
 # reading a silent exit 0 as a clean bill of health.
@@ -705,7 +708,7 @@ def validate_measurement(rec, expected_tool=None):
         "tool", "toolVersion", "score", "killed", "survived", "scored",
         "unviable", "timeout", "survivors", "headSha", "when", "note",
     }
-    optional = {"acceptedWeaker"}
+    optional = {"acceptedWeaker", "equivalent"}
     if not isinstance(rec, dict):
         return ["stored mutation measurement must be an object"]
     findings = []
@@ -718,6 +721,11 @@ def validate_measurement(rec, expected_tool=None):
                         f"{', '.join(sorted(unknown))}")
 
     tool = rec.get("tool")
+    if tool == 'compact':
+        if type(rec.get('equivalent')) is not int or rec['equivalent'] < 0:
+            findings.append('stored Compact compiler-equivalent count must be a non-negative integer')
+    elif 'equivalent' in rec:
+        findings.append('compiler-equivalent counts belong only to the Compact adapter')
     if tool not in SUPPORTED:
         findings.append(f"stored mutation tool must be one of {sorted(SUPPORTED)}")
     elif expected_tool and tool != expected_tool:
@@ -726,6 +734,7 @@ def validate_measurement(rec, expected_tool=None):
     expected_version = {
         "cargo-mutants": CARGO_MUTANTS_TESTED,
         "stryker": f"schema {STRYKER_SCHEMA}",
+        "compact": "schema 1",
     }.get(tool)
     if expected_version and _ver_tuple(rec.get("toolVersion")) < _ver_tuple(expected_version):
         findings.append(f"stored mutation toolVersion must be {expected_version} or newer")
@@ -858,6 +867,9 @@ def validate_baseline(doc, expected_tool=None):
 
 # ------------------------------------------------------------------ commands
 def measure(root, cfg, accept, reason, src=None, persist=True, source_head=None):
+    if src and cfg['tool'] == 'compact':
+        print('mutation-guard: Compact requires live native controls; imported reports are unsupported', file=sys.stderr)
+        return 1
     baseline = load_baseline(root)
     prior_findings = validate_baseline(baseline, cfg.get("tool"))
     for finding in prior_findings:
@@ -896,8 +908,12 @@ def measure(root, cfg, accept, reason, src=None, persist=True, source_head=None)
     else:
         extra = list(cfg.get("args") or [])
         wd = cfg.get("_resolvedWorkDir")
-        rec, findings = (run_stryker(root, extra, wd) if cfg["tool"] == "stryker"
-                         else run_cargo_mutants(root, extra))
+        if cfg['tool'] == 'compact':
+            from compact_native import mutation_measure
+            rec, findings = mutation_measure(root, extra)
+        else:
+            rec, findings = (run_stryker(root, extra, wd) if cfg["tool"] == "stryker"
+                             else run_cargo_mutants(root, extra))
     for f in findings:
         print(f"mutation-guard: {f}", file=sys.stderr)
     if findings and not persist:

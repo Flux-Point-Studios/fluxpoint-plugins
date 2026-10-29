@@ -18,6 +18,13 @@ the lemmas a proof obligation needs, `decreases` clauses and termination
 arguments, and on Aiken the property tests over `aiken/fuzz` that are the
 proof surface that language has.
 
+For Compact targets, use the pinned native profile in `../references/compact.md`.
+Add simulator properties and actual native proof controls, compiled relation
+identity, disclosure obligations, artifact pins, cost ceilings and a maintenance
+authority check with a mutable control. JavaScript ledger success alone cannot
+establish proof verification. Keep the circuit statement and native bad-input
+cases fixed while strengthening the implementation's proof evidence.
+
 The reason this is a separate job: an agent that writes the loop and the
 invariant in one breath has an obvious incentive to weaken the
 specification until the code it already wrote verifies. `spec-guard.py`

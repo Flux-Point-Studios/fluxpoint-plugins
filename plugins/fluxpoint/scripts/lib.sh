@@ -416,6 +416,9 @@ scripts/harness.sh
 .fluxpoint-cex.jsonl
 .fluxpoint-metrics.json
 .fluxpoint-metrics-baseline.json
+.fluxpoint-compact.json
+.fluxpoint-compact-baseline.json
+.fluxpoint-compact-disclosures.json
 package.json
 Makefile"
 

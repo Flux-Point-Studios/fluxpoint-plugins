@@ -399,6 +399,13 @@ proved one.
   pinned. The source guards also cover imported tactic use, named Prop bodies
   and standalone solver commands. See [Blaster verification](references/blaster.md)
   for setup, supported types, proof assumptions and the real integration fixture.
+- **Native Compact checks** register circuit statements and source escape hatches,
+  bind compiler relations and generated code/key/state pins, and ratchet measured
+  proof/key bytes, `k` and transcript gas. A pinned native ledger must accept a
+  genuine proof and reject a corrupted proof for each circuit. Semantic bad-input
+  controls judge isolated assert/comparison/disclosure mutants through the existing
+  mutation score. See [Compact verification](references/compact.md) for the tested
+  ledger-8 profile, driver boundary, arming and real native smoke.
 - **`scripts/proof-guard.py` ratchets escape hatches.** `--baseline`
   records `todo`/`expect` (Aiken), `assume`/`{:axiom}` (Dafny), `sorry`
   (Lean/Isabelle), `Admitted` (Coq), `#[verifier::external_body]` (Verus),
