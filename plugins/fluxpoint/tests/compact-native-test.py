@@ -118,12 +118,13 @@ print(json.dumps({'version':1,'complete':True,'registry':'registry.json','witnes
         gate = template[template.index('need_gate() {'):template.index('\nchanged() {')]
         compact = template[template.index("  # Compact's native adapter"):template.index('  # Statement ratchet.')]
         script = 'set -euo pipefail\nplugin_script() { return 0; }\n' + gate + compact
-        env = {**os.environ, 'FPL_PY': sys.executable, 'FPL_ALLOW_MISSING_GATES': '0'}
+        from process_tree import bash_path
+        env = {**os.environ, 'FPL_PY': Path(sys.executable).as_posix(), 'FPL_ALLOW_MISSING_GATES': '0'}
         for text, expected in [('// ledger witness\nconst prose = "ledger witness";', 0), ('witness secret(): Uint<8>;', 1)]:
             with self.subTest(text=text):
                 (root / 'c.compact').write_text(text)
                 subprocess.run(['git', '-C', str(root), 'add', 'c.compact'], check=True)
-                result = subprocess.run(['bash', '-c', script], cwd=root, env=env, capture_output=True, text=True)
+                result = subprocess.run([bash_path(), '-c', script], cwd=root, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 if expected: self.assertIn('compact-guard.py is not installed', result.stderr)
 

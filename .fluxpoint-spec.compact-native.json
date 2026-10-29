@@ -16,7 +16,8 @@
   "harnessInputs": [
     "plugins/fluxpoint/scripts/spec-guard.py",
     "plugins/fluxpoint/scripts/specification.py",
-    "plugins/fluxpoint/templates/harness.sh"
+    "plugins/fluxpoint/templates/harness.sh",
+    ".github/workflows/windows-specification.yml"
   ],
   "decisions": [
     {
@@ -111,7 +112,7 @@
         "{python}",
         "plugins/fluxpoint/tests/compact-native-test.py"
       ],
-      "scope": "Adapter protocol, isolation, source/statement scanner and existing mutation CLI routing; separate actual compiler/native fixture runs recorded in evidence",
+      "scope": "Adapter protocol, isolation, source/statement scanner and existing mutation CLI routing, including Windows/Python 3.9 protocol coverage through the selected CI suites; separate actual compiler/native fixture runs recorded in evidence",
       "assumptions": [
         "Project proof driver and pinned native verifier are reviewed trusted programs; protocol fixtures validate adapter enforcement, not cryptographic implementation"
       ],
