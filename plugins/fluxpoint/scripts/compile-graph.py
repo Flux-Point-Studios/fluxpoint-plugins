@@ -2230,6 +2230,14 @@ def plan_groups(ir):
             extra_checks += sum(n.get('replay') == 'inputs' for n in ir.get('nodes', []))
             groups.extend({'calls': [('tree-check', sentinel)], 'park': False, 'sentinel': True,
                            'kind': 'sentinel', 'track': frozenset()} for _ in range(extra_checks))
+    # Ref guards do not consume maxNodes, but their fixed-command seats still
+    # cost tokens. Include both endpoints for every potentially executed call.
+    guarded_ids = {n['id'] for n in ir.get('nodes', []) if n.get('mutates') and n.get('pushes')}
+    guarded = [(g['track'], sum(any(label == nid or label.startswith(nid + ':') for nid in guarded_ids)
+                              for label, _ in g['calls'])) for g in groups if not g.get('sentinel')]
+    for track, count in guarded:
+        groups.extend({'calls': [('push-check', sentinel)], 'park': False, 'sentinel': True,
+                       'kind': 'sentinel', 'track': track} for _ in range(count * 2))
     return groups
 
 
@@ -3457,6 +3465,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         extra += ", tree: TREE"
     if modern:
         extra += ", memoRecords: MEMO_RECORDS, callRecords: CALL_RECORDS, rejudges: REJUDGES"
+        if any(n.get('pushes') for n in nodes):
+            extra += ", pushAssuranceVersion: 1, pushReadNonce: A._replayLaunchNonce, pushChecks: PUSH_CHECKS"
         if not prove_nodes and not repair_loops(ir):
             extra += ", launch: A._launch"
     if embedded_args is not None:
@@ -4950,16 +4960,18 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     readings = [r for r in readings if isinstance(r, dict)]
     runtime_args.pop('_memo', None)
     runtime_args.pop('_prefix', None)
-    compiled = emit(ir, contracts, imports_resolved, specification=specification, embedded_args=public_args, replay_state=replay)
-    try:
-        result = subprocess.run(['node', os.path.join(os.path.dirname(__file__), 'graph-plan.js')],
-                                input=json.dumps(dict(source=compiled, args=runtime_args, results=source.get('results') or {}, readings=readings), ensure_ascii=False),
-                                capture_output=True, text=True, encoding='utf-8', timeout=30)
-    except FileNotFoundError as exc:
-        raise ValueError('--plan needs Node.js to render the exact generated program locally; it never spawns an agent') from exc
-    if result.returncode:
-        raise ValueError('plan rendering refused: ' + result.stderr.strip())
-    rendered_output = json.loads(result.stdout)
+    def render(shape, inputs, state):
+        compiled = emit(shape, contracts, imports_resolved, specification=specification, embedded_args=inputs, replay_state=state)
+        try:
+            result = subprocess.run(['node', os.path.join(os.path.dirname(__file__), 'graph-plan.js')],
+                                    input=json.dumps(dict(source=compiled, args=runtime_args, results=source.get('results') or {}, readings=readings), ensure_ascii=False),
+                                    capture_output=True, text=True, encoding='utf-8', timeout=30)
+        except FileNotFoundError as exc:
+            raise ValueError('--plan needs Node.js to render the exact generated program locally; it never spawns an agent') from exc
+        if result.returncode:
+            raise ValueError('plan rendering refused: ' + result.stderr.strip())
+        return json.loads(result.stdout)
+    rendered_output = render(ir, public_args, replay)
     rendered = rendered_output['summary']
     requested = set(public_args.get('rejudge') or {})
     reached = {r.get('gate') for r in rendered.get('rejudges', [])}
@@ -5025,18 +5037,52 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
                         if effective.get(key) != old_inputs.get(key):
                             changed.append(key)
                 cause = ('live ancestor ' + ', '.join(live) if live else 'arg changed: ' + ', '.join(sorted(set(changed))) if changed else 'no matching verified memo/prefix entry')
-        entries = [e for e in replay.get('_memo', {}).values() if e.get('node', e.get('payload', {}).get('id')) == nid]
-        entries += [e for e in replay.get('_prefix', []) if e.get('label') == nid]
-        cost = next((e['cost'] for e in entries if isinstance(e.get('cost'), dict)), {'minutes': None, 'tokens': None})
+        entries = [e for e in replay.get('_prefix', []) if e.get('label') == nid or str(e.get('label', '')).startswith(nid + ':')]
+        if not entries:
+            entries = [e for e in replay.get('_memo', {}).values() if e.get('node', e.get('payload', {}).get('id')) == nid]
+        cost = {}
+        for metric in ('minutes', 'tokens'):
+            values = [(e.get('cost') or {}).get(metric) for e in entries]
+            cost[metric] = sum(values) if values and all(isinstance(value, (int, float)) for value in values) else None
         rows.append(dict(node=nid, status=status, cause=cause, minutes=cost.get('minutes'), tokens=cost.get('tokens')))
-    shared = {}
-    for node in ir['nodes']:
-        if node.get('mutates'):
-            target = branch_target(node, {x.get('id'): x for x in ir['nodes']})
-            if target:
-                shared.setdefault((target['repository'], target['branch']), []).append(node['id'])
-    if rows and any(len(ids) > 1 for ids in shared.values()):
-        rows[0]['warning'] = 'shared-branch opt-ins can execute more work than serial prefix replay: builders require the source-final tip, while each gate retains its exact judged tip'
+    opt_ins = {'lane', 'pushes', 'repository', 'branch', 'replay', 'fresh'}
+    if rows and any(opt_ins.intersection(node) for node in ir['nodes']):
+        import copy
+        serial = copy.deepcopy(ir)
+        for node in serial['nodes']:
+            for key in opt_ins:
+                node.pop(key, None)
+        prior = copy.deepcopy(serial)
+        if 'argDefaults' in source:
+            prior['argDefaults'] = source['argDefaults']
+        old_calls = render(prior, old_inputs, {})['calls']
+        new_calls = render(serial, public_args, {})['calls']
+        prefix_open, serial_modes = True, {}
+        for index, call in enumerate(new_calls):
+            same = prefix_open and index < len(old_calls) and call == old_calls[index]
+            prefix_open = bool(same)
+            label = call['opts'].get('label', '')
+            owners = [n['id'] for n in ir['nodes'] if label == n['id'] or label.startswith(n['id'] + ':')]
+            if owners:
+                nid = max(owners, key=len)
+                serial_modes[nid] = 'live' if not same or serial_modes.get(nid) == 'live' else 'prefix'
+        for row in rows:
+            row['serialStatus'] = serial_modes.get(row['node'], 'not reached')
+        reached_actual = {n['id'] for n in ir['nodes'] if any(call['opts'].get('label') == n['id'] or call['opts'].get('label', '').startswith(n['id'] + ':')
+                                                            for call in rendered_output.get('calls', []))}
+        live = [row for row in rows if row['status'] == 'live' and row['node'] in reached_actual]
+        serial_live = [row for row in rows if row['serialStatus'] == 'live']
+        def totals(selected):
+            return dict(nodes=len(selected), knownMinutes=round(sum(row['minutes'] for row in selected if isinstance(row['minutes'], (int, float))), 6),
+                        unknownMinutes=sum(row['minutes'] is None for row in selected))
+        actual, without = totals(live), totals(serial_live)
+        rows[0]['comparison'] = dict(optIns=actual, serial=without,
+                                     assumption='same current graph, recorded prior inputs and fixed recorded node outputs, with lane/push/replay/fresh/branch opt-ins removed in both renders')
+        if actual['nodes'] > without['nodes'] or actual['knownMinutes'] > without['knownMinutes']:
+            rows[0]['warning'] = (f"opt-ins re-run more work than the serial counterfactual: {actual['nodes']} vs {without['nodes']} live nodes; "
+                                  f"{actual['knownMinutes']} vs {without['knownMinutes']} known recorded-node minutes "
+                                  f"({actual['unknownMinutes']} vs {without['unknownMinutes']} nodes have unknown minutes). "
+                                  'Memo predictions still require fresh branch matches; this comparison assumes the same current graph with recorded prior inputs.')
     return rows
 
 
@@ -5211,7 +5257,11 @@ def main():
                 print('Plan warning: ' + row['warning'])
             minutes = 'unknown' if row['minutes'] is None else str(row['minutes'])
             tokens = 'unknown' if row['tokens'] is None else str(row['tokens'])
-            print(f"{row['node']}: {row['status']} — {row['cause']}; recorded minutes={minutes}, tokens={tokens}")
+            serial_note = '; serial counterfactual=' + row['serialStatus'] if 'serialStatus' in row else ''
+            print(f"{row['node']}: {row['status']} — {row['cause']}; recorded minutes={minutes}, tokens={tokens}{serial_note}")
+        if rows and rows[0].get('comparison'):
+            comparison = rows[0]['comparison']
+            print('Serial comparison (known recorded-node minutes; unknown costs remain unknown): ' + json.dumps(comparison, sort_keys=True))
         return 0
 
     est = estimate_tokens(ir, contracts, specification, embedded_args)

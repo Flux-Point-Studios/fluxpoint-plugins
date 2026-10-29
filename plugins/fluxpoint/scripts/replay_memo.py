@@ -342,12 +342,16 @@ def _porcelain(value, root, checkout, graph):
 
 
 @lru_cache(maxsize=1)
-def _sentinel_base():
+def _sentinel_preamble():
     import ast
     source = ast.parse(Path(__file__).with_name('compile-graph.py').read_text(encoding='utf-8'))
     preamble = next(ast.literal_eval(n.value) for n in source.body if isinstance(n, ast.Assign)
                     and any(isinstance(t, ast.Name) and t.id == 'LONG_PREAMBLE' for t in n.targets))
-    return preamble + ('Run exactly three commands in the repository at the current working directory and return their output verbatim in the '
+    return preamble
+
+
+def _sentinel_base():
+    return _sentinel_preamble() + ('Run exactly three commands in the repository at the current working directory and return their output verbatim in the '
                        'schema, nothing else: `git rev-parse --show-toplevel` as root, `git rev-parse HEAD` as head, and `git status '
                        '--porcelain` as porcelain (empty string when clean). Do not fix, clean, or explain anything.')
 
@@ -408,6 +412,138 @@ def _sentinel(root, summary, calls, index, reading, point, graph=None):
     return dict(call, readingNonce=nonce)
 
 
+def _remote_heads(text):
+    if not isinstance(text, str):
+        raise ReplayError('remote heads output must be a string')
+    heads = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r'([0-9a-fA-F]{40}|[0-9a-fA-F]{64})\s+(refs/heads/[^\s]+)', line)
+        if not match or match[2] in heads:
+            raise ReplayError('invalid or duplicate remote head')
+        heads[match[2]] = match[1].lower()
+    return heads
+
+
+def _verify_push_checks(root, summary, calls, graph, unused=(), prefix_sources=()):
+    nodes = _graph_nodes(Path(root) / graph) if graph is not None else {}
+    declared = {nid: n['pushes'].rsplit('#', 1) for nid, n in nodes.items() if n.get('mutates') and n.get('pushes')}
+    if summary.get('outcome') == 'COMPLETE':
+        results = summary.get('results') or {}
+        for nid in declared:
+            node = nodes[nid]
+            repair_fixer = any(n.get('verifies') == nid and (n.get('repeat') or {}).get('kind') == 'repair' for n in nodes.values())
+            if (nid not in results or results[nid] is None
+                    or results[nid] == [] and not (node.get('foreach') or node.get('repeat') or repair_fixer)):
+                raise ReplayError('successful run omits a completed declared builder result')
+    checks = summary.get('pushChecks', [])
+    if not isinstance(checks, list):
+        raise ReplayError('push checks must be an array')
+    worker_indices = {}
+    for index, call in enumerate(calls):
+        if not call:
+            continue
+        label = call['opts'].get('label', '')
+        owners = [nid for nid in declared if label == nid or label.startswith(nid + ':')]
+        if owners:
+            worker_indices[index] = max(owners, key=len)
+    reached = {nid for nid in declared if nid in (summary.get('results') or {})
+               and summary['results'][nid] is not None and summary['results'][nid] != []}
+    memo_nodes = {row.get('node') for row in summary.get('memoRecords', [])
+                  if isinstance(row, dict) and row.get('mode') == 'memo'}
+    if reached - set(worker_indices.values()) - memo_nodes:
+        raise ReplayError('successful declared builder has no corroborated execution or memo receipt')
+    if (checks or worker_indices) and summary.get('pushAssuranceVersion') != 1:
+        raise ReplayError('declared builder has no supported remote-ref assurance version')
+    nonce = summary.get('pushReadNonce')
+    if summary.get('pushAssuranceVersion') == 1 and (not isinstance(nonce, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', nonce)):
+        raise ReplayError('remote-ref assurance has no current attempt nonce')
+    covered = set()
+    for check in checks:
+        if not isinstance(check, dict):
+            raise ReplayError('invalid push check')
+        worker = check.get('callIndex')
+        before, after = check.get('beforeCallIndex'), check.get('afterCallIndex')
+        if (any(type(i) is not int or not 0 <= i < len(calls) for i in (before, worker, after))
+                or not before < worker < after or worker in covered or not calls[worker]):
+            raise ReplayError('push snapshots do not bracket one completed builder call')
+        node, label, target = check.get('node'), check.get('label'), check.get('target')
+        if (not isinstance(target, dict) or set(target) != {'repository', 'branch'}
+                or any(not isinstance(target[k], str) or not target[k] for k in target)
+                or calls[worker]['opts'].get('label') != label
+                or node not in (label, label.split(':')[0])
+                or declared and (node != worker_indices.get(worker) or declared.get(node) != [target['repository'], target['branch']])):
+            raise ReplayError('push check target differs from declared builder')
+        snapshots = []
+        for side, index in (('before', before), ('after', after)):
+            call = calls[index]
+            if not call or calls[worker].get('live') and not call.get('live'):
+                raise ReplayError('live builder has no fresh remote snapshots')
+            opts, value = call['opts'], call['result']
+            point = side + ' ' + label
+            if (opts.get('label') != 'push-check:' + point or opts.get('effort') != 'low'
+                    or not isinstance(value, dict) or value.get('repository') != target['repository']):
+                raise ReplayError('push snapshot points at another agent or repository')
+            header = 'Fluxpoint-Call-Opts-SHA256: ' + memo_key(opts) + '\n'
+            prompt = call['prompt'].removeprefix(header)
+            fixed = (_sentinel_preamble() + 'Run exactly: git -C ' + json.dumps(target['repository'], ensure_ascii=False)
+                     + ' ls-remote --heads origin. Return stdout verbatim as heads and the exact declared repository as repository. '
+                     'Empty stdout is valid only when the command succeeds and the remote has no heads. On any command failure return null. '
+                     'Do not push, fetch, fix, or explain anything.\nLIVE REF SNAPSHOT NONCE: ')
+            if not prompt.startswith(fixed) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64} point ' + re.escape(point), prompt[len(fixed):]):
+                raise ReplayError('push snapshot prompt is not the fixed nonce command')
+            if call.get('live') and prompt[len(fixed):] != nonce + ' point ' + point:
+                raise ReplayError('live push snapshot belongs to another attempt nonce')
+            snapshots.append(_remote_heads(value.get('heads')))
+        changed = sorted(ref for ref in snapshots[0].keys() | snapshots[1].keys() if snapshots[0].get(ref) != snapshots[1].get(ref))
+        declared_ref = 'refs/heads/' + target['branch']
+        if check.get('changedRefs') != changed or check.get('declaredMoved') is not (declared_ref in changed):
+            raise ReplayError('push check differs from observed remote changes')
+        if any(ref != declared_ref for ref in changed) and summary.get('outcome') == 'COMPLETE':
+            raise ReplayError('undeclared remote ref changed in a successful run')
+        if declared_ref not in changed and not any(row.get('node') == node and row.get('status') == 'PUSH-NO-CHANGE' for row in summary.get('provenance', []) if isinstance(row, dict)):
+            raise ReplayError('unchanged declared remote ref has no retained finding')
+        covered.add(worker)
+    if set(worker_indices) - covered:
+        raise ReplayError('declared builder has no corroborated before/after remote snapshots')
+    for nid in declared:
+        node = nodes[nid]
+        workers = [calls[index] for index, owner in worker_indices.items() if owner == nid]
+        result = (summary.get('results') or {}).get(nid)
+        # A plain fan-out returns precisely its non-null primary results.
+        # Its key is overwritten by the compiler with the list item identity.
+        # Count duplicate values as separate invocations rather than set them.
+        if node.get('foreach') and not node.get('repeat') and node.get('verify', 'schema-only') == 'schema-only' and isinstance(result, list):
+            def primary(value):
+                return {k: v for k, v in value.items() if k != 'key'} if isinstance(value, dict) else value
+            if sorted(canonical(primary(call['result'])) for call in workers if call.get('result') is not None) != sorted(canonical(primary(value)) for value in result):
+                raise ReplayError('declared fan-out output has incomplete invocation coverage')
+        # A wholly prefix-served node claiming its full original output must
+        # retain the complete original worker inventory, including a tail
+        # omitted together with both snapshots. This also covers transformed
+        # loop/council outputs without guessing their cardinality.
+        if workers and all(not call.get('live') for call in workers):
+            actual = {(call.get('runId'), call.get('artifactSha256'), call.get('agentId')) for call in workers}
+            for old_summary, old_calls in prefix_sources:
+                if canonical(result) != canonical((old_summary.get('results') or {}).get(nid)):
+                    continue
+                expected = {(call.get('runId'), call.get('artifactSha256'), call.get('agentId')) for call in old_calls if call
+                            and (call['opts'].get('label') == nid or call['opts'].get('label', '').startswith(nid + ':'))}
+                if expected - actual:
+                    raise ReplayError('declared prefix output omits original worker invocations')
+    # Workflow journals retain earlier attempts under the same run id. Only
+    # inventory the independently recorded snapshots stamped for this attempt.
+    # Dropping an entire fan-out child's worker and both endpoints cannot hide
+    # that invocation while its sibling's valid receipt keeps the node green.
+    for call in unused:
+        prompt = re.sub(r'^Fluxpoint-Call-Opts-SHA256: [0-9a-f]{64}\n', '', call.get('prompt') or '')
+        if (prompt.startswith(_sentinel_preamble() + 'Run exactly: git -C ')
+                and isinstance(nonce, str) and '\nLIVE REF SNAPSHOT NONCE: ' + nonce + ' point ' in prompt
+                and (call.get('done') or {}).get('type') == 'result'):
+            raise ReplayError('current-attempt remote snapshot is missing its compiler receipt')
+
+
 def _source_calls(root, run_id, launch, compiler, projects, seen, cache=None, artifact_sha256=None):
     cache = {} if cache is None else cache
     if artifact_sha256 is not None:
@@ -442,10 +578,13 @@ def _validate_summary(root, summary, run_id, digest, launch, compiler, projects,
     if not isinstance(receipts, list) or not isinstance(records, list):
         raise ReplayError("compiler call and memo receipts must be arrays")
     if not receipts and not records:
+        _verify_push_checks(root, summary, [], graph)
         return summary, [], []
     calls = _journal_calls(run_id, projects)
     unused = list(calls)
     validated = []
+    prefix_sources = []
+    prefix_source_ids = set()
     prefix_open = True
     for position, receipt in enumerate(receipts):
         if not isinstance(receipt, dict):
@@ -459,8 +598,12 @@ def _validate_summary(root, summary, run_id, digest, launch, compiler, projects,
                 raise ReplayError('runtime prefix receipt follows a live or failed call')
             if not isinstance(source, dict):
                 raise ReplayError("invalid replay call source")
-            _, source_calls, _ = _source_calls(root, source.get("runId"), launch, compiler, projects, seen, cache,
-                                              _source_hash(source))
+            source_summary, source_calls, _ = _source_calls(root, source.get("runId"), launch, compiler, projects, seen, cache,
+                                                           _source_hash(source))
+            source_identity = source.get('runId'), source['artifactSha256']
+            if source_identity not in prefix_source_ids:
+                prefix_sources.append((source_summary, source_calls))
+                prefix_source_ids.add(source_identity)
             matches = [c for c in source_calls if c and c["agentId"] == source.get("agentId")
                        and c.get('runId') == source.get('runId') and c.get('artifactSha256') == source['artifactSha256']]
             if len(matches) != 1:
@@ -492,6 +635,7 @@ def _validate_summary(root, summary, run_id, digest, launch, compiler, projects,
         validated.append(dict(prompt=receipt["prompt"], opts=receipt["opts"], result=receipt.get("result"),
                               runId=run_id, artifactSha256=digest, agentId=call["agentId"], cost=call["cost"],
                               live=not receipt.get('source') and receipt.get('mode', 'live') == 'live'))
+    _verify_push_checks(root, summary, validated, graph, unused, prefix_sources)
     verified = []
     for record in records:
         if isinstance(record, dict) and record.get('result') is None and record.get('mode') != 'memo':
@@ -538,7 +682,7 @@ def _validate_summary(root, summary, run_id, digest, launch, compiler, projects,
             point = ('replay ' if record.get('replay') == 'inputs' else 'before ') + record['node']
             _sentinel(root, summary, validated, record.get('readingCallIndex'), reading, point, graph)
         if record['mode'] == 'memo':
-            expected = origin['payload']['tree'] or origin.get('verifiedReading')
+            expected = origin['payload']['tree'] or origin.get('sourceFinalReading', origin.get('verifiedReading'))
             if canonical(reading) != canonical(expected):
                 raise ReplayError('memo has no matching live tree/branch sentinel reading')
         if record.get("verifiedReading") is not None:
@@ -611,8 +755,8 @@ def build_memo(root, run_id, launch, compiler_version, projects=None, artifact_s
                      optsSha256=memo_key(c["opts"]), resultSha256=memo_key(c["result"]),
                      label=c["opts"].get("label"), runId=c["runId"], artifactSha256=c.get('artifactSha256'),
                      agentId=c["agentId"], cost=c.get("cost"))
-        if str(entry['label']).startswith('tree-check:'):
-            nonce = re.search(r'\nLIVE TREE READING NONCE: ([A-Za-z0-9_-]{1,64}) point ', c['prompt'])
+        if str(entry['label']).startswith(('tree-check:', 'push-check:')):
+            nonce = re.search(r'\nLIVE (?:TREE READING|REF SNAPSHOT) NONCE: ([A-Za-z0-9_-]{1,64}) point ', c['prompt'])
             if nonce:
                 entry['readingNonce'] = nonce.group(1)
         prefix.append(entry)

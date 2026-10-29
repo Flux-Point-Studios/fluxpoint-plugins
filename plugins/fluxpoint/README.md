@@ -272,6 +272,9 @@ The graph IR supports named lanes and `after` dependencies with multiple
 parents. Independent branches can run concurrently and join before a later
 gate. Replay policies bind cached node results to declared inputs or source
 trees; fresh nodes rerun, and gate-only rejudging preserves the checked work.
+Declared pushes have before/after remote-head checks that halt on undeclared
+changes. Resume plans compare opt-ins with a serial render using recorded
+outputs and costs, and name unknown costs.
 The [graph-engineering reference](skills/graph-engineering/SKILL.md) defines
 these fields, the accepted shapes and their compile-time restrictions.
 

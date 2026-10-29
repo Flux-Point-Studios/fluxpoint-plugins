@@ -535,6 +535,84 @@ class ReplayFollowup(ReplayMemoTests):
         entry = self.build()['_memo'][self.records[0]['key']]
         self.assertEqual(entry['verifiedReading']['tip'], 'b' * 40)
         self.assertEqual(entry['sourceFinalReading']['tip'], 'c' * 40)
+        # Reusing that earlier builder observes the source-final c tip while
+        # retaining its original b verification. Recursive source validation
+        # must apply the same rule as the immediate recorder path.
+        current_record = copy.deepcopy(self.records[0])
+        current_record.update(mode='memo', source=self.source(), reading=latest,
+                              readingCallIndex=0, sourceFinalReading=latest)
+        current = dict(campaign='test', launch=self.launch, results={'build':current_record['result']},
+                       memoRecords=[current_record], callRecords=[self.sentinel('replay build', tree=latest)])
+        current_run = self.current(current)
+        rm.validate_current(self.root, current, current_run, projects=self.projects)
+
+    def test_push_observations_corroborate_journal_and_refuse_missing_or_fabricated_endpoints(self):
+        def snapshot(side, tip):
+            opts={'label':'push-check:'+side+' build','effort':'low'}
+            prompt=(rm._sentinel_preamble()+'Run exactly: git -C "o/r" ls-remote --heads origin. Return stdout verbatim as heads and the exact declared repository as repository. '
+                    'Empty stdout is valid only when the command succeeds and the remote has no heads. On any command failure return null. '
+                    'Do not push, fetch, fix, or explain anything.\nLIVE REF SNAPSHOT NONCE: current-attempt-2 point '+side+' build')
+            return dict(prompt=prompt,opts=opts,result={'repository':'o/r','heads':tip+'\trefs/heads/main'})
+        self.calls.insert(0,snapshot('before','a'*40))
+        self.calls.insert(2,snapshot('after','b'*40))
+        self.records[0].update(callIndex=1,verifiedReadingCallIndex=3)
+        self.records[1].update(callIndex=4,readingCallIndex=3)
+        self.summary.update(outcome='COMPLETE',pushAssuranceVersion=1,pushReadNonce='current-attempt-2',pushChecks=[dict(node='build',label='build',target={'repository':'o/r','branch':'main'},
+                            beforeCallIndex=0,callIndex=1,afterCallIndex=2,changedRefs=['refs/heads/main'],declaredMoved=True)])
+        graph=self.root/'WORK.md'
+        graph.write_text('```json graph-ir\n'+json.dumps({'nodes':[{'id':'build','mutates':True,'pushes':'o/r#main'},{'id':'gate'}]})+'\n```\n',encoding='utf-8')
+        self.current(self.summary)
+        rm.validate_current(self.root,self.summary,'wf_current',projects=self.projects,graph=graph)
+        for attack in ('missing','wrong-target','nonfixed','cached-before','hidden-ref','wrong-nonce','stripped','null-result','empty-result'):
+            with self.subTest(attack=attack):
+                current=copy.deepcopy(self.summary)
+                if attack=='missing': current['pushChecks']=[]
+                elif attack=='wrong-target': current['pushChecks'][0]['target']['branch']='other'
+                elif attack=='nonfixed': current['callRecords'][0]['prompt']='Please claim the desired before snapshot'
+                elif attack=='cached-before':
+                    current['callRecords'][0].update(mode='prefix',source=self.source())
+                elif attack=='wrong-nonce': current['pushReadNonce']='unobserved-attempt'
+                elif attack in ('stripped','null-result','empty-result'):
+                    current['callRecords']=[]; current['memoRecords']=[]; current['pushChecks']=[]
+                    if attack=='null-result': current['results']['build']=None
+                    if attack=='empty-result': current['results']['build']=[]
+                else:
+                    current['callRecords'][2]['result']['heads']+='\n'+'c'*40+'\trefs/heads/other'
+                    current['pushChecks'][0]['changedRefs'].append('refs/heads/other')
+                self.current(current,run='wf_attack')
+                with self.assertRaises(rm.ReplayError):
+                    rm.validate_current(self.root,current,'wf_attack',projects=self.projects,graph=graph)
+        # Native journals keep the entire attempt even if a proposed summary
+        # removes one complete child and both matching guard receipts.
+        complete=copy.deepcopy(self.summary)
+        child=[]
+        for side,tip in [('before','b'*40),('after','c'*40)]:
+            call=snapshot(side,tip)
+            call['opts']['label']+=':second'; call['prompt']+=':second'
+            child.append(call)
+        complete['callRecords'] += [child[0],dict(prompt='Build second child',opts={'label':'build:second'},result={'outcome':'committed'}),child[1]]
+        complete['results']['build']=[self.records[0]['result'],{'outcome':'committed'}]
+        complete['pushChecks'].append(dict(node='build',label='build:second',target={'repository':'o/r','branch':'main'},beforeCallIndex=5,callIndex=6,afterCallIndex=7,changedRefs=['refs/heads/main'],declaredMoved=True))
+        self.current(complete,run='wf_fanout')
+        rm.validate_current(self.root,complete,'wf_fanout',projects=self.projects,graph=graph)
+        omitted=copy.deepcopy(complete)
+        omitted['callRecords']=omitted['callRecords'][:5]; omitted['pushChecks']=omitted['pushChecks'][:1]
+        with self.assertRaisesRegex(rm.ReplayError,'current-attempt remote snapshot is missing'):
+            rm.validate_current(self.root,omitted,'wf_fanout',projects=self.projects,graph=graph)
+        _, digest=run_artifacts.write(self.root,'wf_fanout',dict(runId='wf_fanout',summary=complete,graph=str(graph)))
+        prefix=copy.deepcopy(omitted)
+        prefix['memoRecords']=[]; prefix['pushReadNonce']='next-attempt'
+        for index,call in enumerate(prefix['callRecords']):
+            call.update(mode='prefix',source={'runId':'wf_fanout','artifactSha256':digest,'agentId':'current'+str(index)})
+        self.current(prefix,run='wf_prefix')
+        with self.assertRaisesRegex(rm.ReplayError,'declared prefix output omits'):
+            rm.validate_current(self.root,prefix,'wf_prefix',projects=self.projects,graph=graph)
+        # Plain fan-out coverage remains bound to every output even when the
+        # aggregate is changed enough to avoid equality with the old summary.
+        graph.write_text('```json graph-ir\n'+json.dumps({'nodes':[{'id':'build','mutates':True,'pushes':'o/r#main','foreach':'items'},{'id':'gate'}]})+'\n```\n',encoding='utf-8')
+        prefix['results']['build'].append({'outcome':'extra fabricated child'})
+        with self.assertRaisesRegex(rm.ReplayError,'declared fan-out output has incomplete'):
+            rm.validate_current(self.root,prefix,'wf_prefix',projects=self.projects,graph=graph)
 
     def test_absolute_graph_alias_resolves_to_project(self):
         alias = self.root / 'alias'

@@ -39,9 +39,15 @@ def execute(ir, args=None, setup='', body='', compiled_source=None):
 const fs = require('fs'); const input = JSON.parse(fs.readFileSync(0,'utf8'));
 const events = []; const rawCalls = []; let active=0, maximum=0;
 const root='/repo', head='a'.repeat(40); let tips = {'repo-a':'b'.repeat(40),'repo-b':'c'.repeat(40)}, remainingTokens=1000000;
+let snapshotHeads = repository => (tips[repository] || 'b'.repeat(40))+'\trefs/heads/main';
 SETUP
 const agent = async (prompt,opts) => {
  rawCalls.push({prompt,opts}); events.push('start:'+opts.label); active++; maximum=Math.max(active,maximum);
+ if (opts.label.startsWith('push-check:')) {
+   const repository=JSON.parse(/git -C ("(?:[^"\\]|\\.)*") ls-remote --heads origin/.exec(prompt)[1]);
+   active--; events.push('end:'+opts.label);
+   return {repository,heads:snapshotHeads(repository)};
+ }
  if (opts.label.startsWith('tree-check:')) {
    let value = {root,head,porcelain:''};
    const target = /git -C ("(?:[^"\\]|\\.)*") ls-remote origin ("(?:[^"\\]|\\.)*")/.exec(prompt);
@@ -251,8 +257,7 @@ class GraphReplay(unittest.TestCase):
         for n in ir['nodes']: n.pop('lane')
         body="if(opts.label.startsWith('b')) result.sha='c'.repeat(40);"
         first=execute(ir,body=body)['result']; args=self.memo_args(first)
-        def digest(value): return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
-        args['_prefix']=[dict(promptSha256=hashlib.sha256(row['prompt'].encode()).hexdigest(),optsSha256=digest(row['opts']),resultSha256=digest(row['result']),runId='source-run',artifactSha256='f'*64,agentId='prefix-'+str(i)) for i,row in enumerate(first['callRecords'])]
+        args['_prefix']=BranchReplayFollowup.prefix(self, first)
         out=execute(ir,args=args,body=body)
         self.assertNotIn('start:tree-check:replay a',out['events'])
         a=next(row for row in out['result']['memoRecords'] if row['node']=='a')
@@ -384,8 +389,8 @@ class BranchReplayFollowup(unittest.TestCase):
         rows = []
         digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
         for call in result['callRecords']:
-            nonce = re.search(r'\nLIVE TREE READING NONCE: ([A-Za-z0-9_-]+) point ', call['prompt'])
-            row = dict(promptSha256=hashlib.sha256(call['prompt'].encode()).hexdigest(), optsSha256=digest(call['opts']), resultSha256=digest(call['result']), runId='source-run', artifactSha256='f'*64, agentId='p'+str(len(rows)))
+            nonce = re.search(r'\nLIVE (?:TREE READING|REF SNAPSHOT) NONCE: ([A-Za-z0-9_-]+) point ', call['prompt'])
+            row = dict(promptSha256=hashlib.sha256(call['prompt'].encode()).hexdigest(), optsSha256=digest(call['opts']), resultSha256=digest(call['result']), label=call['opts']['label'], runId='source-run', artifactSha256='f'*64, agentId='p'+str(len(rows)))
             if nonce: row['readingNonce'] = nonce.group(1)
             rows.append(row)
         return rows
@@ -461,6 +466,142 @@ class BranchReplayFollowup(unittest.TestCase):
         with patch.object(subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout='')):
             with self.assertRaisesRegex(ValueError, 'cannot resolve effective SSH'):
                 c._destination_identity('git@unknown-alias:org/repo.git', 'main')
+
+    def test_declared_builder_snapshots_real_remote_heads_and_halts_other_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            remote, clone = Path(tmp)/'origin.git', Path(tmp)/'worker'
+            def git(*args):
+                return subprocess.check_output(['git', *map(str,args)], text=True, encoding='utf-8', stderr=subprocess.PIPE).strip()
+            git('init','--bare',remote)
+            git('init','-b','main',clone)
+            git('-C',clone,'config','user.name','Fixture')
+            git('-C',clone,'config','user.email','fixture@example.test')
+            git('-C',clone,'commit','--allow-empty','-m','initial')
+            git('-C',clone,'remote','add','origin',remote)
+            git('-C',clone,'push','origin','main')
+            git('-C',clone,'commit','--allow-empty','-m','builder')
+            ir=graph([node('build',mutates=True,pushes=clone.as_posix()+'#main')])
+            graph_file=Path(tmp)/'WORK.md'; graph_file.write_text('```json graph-ir\n'+json.dumps(ir)+'\n```\n',encoding='utf-8')
+            sys.path.insert(0,str(SCRIPTS))
+            import replay_memo as rm
+            setup="const cp=require('child_process'); snapshotHeads=repository=>cp.execFileSync('git',['-C',repository,'ls-remote','--heads','origin'],{encoding:'utf8'});"
+            for ref, expected in [('main','COMPLETE'),('other','PUSH-REF-MISMATCH')]:
+                with self.subTest(ref=ref):
+                    body="cp.execFileSync('git',"+json.dumps(['-C',str(clone),'push','origin','HEAD:refs/heads/'+ref])+",{stdio:'pipe'});"
+                    out=execute(ir,setup=setup,body=body)['result']
+                    self.assertEqual(out['outcome'],expected)
+                    check=out['pushChecks'][0]
+                    self.assertEqual(check['changedRefs'],['refs/heads/'+ref])
+                    self.assertEqual(check['declaredMoved'],ref=='main')
+                    if ref=='other': self.assertTrue(any(p['status']=='PUSH-NO-CHANGE' for p in out['provenance']))
+                    before=out['callRecords'][check['beforeCallIndex']]
+                    after=out['callRecords'][check['afterCallIndex']]
+                    self.assertEqual(before['mode'],'live'); self.assertEqual(after['mode'],'live')
+                    self.assertNotEqual(before['result']['heads'],after['result']['heads'])
+                    rm._verify_push_checks(tmp,out,[dict(call,live=True) for call in out['callRecords']],graph_file)
+
+    def test_declared_ref_unchanged_retains_finding_and_deletion_halts(self):
+        ir=graph([node('build',mutates=True,pushes='repo-a#main')])
+        unchanged=execute(ir)['result']
+        self.assertTrue(any(p['status']=='PUSH-NO-CHANGE' for p in unchanged['provenance']))
+        self.assertEqual(unchanged['pushChecks'][0]['changedRefs'],[])
+        setup="let extra=true; snapshotHeads=r=>tips[r]+'\\trefs/heads/main'+(extra?'\\n'+'e'.repeat(40)+'\\trefs/heads/other':'');"
+        out=execute(ir,setup=setup,body='extra=false;')['result']
+        self.assertEqual(out['outcome'],'PUSH-REF-MISMATCH')
+        self.assertEqual(out['pushChecks'][0]['changedRefs'],['refs/heads/other'])
+
+    def test_snapshot_failure_and_invalid_heads_halt_before_builder(self):
+        ir=graph([node('build',mutates=True,pushes='repo-a#main')])
+        for setup in ["snapshotHeads=()=>null;", "snapshotHeads=()=>('not-a-sha\\trefs/heads/main');",
+                      "snapshotHeads=()=>('a'.repeat(40)+'\\trefs/heads/main\\n'+'b'.repeat(40)+'\\trefs/heads/main');"]:
+            with self.subTest(setup=setup):
+                out=execute(ir,setup=setup)
+                self.assertEqual(out['result']['outcome'],'PUSH-UNKNOWN')
+                self.assertNotIn('start:build',out['events'])
+        after_failure=execute(ir,body='snapshotHeads=()=>null;')
+        self.assertEqual(after_failure['result']['outcome'],'PUSH-UNKNOWN')
+        self.assertIn('start:build',after_failure['events'])
+        self.assertEqual(after_failure['result']['pushChecks'],[])
+
+    def test_live_builder_refreshes_cached_before_snapshot(self):
+        ir=graph([node('build',mutates=True,pushes='repo-a#main',prompt='Build {{A.note}}')])
+        ir['argDefaults']={'note':'before'}
+        first=execute(ir)['result']
+        second=execute(ir,args={'_prefix':self.prefix(first),'note':'changed'})['result']
+        before=[r for r in second['callRecords'] if r['opts']['label']=='push-check:before build']
+        self.assertEqual([r['mode'] for r in before],['prefix','live'])
+        pair=second['pushChecks'][0]
+        self.assertEqual(second['callRecords'][pair['beforeCallIndex']]['mode'],'live')
+        self.assertEqual(next(r for r in second['memoRecords'] if r['node']=='build')['mode'],'live')
+
+    def test_generated_fanout_receipts_preserve_compiler_keys_and_every_invocation(self):
+        sys.path.insert(0,str(SCRIPTS))
+        import replay_memo as rm
+        ir=graph([node('build',mutates=True,pushes='repo-a#main',foreach='items',prompt='Build {{item}}')])
+        ir['lists']={'items':[{'key':'left'},{'key':'right'}]}
+        result=execute(ir,body="result.key='worker-provided-key';")['result']
+        self.assertEqual([value['key'] for value in result['results']['build']],['left','right'])
+        self.assertEqual(len(result['pushChecks']),2)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); projects=root/'projects'; run='wf_fanout'
+            directory=projects/'project/session/subagents/workflows'/run
+            directory.mkdir(parents=True)
+            graph_file=root/'WORK.md'; graph_file.write_text('```json graph-ir\n'+json.dumps(ir)+'\n```\n',encoding='utf-8')
+            events=[]
+            for index,call in enumerate(result['callRecords']):
+                aid='worker'+str(index)
+                events += [dict(type='started',agentId=aid,opts=call['opts']),dict(type='result',agentId=aid,result=call['result'])]
+                (directory/('agent-'+aid+'.jsonl')).write_text(json.dumps(dict(type='user',message=dict(role='user',content=call['prompt'])))+'\n',encoding='utf-8')
+            (directory/'journal.jsonl').write_text(''.join(json.dumps(event)+'\n' for event in events),encoding='utf-8')
+            rm.validate_current(root,result,run,projects=projects,graph=graph_file)
+            # Native Workflow journals may omit both options and labels; the
+            # audited first-user task still identifies each fixed snapshot.
+            for event in events: event.pop('opts',None)
+            (directory/'journal.jsonl').write_text(''.join(json.dumps(event)+'\n' for event in events),encoding='utf-8')
+            rm.validate_current(root,result,run,projects=projects,graph=graph_file)
+            omitted=copy.deepcopy(result)
+            removed={omitted['pushChecks'][1][key] for key in ('beforeCallIndex','callIndex','afterCallIndex')}
+            retained=[i for i in range(len(omitted['callRecords'])) if i not in removed]
+            remap={old:new for new,old in enumerate(retained)}
+            omitted['callRecords']=[omitted['callRecords'][i] for i in retained]
+            omitted['pushChecks']=omitted['pushChecks'][:1]
+            for key in ('beforeCallIndex','callIndex','afterCallIndex'):
+                omitted['pushChecks'][0][key]=remap[omitted['pushChecks'][0][key]]
+            with self.assertRaisesRegex(rm.ReplayError,'incomplete invocation coverage|current-attempt remote snapshot'):
+                rm.validate_current(root,omitted,run,projects=projects,graph=graph_file)
+
+    def test_plan_renders_serial_counterfactual_and_measures_recorded_cost(self):
+        ir=graph([node('a',lane='one'),node('a-gate',lane='one',after='a',verifies='a',independent=True,prompt='Judge {{prev}}'),
+                  node('b',lane='two',prompt='Build {{A.note}}'),node('b-gate',lane='two',after='b',verifies='b',independent=True,prompt='Judge {{prev}}')])
+        ir['argDefaults']={'note':'old'}
+        source=execute(ir)['result']
+        state={'_memo':{},'_prefix':[dict(label=n['id'],cost={'minutes':m,'tokens':m*100},promptSha256='0'*64,optsSha256='0'*64) for n,m in zip(ir['nodes'],[2,3,5,7])]}
+        helpers={'plugin_identity':c._sibling('plugin_identity'), 'replay_memo':SimpleNamespace(build_memo=lambda *a,**kw:state),
+                 'run_artifacts':SimpleNamespace(read=lambda *a,**kw:({'summary':source},'f'*64))}
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(['git','init','-q',tmp],check=True)
+            subprocess.run(['git','-C',tmp,'-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','--allow-empty','-qm','init'],check=True)
+            with patch.object(c,'_sibling',side_effect=helpers.__getitem__):
+                rows=c.rerun_plan(ir,CONTRACTS,{'note':'changed'},tmp,'source-run')
+        self.assertEqual([row['serialStatus'] for row in rows],['prefix','prefix','live','live'])
+        comparison=rows[0]['comparison']
+        self.assertEqual(comparison['optIns'],{'nodes':4,'knownMinutes':17,'unknownMinutes':0})
+        self.assertEqual(comparison['serial'],{'nodes':2,'knownMinutes':12,'unknownMinutes':0})
+        self.assertIn('4 vs 2 live nodes',rows[0]['warning'])
+
+    def test_plan_excludes_unreached_rows_from_measured_cost(self):
+        ir=graph([node('a',lane='one',haltWhen='exit != 0'),node('later',lane='one',after='a',prompt='Use {{prev}}')])
+        source=execute(ir,body="if(opts.label==='a') result.exit=1;")['result']
+        state={'_memo':{},'_prefix':[dict(label=n['id'],cost={'minutes':m,'tokens':m*100},promptSha256='0'*64,optsSha256='0'*64) for n,m in zip(ir['nodes'],[2,100])]}
+        helpers={'plugin_identity':c._sibling('plugin_identity'),'replay_memo':SimpleNamespace(build_memo=lambda *a,**kw:state),
+                 'run_artifacts':SimpleNamespace(read=lambda *a,**kw:({'summary':source},'f'*64))}
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(['git','init','-q',tmp],check=True)
+            subprocess.run(['git','-C',tmp,'-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','--allow-empty','-qm','init'],check=True)
+            with patch.object(c,'_sibling',side_effect=helpers.__getitem__):
+                rows=c.rerun_plan(ir,CONTRACTS,{},tmp,'source-run')
+        self.assertEqual(rows[1]['serialStatus'],'not reached')
+        self.assertEqual(rows[0]['comparison']['optIns'],{'nodes':1,'knownMinutes':2,'unknownMinutes':0})
 
 
 if __name__=='__main__': unittest.main()

@@ -15,7 +15,7 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 | Understand Claude Code and Codex support | [Runtimes](runtimes.md) |
 | Specify implementation work | [Spec-first contract](spec-first.md), [packet format](../plugins/fluxpoint/references/spec-format.md), [grill-me](../plugins/fluxpoint/commands/grill-me.md) |
 | Drive and finish a loop | [Loop engineering](../plugins/fluxpoint/skills/loop-engineering/SKILL.md) |
-| Design a graph, lanes, joins and replay policies | [Graph engineering](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
+| Design a graph, lanes, joins, checked pushes and replay cost comparisons | [Graph engineering](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
 | Launch or resume with pinned artifacts | [Structured resume](../plugins/fluxpoint/references/structured-resume.md), [graph-run](../plugins/fluxpoint/commands/graph-run.md) |
 | Diagnose a busy or unhealthy machine | [Machine health and watchdog](box-health.md) |
 | Run long commands and manage cancellation | [Long-command lifecycle](../plugins/fluxpoint/references/longrun.md) |

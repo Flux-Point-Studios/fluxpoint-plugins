@@ -40,6 +40,7 @@ function sha256(text) {
   return h.map(v => (v >>> 0).toString(16).padStart(8,'0')).join('')
 }
 const CALL_RECORDS = [], MEMO_RECORDS = [], REJUDGES = []
+const PUSH_CHECKS = []
 const NODE_STATE = {}, LIVE_READINGS = {}, LIVE_READING_CALLS = {}, LIVE_READING_FRESH = {}, CALL_STATE = {}
 const REJUDGE_REACHED = new Set()
 let HALT = null, FORKED = false, RESERVED = 0, PREFIX_OPEN = true, PREFIX_INDEX = 0
@@ -77,6 +78,67 @@ function prefixTreePrompt(prompt, options) {
   if (FORKED || !PREFIX_OPEN || !previous || !previous.readingNonce) return prompt
   const candidate = prompt.replace('\nLIVE TREE READING NONCE: ' + A._replayLaunchNonce + ' point ', '\nLIVE TREE READING NONCE: ' + previous.readingNonce + ' point ')
   return previous.promptSha256 === sha256(auditedPrompt(candidate, options)) && previous.optsSha256 === sha256(canonical(options)) ? candidate : prompt
+}
+function parseRemoteHeads(text) {
+  if (typeof text !== 'string') throw new Error('remote heads output must be a string')
+  const heads = {}
+  for (const line of text.split(/\r?\n/).filter(x => x.trim())) {
+    const match = /^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})\s+(refs\/heads\/[^\s]+)$/.exec(line)
+    if (!match || Object.prototype.hasOwnProperty.call(heads, match[2])) throw new Error('invalid or duplicate remote head')
+    heads[match[2]] = match[1].toLowerCase()
+  }
+  return heads
+}
+async function pushSnapshot(n, options, side, forceLive = false) {
+  const point = side + ' ' + options.label
+  const opts = { label: 'push-check:' + point, phase: options.phase, effort: 'low', schema: {
+    type: 'object', additionalProperties: false, required: ['repository','heads'],
+    properties: { repository: { type: 'string' }, heads: { type: 'string' } }
+  } }
+  const base = longPreamble() + 'Run exactly: git -C ' + JSON.stringify(n.target.repository) + ' ls-remote --heads origin. Return stdout verbatim as heads and the exact declared repository as repository. Empty stdout is valid only when the command succeeds and the remote has no heads. On any command failure return null. Do not push, fetch, fix, or explain anything.'
+  let prompt = base + '\nLIVE REF SNAPSHOT NONCE: ' + A._replayLaunchNonce + ' point ' + point
+  const previous = (A._prefix || [])[PREFIX_INDEX]
+  if (!forceLive && !FORKED && PREFIX_OPEN && previous && previous.readingNonce) {
+    const candidate = base + '\nLIVE REF SNAPSHOT NONCE: ' + previous.readingNonce + ' point ' + point
+    if (prefixMatches(auditedPrompt(candidate, opts), opts)) prompt = candidate
+  }
+  const value = await agent(prompt, opts)
+  const call = CALL_STATE[opts.label]
+  try {
+    if (!value || value.repository !== n.target.repository) throw new Error('remote snapshot missing or repository mismatched')
+    return { heads: parseRemoteHeads(value.heads), callIndex: CALL_RECORDS.indexOf(call), mode: call.mode }
+  } catch (error) {
+    note(n.id, 'PUSH-UNKNOWN', point + ': ' + error.message); halt('PUSH-UNKNOWN'); return null
+  }
+}
+async function pushPrefix(n, options) {
+  const previous = (A._prefix || [])[PREFIX_INDEX]
+  return n && n.mutates && n.target && !FORKED && PREFIX_OPEN && previous && previous.label === 'push-check:before ' + options.label
+    ? pushSnapshot(n, options, 'before') : null
+}
+async function guardedInvoke(n, prompt, options, invoke, before = null) {
+  if (!n || !n.mutates || !n.target) return invoke(prompt, options)
+  const nativePrefix = prefixMatches(auditedPrompt(prompt, options), options)
+  if (!before || before.mode === 'prefix' && !nativePrefix) before = await pushSnapshot(n, options, 'before', true)
+  if (!before) return null
+  let result, failure
+  try { result = await invoke(prompt, options) } catch (error) { failure = error }
+  const call = CALL_STATE[options.label]
+  const after = await pushSnapshot(n, options, 'after', !(call && call.mode === 'prefix'))
+  if (!after) return null
+  const changedRefs = [...new Set([...Object.keys(before.heads), ...Object.keys(after.heads)])].filter(ref => before.heads[ref] !== after.heads[ref]).sort()
+  const declared = 'refs/heads/' + n.target.branch
+  const unexpected = changedRefs.filter(ref => ref !== declared)
+  PUSH_CHECKS.push({ node: n.id, label: options.label, target: n.target, beforeCallIndex: before.callIndex,
+    callIndex: CALL_RECORDS.indexOf(call), afterCallIndex: after.callIndex, changedRefs,
+    declaredMoved: changedRefs.includes(declared) })
+  if (!changedRefs.includes(declared)) note(n.id, 'PUSH-NO-CHANGE', 'declared remote ref did not move: ' + declared)
+  if (unexpected.length) {
+    note(n.id, 'PUSH-REF-MISMATCH', 'undeclared remote refs changed during builder interval: ' + unexpected.join(', '))
+    halt('PUSH-REF-MISMATCH'); return null
+  }
+  if (failure) throw failure
+  return result
 }
 function prefixMatches(prompt, options) {
   const previous = (A._prefix || [])[PREFIX_INDEX]
@@ -129,7 +191,8 @@ async function replaySpawn(prompt, options, invoke) {
   if (!n) {
     const owner = Object.values(REPLAY_NODES).find(node => String(options.label).startsWith(node.id + ':'))
     if (owner && owner.fresh) prompt += '\nFRESH NODE LAUNCH NONCE: ' + A._replayLaunchNonce
-    return reservedSpawn(prompt, options, invoke)
+    const before = await pushPrefix(owner, options)
+    return reservedSpawn(prompt, options, (p, o) => guardedInvoke(owner, p, o, invoke, before))
   }
   let reading = LIVE_READINGS[n.id] || null
   const rejudge = (A.rejudge || {})[n.id]
@@ -143,6 +206,7 @@ async function replaySpawn(prompt, options, invoke) {
   }
   const originalPrompt = prompt, originalOptions = options
   ;({ prompt, options } = nodePrompt(originalPrompt, originalOptions, n, reading))
+  const pushBefore = await pushPrefix(n, options)
   if (n.gate && n.target && !LIVE_READING_FRESH[n.id] && !prefixMatches(prompt, options)) {
     if (!await treeCheck('before ' + n.id, options.phase, n.target, true)) { halt(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED'); return null }
     reading = LIVE_READINGS[n.id]
@@ -169,7 +233,7 @@ async function replaySpawn(prompt, options, invoke) {
     note(n.id, 'REPLAYED-MEMO', entry.runId + '/' + entry.agentId, { key, head: entry.verifiedReading ? entry.verifiedReading.tip : reading && reading.tip })
     return entry.result
   }
-  const result = await reservedSpawn(prompt, options, invoke)
+  const result = await reservedSpawn(prompt, options, (p, o) => guardedInvoke(n, p, o, invoke, pushBefore))
   const call = CALL_STATE[options.label]
   if (rejudgeRecord) rejudgeRecord.gateCallIndex = call ? CALL_RECORDS.indexOf(call) : null
   const mode = call && call.mode === 'prefix' ? 'prefix' : 'live'
