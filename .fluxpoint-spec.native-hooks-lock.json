@@ -11,7 +11,7 @@
     "plugins/fluxpoint/scripts/native-hook.py": "5e910937d3023840ca614cde0c5ed85f129b07aa4d581072e2567adfeabae165",
     "plugins/fluxpoint/scripts/plugin_identity.py": "df1496a927c14abcf314c08d0c839cdcac31b834b5842d329a84cc46ea743895",
     "plugins/fluxpoint/scripts/secret-guard.py": "3872bcdebabeab2c5ad8bfe88db96a0033325f76bef7da1204e443becd09b6dc",
-    "plugins/fluxpoint/tests/native-hook-test.py": "3243d8b65ff0468e3500e953bb1c027082fc9393854cdad1853f7e95049fecfa"
+    "plugins/fluxpoint/tests/native-hook-test.py": "502e8203fb00b76c56ff5cfda9ee44ed5d1678cceb378ba72e68113fe48aaaa2"
   },
   "lockFormat": 2
 }

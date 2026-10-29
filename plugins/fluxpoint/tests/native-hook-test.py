@@ -32,9 +32,9 @@ class NativeHooks(unittest.TestCase):
                               env=kwargs.pop('env',self.env), capture_output=True,text=True,timeout=15,**kwargs)
 
     def test_manifest_native_claude_and_explicit_codex_legacy(self):
-        claude=json.loads((PLUGIN/'hooks/hooks.json').read_text())['hooks']
-        codex_path=json.loads((PLUGIN/'plugin.json').read_text())['extensions']['com.openai']['hooks']
-        codex=json.loads((PLUGIN/codex_path).read_text())['hooks']
+        claude=json.loads((PLUGIN/'hooks/hooks.json').read_text(encoding='utf-8'))['hooks']
+        codex_path=json.loads((PLUGIN/'plugin.json').read_text(encoding='utf-8'))['extensions']['com.openai']['hooks']
+        codex=json.loads((PLUGIN/codex_path).read_text(encoding='utf-8'))['hooks']
         for event,index,mode in [('PreToolUse',0,'guard'),('PostToolUse',1,'attest'),('PostToolUseFailure',0,'attest')]:
             hook=claude[event][index]['hooks'][0]
             self.assertEqual(hook['command'],'node');self.assertEqual(hook['args'],['${CLAUDE_PLUGIN_ROOT}/scripts/native-hook.mjs',mode])
@@ -66,7 +66,7 @@ class NativeHooks(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout),[False,False,True,True])
         sys.path.insert(0,str(PLUGIN/'scripts'));import plugin_identity
         copy=self.root/'plugin';shutil.copytree(PLUGIN,copy)
-        first=plugin_identity.current(copy);entry=copy/'scripts/native-hook.mjs';entry.write_text(entry.read_text()+'\n// changed\n')
+        first=plugin_identity.current(copy);entry=copy/'scripts/native-hook.mjs';entry.write_text(entry.read_text(encoding='utf-8')+'\n// changed\n')
         self.assertNotEqual(first['scriptsSha256'],plugin_identity.current(copy)['scriptsSha256'])
 
     def test_attest_is_advisory_and_warns_once_in_payload_project(self):
@@ -101,10 +101,10 @@ class NativeHooks(unittest.TestCase):
         self.assertEqual(self.invoke('guard',env=env).returncode,0)
         added=set(folder.glob('*.json'))-before
         self.assertTrue(added,'a PATH change must select a new interpreter cache entry')
-        cache=next(iter(added));value=json.loads(cache.read_text());value['stamp']=[value['file'],0,0,0]
+        cache=next(iter(added));value=json.loads(cache.read_text(encoding='utf-8'));value['stamp']=[value['file'],0,0,0]
         cache.write_text(json.dumps(value))
         self.assertEqual(self.invoke('guard',env=env).returncode,0)
-        self.assertNotEqual(json.loads(cache.read_text())['stamp'],value['stamp'])
+        self.assertNotEqual(json.loads(cache.read_text(encoding='utf-8'))['stamp'],value['stamp'])
         if os.name!='nt':
             cache.chmod(0o666)
             self.assertEqual(self.invoke('guard',env=env).returncode,0)
@@ -125,7 +125,7 @@ class NativeHooks(unittest.TestCase):
         env.pop('FPL_PY',None)
         result=subprocess.run([shutil.which('node'),str(ENTRY),'guard'],input='{}',cwd=self.root,env=env,capture_output=True,text=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr)
-        values=[json.loads(p.read_text())['file'] for p in (self.root/'cache/fluxpoint/native-hooks').glob('*.json')]
+        values=[json.loads(p.read_text(encoding='utf-8'))['file'] for p in (self.root/'cache/fluxpoint/native-hooks').glob('*.json')]
         self.assertTrue(any(str(directory) in value for value in values))
 
     def fixture_plugin(self, worker):
@@ -164,7 +164,7 @@ time.sleep(60)
         try:
             os.kill(pid,0)
             stat=Path('/proc')/str(pid)/'stat'
-            return not Path('/proc').is_dir() or stat.read_text().rsplit(')',1)[-1].split()[0]!='Z'
+            return not Path('/proc').is_dir() or stat.read_text(encoding='utf-8').rsplit(')',1)[-1].split()[0]!='Z'
         except (ProcessLookupError,FileNotFoundError):return False
 
     def kill_pid(self,pid):
@@ -174,7 +174,7 @@ time.sleep(60)
 
     def cleanup_pids(self, filename):
         if filename.exists():
-            for pid in reversed(json.loads(filename.read_text())):self.kill_pid(pid)
+            for pid in reversed(json.loads(filename.read_text(encoding='utf-8'))):self.kill_pid(pid)
 
     def await_file(self, filename, seconds=8):
         end=time.monotonic()+seconds
@@ -207,7 +207,7 @@ time.sleep(60)
                         proc.kill();proc.wait(timeout=3)
                         # Leave only the orphan alive; the suspended control must
                         # establish that orphan ownership, not its running parent.
-                        worker=json.loads(pidfile.read_text())[0]
+                        worker=json.loads(pidfile.read_text(encoding='utf-8'))[0]
                         self.kill_pid(worker)
                         self.assertEqual(ended.wait(1.0),not inherit,'fixture must distinguish private and inherited hook pipes')
                     finally:
@@ -238,7 +238,7 @@ time.sleep(60)
         try:stdout,stderr=first.communicate(timeout=15)
         except subprocess.TimeoutExpired:first.kill();first.communicate();self.fail('real exec-form hook did not settle')
         self.assertEqual(first.returncode,0,stderr.decode(errors='replace'))
-        observation=json.loads(marker.read_text());self.assertEqual(observation['ppid'],first.pid,'exec-form entry must have Claude as direct parent')
+        observation=json.loads(marker.read_text(encoding='utf-8'));self.assertEqual(observation['ppid'],first.pid,'exec-form entry must have Claude as direct parent')
         self.assertEqual(observation['args'],[str(marker)])
         # Prime the version cache before a deliberately short runtime timeout.
         prime=self.invoke('guard',env=env);self.assertEqual(prime.returncode,0,prime.stderr)
@@ -251,7 +251,7 @@ time.sleep(60)
                 try:
                     out,err=actual.communicate(timeout=30)
                     self.assertTrue(pidfile.exists(),'runtime timeout must occur after worker creates orphan')
-                    self.assertFalse(self.process_alive(json.loads(pidfile.read_text())[2]),'real runtime timeout must terminate its native hook entry')
+                    self.assertFalse(self.process_alive(json.loads(pidfile.read_text(encoding='utf-8'))[2]),'real runtime timeout must terminate its native hook entry')
                     self.assertLess(time.monotonic()-start,25)
                     self.assertEqual(actual.returncode,0,err.decode(errors='replace'))
                 finally:
