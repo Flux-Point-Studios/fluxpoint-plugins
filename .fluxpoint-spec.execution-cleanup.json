@@ -12,7 +12,8 @@
     "Attestation classifies exact harness STATUS and inserted Evidence/Decisions edits without exempting content changes",
     "Replay provenance frames, compact compiled replay authority, live irreversible guards, defined Unicode hashing and SHA-256 ledger migration",
     "Safe targeted-prefix reuse, source-final branch readings, lane warnings and effective SSH/forge identities",
-    "Fixed-command before/after remote-head snapshots for declared builders and same-resume serial cost comparison"
+    "Fixed-command before/after remote-head snapshots for declared builders and same-resume serial cost comparison",
+    "Compiler syntax remains compatible with the supported Python 3.9 runtime"
   ],
   "outOfScope": [
     "External workflow runtime cache redesign",
@@ -146,6 +147,18 @@
         "replay-followup-tests"
       ],
       "counterexample": "A builder moves an undeclared branch without halting, a cached before snapshot fences live work, or the plan claims opt-ins save work without rendering its serial counterfactual"
+    },
+    {
+      "id": "compiler-python-portability",
+      "statement": "The compiler imports under every supported Python runtime, including Python 3.9, while emitting the same repair-origin severity context",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "graph-replay-tests",
+        "execution-cleanup-tests"
+      ],
+      "counterexample": "A nested f-string quote is accepted locally on Python 3.12 but prevents every compiler consumer from importing on the Windows Python 3.9 gate"
     }
   ],
   "checks": [
