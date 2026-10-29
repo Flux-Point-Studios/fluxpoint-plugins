@@ -4,7 +4,7 @@
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/contracts/BlasterVerificationV1.schema.json": "ef204b396a757b63f46804894772c62fcaf2d67a07d9de5f5cc0c7a8648aa8b9",
-    "plugins/fluxpoint/contracts/DecisionV1.schema.json": "d7cddac0bd12224cb73744a3d482e34874594ba32b24b123049395ab2113ba9c",
+    "plugins/fluxpoint/contracts/DecisionV1.schema.json": "0bb4ce05a8919b3d6bd949e22f10b155a4580f74f26a4cfd510b5cdd0daaaaac",
     "plugins/fluxpoint/contracts/DesignV1.schema.json": "044cdfb79fe79f02f25831c3f5ca89c97cffd732777152ca0e3baa57e8354a1b",
     "plugins/fluxpoint/contracts/ExecutionV1.schema.json": "bd673cb2460387192ab37028a0e0a0bfeedef1b34a0f29918b361308de9b719a",
     "plugins/fluxpoint/contracts/FindingsV1.schema.json": "8cd6c53427966acb848be265a6b586865f0aacbb15d69075317653f841a11f84",
@@ -12,13 +12,14 @@
     "plugins/fluxpoint/contracts/HarnessCheckV1.schema.json": "cbe5c0f3ad2caf8cf5197a42c7ac7849a96fefd27821bf0b5d47f26b4d0762d8",
     "plugins/fluxpoint/contracts/JudgmentV1.schema.json": "580fe8cdb0f2706ab0875fb702e06054712527d3366e43dac6030c4e66a61c70",
     "plugins/fluxpoint/contracts/LessonV1.schema.json": "d1cd1369175b7600d88ed276b79a07fc437216b9d6cddfaaac092a4537e083cf",
+    "plugins/fluxpoint/contracts/NativeReadingsV1.schema.json": "51af9fc34578e4160b88d0b3d26c31e19266a56c154ca34f3aa8f1e79ca47d44",
     "plugins/fluxpoint/contracts/ProofV1.schema.json": "09b8ba54e72e33447bfaccb21582c26d759cf4a345dceae787bc543b97dcd572",
     "plugins/fluxpoint/contracts/RedTeamV1.schema.json": "48d70fa172b8d9ea332d7bea44bd91288b5e7388d09ece865b6d12dc1935dd49",
     "plugins/fluxpoint/contracts/SliceV1.schema.json": "3471ce068c825f6684cd64f8469e282b097b33da6487a95ff88b0ca000a88cef",
     "plugins/fluxpoint/contracts/TreeCheckV1.schema.json": "fce67697c572aa1df0320e64a4eb4963c03dccac5f7538d65875c247e5e87fbc",
     "plugins/fluxpoint/contracts/VerdictV1.schema.json": "ce1d11d9db6b45a3786f25963ad8ca5d2f979fef63cd6dfcc374bde8ac7853f3",
-    "plugins/fluxpoint/scripts/compile-graph.py": "29f445a539da0d1940ddba870081e7854d63a15e74703000794de0c872e55fe9",
-    "plugins/fluxpoint/scripts/record-run.py": "00f982c90aad36dd50706fb2b0479dad3a533b5fa35b92377d087f16f7abd8f8",
+    "plugins/fluxpoint/scripts/compile-graph.py": "7012d38d1c7313362f4f270b2cb1b7a774e93e078c36c7d275ca77a1ff1a2a29",
+    "plugins/fluxpoint/scripts/record-run.py": "587c833d311ae7dd1b02a8a8f5a443c34d10bdc8f478411ca51ceba01b7af739",
     "plugins/fluxpoint/tests/review-gate-evidence-test.py": "91171f78c6f49700c2799b53d5dc7ec536ee5be403e525ca008587f9e7856893"
   },
   "lockFormat": 2
