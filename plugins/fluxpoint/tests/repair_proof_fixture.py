@@ -29,7 +29,10 @@ const agent=async(p,o)=>{
   return {base:m.base,patchSha256:m.patchSha256,completed:true,evidence:['test fixture executed coverage and valid controls'],blockers:[],findings:[]};
  }
  const r=await rawAgent(p,o);
- if(r?.branch)r.patchSha256=PATCH_MANIFEST.patchSha256;
+ if(r?.branch){
+  r.patchSha256=PATCH_MANIFEST.patchSha256;
+  if(o.schema.required?.includes('baseSeen')&&!Object.prototype.hasOwnProperty.call(r,'baseSeen'))r.baseSeen=args._base.sha;
+ }
  if(r?.verdict==='PASS'&&p.includes('HARNESS PATCH MANIFEST')){
   const m=JSON.parse(p.split('HARNESS PATCH MANIFEST (derived from raw patch bytes, never your own inventory): ')[1].split('\n')[0]);
   const c=JSON.parse(p.split('ORIGIN REPLAY CONTEXT: ')[1].split('\n')[0]);

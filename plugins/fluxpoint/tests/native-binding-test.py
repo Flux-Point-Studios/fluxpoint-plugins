@@ -134,6 +134,18 @@ class NativeBinding(unittest.TestCase):
         with self.assertRaisesRegex(native_binding.BindingError,'caller report'):
             native_binding.verify_fixed(summary,self.run,self.projects)
 
+    def test_compiler_base_extension_stays_exact_and_closed(self):
+        import native_binding
+        self.report['baseSeen'] = 'a' * 40
+        self.save()
+        summary = dict(contracts={'fixed-check':'NativeReadingsV1'}, results={'fixed-check':copy.deepcopy(self.report)}, worktreeBase={'sha':'a' * 40})
+        self.assertEqual(native_binding.verify_fixed(summary,self.run,self.projects)[0]['baseSeen'], 'a' * 40)
+        summary['worktreeBase']['sha'] = 'b' * 40
+        with self.assertRaisesRegex(native_binding.BindingError,'baseSeen'): native_binding.verify_fixed(summary,self.run,self.projects)
+        with self.assertRaisesRegex(native_binding.BindingError,'baseSeen'): self.bind()
+        self.report['unexpected'] = True; self.save()
+        with self.assertRaisesRegex(native_binding.BindingError,'closed'): native_binding.bind(self.run,self.agent,self.projects, expected_base='a' * 40)
+
     def test_domain_adapter_receipts_keep_exact_command_and_source_ids(self):
         import native_binding
         self.rows.insert(0,dict(type='assistant',cwd=str(self.worktree),message={'role':'assistant','content':[dict(type='tool_use',id='inspection',name='Read',input={'file_path':'source.py'})]}))
@@ -171,7 +183,20 @@ class NativeBinding(unittest.TestCase):
         self.assertTrue(any('NativeReadingsV1' in value for value in compiler.validate(ir,contracts)))
         graph=self.worktree/'WORK.md'
         graph.write_text('## Evidence\n\n| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n')
-        summary=dict(campaign='fixed',outcome='COMPLETE',contracts={'fixed-check':'NativeReadingsV1'},results={'fixed-check':self.report},provenance=[])
+        self.report['baseSeen'] = 'a' * 40
+        self.save()
+        ir['nodes'][0]['isolation'] = 'worktree'
+        compiled = compiler.emit(ir, contracts)
+        runner = self.root / 'compiled-native.mjs'
+        runner.write_text('const args=' + json.dumps({'_base': {'sha':'a' * 40, 'root':str(self.root), 'porcelain':'', 'branch':'main'}}) + ';\n'
+                          + 'const agent=async(p,o)=>(' + json.dumps(self.report) + ');\n'
+                          + 'const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};\n'
+                          + 'const result=await(async()=>{\n' + compiled.replace('export const meta =','const meta =') + '\n})();\nconsole.log(JSON.stringify(result));\n', encoding='utf-8')
+        executed = subprocess.run(['node',str(runner)],capture_output=True,text=True,encoding='utf-8',timeout=30)
+        self.assertEqual(executed.returncode,0,executed.stderr)
+        summary=json.loads(executed.stdout)
+        self.assertEqual(summary['outcome'],'COMPLETE')
+        self.assertEqual(summary['results']['fixed-check']['baseSeen'],'a' * 40)
         command=[sys.executable,str(SCRIPTS/'record-run.py'),'--root',str(self.worktree),'--graph',str(graph),'--run-id',self.run]
         result=subprocess.run(command,input=json.dumps(summary),capture_output=True,text=True,
                               env=dict(os.environ,CLAUDE_CONFIG_DIR=str(self.root),FPL_MEMORY_INDEX='0'),timeout=30)

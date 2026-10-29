@@ -322,9 +322,11 @@ had yet; build it when one does, not before.
 are worth knowing before you depend on it, because each has cost a real
 campaign a wrong answer rather than an error:
 
-- **You do not choose the base — so every isolated node is told it and
-  asserts it.** The compiler emits the literal string and the runtime cuts
-  the worktree; nothing in this plugin selects the commit. A node given
+- **Every isolated node establishes the exact campaign base.** The runtime
+  cuts the worktree. Its `worktree.baseRef` setting accepts `"head"` to start
+  at the launching HEAD, or `"fresh"` (the default) for its fresh branch base.
+  Set `{"worktree":{"baseRef":"head"}}` in `.claude/settings.local.json`
+  when launching from campaign commits. A node given
   isolation has been observed reading a tree cut from the default branch
   rather than the campaign's, which makes a file an earlier node committed
   simply ABSENT — and nothing inside says so: `git status` is clean and a
@@ -332,9 +334,16 @@ campaign a wrong answer rather than an error:
   well-evidenced, wrong report. The graph therefore refuses to start
   without `args._base` (graph-run loads `git rev-parse HEAD` at launch),
   and the compiler injects a preamble ahead of every worktree-isolated
-  node's own prompt: run `git rev-parse HEAD` first, check the campaign
-  base is an ancestor, and on a mismatch make the mismatch the result
-  rather than reporting absent files as findings. A downstream node that
+  node's own prompt: read HEAD and root, refuse the shared checkout, dirt
+  and detached HEAD, and fast-forward a clean behind worktree with plain
+  `git merge --ff-only <base>`. The final HEAD must equal the base exactly;
+  ahead, divergent and missing-object states stop without reset or detach.
+  Schemas require the full `baseSeen` observed before the requested work,
+  retained even when that work creates later commits; the script files a missing or
+  different hash as `WRONG-BASE` and drops those findings, including restored
+  results. Preflight's project/local `head`, `fresh/absent` or `unknown`
+  setting report is advisory because managed/user settings and CLI overrides
+  can differ. A downstream node that
   must read what an upstream node committed should still fetch or check
   out that branch by name rather than assuming it is there.
 

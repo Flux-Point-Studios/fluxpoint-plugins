@@ -678,7 +678,7 @@ for name, ok in [
     ("isolated nodes refuse to start without args._base",
      "A._base" in tree_js and "no base was passed" in tree_js),
     ("the worktree preamble asserts the base, with the sha supplied",
-     "basePreamble() +" in tree_js and "merge-base --is-ancestor" in tree_js
+     "basePreamble() +" in tree_js and "git merge --ff-only" in tree_js
      and "${BASE.sha}" in tree_js),
     # It may READ one — the tree guard compares a launch reading when
     # there is one (#94) — but never refuses to start without it.
@@ -833,17 +833,17 @@ def tree_sentinel_executed_case():
                     "const PROMPTS=[]; let checks=0;",
                     "const agent=async(p,o)=>{PROMPTS.push(String(p));",
                     "  if(String(o.label||'').includes('tree-check'))",
-                    f"    return {{head:'abc123', porcelain: (++checks > 1 && {json.dumps(drift)}) ? ' M src/app.py' : ''}};",
+                    f"    return {{head:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', porcelain: (++checks > 1 && {json.dumps(drift)}) ? ' M src/app.py' : ''}};",
                     "  if(String(o.label||'').includes('refute'))",
                     "    return {refuted:false, reason:'no'};",
                     "  if(String(o.label||'').includes('gate'))",
                     "    return {exit:0, command:'scripts/harness.sh --full', tail:''};",
                     "  if(String(o.label||'').includes('build'))",
-                    "    return {summary:'done', plan:'p', files:[], risks:[]};",
+                    "    return {baseSeen:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',summary:'done', plan:'p', files:[], risks:[]};",
                     "  return {findings:[]}};",
                     "const parallel=async(t)=>Promise.all(t.map(f=>f()));",
                     "const pipeline=async()=>[],log=()=>{},phase=()=>{};",
-                    "const args={_base:{sha:'abc123',branch:'main',porcelain:''}};",
+                    "const args={_base:{sha:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',branch:'main',porcelain:'',root:'/campaign'}};",
                     "const budget={total:null,spent:()=>0,remaining:()=>1e9};",
                     "const workflow=0;",
                     "(async () => {",
@@ -913,7 +913,7 @@ def tree_own_writes_and_launch_case():
                     "  if(String(o.label||'').includes('gate'))",
                     "    return {exit:0, command:'scripts/harness.sh --full', tail:''};",
                     "  if(String(o.label||'').includes('build'))",
-                    "    return {summary:'done', plan:'p', files:[], risks:[]};",
+                    "    return {baseSeen:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',summary:'done', plan:'p', files:[], risks:[]};",
                     "  return {findings:[]}};",
                     "const parallel=async(t)=>Promise.all(t.map(f=>f()));",
                     "const pipeline=async()=>[],phase=()=>{};",
@@ -931,19 +931,19 @@ def tree_own_writes_and_launch_case():
             subprocess.run(["node", w], capture_output=True, timeout=90)
             return json.load(open(out)) if os.path.exists(out) else {"err": "no output"}
 
-    base = {"sha": "abc123", "branch": "main", "porcelain": ""}
-    hook_row = run([["abc123", ""], ["abc123", " M WORK.md"]], base)
-    own = run([["abc123", ""], ["abc123", "?? .claude/\n M GRAPH.rollout.md"]], base)
-    code = run([["abc123", ""], ["abc123", " M WORK.md\n M src/app.py"]], base)
-    moved_head = run([["abc123", ""]], {"sha": "fff999", "branch": "main", "porcelain": ""})
-    moved_dirt = run([["abc123", ""]], {"sha": "abc123", "porcelain": " M src/app.py"})
-    resumed_dirty_state = run([["abc123", ""]], {"sha": "abc123", "porcelain": " M WORK.md"})
-    no_launch = run([["abc123", ""]], None, js=plain_js)
-    wrong_root = run([["abc123", "", "/other-checkout"]], dict(base, root="/campaign"))
-    wrong_root_and_head = run([["other123", "", "/other-checkout"]], dict(base, root="/campaign"))
-    normalized_root = run([["abc123", "", "C:/WORK/Campaign/"]], dict(base, root="c:\\work\\campaign"))
-    no_root = run([["abc123", "", "/other-checkout"]], base)
-    old_shape = run([["abc123", ""]], {"sha": "abc123", "branch": "main"})
+    base = {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "branch": "main", "porcelain": "", "root": "/campaign"}
+    hook_row = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""], ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", " M WORK.md"]], base)
+    own = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""], ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "?? .claude/\n M GRAPH.rollout.md"]], base)
+    code = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""], ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", " M WORK.md\n M src/app.py"]], base)
+    moved_head = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""]], {"sha": "ffffffffffffffffffffffffffffffffffffffff", "branch": "main", "porcelain": "", "root": "/campaign"})
+    moved_dirt = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""]], {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "porcelain": " M src/app.py", "root": "/campaign"})
+    resumed_dirty_state = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""]], {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "porcelain": " M WORK.md", "root": "/campaign"})
+    no_launch = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""]], None, js=plain_js)
+    wrong_root = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", "/other-checkout"]], dict(base, root="/campaign"))
+    wrong_root_and_head = run([["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "", "/other-checkout"]], dict(base, root="/campaign"))
+    normalized_root = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", "C:/WORK/Campaign/"]], dict(base, root="c:\\work\\campaign"))
+    no_root = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", "/other-checkout"]], {k: v for k, v in base.items() if k != "root"}, js=plain_js)
+    old_shape = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""]], {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "branch": "main"})
 
     def outcome(x):
         return (x.get("r") or {}).get("outcome")
@@ -953,20 +953,20 @@ def tree_own_writes_and_launch_case():
     # git octal-escapes a non-ASCII graph name, which must still match.
     mono_js = cg.emit(ir, CONTRACTS, graph_file="GRAPH-\u00e9.md",
                       project_prefix="services/api/")
-    mono_hook = run([["abc123", ""], ["abc123", " M services/api/WORK.md\n"
+    mono_hook = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""], ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", " M services/api/WORK.md\n"
                                                  "?? services/api/.claude/"]], base, js=mono_js)
-    mono_launch = run([["abc123", " M services/api/WORK.md"]], base, js=mono_js)
-    mono_quoted = run([["abc123", ' M "services/api/GRAPH-\\303\\251.md"']], base, js=mono_js)
-    mono_code = run([["abc123", ""], ["abc123", " M services/api/src/app.py"]], base, js=mono_js)
-    mono_other = run([["abc123", ""], ["abc123", " M WORK.md"]], base, js=mono_js)
+    mono_launch = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", " M services/api/WORK.md"]], base, js=mono_js)
+    mono_quoted = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ' M "services/api/GRAPH-\\303\\251.md"']], base, js=mono_js)
+    mono_code = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""], ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", " M services/api/src/app.py"]], base, js=mono_js)
+    mono_other = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""], ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", " M WORK.md"]], base, js=mono_js)
     # Only the plugin's own directories under .claude/ are its writes: a
     # tracked settings file or project agent edited mid-run is a mutation.
-    settings = run([["abc123", ""], ["abc123", " M .claude/settings.json"]], base)
-    agent_def = run([["abc123", ""], ["abc123", " M .claude/agents/red-team-reviewer.md"]], base)
+    settings = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""], ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", " M .claude/settings.json"]], base)
+    agent_def = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""], ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", " M .claude/agents/red-team-reviewer.md"]], base)
     # git quotes a path with a tab and, under core.quotePath=false, leaves an
     # astral character raw: decoding it must not throw out of the guard.
-    astral = run([["abc123", ""], ["abc123", '?? "x\\t\U0001F600.txt"']], base)
-    plugin_dirs = run([["abc123", ""], ["abc123", "?? .claude/fluxpoint/\n"
+    astral = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""], ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", '?? "x\\t\U0001F600.txt"']], base)
+    plugin_dirs = run([["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""], ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "?? .claude/fluxpoint/\n"
                                                    " M .claude/workflows/g.js\n"
                                                    "?? .claude/worktrees/"]], base)
 
@@ -978,7 +978,7 @@ def tree_own_writes_and_launch_case():
          outcome(wrong_root_and_head) == "WRONG-ROOT", wrong_root_and_head),
         ("Windows root separators, trailing slash and drive-path case normalize",
          outcome(normalized_root) in ("COMPLETE", "INCOMPLETE"), normalized_root),
-        ("an omitted root retains existing compatibility",
+        ("a non-isolated graph retains optional-root compatibility",
          outcome(no_root) in ("COMPLETE", "INCOMPLETE"), no_root),
         ("an old _base without porcelain refuses before sentinel or nodes",
          "git status --porcelain" in old_shape.get("err", ""), old_shape),
@@ -1349,13 +1349,13 @@ def repair_loop_case():
             out = os.path.join(tmp, "result.json"); script = os.path.join(tmp, "run.mjs")
             prefix = '''import {writeFileSync} from 'node:fs';
 const calls=[]; const mode=MODE;
-const args={_base:{sha:'base',porcelain:''},_replayLaunchNonce:'1111111111111111111111111111111111111111111111111111111111111111',_launch:{root:'/campaign',nonce:'launch1'}};
+const args={_base:{sha:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',porcelain:'',root:'/campaign'},_replayLaunchNonce:'1111111111111111111111111111111111111111111111111111111111111111',_launch:{root:'/campaign',nonce:'launch1'}};
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
  if (label.startsWith('check:')) return {exit: mode==='cap' || (label.includes(':b:') && label.endsWith('r1')) ? 1 : 0, command:'check', tail:'finding'};
  if (label.startsWith('review:')) return {exit: mode==='conflict' && label.endsWith('r1') ? 1 : 0, command:'review',tail:'composition failure'};
- return {branch:'branch',diffSummary:'patch',testsAdded:[],sharedResources:[],harnessCommand:'test',harnessExit:0,evidence:['test']};};
+ return {baseSeen:args._base.sha,branch:'branch',diffSummary:'patch',testsAdded:[],sharedResources:[],harnessCommand:'test',harnessExit:0,evidence:['test']};};
 '''.replace("MODE", json.dumps(mode))
             open(script, "w").write(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(out) + ',JSON.stringify({error:String(e)})));')
             proc = subprocess.run(["node", script], capture_output=True, text=True, timeout=20)
@@ -1410,7 +1410,7 @@ def repair_reframe_case():
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "out.json"); script = os.path.join(tmp, "run.mjs")
             prefix = r'''import {writeFileSync} from 'node:fs';
-const args={_replayLaunchNonce:'freshlaunch',_base:{sha:'base',porcelain:''},_launch:{root:'/campaign',nonce:'nonce'}},calls=[],mode=MODE;
+const args={_replayLaunchNonce:'freshlaunch',_base:{sha:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',porcelain:'',root:'/campaign'},_launch:{root:'/campaign',nonce:'nonce'}},calls=[],mode=MODE;
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const reframe={classes:['decode'],invariant:'ledger admits only bounded rows',classRewire:'enforce item decoding budget at ingress',disposition:'adopt',measurement:{command:'pytest test_decode_budget',result:'all outsider rows bounded'}};
@@ -1419,7 +1419,7 @@ const origin=(p,defectClass)=>{const line=p.split('ORIGIN REPLAY CONTEXT: ')[1].
  return {origin:defectClass==='decode'?'incomplete-fix':'pre-existing',originEvidence:{base:{snapshot:c.base,...observation},targetClasses:['decode'],rounds:c.patches.map(x=>({...x,...observation})),...(c.integrated?{integrated:{...c.integrated,...observation}}:{})}};};
 
 const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
- if(label.startsWith('tree-check:'))return (mode==='sentinel-start'&&label.includes('campaign-start'))||(mode==='sentinel-after'&&label.includes('after repair'))?null:{head:'base',porcelain:''};
+ if(label.startsWith('tree-check:'))return (mode==='sentinel-start'&&label.includes('campaign-start'))||(mode==='sentinel-after'&&label.includes('after repair'))?null:{head:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',porcelain:''};
  const round=Number(label.match(/:r(\d+)$/)?.[1]||1);
  if(label.startsWith('fix:'))return {branch:'patch',diffSummary:'patch',testsAdded:[],sharedResources:[],harnessCommand:'pytest',harnessExit:0,evidence:['pytest exit0'],...(round>=3&&['measured','unchecked','integration-measured','integration-merge-narrow'].includes(mode)?{reframe}: {})};
  if(label.startsWith('check:')){const pass=mode==='contradictory'||mode.startsWith('integration')||round>=3&&['measured','unchecked','different'].includes(mode);

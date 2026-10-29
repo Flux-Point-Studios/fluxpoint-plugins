@@ -30,6 +30,11 @@ Campaign lessons survive worktree deletion in a clone-wide store. See
 
 Compiled graphs pin the plugin witness by root, version and code hashes. Gate
 rows record their producer; launch, resume and recording detect witness drift.
+
+Isolated nodes establish the [exact campaign base](references/worktree-base.md):
+clean behind worktrees fast-forward their own branch, and typed `baseSeen`
+observations reject findings from other commits. Runtime base settings remain
+advisory; actual CLI controls exercise both refusal and success.
 See [witness identity](../../docs/witness-identity.md).
 
 Shipped graph templates pass locked packets by reference with an exact identity

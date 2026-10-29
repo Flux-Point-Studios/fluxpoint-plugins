@@ -247,7 +247,7 @@ class RuntimeOriginGuards(unittest.TestCase):
         js = CG.emit(ir, CONTRACTS).replace('export const meta', 'const meta')
         prefix = r'''
 import {writeFileSync} from 'node:fs';
-const args={_base:{sha:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',porcelain:''},_launch:{root:'/campaign',nonce:'launch'}},calls=[],mode=MODE;
+const args={_base:{sha:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',porcelain:'',root:'/campaign'},_launch:{root:'/campaign',nonce:'launch'}},calls=[],mode=MODE;
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const observation=(reproduces)=>({command:'python attack.py',result:reproduces?'exit 1: harm observed':'exit 0: defended',controlCommand:'python valid.py',controlResult:'exit 0: valid control',controlPassed:true,reproduces});

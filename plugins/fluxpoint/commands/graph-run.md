@@ -37,6 +37,12 @@ Workflow tool requires.
      for this installed compiler, even if these command instructions were
      loaded before a plugin upgrade. Load each named producer's current
      output; do not recover from a refusal by guessing a missing field.
+     For worktree nodes it also reports the project/local `worktree.baseRef`
+     reading: `head`, `fresh/absent`, or `unknown`. To inspect it separately,
+     run `bash "$ROOT/scripts/py.sh" worktree-base.py --root <project-root>`.
+     This is advisory: user/managed settings, CLI `--settings` overrides and
+     another `CLAUDE_CONFIG_DIR` can differ. Neither a warning nor an unreadable
+     setting passes or refuses a launch; the in-node exact-base check decides.
    - Run `bash "$ROOT/scripts/py.sh" attest.py --root <project-root> --check-ci --if-present`.
      A configured CI witness must pin an identity the harness cannot post as;
      exit 2 refuses the harness's own status creator, and exit 3 means identity
@@ -119,20 +125,28 @@ Workflow tool requires.
    only one that sees the tree the resumed run is really on. Never reuse an
    earlier launch's `_base`.
    A supplied `_base` without `porcelain` is refused, including when clean:
-   use the empty string. `sha` must be a nonempty string, `branch` a string
-   when supplied (empty for detached HEAD), and optional `root` a nonempty
-   string. Numeric or boolean values are refused before agents start.
+   use the empty string. Worktree graphs require a full forty-character
+   hexadecimal `sha` and a nonempty `root`; shared/measurement-only graphs
+   retain optional root and nonempty SHA compatibility. `branch` is a string
+   when supplied (empty for detached HEAD). Wrong types refuse before agents start.
    The sentinel reads its own checkout root and
    compares it before HEAD or dirt. `WRONG-ROOT` means the session and launch
    reading name different checkouts; move the session to the launch checkout
    with `/cd` and launch fresh. Repeating a fresh launch in the same wrong
    directory cannot fix it. Root normalization preserves the leading `//`
    of a network checkout so it cannot match a different local root.
-   Isolated nodes are handed this base in their prompts and told to assert
-   it before trusting the tree they were given: a worktree's base is the
-   runtime's choice, and it has been observed cut from the default branch
-   rather than the campaign's, where a file an earlier node committed is
-   simply absent and nothing inside says so.
+   A worktree node first refuses the shared launch root, dirt and detached
+   HEAD. A clean worker behind the base may run plain `git merge --ff-only
+   <base>` in its own directory, then must read exact HEAD equality. Ahead,
+   diverged and missing-object cases stop without resetting or detaching.
+   Every such node returns the full `baseSeen` observed before its requested
+   work (even if that work later creates commits); missing, malformed
+   or mismatched values file `WRONG-BASE`, and its findings never count.
+   `{"worktree":{"baseRef":"head"}}` in `.claude/settings.local.json`
+   asks the runtime to start at the launching HEAD. The default `fresh`
+   commonly starts at the default branch; the exact-base check still applies
+   under either setting. See `references/worktree-base.md` for the native
+   acceptance controls and scope of the setting reading.
    If any node declares `verify: prove:<gate>`, `cites: [<gate>, ...]`, or a repair `repeat.until`,
    stamp the launch; the
    compiled graph refuses to start without it:

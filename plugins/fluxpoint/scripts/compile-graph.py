@@ -2709,6 +2709,10 @@ def subst_mapping(n, var=None, texts=None):
     return mapping
 
 
+def worktree_base_node(n):
+    return n.get('isolation') != 'measure' and (n.get('isolation') in (True, 'worktree') or bool(n.get('mutates')))
+
+
 def opts(n, ir, phase, label, schema_expr=None):
     roles = ir.get("roles") or {}
     role = roles.get(n.get("role"), {})
@@ -2717,6 +2721,8 @@ def opts(n, ir, phase, label, schema_expr=None):
         schema = 'judgedSchema(' + schema + ')'
     if n.get('cites'):
         schema = 'citationSchema(' + schema + ', ' + json.dumps(n['cites']) + ')'
+    if worktree_base_node(n):
+        schema = 'baseSchema(' + schema + ')'
     parts = [f"label: {label}", f"phase: {js_str(phase)}", f"schema: {schema}"]
     agent_type = n.get("agentType") or role.get("agentType")
     if agent_type:
@@ -2846,16 +2852,21 @@ def launch_requirements(ir, embedded_args=None):
 
     A tree-guarded non-isolated graph still accepts an absent launch reading
     for compatibility, but a supplied reading must include porcelain. Root is
-    optional so existing callers retain their previous identity semantics.
+    optional for shared/measurement-only graphs. Worktree nodes require it so
+    an isolated worker can refuse the shared checkout before moving its branch.
     """
     nodes = ir.get("nodes") or []
     args = []
     if ir.get("treeGuard", True) or any(n.get("isolation") or n.get("mutates") for n in nodes):
         required = any(n.get("isolation") or n.get("mutates") for n in nodes)
-        args.append(dict(name="_base", fields=["sha", "branch", "porcelain"], optionalFields=["root"],
+        worktree = any(worktree_base_node(n) for n in nodes)
+        base_check = "!v || typeof v !== 'object' || Array.isArray(v) || typeof v.sha !== 'string' || !v.sha.trim() || typeof v.porcelain !== 'string' || (v.branch !== undefined && typeof v.branch !== 'string') || (v.root !== undefined && (typeof v.root !== 'string' || !v.root.trim()))"
+        if worktree:
+            base_check += " || !/^[0-9a-f]{40}$/.test(v.sha) || typeof v.root !== 'string' || !v.root.trim()"
+        args.append(dict(name="_base", fields=["sha", "branch", "porcelain"] + (["root"] if worktree else []), optionalFields=[] if worktree else ["root"],
                          required=required, condition="isolated nodes" if required else "when a tree-guard launch reading is supplied",
-                         producer="git rev-parse HEAD; git branch --show-current; git status --porcelain; git rev-parse --show-toplevel (optional root)",
-                         check="!v || typeof v !== 'object' || Array.isArray(v) || typeof v.sha !== 'string' || !v.sha.trim() || typeof v.porcelain !== 'string' || (v.branch !== undefined && typeof v.branch !== 'string') || (v.root !== undefined && (typeof v.root !== 'string' || !v.root.trim()))"))
+                         producer="git rev-parse HEAD; git branch --show-current; git status --porcelain; git rev-parse --show-toplevel" + (" (required root and full commit SHA for worktree nodes)" if worktree else " (optional root)"),
+                         check=base_check))
     prove = any(prove_gate(n) or n.get("cites") for n in nodes)
     repair = bool(repair_loops(ir))
     if prove or repair:
@@ -2919,8 +2930,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     modern = replay_features(ir, embedded_args)
     tree_guard = ir.get("treeGuard", True)
     measure_nodes = [n for n in nodes if n.get("isolation") == "measure"]
-    worktree_nodes = [n for n in nodes
-                      if n.get("isolation") in (True, "worktree") or n.get("mutates")]
+    worktree_nodes = [n for n in nodes if worktree_base_node(n)]
     used = sorted({n["contract"] for n in nodes if not is_reduce(n)}
                   | ({"VerdictV1"} if any(panel_size(n) for n in nodes) else set())
                   | ({"JudgmentV1"} if any(judge_size(n) for n in nodes) else set())
@@ -2960,19 +2970,19 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
       f"against spent)")
     if unpriced_note(est):
         a(f"// {unpriced_note(est)}")
-    a("const PLUGIN = " + json.dumps(plugin, ensure_ascii=False, sort_keys=True) + ";")
     a("export const meta = {")
     a(f"  name: {js_str(ir.get('name') or 'graph-campaign')},")
     a(f"  description: {js_str(ir['campaign'])},")
     a(f"  compilerVersion: {js_str(version)},")
     a("  specificationContext: " + js_str(ir.get("specificationContext", "inline")) + ",")
-    a("  plugin: PLUGIN,")
+    a("  plugin: " + json.dumps(plugin, ensure_ascii=False, sort_keys=True) + ",")
     a("  launchRequirements: " + json.dumps(public_launch_requirements(launch)) + ",")
     a("  phases: [")
     for p in phases:
         a(f"    {{ title: {js_str(p)} }},")
     a("  ],")
     a("}")
+    a("const PLUGIN = " + json.dumps(plugin, ensure_ascii=False, sort_keys=True) + ";")
     a("")
     a("// --- contracts (from contracts/*.schema.json, referenced by name) ---")
     a("const C = {")
@@ -3432,9 +3442,14 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("// find. It rides all the way out to the Evidence row, so a partial run")
     a("// can never be read as a clean one.")
     a("let INCOMPLETE = false")
+    if worktree_nodes:
+        a("let WRONG_BASE = false")
+        a("const BASE_OBSERVATIONS = []")
     a("function summary(outcome) {")
-    a("  const final = outcome === 'COMPLETE' && INCOMPLETE ? 'INCOMPLETE' : outcome")
+    a("  const final = " + ("WRONG_BASE ? 'WRONG-BASE' : " if worktree_nodes else "") + "outcome === 'COMPLETE' && INCOMPLETE ? 'INCOMPLETE' : outcome")
     extra = f", compilerVersion: {js_str(version)}, plugin: PLUGIN"
+    if worktree_nodes:
+        extra += ", worktreeBase: { sha: BASE.sha, root: BASE.root, observations: BASE_OBSERVATIONS }"
     if embedded_args is not None:
         extra += ", argDefaults: " + json.dumps(ir.get('argDefaults') or {}, ensure_ascii=True) + ", rerunPlan: A._rerunPlan || null"
     if modern or replay_state is not None:
@@ -3572,6 +3587,25 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("const originalSpawn = spawn")
         a("spawn = (prompt, options) => replaySpawn(prompt, options, originalSpawn)")
         a("")
+    if worktree_nodes:
+        if max_nodes is None:
+            a("async function spawn(prompt, options) { return agent(prompt, options) }")
+        a("function baseSchema(schema) { return { ...schema, required: [...new Set([...(schema.required || []), 'baseSeen'])], properties: { ...schema.properties, baseSeen: {type:'string', pattern:'^[0-9a-f]{40}$'} } } }")
+        a("function checkedBase(result, options) {")
+        a("  if (result === null || result === undefined || !(options.schema.required || []).includes('baseSeen')) return result")
+        a("  const accepted = typeof result.baseSeen === 'string' && /^[0-9a-f]{40}$/.test(result.baseSeen) && result.baseSeen === BASE.sha")
+        a("  BASE_OBSERVATIONS.push({ label: options.label, expected: BASE.sha, baseSeen: typeof result.baseSeen === 'string' ? result.baseSeen : null, accepted })")
+        a("  if (accepted) return result")
+        a("  WRONG_BASE = true; INCOMPLETE = true")
+        a("  note(String(options.label), 'WRONG-BASE', 'missing, malformed or mismatched baseSeen; result and findings refused', BASE_OBSERVATIONS[BASE_OBSERVATIONS.length - 1])")
+        a("  log(`WRONG-BASE at ${options.label}: expected ${BASE.sha}; observed ${String(result.baseSeen)}`)")
+        if modern:
+            a("  halt('WRONG-BASE')")
+        a("  return null")
+        a("}")
+        a("const uncheckedBaseSpawn = spawn")
+        a("spawn = async (prompt, options) => checkedBase(await uncheckedBaseSpawn(prompt, options), options)")
+        a("")
     if needs_panel:
         a("// --- verification: refuters attack the claim; majority kills it ---")
         a(f"const VERIFY_FLOOR = {int(floor)}")
@@ -3650,9 +3684,16 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("    `You are in an isolated worktree, and the runtime chose its base; it has been observed cut from the default branch rather than the campaign's.\\n` +")
         a("    `The campaign's base is commit ${BASE.sha}` + (BASE.branch ? ` on branch ${BASE.branch}` : '') + `.\\n` +")
         a("    `1. Run: git rev-parse HEAD\\n` +")
-        a("    `2. If it is not ${BASE.sha}, run: git merge-base --is-ancestor ${BASE.sha} HEAD\\n` +")
-        a("    `3. If that fails, this tree is MISSING work the campaign committed. Do not report absent files or failed checks as findings — they describe the wrong tree. Make the observed commit and the mismatch the substance of your result, and stop.\\n` +")
-        a("    `Name the commit you actually examined in your result.\\n\\n`")
+        a("    `2. Run: git rev-parse --show-toplevel\\n` +")
+        a("    `Compare the printed root with the shared launch checkout ${JSON.stringify(BASE.root)}. If they name the same checkout (normalize separators, trailing slash and Windows drive-path case), stop: never move the shared checkout, even when its HEAD equals the base.\\n` +")
+        a("    `3. Run: git status --porcelain\\n` +")
+        a("    `If it prints anything, stop without moving HEAD; never discard or carry dirt into the base.\\n` +")
+        a("    `4. Run: git symbolic-ref --short HEAD\\n` +")
+        a("    `If this fails, stop: keep the runtime's own branch attached. If the HEAD from step 1 already equals ${BASE.sha}, continue without moving it. Otherwise run: git merge --ff-only ${BASE.sha}\\n` +")
+        a("    `If the merge fails (including diverged history or a missing object), stop without changing HEAD. Never reset, detach, fetch or redirect the command to another checkout.\\n` +")
+        a("    `5. Run: git rev-parse HEAD\\n` +")
+        a("    `It must equal ${BASE.sha} exactly. An ahead tree can report Already up to date with exit 0; a different hash still stops the node.\\n` +")
+        a("    `Set baseSeen to the full hash read in step 5 BEFORE doing the requested work; keep that base observation even if your later work creates commits. On refusal, return the actual hash observed. Do not report findings from any other base. Run each command plainly in your own directory; read and compare its printed output.\\n\\n`")
         a("}")
         a("")
     if measure_nodes:
@@ -3829,6 +3870,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
                 a(f"if (!await treeCheck({js_str('before ' + n['id'])}, "
                   f"{js_str(n.get('phase', 'Run'))})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
             a(emit_node(n, ir, specification=bool(specification)))
+            if worktree_nodes:
+                a("if (WRONG_BASE) return summary('WRONG-BASE')")
             a("")
     if tree_guard:
         a(f"if (!await treeCheck('campaign-end', {js_str(last_phase)})) return summary(TREE.unknown ? 'TREE-UNKNOWN' : 'TREE-MOVED')")
@@ -4234,7 +4277,10 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
             a(f"  log(`REPLAYED-FROM-LEDGER at {nid}: already recorded against this "
               f"campaign — the effect is not performed again`)")
             a(f"  note({js_str(nid)}, 'REPLAYED', 'once-only ledger hit; effect not repeated')")
-            a(f"  {raw} = LEDGER[hit_{key}].result")
+            stored = f"LEDGER[hit_{key}].result"
+            if worktree_base_node(n):
+                stored = f"checkedBase({stored}, {opts(n, ir, phase, label)})"
+            a(f"  {raw} = {stored}")
             a("} else {")
             a(f"  if (!confirmed({js_str(nid)})) {{")
             a(f"    note({js_str(nid)}, 'REFUSED', 'irreversible node not named in confirm')")
@@ -4367,7 +4413,7 @@ def emit_judges(n, ir, prompt, phase):
     a("))")
     a(f"if (DECLINED > d0_{var}) {{ note({js_str(nid)}, 'SKIPPED', 'judge seat declined by node ceiling'); return summary('BUDGET-EXHAUSTED') }}")
     a(f"const valid_{var} = vote => !!vote && typeof vote === 'object' && !Array.isArray(vote) &&")
-    a("  Object.keys(vote).every(k => ['winner', 'ranking', 'rationale', 'strongest_objection'].includes(k)) &&")
+    a("  Object.keys(vote).every(k => " + json.dumps(['winner', 'ranking', 'rationale', 'strongest_objection'] + (['baseSeen'] if worktree_base_node(n) else [])) + ".includes(k)) &&")
     a(f"  choices_{var}.includes(vote.winner) && Array.isArray(vote.ranking) && vote.ranking.length === choices_{var}.length &&")
     a(f"  new Set(vote.ranking).size === choices_{var}.length && vote.ranking.every(k => choices_{var}.includes(k)) && vote.ranking[0] === vote.winner &&")
     a("  typeof vote.rationale === 'string' && [...vote.rationale.trim()].length >= 40 &&")
@@ -5227,6 +5273,9 @@ def main():
     planned = plan_node_count(ir)
     # Warnings inform, never block: these shapes are legal and occasionally
     # deliberate, but they will usually disappoint whoever reads the result.
+    if args.check and any(worktree_base_node(n) for n in ir.get('nodes', [])):
+        worktree_settings = _sibling('worktree_settings')
+        print('graph-compile: ' + worktree_settings.describe(worktree_settings.report(args.gates_root)))
     for w in warnings(ir, agents, specification, gates):
         print(f"graph-compile: warning — {w}", file=sys.stderr)
     if _sibling("evidence_table").locate(text)[0] is None:

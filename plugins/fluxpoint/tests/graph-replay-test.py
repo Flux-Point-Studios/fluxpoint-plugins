@@ -54,7 +54,7 @@ const agent = async (prompt,opts) => {
    if (target) { value.repository=JSON.parse(target[1]); value.branch=JSON.parse(target[2]).replace('refs/heads/',''); value.tip=tips[value.repository] || 'b'.repeat(40) }
    active--; events.push('end:'+opts.label); return value;
  }
- let result={outcome:'committed',exit:0,sha:'b'.repeat(40)};
+ let result={outcome:'committed',exit:0,sha:'b'.repeat(40),...(opts.schema.required?.includes('baseSeen')?{baseSeen:head}:{})};
  BODY
  await new Promise(resolve=>setTimeout(resolve,opts.label.startsWith('a')?25:5));
  active--; events.push('end:'+opts.label); return result;

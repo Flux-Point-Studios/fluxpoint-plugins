@@ -47,8 +47,8 @@ class AuthorizationTests(unittest.TestCase):
         script = script.replace('export const meta', 'const meta')
         out = self.root / 'out.json'
         harness = ("import {writeFileSync} from 'node:fs';\nconst prompts=[];"
-                   "const args={_base:{sha:'" + 'a' * 40 + "',branch:'test',porcelain:''}};"
-                   "const phase=()=>{},log=()=>{},budget={remaining:()=>10000000};const agent=async(p,o)=>{prompts.push({p,label:o.label});return {}};const spawn=agent;"
+                   "const args={_base:{sha:'" + 'a' * 40 + "',branch:'test',porcelain:'',root:'/campaign'}};"
+                   "const phase=()=>{},log=()=>{},budget={remaining:()=>10000000};const agent=async(p,o)=>{prompts.push({p,label:o.label});return o.schema.required?.includes('baseSeen')?{baseSeen:args._base.sha}:{}};const spawn=agent;"
                    "(async()=>{\n" + script + "\n})().then(()=>writeFileSync(" + json.dumps(str(out))
                    + ",JSON.stringify(prompts))).catch(e=>{console.error(e);process.exitCode=1});")
         path = self.root / 'run.mjs'
@@ -56,6 +56,7 @@ class AuthorizationTests(unittest.TestCase):
         p = subprocess.run(['node', str(path)], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
         prompts = json.loads(out.read_text())
+        self.assertEqual([row['label'] for row in prompts], ['first', 'read', 'second'])
         for row in prompts:
             self.assertEqual('RECORDED AUTHORIZATION CONTEXT' in row['p'], row['label'] in ('first', 'second'))
             if row['label'] in ('first', 'second'):
