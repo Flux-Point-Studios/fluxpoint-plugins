@@ -31,8 +31,10 @@ def node(nid, **extra):
     return dict({'id':nid,'prompt':'Do '+nid,'contract':'TestV1'}, **extra)
 
 
-def execute(ir, args=None, setup='', body=''):
-    source = c.emit(ir, CONTRACTS).replace('export const meta =', 'const meta =')
+def execute(ir, args=None, setup='', body='', compiled_source=None):
+    args = dict(args or {})
+    state = {key: args.pop(key) for key in ('_memo', '_prefix') if key in args}
+    source = (compiled_source if compiled_source is not None else c.emit(ir, CONTRACTS, replay_state=state)).replace('export const meta =', 'const meta =')
     harness = r'''
 const fs = require('fs'); const input = JSON.parse(fs.readFileSync(0,'utf8'));
 const events = []; const rawCalls = []; let active=0, maximum=0;
@@ -79,7 +81,7 @@ class GraphReplay(unittest.TestCase):
             git('commit','-q','--allow-empty','-m','baseline')
             ir=graph([node('inspect',fresh=False,prompt='Inspect {{A.language}}')])
             source={'launch':{'nonce':'original','root':str(root)},'results':{'inspect':{'outcome':'réparé 🦀 東京'}},'inputs':{'language':'réparé 🦀 東京'}}
-            helpers={'replay_memo':SimpleNamespace(build_memo=lambda *a,**kw:{'_memo':{},'_prefix':[]}),
+            helpers={'plugin_identity':c._sibling('plugin_identity'), 'replay_memo':SimpleNamespace(build_memo=lambda *a,**kw:{'_memo':{},'_prefix':[]}),
                      'run_artifacts':SimpleNamespace(read=lambda *a,**kw:({'summary':source},'f'*64))}
             with patch.object(c,'_sibling',side_effect=helpers.__getitem__), patch.object(locale,'getpreferredencoding',return_value='cp1252'), patch.object(locale,'getencoding',return_value='cp1252',create=True), patch.object(subprocess,'run',wraps=subprocess.run) as ran:
                 rows=c.rerun_plan(ir,CONTRACTS,{'language':'réparé 🦀 東京'},str(root),'source-run')
@@ -293,6 +295,8 @@ class GraphReplay(unittest.TestCase):
             self.assertNotIn('operator attribution only',call['prompt'])
             if 'new-judgment' in call['prompt']:
                 self.assertIn(call['opts']['label'],['a-gate','tree-check:before a-gate'])
+            if call['opts']['label'].startswith('tree-check:'):
+                self.assertNotIn('faulty test fixture now corrected', call['prompt'])
         row=out['result']['rejudges'][0]
         self.assertEqual(row['reason'],'operator attribution only'); self.assertEqual(row['priorVerdict'],first['results']['a-gate'])
 
@@ -311,13 +315,152 @@ class GraphReplay(unittest.TestCase):
         self.assertEqual(len(calls),1)
         self.assertEqual(out['result']['outcome'],'BUDGET-EXHAUSTED')
 
-    def test_legacy_compilation_is_byte_identical(self):
+    def test_legacy_runtime_prompts_options_and_results_match_baseline(self):
         # Compare the baseline compiler, not a hand-written expected string.
         original=subprocess.run(['git','show','c848f07:plugins/fluxpoint/scripts/compile-graph.py'],text=True,encoding='utf-8',capture_output=True,check=True).stdout
         scope={'__name__':'baseline','__file__':str(SCRIPTS/'compile-graph.py')}; exec(compile(original,'baseline','exec'),scope)
         ir=graph([node('a'),node('b',after='a',prompt='Use {{prev}}')])
-        self.assertEqual(c.emit(ir,CONTRACTS),scope['emit'](ir,CONTRACTS))
+        def compare_execution(graph):
+            new = execute(graph)
+            old = execute(graph, compiled_source=scope['emit'](graph, CONTRACTS))
+            self.assertEqual(new['rawCalls'], old['rawCalls'])
+            for key in ('outcome', 'results', 'provenance', 'planned', 'inputs'):
+                self.assertEqual(new['result'][key], old['result'][key], key)
+        compare_execution(ir)
         ir['argDefaults']={'configuration':'default'}; ir['nodes'][0]['prompt']='Read {{A.configuration}}'
-        self.assertEqual(c.emit(ir,CONTRACTS),scope['emit'](ir,CONTRACTS))
+        compare_execution(ir)
+
+class ReplayFollowup(unittest.TestCase):
+    def test_mixed_targeted_and_untargeted_builders_do_not_claim_unusable_readings(self):
+        ir = graph([node('a', mutates=True), node('a-gate', after='a', verifies='a', independent=True, prompt='Judge {{prev}}'),
+                    node('b', after='a-gate', mutates=True, pushes='repo-a#main', replay='inputs', prompt='Build {{prev}}'),
+                    node('b-gate', after='b', verifies='b', independent=True, repository='repo-a', branch='main', replay='tree', prompt='Judge {{prev}}')])
+        records = execute(ir)['result']['memoRecords']
+        self.assertNotIn('verifiedReading', next(r for r in records if r['node'] == 'a'))
+        self.assertIn('verifiedReading', next(r for r in records if r['node'] == 'b'))
+
+    def test_lone_surrogates_have_a_defined_raw_hash_encoding(self):
+        helpers = (SCRIPTS / 'graph-replay.js').read_text().split('const CALL_RECORDS')[0]
+        run = subprocess.run(['node', '-e', helpers + '\nprocess.stdout.write(sha256("a\\ud800b"))'], capture_output=True, text=True, check=True)
+        self.assertEqual(run.stdout, hashlib.sha256('a\ufffdb'.encode()).hexdigest())
+
+    def test_inline_memo_is_rejected_when_state_is_compiled(self):
+        ir = graph([node('a', fresh=False)])
+        source = c.emit(ir, CONTRACTS, replay_state={})
+        harness = 'const input=JSON.parse(require("fs").readFileSync(0,"utf8"));const f=new (Object.getPrototypeOf(async function(){}).constructor)("args","agent","budget","parallel","phase","log",input.source);f(input.args,async()=>({}),{total:0},async()=>[],()=>{},()=>{}).catch(e=>{console.log(String(e))})'
+        # Compiled graphs exceed Windows CreateProcess's command-line limit.
+        payload = {'source': source.replace('export const meta =', 'const meta ='),
+                   'args': dict(BASE, _memo={'forged': {'result': {'exit': 0}}})}
+        run = subprocess.run(['node', '-e', harness], input=json.dumps(payload), text=True, encoding='utf-8', capture_output=True, check=True)
+        self.assertIn('compiled replay state cannot be overridden inline', run.stdout)
+
+    def test_ledger_uses_sha256_and_replays_prior_fnv_key(self):
+        ir = graph([node('effect', irreversible=True)])
+        first = execute(ir, args={'_ledger': {}, 'confirm': 'effect'})
+        written = first['result']['ledger'][0]
+        prompt = next(call['prompt'] for call in first['rawCalls'] if call['opts']['label'] == 'effect')
+        self.assertEqual(written['key'], ir['campaign'] + '|effect|sha256:' + hashlib.sha256(prompt.encode('utf-8')).hexdigest())
+        old = 2166136261
+        units = prompt.encode('utf-16-le')
+        for index in range(0, len(units), 2):
+            old = ((old ^ int.from_bytes(units[index:index + 2], 'little')) * 16777619) & 0xffffffff
+        oldkey = ir['campaign'] + '|effect|' + format(old, 'x')
+        replayed = execute(ir, args={'_ledger': {oldkey: {'result': written['result']}}, 'confirm': ''})
+        self.assertNotIn('start:effect', replayed['events'])
+        self.assertEqual(replayed['result']['results']['effect'], written['result'])
+
+    def test_replay_ancestors_of_irreversible_effect_are_refused(self):
+        ir = graph([node('a', mutates=True, pushes='repo-a#main', replay='inputs'),
+                    node('gate', after='a', verifies='a', independent=True, repository='repo-a', branch='main', replay='tree', prompt='Judge {{prev}}'),
+                    node('effect', after='gate', irreversible=True, prompt='Act {{prev}}')])
+        self.assertTrue(any('irreversible ancestor' in error for error in c.validate(ir, CONTRACTS)))
+
+
+class BranchReplayFollowup(unittest.TestCase):
+    memo_args = GraphReplay.memo_args
+    replay_graph = GraphReplay.replay_graph
+    def prefix(self, result):
+        import re
+        rows = []
+        digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+        for call in result['callRecords']:
+            nonce = re.search(r'\nLIVE TREE READING NONCE: ([A-Za-z0-9_-]+) point ', call['prompt'])
+            row = dict(promptSha256=hashlib.sha256(call['prompt'].encode()).hexdigest(), optsSha256=digest(call['opts']), resultSha256=digest(call['result']), runId='source-run', artifactSha256='f'*64, agentId='p'+str(len(rows)))
+            if nonce: row['readingNonce'] = nonce.group(1)
+            rows.append(row)
+        return rows
+
+    def test_targeted_reading_preserves_prefix_before_first_fork(self):
+        ir = self.replay_graph()
+        for n in ir['nodes']: n.pop('lane', None)
+        ir['argDefaults'] = {'repairA':'same', 'repairB':'old'}
+        body = "if(opts.label.startsWith('b')) result.sha='c'.repeat(40);"
+        first = execute(ir, body=body)['result']
+        args = self.memo_args(first)
+        args['_prefix'] = self.prefix(first)
+        args['repairB'] = 'changed'
+        second = execute(ir, args=args, body=body)['result']
+        self.assertEqual(next(r for r in second['memoRecords'] if r['node']=='a-gate')['mode'], 'prefix')
+        self.assertEqual(next(r for r in second['memoRecords'] if r['node']=='b')['mode'], 'live')
+
+    def test_gate_falling_out_of_prefix_refreshes_cached_reading(self):
+        ir = self.replay_graph()
+        for n in ir['nodes']: n.pop('lane', None)
+        ir['argDefaults'] = {'repairA':'same', 'repairB':'same', 'gateNote':'old'}
+        ir['nodes'][1]['prompt'] += ' Note {{A.gateNote}}'
+        body = "if(opts.label.startsWith('b')) result.sha='c'.repeat(40);"
+        first = execute(ir, body=body)['result']
+        args = self.memo_args(first)
+        args['_prefix'] = self.prefix(first)
+        args['gateNote'] = 'changed'
+        second = execute(ir, args=args, body=body)['result']
+        readings = [r for r in second['callRecords'] if r['opts']['label']=='tree-check:before a-gate']
+        self.assertEqual(len(readings), 2)
+        self.assertEqual(readings[0]['mode'], 'prefix')
+        self.assertEqual(readings[1]['mode'], 'live')
+        self.assertIn('new-fresh', readings[1]['prompt'])
+
+    def test_builder_compares_live_branch_with_source_final_tip(self):
+        ir = graph([node('a', mutates=True, pushes='repo-a#main', replay='inputs'),
+                    node('a-gate', after='a', verifies='a', independent=True, repository='repo-a', branch='main', replay='tree', prompt='Judge {{prev}}'),
+                    node('b', after='a-gate', mutates=True, pushes='repo-a#main', replay='inputs', prompt='Build {{prev}}'),
+                    node('b-gate', after='b', verifies='b', independent=True, repository='repo-a', branch='main', replay='tree', prompt='Judge {{prev}}')])
+        body = "if(opts.label==='a') tips['repo-a']='d'.repeat(40); if(opts.label==='b') tips['repo-a']='e'.repeat(40); result.sha=tips['repo-a'];"
+        self.assertTrue(any('share repo-a#main' in text for text in c.warnings(ir)))
+        first = execute(ir, body=body)['result']
+        args = self.memo_args(first)
+        final = next(r for r in reversed(first['tree']['checks']) if r.get('repository')=='repo-a')
+        final = {k:final[k] for k in ['root','head','porcelain','repository','branch','tip']}
+        for entry in args['_memo'].values(): entry['sourceFinalReading'] = final
+        second = execute(ir, args=args, setup="tips['repo-a']='e'.repeat(40);", body=body)
+        self.assertNotIn('start:a', second['events'])
+        # The old gate judged d, so it must execute against current e.
+        self.assertIn('start:a-gate', second['events'])
+        replay = next(r for r in second['result']['memoRecords'] if r['node']=='a')
+        self.assertEqual(replay['reading']['tip'], 'e'*40)
+        self.assertEqual(replay['verifiedReading']['tip'], 'd'*40)
+
+    def test_separate_lanes_do_not_emit_serial_adjacency_warning(self):
+        ir = graph([node('a', lane='one'), node('b', lane='two')])
+        self.assertFalse(any('run serially in declaration order' in text for text in c.warnings(ir)))
+        ir['nodes'][1]['lane'] = 'one'
+        self.assertTrue(any('run serially in declaration order' in text for text in c.warnings(ir)))
+
+    def test_plan_uses_latest_corroborated_source_branch_reading(self):
+        source = 'return {read:await agent(\'git -C "repo-a" ls-remote origin "refs/heads/main"\',{label:"tree-check:before gate"})}'
+        query = dict(source=source, args={'_base':BASE['_base']}, results={}, readings=[dict(repository='repo-a', branch='main', tip='b'*40), dict(repository='repo-a', branch='main', tip='c'*40)])
+        result = subprocess.run(['node', str(SCRIPTS/'graph-plan.js')], input=json.dumps(query), text=True, capture_output=True, check=True)
+        self.assertEqual(json.loads(result.stdout)['summary']['read']['tip'], 'c'*40)
+
+    def test_ssh_and_known_forge_www_aliases_share_push_identity(self):
+        with patch.object(subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='hostname github.com\nport 22\n')):
+            alias = c._destination_identity('git@forge-alias:org/repo.git', 'main')
+            normal = c._destination_identity('https://github.com/org/repo.git', 'main')
+            self.assertEqual(alias, normal)
+        self.assertEqual(c._destination_identity('https://www.github.com/org/repo.git', 'main'), normal)
+        with patch.object(subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout='')):
+            with self.assertRaisesRegex(ValueError, 'cannot resolve effective SSH'):
+                c._destination_identity('git@unknown-alias:org/repo.git', 'main')
+
 
 if __name__=='__main__': unittest.main()

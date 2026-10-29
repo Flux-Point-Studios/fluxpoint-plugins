@@ -73,7 +73,7 @@ class UncheckedRepairsTests(unittest.TestCase):
                  'evidence': ['pytest regression.py: original attack rejected, valid control passed'],
                  'commits': commits}
         patch = {'item': 'slice', 'round': 1,
-                 'patch': str(self.root) + '/.claude/fluxpoint/rounds/launch/slice/r1/patch.diff'}
+                 'patch': str(self.root) + '/.claude/fluxpoint/rounds/launch/' + '1' * 64 + '/slice/r1/patch.diff'}
         row = {'node': 'check', 'item': 'slice', 'round': 1,
                'verdict': 'PASS', 'findings': [], 'blockers': [],
                'evidence': check['evidence'], 'commits': commits, 'check': check,
@@ -91,6 +91,8 @@ class UncheckedRepairsTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         measured = manifest(data)
+        from repair_diff import compact_manifest, manifest_digest
+        patch['patchSha256'] = measured['patchSha256']
         observed = {'command': 'pytest regression.py', 'result': 'executed attack and valid control passed'}
         check['targetClasses'] = ['legacy-defect']
         check['siblings'] = [dict(finding='legacy-defect', invariant='all sibling paths preserve the invariant',
@@ -104,7 +106,7 @@ class UncheckedRepairsTests(unittest.TestCase):
                                        snapshot='/snapshot/checker', token='f' * 64,
                                        observations=[dict(base=self.base, patchSha256=measured['patchSha256'], attack=observed, control=observed, reproduces=False)])
         proof = dict(version=1, base=self.base, item='slice', round=1, patch=patch['patch'],
-                     patchSha256=measured['patchSha256'], readNonce=nonce, clean=True, blockers=[], refuters=[], findings=[])
+                     patchSha256=measured['patchSha256'], manifestSha256=manifest_digest(compact_manifest(data)), readNonce=nonce, clean=True, blockers=[], refuters=[], findings=[])
         lenses = ['authority', 'value', 'state', 'input', 'operations', 'composition', 'coverage-skeptic']
         proof['attackers'] = [dict(spawnId='repair-diff:slice:r1:attack:' + lens, lens=lens, completed=True,
                                    base=self.base, patchSha256=measured['patchSha256'], observations=[
@@ -116,21 +118,100 @@ class UncheckedRepairsTests(unittest.TestCase):
         summary['repairReadNonce'] = nonce
         return summary
 
+    def journal(self, summary):
+        import repair_journal
+        directory = self.root / 'runtime/projects/project/session/subagents/workflows/repair'
+        directory.mkdir(parents=True, exist_ok=True)
+        events = []
+        for i, (label, result) in enumerate(repair_journal.expected_calls(summary)):
+            agent = 'repair' + str(i)
+            events += [dict(type='started', agentId=agent, label=label), dict(type='result', agentId=agent, result=result)]
+            (directory / ('agent-' + agent + '.jsonl')).write_text(json.dumps(dict(type='user', message=dict(role='user', content='Fixed repair seat ' + label))) + '\n')
+        (directory / 'journal.jsonl').write_text(''.join(json.dumps(e) + '\n' for e in events))
+
     def record_repair(self, commits):
         self.repair_graph()
         summary = self.pass_summary(commits)
+        self.journal(summary)
         p = subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'),
                             '--root', str(self.root), '--graph', str(self.graph), '--run-id', 'repair'],
                            input=json.dumps(summary), text=True, capture_output=True,
-                           env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=20)
+                           env=dict(os.environ, FPL_MEMORY_INDEX='0', CLAUDE_CONFIG_DIR=str(self.root / 'runtime')), timeout=20)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.set_graph([{'id': 'review', 'contract': 'RedTeamV1'}])
         return json.loads((self.runs / 'repair.json').read_text())
+
+    def test_repair_seat_result_must_match_the_runtime_journal(self):
+        import repair_journal
+        summary = self.pass_summary([self.first])
+        self.journal(summary)
+        projects = self.root / 'runtime/projects'
+        verified = repair_journal.corroborate(summary, 'repair', projects=projects)
+        self.assertTrue(verified['seats'])
+        directory = projects / 'project/session/subagents/workflows/repair'
+        journal = directory / 'journal.jsonl'
+        rows = [json.loads(line) for line in journal.read_text().splitlines()]
+        for row in rows:
+            if row.get('type') == 'result' and row.get('result', {}).get('verdict') == 'PASS':
+                row['result']['verdict'] = 'FAIL'
+        journal.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        with self.assertRaisesRegex(ValueError, 'differs from journal'):
+            repair_journal.corroborate(summary, 'repair', projects=projects)
+
+    def test_handwritten_pass_without_runtime_seats_cannot_discharge_commit(self):
+        self.repair_graph()
+        summary = self.pass_summary([self.first])
+        p = subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'), '--root', str(self.root),
+            '--graph', str(self.graph), '--run-id', 'repair'], input=json.dumps(summary), text=True,
+            capture_output=True, env=dict(os.environ, FPL_MEMORY_INDEX='0', CLAUDE_CONFIG_DIR=str(self.root / 'missing-runtime')))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        artifact = json.loads((self.runs / 'repair.json').read_text())
+        self.assertEqual(artifact['checked'], [])
+        self.assertEqual(artifact['outcome'], 'INCOMPLETE')
+        self.assertIn('REPAIR-JOURNAL-UNPROVEN', p.stderr)
 
     def run_check(self):
         return subprocess.run([sys.executable, str(SCRIPTS / 'unchecked-repairs.py'),
                                '--root', str(self.root), '--json'], text=True,
                               capture_output=True, timeout=20)
+
+    def test_recorded_repair_keeps_patch_evidence_after_round_cleanup(self):
+        artifact = self.record_repair([self.first])
+        patch = artifact['summary']['fixOrigins'][0]['context']['current']['patch']
+        Path(patch).unlink()
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual([r['commit'] for r in json.loads(result.stdout)['unchecked']], [self.second])
+
+    def test_retained_bytes_stay_bound_and_old_window_receipts_are_skipped(self):
+        artifact = self.record_repair([self.first])
+        self.assertTrue(artifact['repairEvidence']['files'])
+        patch = artifact['summary']['fixOrigins'][0]['context']['current']['patch']
+        Path(patch).unlink()
+        digest = artifact['repairEvidence']['files'][patch]
+        retained = self.runs / 'evidence' / digest
+        retained.write_bytes(b'changed retained bytes')
+        result = self.run_check()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('digest mismatch', result.stderr)
+        self.artifact('new-block', {'recordedAt': '2026-10-16 12:00:00', 'redTeam': 'BLOCK',
+            'summary': {'tree': {'baseline': {'head': self.first}}}})
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual([r['commit'] for r in json.loads(result.stdout)['unchecked']], [self.second])
+
+    def test_recorded_series_is_retained_separately_from_a_rotating_source(self):
+        import repair_checks
+        import hashlib
+        summary = self.pass_summary([self.first])
+        series = self.root / 'series.json'
+        series.write_bytes(b'[0,1,2]')
+        row = summary['fixOrigins'][0]
+        row['check']['diffCoverage']['operational'] = {'alarmRate': {'seriesPath': str(series), 'seriesSha256': hashlib.sha256(series.read_bytes()).hexdigest()}}
+        saved = repair_checks.retain_evidence(self.root, summary)
+        series.write_bytes(b'[0,1,2,3]')
+        original = repair_checks._evidence_file(self.root, str(series), saved)
+        self.assertEqual(original.read_bytes(), b'[0,1,2]')
 
     def test_any_producer_is_checked_and_only_final_trailers_are_reported(self):
         p = self.run_check()

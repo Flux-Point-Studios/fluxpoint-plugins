@@ -271,10 +271,20 @@ def evaluate(root, rows, manifest):
 
 def load(root):
     """(rows, bad, manifest) or None when this repo has no store at all."""
-    path = memory_mod.path_for(root)
-    if not os.path.exists(path):
+    paths = memory_mod.source_paths(root)
+    if not any(os.path.exists(path) for path in paths):
         return None
-    rows, bad = read_tolerant(path)
+    rows, bad, seen = [], 0, set()
+    with memory_mod.workfile_lock(memory_mod.path_for(root)):
+        for path in paths:
+            part, unreadable = read_tolerant(path)
+            bad += unreadable
+            for row in part:
+                key = json.dumps(row, sort_keys=True)
+                if key not in seen:
+                    rows.append(row)
+                    seen.add(key)
+    rows.sort(key=memory_mod.history_order)
     return rows, bad, load_manifest(root)
 
 
@@ -287,7 +297,7 @@ def check(root):
 
     if bad:
         note = (f"recurrence: {bad} unreadable line(s) in "
-                f"{memory_mod.MEMORY} — arrivals are undercounted by at least "
+                f"{', '.join(memory_mod.source_paths(root))} — arrivals are undercounted by at least "
                 f"that much")
         if manifest is not None:
             problems.append(

@@ -141,9 +141,11 @@ It includes repository files named in `argv`/`witness`, including `file::node`
 selectors and `--option=file`, plus every `harnessInputs` file. A directory
 expands to its Git-tracked files; an empty or untracked-only directory refuses
 to freeze. Explicit inputs must exist inside the repository. Package cwd
-flags (`--prefix`, `--dir`, `--cwd`, `-C`, `--project`) resolve package-relative
-paths; a path without that context may resolve against a unique repository
-package root. Ambiguous package paths refuse rather than choosing one.
+flags (`--prefix`, `--dir`, `--cwd`, and a directory-valued `-C` or `--project`)
+resolve package-relative paths. A `--project` file is pinned as configuration;
+its parent guides local module resolution. Non-directory `-C` values and Jest
+`--testPathPattern(s)` regexes do not become input paths. A path without that
+context may resolve against a unique repository package root. Ambiguous package paths refuse rather than choosing one.
 Deleting a frozen input does not alter the specification identity; its next run
 record names the missing file with a null hash. Both lock operations compute
 the same additive support closure: Python conftest ancestry, package
@@ -155,12 +157,23 @@ is parsed, never imported or executed. A Python support parse failure refuses
 freezing. Production imports guide reach but do not freeze production code.
 Keep `harnessInputs` for opaque commands, dynamic imports, resources outside a
 test package, generated loaders and dependencies no static walk can see.
+Known Python dynamic loaders and computed or template-literal JS imports emit
+warnings in lock and preflight output; a known target explicitly covered by
+`harnessInputs` discharges its warning. Static closure still cannot enumerate
+arbitrary resource paths computed by repository programs.
 Every path in a previous harness map is retained as a closure root, even after
 an argv or import is removed. A missing retained file refuses re-locking; no
 path can silently leave the locked set.
 The harness map stays outside the compared identity, so editing check code
 changes neither the graph's IR nor its compiled script and does not stale its
 specification. It remains reviewed code, with its own recorded identity.
+`--check --strict-harness` and `--run --strict-harness` refuse changed, missing
+or newly discovered harness inputs in the exact checkout being judged, naming
+them before running checks and checking again afterwards. Newly scaffolded
+harnesses use strict mode, including when executed in builder worktrees.
+Existing copied harnesses need that flag added explicitly. Review intended
+harness edits and re-lock them before allowing that tree to certify a packet;
+plain `--check` remains an identity diagnostic for migration and review.
 
 After reviewing and committing a harness fix, run its declared gate through
 `attest.py --run <name>`, then run
@@ -177,6 +190,8 @@ the run artifact; its Evidence row names the digest and changed paths. Missing
 locked files are recorded with a null hash. These describe the tree at recording
 time; record from the executed tree before further edits. The Stop gate also
 names edited check files from declared packets' harness maps as trust-base edits.
+It reads frozen maps directly and only walks legacy locks lacking a map, so
+recording a green Stop does not repeat the live closure walk.
 
 Before a repair, `specification.py --inputs --closure` reports JSON paths,
 hashes, holding check ids and reasons, including packet/lock, proof baseline,
@@ -189,7 +204,9 @@ or re-locks anything. Use `--spec` or `--graph` for a sibling packet.
 `--touches <path>...` always includes closure and exits 4 if a planned file or
 directory overlaps locked inputs, naming the checks that hold them. Exit 0
 only describes the declared list, never grants edit permission or proves the
-live tree unchanged. `--reach <production-path-or-module>...` reports holding
+live tree unchanged. Planned ambient files such as a new `conftest.py`, package
+initializer or test-runner configuration also conflict when locked inputs lie
+under their directory, even before the ambient file exists. `--reach <production-path-or-module>...` reports holding
 check commands, reached test files and statically discovered pytest node ids.
 Unresolved targets refuse; dynamic imports may be missed. Module/package-level
 imports conservatively reach every test in the file, so this is an early probe
@@ -248,11 +265,40 @@ projected referenced JSON files, and graph files declaring that same packet.
 Unrelated files, locks, paths outside the repository and graph packet redirects
 are refused. A newly referenced archive must already exist in the tree. Invalid
 projected JSON or packet structure fails rather than receiving a borrowed lock
-identity. Archived text remains fully resolved, so moving it behind a reference
-does not reduce compiled size.
+identity. Inline context keeps archived text fully resolved. Reference context
+keeps only the packet path, its exact identity and a catalogue of IDs in the
+compiled script, so archived prose does not inflate every prompt or the script.
 
 In a repair round, integrate every passing slice's proposals, including earlier
 passing rounds, into one immutable `packet-edits.json`. The integration checker
 compares the artifact with the returned `packetEdits` and projects it against
 every graph naming that packet. Conflicts, dropped proposals and overflow fail
 the round; low headroom raises a finding while revision is still reviewable.
+
+
+## Packet context by reference
+
+Set `"specificationContext": "reference"` in graph IR to pass the packet by
+reference. Shipped WORK templates use this setting. Existing graphs without it
+retain `"inline"` behavior. The compiler still fully validates and resolves the
+packet, but emits only its repo-relative path, the full lock identity (including
+archive digests), and requirement/check/decision IDs. Each node first runs the
+quoted, pinned `specification.py --check --check-identity <digest>` command from
+its working-tree root, then reads applicable requirements, binding check scopes
+and rulings from the verified files. A reviewer challenging packet completeness
+must read the whole packet. Reference mode changes transport, not applicability.
+
+`--check-identity` compares the canonical current identity with the compiled
+expectation, so relocking a changed packet or archive cannot make an old graph
+trust new bytes. A mismatch stops the worker. Run summaries retain the complete
+identity and record their context mode. `--check` reports packet input tokens per
+call, and each profile row records `specificationInputTokens`; prices include
+reference metadata and validation instructions. Tool output from targeted reads
+is workload-dependent and does not become a claim of measured latency savings.
+
+Reference text uses UTF-8 serialization instead of ASCII escapes in both modes.
+The starter, consolidation, discovery, feature, verified and repair template
+ceilings are now 200,000, 350,000, 2,500,000, 1,450,000, 1,300,000 and 9,500,000
+estimated tokens. Recompute against each campaign's packet and runtime context.
+
+For a graph rooted in a repository subdirectory, reference context carries that project path relative to each worker’s repository root. Its first identity check passes that path through `--root`, so it reads the project packet within the isolated tree even when the repository root has another packet.

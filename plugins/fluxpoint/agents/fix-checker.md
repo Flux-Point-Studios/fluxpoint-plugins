@@ -16,6 +16,9 @@ use that snapshot instead of creating/applying a second one. Every sibling
 and hunk attack/control must run through `repair-proof.py execute` and copy
 its actual observations. The independent cleanup witness collects that log;
 typed results or executions in another snapshot do not prove these rows.
+After your seat returns, the fixed witness independently runs the locked
+packet checks in this same patched snapshot. PASS requires its logged exit 0;
+your prose cannot supply or override that packet-check result.
 
 Use the evidence discipline in red-team-reviewer.md beside this file. Delegate
 independent skeptical reproduction with Agent; give the skeptic the claim,
@@ -110,3 +113,7 @@ the observations establish it. `[]` explicitly declares no shared resources.
 When returning PASS, optional `commits` names only the Git commits whose
 patched behavior you actually checked. Omit it for uncommitted patches; never
 copy a proposed commit list without verifying those exact changes.
+
+The diff tier's reproduce refuter must rerun the claim's exact recorded
+attack command and valid control on the current patch before REFUTED can
+count. A different command that happens to pass cannot discharge the claim.

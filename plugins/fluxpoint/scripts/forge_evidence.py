@@ -7,14 +7,16 @@ import ast
 import base64
 import hashlib
 import json
+import os
 import re
 import subprocess
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
+from urllib.request import urlopen
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 GATE = re.compile(r"[a-z][a-z0-9-]*\Z")
-IMPLICIT = {'pyproject.toml', 'setup.cfg', 'pytest.ini', 'tox.ini', 'conftest.py'}
+IMPLICIT = {'pyproject.toml', 'setup.cfg', 'pytest.ini', '.pytest.ini', 'pytest.toml', '.pytest.toml', 'tox.ini', 'conftest.py'}
 
 
 class PolicyError(ValueError):
@@ -35,7 +37,7 @@ def problems(ci, gates=None):
     if not isinstance(ci, dict):
         return ['ci must be an object']
     out = []
-    unknown = set(ci) - {'forge', 'repository', 'contexts', 'witness', 'covers', 'packetSha'}
+    unknown = set(ci) - {'forge', 'repository', 'contexts', 'witness', 'covers', 'packetSha', 'config'}
     out.extend('ci: unknown field ' + str(k) for k in sorted(unknown))
     if not isinstance(ci.get('repository'), str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]+', ci['repository']):
         out.append('ci.repository must pin the GitHub owner/repository')
@@ -74,6 +76,14 @@ def problems(ci, gates=None):
                 if (path.startswith('/') or '\\' in path or any(p in ('', '.', '..') for p in path.split('/'))
                         or any(ord(c) < 32 for c in path)):
                     out.append('ci.covers.' + gate + ': config must name repository-relative files')
+    if 'config' in ci:
+        config = ci['config']
+        if not _strings(config) or any(path.startswith('/') or '\\' in path
+                or any(p in ('', '.', '..') for p in path.split('/'))
+                or any(ord(c) < 32 for c in path) for path in config):
+            out.append('ci.config must be a unique list of repository-relative files')
+        if not SHA.fullmatch(str(ci.get('packetSha', ''))):
+            out.append('ci.packetSha must pin a full packet commit for prove:ci')
     if 'packetSha' in ci and not SHA.fullmatch(str(ci['packetSha'])):
         out.append('ci.packetSha must be a full lowercase commit SHA')
     return out
@@ -92,39 +102,61 @@ def module_files(module, tracked):
     return found
 
 
+def uncomment(content):
+    """Drop shell/YAML comments without erasing quoted # characters."""
+    result, quote_, escaped, i = [], None, False, 0
+    while i < len(content):
+        c = content[i]
+        if escaped:
+            escaped = False
+        elif c == "\\" and quote_ != "'":
+            escaped = True
+        elif quote_:
+            if c == quote_:
+                quote_ = None
+        elif c in ("'", '"'):
+            quote_ = c
+        elif c == '#' and (i == 0 or content[i - 1].isspace()):
+            end = content.find('\n', i)
+            i = len(content) if end < 0 else end
+            continue
+        result.append(c)
+        i += 1
+    return ''.join(result)
+
+
+def coverage_text(path, content):
+    if path.endswith('.py'):
+        try:
+            return '\n'.join(node.value for node in ast.walk(ast.parse(content))
+                             if isinstance(node, ast.Constant) and isinstance(node.value, str))
+        except SyntaxError as exc:
+            raise ValueError('cannot scan Python CI dependency: ' + path) from exc
+    return uncomment(content)
+
+
 def executable_references(path, content, tracked):
-    tokens = set(re.findall(r'[A-Za-z0-9_@+./-]+', content))
-    normalized = {t.lstrip('./') for t in tokens}
+    scanned = coverage_text(path, content)
+    tree = ast.parse(content) if path.endswith('.py') else None
+    tokens = set(re.findall(r'[A-Za-z0-9_@+./-]+', scanned))
+    normalized = {re.sub(r'^(?:\.{1,2}/)+', '', token) for token in tokens}
     invoked = set()
     for candidate in tracked:
         parts = candidate.split('/')
-        suffixes = {'/'.join(parts[i:]) for i in range(len(parts))}
-        if suffixes & normalized:
+        if {'/'.join(parts[i:]) for i in range(len(parts))} & normalized:
             invoked.add(candidate)
-        if candidate.endswith('.py'):
-            modules = {suffix[:-3].replace('/', '.') for suffix in suffixes}
-            modules.update(suffix.rsplit('/', 1)[0].replace('/', '.') for suffix in suffixes
-                           if suffix.endswith(('/__init__.py', '/__main__.py')))
-            if modules & tokens:
-                invoked.add(candidate)
-                invoked.update('/'.join(parts[:i]) + '/__init__.py' for i in range(1, len(parts))
-                               if '/'.join(parts[:i]) + '/__init__.py' in tracked)
-    if re.search(r'\$\{?\w+\}?[\"\']?\s+[^\n;&|]*?-m\s', content):
+    if re.search(r'\$\{?\w+\}?[\"\']?\s+[^\n;&|]*?-m\s', scanned):
         raise ValueError('dynamic interpreter cannot establish coverage: ' + path)
     interpreter = r'\b(?:python(?:3(?:\.\d+)?)?|pypy3?|py)(?:\.exe)?\s+'
     command = interpreter + r'[^\n;&|]*?-m\s+'
-    if not path.endswith('.py') and re.search(interpreter + r'[^\n;&|]*(?:-c\s|<<|<\s)', content):
+    if not path.endswith('.py') and re.search(interpreter + r'[^\n;&|]*(?:-c\s|<<|<\s)', scanned):
         raise ValueError('inline Python execution cannot establish coverage: ' + path)
-    for match in re.finditer(command, content):
-        operand = re.match(r"[\"']?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)[\"']?(?=\s|$|[;&|])", content[match.end():])
+    for match in re.finditer(command, scanned):
+        operand = re.match(r"[\"']?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)[\"']?(?=\s|$|[;&|])", scanned[match.end():])
         if not operand:
             raise ValueError('dynamic Python module cannot establish coverage: ' + path)
         invoked.update(module_files(operand.group(1), tracked))
     if path.endswith('.py'):
-        try:
-            tree = ast.parse(content)
-        except SyntaxError as e:
-            raise ValueError('cannot scan Python CI dependency: ' + path) from e
         package = path.split('/')[:-1]
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -140,7 +172,13 @@ def executable_references(path, content, tracked):
                         invoked.update(module_files('.'.join(filter(None, (module, alias.name))), tracked))
             elif isinstance(node, ast.Call):
                 func = node.func
-                if (isinstance(func, ast.Name) and func.id in ('__import__', 'eval', 'exec', 'compile', 'getattr', 'globals', 'locals') or
+                if isinstance(func, ast.Name) and func.id in ('getattr', 'hasattr'):
+                    dangerous = {'import_module', '__import__', 'exec_module', 'run_module', 'run_path',
+                                 'spec_from_file_location', 'load_module', 'exec', 'eval', 'compile'}
+                    attribute = node.args[1] if len(node.args) > 1 else None
+                    if not isinstance(attribute, ast.Constant) or not isinstance(attribute.value, str) or attribute.value in dangerous:
+                        raise ValueError('dynamic Python execution cannot establish coverage: ' + path)
+                if (isinstance(func, ast.Name) and func.id in ('__import__', 'eval', 'exec', 'compile', 'globals', 'locals') or
                         isinstance(func, ast.Attribute) and func.attr in ('import_module', 'spec_from_file_location', 'exec_module', 'run_module', 'run_path')):
                     raise ValueError('dynamic Python execution cannot establish coverage: ' + path)
     return invoked
@@ -175,16 +213,74 @@ class GitHub:
             raise RuntimeError(p.stderr.strip() or 'GitHub API failed')
         return json.loads(p.stdout)
 
+    def _identity_command(self, argv, env):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('forge identity observation deadline expired')
+        try:
+            return subprocess.run(argv, cwd=self.root, env=env, capture_output=True,
+                                  text=True, encoding='utf-8', timeout=min(30, remaining))
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError('GitHub identity observation timed out') from exc
+
+    def stored_logins(self):
+        # Removing both token variables makes this an inventory of gh's stored
+        # accounts, including inactive accounts hidden by an environment token.
+        env = {key: value for key, value in os.environ.items()
+               if key not in ('GH_TOKEN', 'GITHUB_TOKEN')}
+        result = self._identity_command(
+            ['gh', 'auth', 'status', '--json', 'hosts', '--jq',
+             '{hosts: {"github.com": [.hosts["github.com"][]? | {login, state}]}}'], env)
+        try:
+            inventory = json.loads(result.stdout)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError('cannot inventory stored gh accounts; JSON auth status support is required') from exc
+        hosts = inventory.get('hosts') if isinstance(inventory, dict) else None
+        if not isinstance(hosts, dict):
+            raise PolicyError('malformed stored gh account inventory')
+        accounts = hosts.get('github.com', [])
+        if (not isinstance(accounts, list) or any(not isinstance(row, dict)
+                or not isinstance(row.get('login'), str) or not row['login'] for row in accounts)):
+            raise PolicyError('malformed stored gh account login')
+        if (result.returncode and not accounts
+                and 'not logged into any GitHub hosts' not in (result.stderr or '')):
+            raise RuntimeError('stored gh account inventory failed')
+        # gh may exit nonzero when there are no stored accounts, or an expired
+        # account. The valid inventory still names every available stored login.
+        return {row['login'] for row in accounts}
+
     def identity(self, ci):
-        creators = ci['witness']['statusCreators']
+        creators = {login.lower() for login in ci['witness']['statusCreators']}
         if not creators:
             return
         got = self.api('user')
         login = got.get('login') if isinstance(got, dict) else None
         if not isinstance(login, str) or not login:
             raise PolicyError('cannot establish the harness token login')
-        if login.lower() in {x.lower() for x in creators}:
+        if login.lower() in creators:
             raise PolicyError('ci.witness.statusCreators pins the harness own gh login: ' + login)
+        # Injected API fixtures are the complete observation boundary in tests.
+        if self._api is not None:
+            return
+        available = {login.lower() for login in self.stored_logins()}
+        if available & creators:
+            raise PolicyError('ci.witness.statusCreators pins a gh account available on this host: '
+                              + ', '.join(sorted(available & creators)))
+        if os.environ.get('GH_TOKEN') and os.environ.get('GITHUB_TOKEN'):
+            env = dict(os.environ)
+            env.pop('GH_TOKEN', None)
+            result = self._identity_command(['gh', 'api', 'user', '--hostname', 'github.com'], env)
+            if result.returncode:
+                raise RuntimeError('cannot establish the shadowed GITHUB_TOKEN login')
+            try:
+                got = json.loads(result.stdout)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError('cannot read the shadowed GITHUB_TOKEN login') from exc
+            login = got.get('login') if isinstance(got, dict) else None
+            if not isinstance(login, str) or not login:
+                raise PolicyError('cannot establish the shadowed GITHUB_TOKEN login')
+            if login.lower() in creators:
+                raise PolicyError('ci.witness.statusCreators pins the shadowed GITHUB_TOKEN login: ' + login)
 
     def target(self, target):
         if re.fullmatch(r'pr:[1-9][0-9]*', str(target)):
@@ -245,6 +341,49 @@ class GitHub:
                 raise ValueError('inconsistent GitHub listing count')
         raise ValueError('GitHub listing exceeds bounded pagination; no verdict')
 
+    def pipeline(self, row, sha):
+        """Inspect launch metadata when a status links a Woodpecker pipeline.
+
+        GitHub authenticates who posted a status, not a CI server's restart
+        inputs. An unreadable provider record cannot substantiate a green.
+        """
+        url = row.get('target_url') or ''
+        if not isinstance(url, str):
+            raise ValueError('invalid pipeline status URL')
+        parsed = urlsplit(url)
+        match = re.fullmatch(r'/repos/([1-9][0-9]*)/pipeline/([1-9][0-9]*)(?:/[1-9][0-9]*)?/?', parsed.path)
+        if not match:
+            if str(row.get('context', '')).lower().startswith('ci/woodpecker/'):
+                raise ValueError('Woodpecker pipeline status has no observable pipeline URL')
+            return None
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment):
+            raise ValueError('invalid Woodpecker pipeline URL')
+        endpoint = 'https://' + parsed.netloc + '/api/repos/' + match[1] + '/pipelines/' + match[2]
+        if self._api:
+            pipeline = self._api('woodpecker:' + endpoint)
+        else:
+            remaining = min(30, self.deadline - time.monotonic())
+            if remaining <= 0:
+                raise ValueError('pipeline observation deadline expired')
+            try:
+                # No GitHub or CI credential is forwarded to the status URL.
+                with urlopen(endpoint, timeout=remaining) as response:
+                    data = response.read(1048577)
+                if len(data) > 1048576:
+                    raise ValueError('pipeline response exceeds the observation bound')
+                pipeline = json.loads(data.decode('utf-8'))
+            except (OSError, ValueError) as exc:
+                raise ValueError('cannot establish pipeline launch provenance: ' + str(exc)) from exc
+        if (not isinstance(pipeline, dict) or type(pipeline.get('parent')) is not int
+                or pipeline['parent'] != 0 or pipeline.get('event') not in ('push', 'pull_request')
+                or pipeline.get('commit') != sha or type(pipeline.get('number')) is not int
+                or pipeline['number'] != int(match[2])
+                or pipeline.get('status') != 'success'):
+            raise ValueError('pipeline is restarted, manual, incomplete or for another commit')
+        return {'provider': 'woodpecker', 'url': endpoint, 'number': pipeline['number'],
+                'parent': 0, 'event': pipeline['event'], 'commit': sha}
+
     def contexts(self, sha, ci):
         if not SHA.fullmatch(sha):
             raise ValueError('CI requires a full commit SHA')
@@ -267,7 +406,7 @@ class GitHub:
             if state == 'failure':
                 result[name] = 'failure'
             if pinned and ((kind, name) not in newest or row['id'] > newest[kind, name][0]):
-                newest[kind, name] = (row['id'], state)
+                newest[kind, name] = (row['id'], state, row)
         for row in rows:
             state, creator = row.get('state'), row.get('creator')
             if state not in ('success', 'failure', 'error', 'pending') or not isinstance(creator, dict) or not isinstance(creator.get('login'), str):
@@ -290,6 +429,11 @@ class GitHub:
             else:
                 raise ValueError('malformed check-run conclusion')
             add(row.get('name'), state, app['id'] in apps, row, 'check')
+        for (kind, name), (_, state, row) in newest.items():
+            if kind == 'status' and state == 'success' and result[name] != 'failure':
+                observation = self.pipeline(row, sha)
+                if observation:
+                    next(item for item in evidence if item['kind'] == kind and item['id'] == row['id'])['pipeline'] = observation
         for name in result:
             if result[name] == 'failure':
                 continue
@@ -321,9 +465,9 @@ class GitHub:
         return data.decode('utf-8')
 
     def coverage(self, sha, ci, gate):
-        cover = ci.get('covers', {}).get(gate)
-        if not cover:
-            raise ValueError('no manifest CI coverage for gate ' + gate)
+        cover = ({'config': ci.get('config')} if gate == 'ci' else ci.get('covers', {}).get(gate))
+        if not cover or not _strings(cover.get('config')) or not SHA.fullmatch(str(ci.get('packetSha', ''))):
+            raise ValueError('no pinned manifest CI coverage for gate ' + gate)
         judged, base = self.tree(sha), self.tree(ci['packetSha'])
         config = set(cover['config'])
         # Deliberately conservative: implicit tool configs anywhere in the repo
@@ -347,7 +491,7 @@ class GitHub:
                 raise ValueError('coverage omits tracked file referenced by ' + path + ': ' + ', '.join(sorted(invoked - config)))
             # Constructed filenames cannot be resolved by a token scan. Refuse
             # executable substitution/path interpolation rather than guessing.
-            if re.search(r'\$\(|[<>]\(|`|(?:\$\{?\w+\}?/|/\$\{?\w+)', content):
+            if re.search(r'\$\(|[<>]\(|`|(?:\$\{?\w+\}?/|/\$\{?\w+)', coverage_text(path, content)):
                 raise ValueError('dynamic pipeline paths cannot establish complete CI coverage: ' + path)
         if not any(p.endswith(('.yml', '.yaml')) for p in config):
             raise ValueError('coverage must include its pipeline YAML')
@@ -373,8 +517,8 @@ def observe(root, ci, target, gate='ci', api=None, deadline=None):
     if gate != 'ci' and not required:
         raise ValueError('no manifest CI coverage for gate ' + gate)
     code = verdict(contexts, required)
-    blobs = client.coverage(sha, ci, gate) if gate != 'ci' and code == 0 else {}
+    blobs = client.coverage(sha, ci, gate) if code == 0 else {}
     if client.target(target) != sha:
         raise TargetMoved('forge target moved during observation')
     return {'headSha': sha, 'target': target, 'contexts': contexts, 'evidence': evidence,
-            'exit': code, 'configBlobs': blobs, 'packetSha': ci.get('packetSha') if gate != 'ci' else None}
+            'exit': code, 'configBlobs': blobs, 'packetSha': ci.get('packetSha')}

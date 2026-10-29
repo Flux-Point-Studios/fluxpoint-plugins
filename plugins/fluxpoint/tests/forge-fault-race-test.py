@@ -63,6 +63,9 @@ class ForgeFaultRace(unittest.TestCase):
                     raw = subprocess.run(['git', '-C', str(self.root), 'cat-file', 'blob', oid], capture_output=True, check=True).stdout
                     self.api['repos/fixture/repo/git/blobs/' + oid] = dict(sha=oid, encoding='base64', size=len(raw), content=base64.b64encode(raw).decode())
             self.api['repos/fixture/repo/git/trees/' + commit + '?recursive=1'] = dict(truncated=False, tree=rows)
+        identities = patch.object(forge.GitHub, 'stored_logins', return_value=set())
+        identities.start()
+        self.addCleanup(identities.stop)
         transport = patch.object(forge.GitHub, 'request', lambda client, path, timeout: copy.deepcopy(self.api[path]))
         transport.start()
         self.addCleanup(transport.stop)

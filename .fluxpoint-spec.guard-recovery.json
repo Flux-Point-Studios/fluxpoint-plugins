@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "goal": "Recover interrupted guard mutations from a durable owned journal on the next guard CLI invocation",
+  "asset": "Guard ratchet verifier and guard restoration",
+  "scope": [
+    "Exact-byte crash recovery after native termination",
+    "Refusal of live owners, unrecognized edits, damaged backups and unsafe journal paths"
+  ],
+  "outOfScope": [
+    "Guaranteeing that a terminated native process executes signal handlers",
+    "Restoring legacy sentinel files which contain no backup path"
+  ],
+  "decisions": [
+    {
+      "id": "durable-guard-recovery",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should a guard survive termination that runs no Python handler?",
+        "options": [
+          {
+            "option": "durable-journal",
+            "argued_by": "model",
+            "strongest_objection": "Requires owned recovery metadata and a restart before restoration"
+          },
+          {
+            "option": "signal-handlers-only",
+            "argued_by": "model",
+            "strongest_objection": "Windows TerminateProcess and abrupt exit run no cleanup"
+          }
+        ],
+        "chosen": "durable-journal",
+        "rationale": "Persist exact backup identity before an atomic mutation, then recover only a dead owner and known bytes.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue #219 measures termination before proof spawn leaving the guard disabled",
+          "Portable os._exit regression invokes the actual verifier without cleanup callbacks"
+        ]
+      },
+      "costs": [
+        {
+          "option": "durable-journal",
+          "cost": "One backup and one journal during a mutation plus recovery validation",
+          "basis": "estimate",
+          "evidence": [
+            "Existing sentinel and verifier already delimit the mutation window"
+          ]
+        },
+        {
+          "option": "signal-handlers-only",
+          "cost": "A disabled guard remains after abrupt native termination",
+          "basis": "estimate",
+          "evidence": [
+            "Issue #219 reproducer"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "guard-restart-recovery",
+      "statement": "After abrupt exit before proof spawn, the next CLI restores exact original bytes and clears owned artifacts; recovery refuses live owners, unknown edits, corrupt backups and escaping targets.",
+      "decisions": [
+        "durable-guard-recovery"
+      ],
+      "checks": [
+        "guard-recovery-tests"
+      ],
+      "counterexample": "os._exit leaves if False in server.py and a subsequent --check cannot recover it"
+    }
+  ],
+  "checks": [
+    {
+      "id": "guard-recovery-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/guard-recovery-test.py"
+      ],
+      "scope": "Actual verifier abrupt exit, restart recovery and preservation refusals",
+      "assumptions": [
+        "Host filesystem and process birth identity observations are trusted",
+        "Recovery occurs on next guard CLI invocation; a dead process cannot run cleanup"
+      ],
+      "timeoutSeconds": 120
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Can a recovery overwrite legitimate new edits or another live verifier?",
+      "resolution": "Owner birth identity and exact original/mutant byte hashes gate recovery; unknown state retains artifacts and fails."
+    }
+  ]
+}

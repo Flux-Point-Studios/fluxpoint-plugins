@@ -261,16 +261,32 @@ def find(root, did):
     hits = [(order_key(r.get("when")), (1, i), str(r.get("recordId") or "store"), r.get("record"))
             for i, r in enumerate(read_store(os.path.join(root, STORE)))
             if r.get("id") == did and isinstance(r.get("record"), dict)]
-    runs = os.path.join(root, RUNS)
-    for fn in sorted(os.listdir(runs)) if os.path.isdir(runs) else []:
-        if not fn.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(runs, fn), encoding="utf-8") as fh:
-                art = json.load(fh)
-        except (OSError, json.JSONDecodeError):
-            continue
-        rec = run_decision(art, did) if isinstance(art, dict) else None
+    # Local records remain canonical for replay. This lookup is advisory:
+    # union the durable clone store so a sibling's recorded decisions survive
+    # removal of the checkout that made them.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import memory as memory_mod
+    directories = list(dict.fromkeys([os.path.realpath(os.path.join(root, RUNS)),
+                                      os.path.realpath(memory_mod.runs_path(root))]))
+    artifacts = {}
+    for runs in directories:
+        for fn in sorted(os.listdir(runs)) if os.path.isdir(runs) else []:
+            if not fn.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(runs, fn), encoding="utf-8") as fh:
+                    art = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(art, dict):
+                continue
+            prior = artifacts.get(fn)
+            order = lambda row: (order_key(row.get("recordedAt") or row.get("when")),
+                                 json.dumps(row, sort_keys=True))
+            if prior is None or order(art) > order(prior):
+                artifacts[fn] = art
+    for fn, art in sorted(artifacts.items()):
+        rec = run_decision(art, did)
         if rec is not None:
             hits.append((order_key(art.get("recordedAt") or art.get("when")), (0, 0),
                          fn[:-len(".json")], rec))

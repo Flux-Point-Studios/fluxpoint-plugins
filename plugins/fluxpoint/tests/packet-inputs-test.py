@@ -72,6 +72,101 @@ class PacketInputsTests(unittest.TestCase):
         self.git('add', '.')
         self.git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'Fixture')
 
+    def test_default_packet_header_is_deduplicated_and_frozen_trust_paths_do_not_walk(self):
+        from unittest.mock import patch
+        self.lock()
+        self.write('WORK.md', 'SPEC: .fluxpoint-spec.json\n')
+        self.assertEqual(specification.declared_packets(self.root), [None])
+        with patch.object(specification.packet_inputs.Inputs, '_expand', side_effect=AssertionError('live walk')):
+            paths = specification.packet_inputs.trust_paths(self.root, self.doc,
+                json.loads((self.root / specification.LOCK).read_text())['harness'])
+        self.assertIn('tests/helper.py', paths)
+
+    def test_frozen_and_live_closure_are_expanded_once_per_record(self):
+        from unittest.mock import patch
+        self.lock()
+        original = specification.packet_inputs.Inputs._expand
+        calls = []
+        def counted(inputs):
+            calls.append(inputs)
+            return original(inputs)
+        with patch.object(specification.packet_inputs.Inputs, '_expand', counted):
+            specification.harness_record(self.root)
+        self.assertEqual(len(calls), 1)
+
+    def test_project_files_context_counts_and_jest_patterns_remain_lockable(self):
+        self.write('tsconfig.json', '{}')
+        self.write('notes.txt', 'sample')
+        for argv, expected in [(['npx', 'tsc', '--noEmit', '--project', 'tsconfig.json'], 'tsconfig.json'),
+                               (['pyright', '--project=tsconfig.json'], 'tsconfig.json'),
+                               (['grep', '-C', '2', 'sample', 'notes.txt'], 'notes.txt'),
+                               (['npx', 'jest', '--testPathPattern', r'src/.*\.test\.ts$'], None),
+                               (['npx', 'jest', '--testPathPatterns=landing'], None)]:
+            with self.subTest(argv=argv):
+                self.doc['checks'][0]['argv'] = argv
+                self.save()
+                frozen = self.lock()
+                if expected:
+                    self.assertIn(expected, frozen['harness'])
+
+    def test_planned_new_ambient_files_conflict_before_they_exist(self):
+        self.lock()
+        for rel in ['tests/__init__.py', 'tests/conftest.py', 'conftest.py', 'pyproject.toml']:
+            (self.root / rel).unlink()
+        for rel in ['tests/conftest.py', 'conftest.py', 'tests/__init__.py', 'pytest.ini',
+                    'tox.ini', 'setup.cfg', 'package.json', 'vitest.config.ts', 'vite.config.js']:
+            with self.subTest(rel=rel):
+                result = self.cli('--touches', rel)
+                self.assertEqual(result.returncode, 4, result.stderr)
+                self.assertIn('spec-tests', json.loads(result.stdout)['conflicts'][0]['checks'])
+        self.assertEqual(self.cli('--touches', 'unrelated/conftest.py').returncode, 0)
+
+    def test_dynamic_python_and_js_inputs_warn_on_lock_touches_and_reach(self):
+        self.write('tests/test_landing.py', 'import importlib as il\nimport runpy\n'
+                   'il.import_module("tests.dyn_helper")\n__import__("tests.dunder_helper")\n')
+        self.write('tests/dyn_helper.py', 'VALUE=1')
+        self.write('tests/dunder_helper.py', 'VALUE=2')
+        self.save()
+        result = self.cli('--lock')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('dynamic', result.stderr)
+        self.assertIn('harnessInputs', result.stderr)
+        touched = json.loads(self.cli('--touches', 'tests/dyn_helper.py').stdout)
+        self.assertTrue(touched['warnings'])
+        self.assertTrue(self.report('--reach', 'tests/dyn_helper.py')['warnings'])
+        self.doc['harnessInputs'] = ['tests/dyn_helper.py', 'tests/dunder_helper.py']
+        self.save()
+        self.lock()
+        self.assertFalse(self.report('--reach', 'tests/dyn_helper.py')['warnings'])
+        self.doc['checks'][0]['argv'] = ['node', 'checks/test.js']
+        self.doc.pop('harnessInputs', None)
+        self.write('checks/test.js', 'await import(`./tmpl`);')
+        self.write('checks/tmpl.js', 'export const n=1;')
+        self.save()
+        self.lock()
+        self.assertTrue(self.report('--reach', 'checks/tmpl.js')['warnings'])
+        self.doc['harnessInputs'] = ['checks/tmpl.js']
+        self.save()
+        self.lock()
+        self.assertFalse(any('dynamic JS' in warning
+                             for warning in self.report('--reach', 'checks/tmpl.js')['warnings']))
+
+    def test_strict_harness_check_refuses_drift_in_the_worktree_being_judged(self):
+        self.lock()
+        self.commit()
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / 'builder'
+            self.git('worktree', 'add', '-q', '-b', 'builder', str(worktree))
+            (worktree / 'tests/helper.py').write_text('def sign(): return True\n')
+            subprocess.run(['git', '-C', str(worktree), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(worktree), '-c', 'user.name=Test',
+                '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'Change frozen helper'], check=True)
+            self.assertEqual(specification.harness_record(self.root)['changedPaths'], [])
+            result = self.cli('--root', str(worktree), '--check', '--strict-harness')
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('tests/helper.py', result.stderr)
+            self.assertIn('locked harness inputs changed', result.stderr)
+
     def test_lock_persists_imports_conftests_inits_config_but_not_production(self):
         lock = self.lock()
         self.assertEqual(set(lock['harness']), {'tests/test_landing.py', 'tests/helper.py',
@@ -102,6 +197,22 @@ class PacketInputsTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)['conflicts'][0]['checks'], ['spec-tests'])
         record = specification.harness_record(self.root)
         self.assertIn('tests/fixtures.py', record['changedPaths'])
+
+    def test_runner_directory_options_do_not_seed_the_repository(self):
+        from packet_inputs import Inputs
+        self.write('README.md', 'unrelated\n')
+        self.commit()
+        argv = self.doc['checks'][0]['argv']
+        expected = Inputs(self.root, self.doc).hashes()
+        for option in (['--rootdir=.'], ['--confcutdir', '.'],
+                       ['--confcutdir=tests']):
+            with self.subTest(option=option):
+                self.doc['checks'][0]['argv'] = argv + option
+                self.assertEqual(Inputs(self.root, self.doc).hashes(), expected)
+        self.doc['checks'][0]['argv'] = argv + ['--path', '.']
+        self.assertIn('README.md', Inputs(self.root, self.doc).hashes())
+        self.doc['checks'][0]['argv'] = argv + ['.']
+        self.assertIn('README.md', Inputs(self.root, self.doc).hashes())
 
     def test_touches_covers_directories_fixed_inputs_and_unlocked_changes(self):
         self.lock()

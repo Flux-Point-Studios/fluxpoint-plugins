@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "sha256": "c9e8e05fa038a66f523e09baac26172aca044d1fa06ca5c78b712669d66a6160",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/campaign-upgrade-test.py": "96ef50507bf32d7913cb89ca7f27eaa3e97c294532c34ce6f5026f1c0e8ae58d"
+  },
+  "lockFormat": 2
+}

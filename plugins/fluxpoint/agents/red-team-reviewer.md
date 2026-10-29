@@ -16,10 +16,24 @@ identities and runtime versions. Verify that experiments use that state.
 Add PoCs only in isolated scratch copies or verified worktrees; do not alter
 shared source or another reviewer's fixtures.
 
+Use upstream gate evidence before scheduling suites. The graph supplies compact
+witness pointers for completed prove/cited gates. Read each applicable source row
+with the pinned `attest.py --show <attestId> --nonce <launch>` command. A green row
+at the reviewed head and launch covers that suite: cite it and do not rerun it.
+Spend tool time on new attacks, valid controls, PoCs and tests you write. Rerun a
+covered suite only to test a named claim, and state that claim. Missing, stale or
+red evidence remains a blocker. Preserve measured runtime identity; an opaque
+shell wrapper with no runtime measurement does not establish a reference runtime.
+
 Build a coverage matrix before attacking. Each applicable row names an
 invariant, attacker capabilities, an attack and its evidence. Mark a surface
 not applicable only with a reason tied to inspected code. For Cardano, read
 `../references/red-team-cardano.md` and expand the relevant transaction paths.
+For Midnight targets, include transcript gas against growing live state,
+concurrent state conflicts, maintenance authority, verifier binding, lookalike
+deployments, witness egress, disclosure minimality, ledger version pins and
+replay. The `compact` attack taxonomy names their required properties. Run
+sequential and concurrent posts beyond the initial empty-state examples.
 For other systems, adapt these surfaces to the actual change. For test doubles
 and recordings, name each recording and the production behavior it stands in
 for. Compare derived identities with the recorded value instead of deriving
@@ -114,6 +128,16 @@ with `severity`, `finding`, `exploit_path`, `minimal_fix`, plus
 and `worstSeverityRank` (0 NONE, 1 LOW, 2 MEDIUM, 3 HIGH, 4 CRITICAL). The
 contract binds the three together and refuses SHIP over a HIGH or CRITICAL
 finding, so a halt gate reading one field cannot be passed by the others.
+Typed suite coverage belongs in `coverage.suites`, a list of declared gate names.
+For each, record a reused upstream row in `coverage.citedGates` or your own new
+witnessed run in `coverage.executedGates`. Each citation contains
+`{gate, attestId, exit: 0, sha, logSha256, nonce}` and optional `runtime` copied
+from the source row's host or reference-image measurement. Own runs also require
+`reason` naming the claim they test. Reused rows may support every lens; they do
+not satisfy another independent prove node. Never describe an upstream execution
+as your own new run. The compiler checks the coverage shape and the recorder
+checks actual source rows, including producer, exact head, log and launch.
+
 For SHIP, include top-level `coverage`: `subject` is an array of exact
 `{repository, base, head, files, additions, deletions}` ranges measured with
 git; `attackers` counts completed attacker agents, `lenses` lists their surface

@@ -38,13 +38,14 @@ Campaign section to use it.
 ```json graph-ir
 {
   "version": 1,
+  "specificationContext": "reference",
   "name": "verified-campaign",
   "campaign": "Verified feature slice: program synthesis and proof synthesis as separate mutators, each independently gated, the proof audited before red-team",
   "budget": {
     "maxNodes": 100,
     "verifyFloorTokens": 50000,
     "cacheTtl": "1h",
-    "maxEstimatedTokens": 2250000
+    "maxEstimatedTokens": 1300000
   },
   "defaults": {
     "effort": "medium"

@@ -1003,5 +1003,83 @@ report("plateau before another audit retains unresolved historical evidence",
        and result["r"]["deadLenses"] == ["runtime"] and result["r"]["refuted"] == ["old claim"],
        "no unresolved claim was erased")
 
+# Regressions for #221–#223: reductions are deterministic and future git
+# operands can be probed without creating the future branch or commit.
+reduce_ir = {"nodes": [
+    {"id": "builder", "mutates": True, "prompt": "Run git status"},
+    {"id": "reduced", "reduce": {"from": "builder", "op": "distinct"}}], "argDefaults": {}}
+reduce_result = run(dict(BASE, ir=reduce_ir),
+    "(p,o)=>o.label.startsWith('probe:')?" + json.dumps({"completed": True,
+        "commands": [receipt('git status')], "findings": [], "blockers": []}) + ":{findings:[]}")
+report('#222 a valid reduce has no prompt and does not kill the probe plan',
+       sound(reduce_result) and len(labels(reduce_result, 'probe:')) == 1,
+       str((reduce_result.get('r') or {}).get('deadProbes')))
+bad_probed_ir = {"nodes": [{"id": "builder", "mutates": True}], "argDefaults": {}}
+bad_probed = run(dict(BASE, ir=bad_probed_ir))
+report('#222 an actual probed node still requires its prompt',
+       (bad_probed.get('r') or {}).get('deadProbes') == ['plan'], 'missing probe prompt refused')
+
+for command, form, data in [
+        ('git switch --detach {{prev.sha}}', 'git status', {'prev.sha': 'sha'}),
+        ('git merge-base --is-ancestor {{prev.gate.sha}} HEAD', 'git status', {'prev.gate.sha': 'sha'}),
+        ('git -C /repo rev-parse <future-ref>', 'git -C /repo status', {'future-ref': 'token'}),
+        ('git update-ref refs/heads/<branch> HEAD {{prev.sha}}', 'git status',
+         {'branch': 'token', 'prev.sha': 'sha'})]:
+    result = declared_probe('Run `' + command + '`',
+        {'commands': [{'command': command, 'kind': 'shape', 'form': form, 'data': data}]},
+        [receipt(command, form)])
+    report('#221/#223 typed future git operands accept a read in the same frame: ' + command,
+           sound(result) and probe_report(result).get('commands', [{}])[0].get('kind') == 'shape-only',
+           str(probe_report(result).get('blockers')))
+
+future = 'git -C /repo switch {{prev.sha}}'
+for name, form, data in [('untyped', 'git -C /repo status', {}),
+                         ('different cwd', 'git -C /other status', {'prev.sha': 'sha'}),
+                         ('writer form', 'git -C /repo reset --hard HEAD', {'prev.sha': 'sha'})]:
+    result = declared_probe('Run `' + future + '`',
+        {'commands': [{'command': future, 'kind': 'shape', 'form': form, 'data': data}]},
+        [receipt(future, form)])
+    report('#223 future git declaration refuses ' + name, incomplete(result),
+           str(probe_report(result).get('blockers')))
+
+compound = 'cd /repo && git -C /repo switch task; git update-ref refs/heads/task HEAD'
+canonical = 'cd /repo && git -C /repo status ; git status'
+generated = declared_probe('Run `' + compound + '`', None, [receipt(compound, canonical)])
+report('#223 git write probes receive deterministic safe reads in the declared forms',
+       sound(generated) and declared_forms(generated) == {compound: {'kind': 'shape', 'run': canonical}},
+       str(declared_forms(generated)))
+report('#221 probe advice names generated reads and contains no dry-run suggestion',
+       bool(labels(generated, 'probe:')) and '--dry-run' not in labels(generated, 'probe:')[0]['prompt'],
+       'probe prompt follows the accepted grammar')
+
+# The compiler executes this same grammar for --check, so declarations do
+# not pass only at runtime while being rejected before a graph can run.
+import importlib.util
+compiler_spec = importlib.util.spec_from_file_location('probe_compiler_regression', os.path.join(PLUGIN, 'scripts', 'compile-graph.py'))
+compiler = importlib.util.module_from_spec(compiler_spec)
+compiler_spec.loader.exec_module(compiler)
+compiler_node = {'id': 'builder', 'mutates': True, 'prompt': 'Run `git switch {{prev.sha}}`',
+    'probe': {'commands': [{'command': 'git switch {{prev.sha}}', 'kind': 'shape',
+                            'form': 'git status', 'data': {'prev.sha': 'sha'}}]}}
+report('#223 compiler check accepts the same fully typed future git declaration',
+       compiler.probe_findings({'nodes': [compiler_node]}) == [], 'shared grammar accepts the declaration')
+compiler_node['probe']['commands'][0]['form'] = 'git reset --hard HEAD'
+report('#223 compiler check refuses a future git declaration whose form writes',
+       bool(compiler.probe_findings({'nodes': [compiler_node]})), 'writer form refused by the shared grammar')
+
+rooted = run(dict(BASE, root='/scratch/revision'),
+    "(p,o)=>o.label==='lens:commands'?{findings:[F('MEDIUM','root fixture')]}:"
+    "o.label==='reduce'?singletons(p):o.label.startsWith('refute:')?{refuted:true,reason:'not reproduced in this revision'}:{findings:[]}")
+root_calls = [c for c in rooted['calls'] if c['label'].startswith(('lens:', 'refute:')) or c['label']=='reduce']
+report('#158 every lens, reducer and refuter receives the explicit repository root',
+       bool(root_calls) and all('/scratch/revision' in c['prompt'] and 'relative path' in c['prompt'] for c in root_calls)
+       and (rooted.get('r') or {}).get('root')=='/scratch/revision', 'audit rooted in the requested tree')
+report('#158 refuters receive the existing structural check summary',
+       bool(labels(rooted,'refute:')) and all(BASE['check'] in c['prompt'] for c in labels(rooted,'refute:')),
+       'structural check reused')
+invalid_root = run(dict(BASE, root=17))
+report('#158 a malformed root is rejected before dispatch', bool(invalid_root.get('err')) and not invalid_root['calls'],
+       invalid_root.get('err','accepted'))
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

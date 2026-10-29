@@ -19,6 +19,7 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 | Launch or resume with pinned artifacts | [Structured resume](../plugins/fluxpoint/references/structured-resume.md), [graph-run](../plugins/fluxpoint/commands/graph-run.md) |
 | Diagnose a busy or unhealthy machine | [Machine health and watchdog](box-health.md) |
 | Run long commands and manage cancellation | [Long-command lifecycle](../plugins/fluxpoint/references/longrun.md) |
+| Keep armed per-prompt recall warm | [Warm prompt recall](warm-prompt-recall.md) |
 | Inspect status, blockers and metrics | [Status command](../plugins/fluxpoint/commands/status.md) |
 
 ## Verification and evidence
@@ -27,10 +28,12 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 |---|---|
 | Audit proof strength and assumptions | [Verified work](../plugins/fluxpoint/README.md#verified-work), [proof-audit](../plugins/fluxpoint/commands/proof-audit.md) |
 | Configure pinned Lean/Z3 checks | [Blaster setup, trust and replay](../plugins/fluxpoint/references/blaster.md) |
+| Recover an interrupted guard mutation | [Guard recovery](guard-recovery.md) |
 | Check builder/validator relations | [Relations](../plugins/fluxpoint/README.md#relations-between-artifacts), [Cardano review](../plugins/fluxpoint/references/red-team-cardano.md) |
 | Require independent repair evidence | [Repair campaign](../plugins/fluxpoint/templates/WORK.repair.md), [graph repair rules](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
 | Check production dependency pins | [Deployed gates](../plugins/fluxpoint/references/deployed-gates.md) |
-| Bind CI results to commits and attempts | [Forge evidence](../plugins/fluxpoint/references/forge-evidence.md), [fault reruns](../plugins/fluxpoint/references/fault-reruns.md) |
+| Bind CI results to commits and attempts | [Forge evidence, source pins and CI identities](../plugins/fluxpoint/references/forge-evidence.md), [fault reruns](../plugins/fluxpoint/references/fault-reruns.md) |
+| Bind CI results to commits and attempts | [Forge evidence](../plugins/fluxpoint/references/forge-evidence.md), [content-bound red retention and fault reruns](../plugins/fluxpoint/references/fault-reruns.md) |
 | Check captured provider shapes and counters | [Recordings](../plugins/fluxpoint/references/recordings.md) |
 | Measure and tighten deterministic limits | [Metrics, Aiken costs and plateau detection](deterministic-metrics.md), [slice calibration](../plugins/fluxpoint/README.md#calibrating-predicted-gains) |
 | Retrieve lessons and decisions | [Memory and recall](memory-recall.md), [recall command](../plugins/fluxpoint/commands/recall.md) |
@@ -49,5 +52,24 @@ its accepted CLI options.
 [Design notes](../plugins/fluxpoint/DESIGN-NOTES.md) and the
 [roadmap](../plugins/fluxpoint/ROADMAP.md) preserve historical reasoning and
 remaining gaps. Use the operational guides above for current instructions.
+See [campaign upgrades](campaign-upgrades.md) for schema migrations and the
+explicit coverage limits when recording an in-flight legacy run.
+The [proof-strength ratchet](../plugins/fluxpoint/README.md) includes Python
+typing suppressions and checker configuration; its module help lists categories.
+The [initialization guide](../plugins/fluxpoint/commands/init.md) describes
+Compact/Midnight attack classes and their property-test or waiver requirements.
 The [documentation audit](documentation-audit.md) records the checked surfaces,
 corrections and verification limits of the October 2026 review.
+
+Recall corpus configuration, shared schema-specific indexes, detached refresh,
+embedding consent, worker briefs and
+shared worktree memory are described in [memory recall](memory-recall.md#corpus-configuration-and-safe-refresh).
+
+[Compiled witness identity](witness-identity.md) documents plugin pins across
+launch, resume, gate execution and attestation recording.
+
+[Packet reference context](../plugins/fluxpoint/references/spec-format.md#packet-context-by-reference)
+reduces repeated scope text while retaining the exact compiled lock identity.
+
+[Suite evidence in independent reviews](review-gate-evidence.md) explains typed
+gate citations, shared lens reuse and named rerun reasons.

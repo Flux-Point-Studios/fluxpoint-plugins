@@ -31,6 +31,9 @@ import statistics
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import memory as memory_mod
+
 RUNS_DIR = os.path.join(".claude", "fluxpoint", "runs")
 MEMORY = os.path.join(".claude", "fluxpoint", "memory.jsonl")
 INBOX = os.path.join(".claude", "fluxpoint", "inbox.jsonl")
@@ -479,9 +482,29 @@ def main():
     ap.add_argument("--json", action="store_true", dest="as_json")
     args = ap.parse_args()
 
-    runs_dir = args.runs_dir or os.path.join(args.root, RUNS_DIR)
-    runs, findings = read_runs(runs_dir)
-    lessons, f2 = read_jsonl(os.path.join(args.root, MEMORY))
+    directories = ([args.runs_dir] if args.runs_dir else list(dict.fromkeys([
+        os.path.realpath(os.path.join(args.root, RUNS_DIR)),
+        os.path.realpath(memory_mod.runs_path(args.root))])))
+    run_map, findings = {}, []
+    for directory in directories:
+        part, bad = read_runs(directory)
+        findings += bad
+        for run_id, record in part:
+            prior = run_map.get(run_id)
+            order = lambda row: (str(row.get('recordedAt') or row.get('when') or ''), json.dumps(row, sort_keys=True))
+            if prior is None or order(record) > order(prior):
+                run_map[run_id] = record
+    runs = sorted(run_map.items(), key=lambda item: (str(item[1].get('when') or ''), item[0]))
+    lessons, f2, seen = [], [], set()
+    with memory_mod.workfile_lock(memory_mod.path_for(args.root)):
+        for path in memory_mod.source_paths(args.root):
+            part, bad = read_jsonl(path)
+            f2 += bad
+            for row in part:
+                key = json.dumps(row, sort_keys=True)
+                if key not in seen:
+                    lessons.append(row)
+                    seen.add(key)
     inbox_rows, f3 = read_jsonl(os.path.join(args.root, INBOX))
     findings += f2 + f3
 

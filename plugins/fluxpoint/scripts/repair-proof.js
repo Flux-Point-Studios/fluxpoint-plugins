@@ -69,7 +69,6 @@ function repairManifest(bytes) {
       for (let j = i + 1; j < lines.length && !lines[j].startsWith('@@ ') && !lines[j].startsWith('diff --git '); j++) {
         if (lines[j].startsWith('+')) added.push(lines[j].slice(1))
       }
-      if (!added.length) return
       const content = added.join('\n')
       const surfaces = repairSurfaces(content), obligations = []
       if (surfaces.some(s => ['outbound-calls', 'timers'].includes(s))) obligations.push('latency')
@@ -84,6 +83,26 @@ function repairManifest(bytes) {
   const changed = lines.filter(s => /^[+-]/.test(s) && !s.startsWith('+++ ') && !s.startsWith('--- ')).map(s => s.slice(1)).join('\n')
   return { patchSha256:repairSHA256(bytes),hunks,changedSurfaces:repairSurfaces(changed) }
 }
+function repairCanonical(value) {
+  const sorted = v => Array.isArray(v) ? v.map(sorted) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sorted(v[k])])) : v
+  return JSON.stringify(sorted(value)).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4,'0'))
+}
+function repairManifestDigest(measured) { return repairSHA256([...repairCanonical(measured)].map(c => c.charCodeAt(0))) }
+
+function repairFeedback(check) {
+  if (!check || typeof check !== 'object') return check
+  return Object.fromEntries(['verdict','findings','blockers','evidence','reframe','exit','command','tail'].filter(k => check[k] !== undefined).map(k => [k,check[k]]))
+}
+function repairContextIssue(...values) {
+  for (const value of values) {
+    const text = tokenText(value)
+    let bytes = 0
+    for (const c of text) { const n = c.codePointAt(0); bytes += n <= 127 ? 1 : n <= 2047 ? 2 : n <= 65535 ? 3 : 4 }
+    if (bytes > REPAIR_CONTEXT_BYTES) return 'repair context is '+bytes+' UTF-8 bytes, exceeding budget.repairContextBytes '+REPAIR_CONTEXT_BYTES+'; narrow the slice or raise the explicitly priced bound'
+  }
+  return null
+}
+
 function repairSiblingIssue(check, context, fixed) {
   if (!repairTargets(check.targetClasses) || JSON.stringify([...check.targetClasses].sort()) !== JSON.stringify([...context.targetClasses].sort())) return 'SIBLINGS-UNPROVEN: checker targetClasses differ from pinned slice'
   const rows = check.siblings, claims = fixed.siblings === undefined ? [] : fixed.siblings
@@ -113,7 +132,7 @@ function repairCoverageIssue(check, measured, fixed) {
   }
   return null
 }
-const REPAIR_SENTINEL_SCHEMA = {type:'object',required:['status'],properties:{status:{type:'string'},rawPatch:{type:'string'},base:{type:'string'},patch:{type:'string'},item:{type:'string'},round:{type:'integer'},snapshot:{type:'string'},token:{type:'string'},patchSha256:{type:'string'},observations:{type:'array',items:{type:'object'}},issue:{type:'string'}}}
+const REPAIR_SENTINEL_SCHEMA = {type:'object',required:['status'],properties:{status:{type:'string'},manifest:{type:'object'},manifestSha256:{type:'string'},kind:{type:'string'},spec:{type:'string'},exit:{type:'integer'},argv:{type:'array',items:{type:'string'}},elapsedMs:{type:'number'},output:{type:'string'},base:{type:'string'},patch:{type:'string'},item:{type:'string'},round:{type:'integer'},snapshot:{type:'string'},token:{type:'string'},patchSha256:{type:'string'},observations:{type:'array',items:{type:'object'}},issue:{type:'string'}}}
 const repairQuote = s => "'" + String(s).replace(/'/g, "'\\''") + "'"
 const repairHelperCommand = mode => REPAIR_PROOF_ARGV.map(repairQuote).join(' ') + ' ' + mode
 function repairSamePath(expected, actual) {
@@ -129,7 +148,7 @@ function repairSamePath(expected, actual) {
 function repairIdentity(context) { const p = context.integrated || context.current; return {base:context.base,item:context.item,round:context.round,patch:p.patch} }
 async function repairSentinel(mode, context, extra = {}, id = '') {
   const identity = repairIdentity(context)
-  const args = mode === 'cleanup' ? extra : {...identity,root:REPAIR_LAUNCH.root,...extra}
+  const args = ['cleanup','check'].includes(mode) ? extra : {...identity,root:REPAIR_LAUNCH.root,...extra}
   const command = repairHelperCommand(mode) + ' ' + Object.entries(args).map(([k,v]) => '--' + k + ' ' + repairQuote(v)).join(' ')
   return agent('FIXED REPAIR WITNESS. Run exactly this command and return its raw JSON verbatim. Do not inspect or accept fixer/checker reasoning, manually edit source/artifacts, infer a digest, or substitute another command. The helper may create/clean only its owned scratch archives. A command failure returns status INCOMPLETE with its issue.\nCOMMAND: ' + command + '\nREAD PHASE: '+id+'\nFRESH LAUNCH READ: ' + A._replayLaunchNonce,
     {label:'repair-witness:'+mode+':'+context.item+':r'+context.round+':'+id,effort:'low',schema:REPAIR_SENTINEL_SCHEMA})
@@ -141,14 +160,22 @@ async function repairReadPatch(context, readId = 'before-check') {
   if (!r || r.status !== 'READ') return {issue:'DIFF-UNPROVEN: fixed patch witness missing or failed'+(repairText(r?.issue)?': '+r.issue:'')}
   const mismatched = Object.keys(id).filter(k => k === 'patch' ? !repairSamePath(id[k],r[k]) : r[k] !== id[k])
   if (mismatched.length) return {issue:'DIFF-UNPROVEN: fixed patch witness identity mismatch in '+mismatched.join(', ')+(mismatched.includes('patch')?' (expected '+JSON.stringify(id.patch)+', observed '+JSON.stringify(r.patch)+')':'')}
-  try { return {...repairManifest(repairBytes(r.rawPatch)),...id} }
+  try {
+    const m = r.manifest
+    if (!m || !/^[0-9a-f]{64}$/.test(m.patchSha256) || !Array.isArray(m.hunks) || !Array.isArray(m.changedSurfaces) || repairManifestDigest(m) !== r.manifestSha256) throw new Error('invalid or mismatched patch manifest digest')
+    const expected = (context.integrated || context.current)?.patchSha256
+    if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected) || expected !== m.patchSha256) throw new Error('fixer patchSha256 differs from the witnessed artifact')
+    return {...m,manifestSha256:r.manifestSha256,...id}
+  }
   catch (e) { return {issue:'DIFF-UNPROVEN: '+String(e.message || e)} }
 }
 function repairProofBrief(measured, context, fixed) {
   return 'HARNESS PATCH MANIFEST (derived from raw patch bytes, never your own inventory): '+JSON.stringify(measured)+'\nReturn targetClasses exactly '+JSON.stringify(context.targetClasses)+' and siblings for every targeted class on ALL six axes: field, encoding, caller, network, role, path. Rerun every fixer-listed sibling attack/control yourself, then attack at least one unlisted sibling per axis. NOT-APPLICABLE requires inspected snapshot file:line. Map EVERY harness hunk id in diffCoverage with the exact patchSha256, surface and your own attack/control command/results. Latency requires a declared deadline and measured bound; alarm-rate requires a recorded production series path/digest and measured acceptable false-positive rate. Rate-limited providers need declared shared pool resources. Missing proof is INCOMPLETE.\nFIXER SIBLING CLAIMS (not evidence): '+JSON.stringify(fixed.siblings || [])+'\n'
 }
 function repairCheckerEvidenceIssue(check, context, measured) {
-  const witness = check.checkerWitness, observations = witness?.observations
+  const witness = check.checkerWitness, allObservations = witness?.observations
+  const observations = Array.isArray(allObservations) ? allObservations.filter(o => o?.kind !== 'packet-check') : allObservations
+  if (REPAIR_PACKET !== null && (!check.packetCheck || check.packetCheck.status !== 'CHECKED' || check.packetCheck.exit !== 0 || check.packetCheck.spec !== REPAIR_PACKET || check.packetCheck.base !== context.base || check.packetCheck.patchSha256 !== measured.patchSha256 || !allObservations?.some(o => JSON.stringify(o) === JSON.stringify(check.packetCheck)))) return 'PACKET-CHECK-UNPROVEN: fixed packet check did not pass on the exact repair snapshot'
   if (!witness || witness.status !== 'CLEANED' || witness.base !== context.base || witness.patchSha256 !== measured.patchSha256 || witness.readNonce !== A._replayLaunchNonce || !Array.isArray(observations) || !observations.length || observations.some(o => !o || o.base !== context.base || o.patchSha256 !== measured.patchSha256 || o.reproduces !== false)) return 'CHECKER-UNPROVEN: independent checker witness is missing or records an undefeated harm'
   const same = (a,b) => repairObservation(a) && repairObservation(b) && a.command === b.command && a.result === b.result
   const pairs = [...(check.siblings || []), ...(check.diffCoverage?.hunks || [])]
@@ -162,14 +189,17 @@ function repairSnapshotBrief(snapshot) {
   return 'SNAPSHOT IDENTITY: '+JSON.stringify(snapshot)+'\nThe harness already applied the complete current patch to this fresh archive of the exact launch base. Work only there; no second snapshot or second patch application. Run ALL attack/control cases through '+repairHelperCommand('execute')+' --snapshot '+repairQuote(snapshot.snapshot)+' --token '+repairQuote(snapshot.token)+' --control <valid-command> --attack <case-command>. Copy the actual command/result observations into each sibling and hunk row. Latency observedMs must copy attack.elapsedMs; for alarms pass --series <absolute-production-series>, read its frozen copy from FPL_PRODUCTION_SERIES, and have the command print JSON {durationSeconds,falsePositives,maxPerDay}, then copy its measured output and helper-read series digest. These actual executions, not descriptions, are independently logged outside the snapshot and collected by the cleanup sentinel.\n'
 }
 async function repairCheckedSpawn(context, measured, prompt, options) {
-  const snapshot = await repairSentinel('materialize',context,{sha256:measured.patchSha256},options.label)
+  const snapshot = await repairSentinel('materialize',context,{sha256:measured.patchSha256,'manifest-sha256':measured.manifestSha256},options.label)
   if (!snapshot || snapshot.status !== 'READY' || snapshot.base !== context.base || snapshot.patchSha256 !== measured.patchSha256 || !repairText(snapshot.snapshot) || typeof snapshot.token !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.token)) return {verdict:'INCOMPLETE',findings:[],blockers:['checker fresh base archive unavailable'],evidence:['harness could not materialize checker snapshot']}
-  let result = null, cleanup = null
-  try { result = await spawn(repairSnapshotBrief(snapshot)+prompt,options) }
+  let result = null, cleanup = null, packetCheck = null
+  try {
+    result = await spawn(repairSnapshotBrief(snapshot)+prompt,options)
+    if (REPAIR_PACKET !== null) packetCheck = await repairSentinel('check',context,{snapshot:snapshot.snapshot,token:snapshot.token,spec:REPAIR_PACKET},options.label)
+  }
   finally { cleanup = await repairSentinel('cleanup',context,{snapshot:snapshot.snapshot,token:snapshot.token},options.label) }
   const valid = cleanup && cleanup.status === 'CLEANED' && repairSamePath(snapshot.snapshot,cleanup.snapshot) && cleanup.token === snapshot.token
   if (!valid) return {verdict:'INCOMPLETE',findings:[],blockers:['checker snapshot/process cleanup unconfirmed'],evidence:['harness refused undrained or missing checker snapshot']}
-  return result && typeof result === 'object' ? {...result,checkerWitness:{...cleanup,spawnId:options.label,base:context.base,patchSha256:measured.patchSha256,readNonce:A._replayLaunchNonce}} : null
+  return result && typeof result === 'object' ? {...result,packetCheck,checkerWitness:{...cleanup,spawnId:options.label,base:context.base,patchSha256:measured.patchSha256,readNonce:A._replayLaunchNonce}} : null
 }
 function repairOriginalTitles() {
   const f = Array.isArray(A.findings?.findings) ? A.findings.findings : A.findings
@@ -177,7 +207,7 @@ function repairOriginalTitles() {
 }
 async function repairDiffAttack(context, measured, phaseName) {
   const prefix = 'repair-diff:'+context.item+':r'+context.round
-  const receipt = {version:1,...repairIdentity(context),patchSha256:measured.patchSha256,readNonce:A._replayLaunchNonce,settled:repairOriginalTitles(),attackers:[],refuters:[],findings:[],snapshots:[],blockers:[],clean:false}
+  const receipt = {version:1,...repairIdentity(context),patchSha256:measured.patchSha256,manifestSha256:measured.manifestSha256,readNonce:A._replayLaunchNonce,settled:repairOriginalTitles(),attackers:[],refuters:[],findings:[],snapshots:[],blockers:[],clean:false}
   const attackSchema = {type:'object',required:['base','patchSha256','completed','evidence','blockers','findings'],properties:{base:{type:'string'},patchSha256:{type:'string'},completed:{type:'boolean'},evidence:{type:'array',minItems:1,items:{type:'string'}},blockers:{type:'array',items:{type:'string'}},findings:C.FixCheckV1.properties.findings}}
   const voteSchema = {type:'object',required:['resolution','attack','control','contradiction'],properties:{resolution:{enum:['REFUTED','CONFIRMED','UNRESOLVED']},attack:{type:'object'},control:{type:'object'},contradiction:{type:'string'}}}
   const subject = 'PINNED PATCH SUBJECT: '+JSON.stringify(measured)+'\nORIGIN REPLAY CONTEXT: '+JSON.stringify(context)+'\nORIGINAL FINDINGS: '+JSON.stringify(A.findings || [])+'\nSETTLED ORIGINAL FINDINGS (context, never evidence): '+JSON.stringify(repairOriginalTitles())
@@ -185,7 +215,7 @@ async function repairDiffAttack(context, measured, phaseName) {
   const observed = r => Array.isArray(r?._executed) && r._executed.length > 0 && r._executed.every(o => o && o.base === context.base && o.patchSha256 === measured.patchSha256 && repairObservation(o.attack) && repairObservation(o.control) && typeof o.reproduces === 'boolean')
   async function runSeat(id, prompt, schema) {
     if (!affordable(id)) { receipt.blockers.push(id+': budget floor'); return null }
-    const snapshot = await repairSentinel('materialize',context,{sha256:measured.patchSha256},id)
+    const snapshot = await repairSentinel('materialize',context,{sha256:measured.patchSha256,'manifest-sha256':measured.manifestSha256},id)
     if (!snapshot || snapshot.status !== 'READY' || snapshot.base !== context.base || snapshot.patchSha256 !== measured.patchSha256 || !repairText(snapshot.snapshot) || typeof snapshot.token !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.token)) { receipt.blockers.push(id+': fresh base archive unavailable'); return null }
     let result = null, executions = []
     try { result = await spawn(subject+'\n'+snapshotPrompt(snapshot)+'\n'+prompt,{label:id,phase:phaseName,schema,effort:'medium'}) }
@@ -228,8 +258,10 @@ async function repairDiffAttack(context, measured, phaseName) {
   await parallel(raw.map(f => async () => {
     const votes = await parallel(REPAIR_REVIEW_REFUTERS.map(lens => async () => {
       const spawnId = prefix+':refute:'+f.id+':'+lens.id
-      const r = await runSeat(spawnId,'Read '+REPAIR_REVIEW_AGENT+'. Independently test this claim, never the fixer/checker reasoning: '+JSON.stringify(f)+'\nREFUTER '+lens.id+': '+lens.focus+'\nReturn the supplied refutation schema. REFUTED requires contradictory EXECUTED attack and valid-control command/results plus the specific contradiction. Missing/null/uncertain observations are UNRESOLVED. Never refute from a settled title or inference.',voteSchema)
-      const valid = !!r && observed(r) && ['REFUTED','CONFIRMED','UNRESOLVED'].includes(r.resolution) && repairObservation(r.attack) && repairObservation(r.control) && r._executed.some(o => o.attack.command === r.attack.command && o.attack.result === r.attack.result && o.control.command === r.control.command && o.control.result === r.control.result) && (r.resolution !== 'REFUTED' || repairText(r.contradiction) && r._executed.every(o => o.reproduces === false))
+      const r = await runSeat(spawnId,'Read '+REPAIR_REVIEW_AGENT+'. Independently test this claim, never the fixer/checker reasoning: '+JSON.stringify(f)+'\nREFUTER '+lens.id+': '+lens.focus+'\nReturn the supplied refutation schema. REFUTED requires contradictory EXECUTED attack and valid-control command/results plus the specific contradiction. The reproduce seat must rerun the exact claim originEvidence command and controlCommand on the current patch; an unrelated defended command cannot refute it. Missing/null/uncertain observations are UNRESOLVED. Never refute from a settled title or inference.',voteSchema)
+      const origin = f.originEvidence?.integrated || (f.originEvidence?.rounds || []).find(p => repairPatchKey(p) === repairPatchKey(context.integrated || context.current))
+      const exactReproduction = lens.id !== 'reproduce' || !!origin && r?._executed?.some(o => o.reproduces === false && o.attack.command === origin.command && o.control.command === origin.controlCommand)
+      const valid = exactReproduction && !!r && observed(r) && ['REFUTED','CONFIRMED','UNRESOLVED'].includes(r.resolution) && repairObservation(r.attack) && repairObservation(r.control) && r._executed.some(o => o.attack.command === r.attack.command && o.attack.result === r.attack.result && o.control.command === r.control.command && o.control.result === r.control.result) && (r.resolution !== 'REFUTED' || repairText(r.contradiction) && r._executed.every(o => o.reproduces === false))
       const vote = {spawnId,resolution:valid?r.resolution:'UNRESOLVED',attack:r?.attack || null,control:r?.control || null,contradiction:r?.contradiction || '',observations:r?._executed || []}
       receipt.refuters.push(vote)
       return vote

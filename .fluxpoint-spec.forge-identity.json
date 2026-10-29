@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "goal": "Keep CI witnesses independent of host credentials and deployed dependency resolution",
+  "asset": "Source-backed forge evidence and deployed-gate wrapper verification",
+  "scope": [
+    "Inventory every stored GitHub CLI login and shadowed token variable",
+    "Keep deployed dependency checks mandatory for forge and reuse witnesses"
+  ],
+  "outOfScope": [
+    "Inspecting arbitrary credential helpers or secret files",
+    "Auditing CI-server credentials or changing host authentication"
+  ],
+  "decisions": [
+    {
+      "id": "forge-host-identity",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "Which observable host identities must be excluded from CI witnesses?",
+        "options": [
+          {
+            "option": "inventory-gh-identities",
+            "argued_by": "model",
+            "strongest_objection": "Requires a GitHub CLI exposing a JSON account inventory"
+          },
+          {
+            "option": "active-login-only",
+            "argued_by": "model",
+            "strongest_objection": "An inactive stored account or shadowed token can still mint a green"
+          }
+        ],
+        "chosen": "inventory-gh-identities",
+        "rationale": "Pinning an independent creator requires checking all observable gh accounts and both token variables; deployed proof still requires its wrapper witness.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue #178 parts5 and6 reproduce forge deployed bypass and inactive gh identity availability",
+          "Existing GitHub.identity reads only the active user endpoint"
+        ]
+      },
+      "costs": [
+        {
+          "option": "inventory-gh-identities",
+          "cost": "One gh account inventory and at most one additional user endpoint request",
+          "basis": "estimate",
+          "evidence": [
+            "GH_TOKEN masks GITHUB_TOKEN; stored-account JSON lists inactive logins"
+          ]
+        },
+        {
+          "option": "active-login-only",
+          "cost": "A locally available pinned creator can forge a CI green",
+          "basis": "estimate",
+          "evidence": [
+            "Issue #178 inactive account reproducer"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "host-identity-exclusion",
+      "statement": "An inactive stored pinned account or pinned shadowed GITHUB_TOKEN refuses CI identity policy; malformed inventory cannot pass.",
+      "decisions": [
+        "forge-host-identity"
+      ],
+      "checks": [
+        "forge-identity-tests"
+      ],
+      "counterexample": "The current gh user is agent while an inactive ci-bot remains in the account store and identity policy passes"
+    },
+    {
+      "id": "deployed-wrapper-required",
+      "statement": "Forge and reuse evidence cannot replace the resolution-checked wrapper required by deployed gates.",
+      "decisions": [
+        "forge-host-identity"
+      ],
+      "checks": [
+        "forge-identity-tests"
+      ],
+      "counterexample": "A source-backed CI green remains ATTESTED for a deployed gate without a wrapper resolution check"
+    }
+  ],
+  "checks": [
+    {
+      "id": "forge-identity-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/forge-identity-test.py"
+      ],
+      "scope": "Credential inventory process boundary and deployed witness enforcement",
+      "assumptions": [
+        "GitHub CLI JSON login responses are authoritative for its own store and token environment",
+        "Other credential stores and CI-server tokens remain operator responsibilities"
+      ],
+      "timeoutSeconds": 120
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does a passing identity check prove no bot secret exists anywhere on the host?",
+      "resolution": "No; success names its gh-store and token-variable scope, leaving other credential stores and CI credentials outside this check."
+    }
+  ]
+}

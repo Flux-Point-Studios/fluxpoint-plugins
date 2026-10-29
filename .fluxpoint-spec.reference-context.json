@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "goal": "Reduce repeated packet context while binding every reference to the compiled requirement identity",
+  "asset": "Packet context, compiler estimates and shipped graph templates",
+  "scope": [
+    "Opt-in reference projection with compact IDs",
+    "Exact compiled identity validation before packet reads",
+    "Reference context as the shipped template default",
+    "Visible per-node input estimates"
+  ],
+  "outOfScope": [
+    "Claiming measured end-to-end latency savings",
+    "Dropping full-packet review when a reviewer needs it"
+  ],
+  "decisions": [
+    {
+      "id": "packet-reference-context",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should nodes consult a large locked packet without repeating its whole text in every context?",
+        "options": [
+          {
+            "option": "reference-projection",
+            "argued_by": "model",
+            "strongest_objection": "Nodes must read relevant packet sections from a verified file before use"
+          },
+          {
+            "option": "inline-entire-packet",
+            "argued_by": "model",
+            "strongest_objection": "Every lens and refuter repeats tens of thousands of scope tokens on every model call"
+          }
+        ],
+        "chosen": "reference-projection",
+        "rationale": "Retain the full identity in summaries and a compact catalogue in prompts; a first-command identity check binds local and archived bytes to the exact compiled lock.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue #184 measured 70K packet tokens repeated on 48-121 model calls per review",
+          "Current identity already binds referenced archive digests"
+        ]
+      },
+      "costs": [
+        {
+          "option": "reference-projection",
+          "cost": "One local identity validation and targeted packet reads per node",
+          "basis": "estimate",
+          "evidence": [
+            "Local specification validator already resolves and hashes archives"
+          ]
+        },
+        {
+          "option": "inline-entire-packet",
+          "cost": "About 3.4M-8.5M repeated cache-read packet tokens per review in measured downstream run",
+          "basis": "measured",
+          "evidence": [
+            "Issue #184 transcript measurements"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "bound-reference-context",
+      "statement": "Reference prompts omit archive text and retain IDs, exact compiled identity and mandatory validation; both changed packets and changed archives refuse even after relock; estimates reflect the smaller input",
+      "decisions": [
+        "packet-reference-context"
+      ],
+      "checks": [
+        "packet-reference-tests"
+      ],
+      "counterexample": "Relocking changed archives makes an old compiled reference graph trust new bytes or estimates still price the inline packet"
+    },
+    {
+      "id": "reference-project-root",
+      "statement": "The emitted first identity command resolves the packet in the nested project directory within the worker tree, even when repository root carries another packet",
+      "decisions": [
+        "packet-reference-context"
+      ],
+      "checks": [
+        "packet-reference-tests"
+      ],
+      "counterexample": "A graph compiled with --gates-root apps/pkg runs --spec .fluxpoint-spec.json from repository root and reads the wrong packet"
+    }
+  ],
+  "checks": [
+    {
+      "id": "packet-reference-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/specification-reference-test.py"
+      ],
+      "scope": "Real locked archive packets, emitted JavaScript, CLI identity validation and shipped template choices",
+      "assumptions": [
+        "Model workers follow their first-command instruction as they already follow inline packet requirements; filesystem validation is deterministic"
+      ],
+      "timeoutSeconds": 90
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does a valid current lock prove it is the lock this graph was compiled against?",
+      "resolution": "No. The reference preamble includes the compiled identity digest; --check-identity compares the current validated identity against that exact digest."
+    }
+  ]
+}

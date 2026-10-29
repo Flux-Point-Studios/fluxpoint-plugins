@@ -5,6 +5,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import locale
 import os
 from pathlib import Path
 import shutil
@@ -258,6 +259,7 @@ class Assembly(Fixture):
         self.args = argparse.Namespace(root=str(self.root), graph="WORK.md", run="wf_previous", args=None,
                     set=[], set_json=[], unpinned_ok=[], out=None, projects="runtime-projects")
         self.compiled_inputs = None
+        self.compiled_replay = None
         real_module = resume._module
         self.compiler = real_module("compile-graph")
         self.memo_builder = mock.Mock(return_value={"_memo": {"checked": "receipt"}, "_prefix": []})
@@ -271,6 +273,8 @@ class Assembly(Fixture):
         def commands(command, root):
             if str(command[0]) == sys.executable and str(command[1]).endswith("compile-graph.py"):
                 self.compiled_inputs = json.loads(Path(command[command.index("--args") + 1]).read_text())
+                if '--replay-state' in command:
+                    self.compiled_replay = json.loads(Path(command[command.index('--replay-state') + 1]).read_text())
                 return "rerun plan: live repair\n" if "--plan" in command else "compiled fixture\n"
             return real_run(command, root)
         mock.patch.object(resume, "_run", side_effect=commands).start()
@@ -294,7 +298,8 @@ class Assembly(Fixture):
         self.assertEqual(first["args"]["_base"]["sha"], subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root).decode().strip())
         self.assertNotEqual(first["args"]["_replayLaunchNonce"], second["args"]["_replayLaunchNonce"])
         self.assertEqual(len(first["args"]["_replayLaunchNonce"]), 64)
-        self.assertEqual(first["args"]["_memo"], {"checked": "receipt"})
+        self.assertNotIn('_memo', first['args'])
+        self.assertEqual(self.compiled_replay['_memo'], {'checked': 'receipt'})
         self.assertNotIn("_priorResults", first["args"])
         self.assertFalse(any(not key.startswith("_") for key in first["args"]))
 
@@ -350,6 +355,7 @@ class Assembly(Fixture):
                 resume._safe_run(value)
         path = self.file("rejudge.json", '{"gate":{"nonce":"retry-2","reason":"operator request"}}')
         self.summary["results"] = {"gate": {"verdict": "BLOCK"}, "unrelated": {"huge": "x" * 40000}}
+        self.summary['memoRecords'] = []
         self.save()
         self.args.set_json = ["rejudge=@" + str(path)]
         workflow = resume.assemble(self.args)
@@ -418,6 +424,9 @@ const agent=async(prompt,opts)=>({findings:[]});
         second = json.loads(resumed.stdout)
         self.assertIn("review", resumed.stderr)
         self.assertEqual(second["resumeFromRunId"], "wf_integration")
+        self.assertNotIn('_memo', second['args'])
+        self.assertNotIn('_prefix', second['args'])
+        self.assertIn('const REPLAY_STATE = ', Path(second['scriptPath']).read_text())
         inputs = self.execute(second)["summary"]["inputs"]
         self.assertEqual(inputs, {"note": "reviewed repair\r\n", "zero": 0, "unchanged": "default"})
 
@@ -441,6 +450,110 @@ const agent=async(prompt,opts)=>({findings:[]});
         invalid = self.file("invalid.json", '{"_memo":{"forged":true}}')
         refused = self.command("compile-graph.py", self.graph, "--args", invalid, "--check", want=1)
         self.assertIn("only non-underscore keys", refused.stderr)
+
+
+class ResumeCleanup(Assembly):
+    def set_defaults(self, defaults):
+        self.ir['argDefaults'] = defaults
+        self.file('WORK.md', '```json graph-ir\n' + json.dumps(self.ir) + '\n```\n')
+
+    def test_changed_default_requires_named_adopt_or_keep(self):
+        self.set_defaults({'defaultNote': 'new default'})
+        self.summary['argDefaults'] = {'defaultNote': 'none'}
+        self.save()
+        with self.assertRaisesRegex(ValueError, 'RESUME-DEFAULT-DRIFT.*defaultNote'):
+            resume.assemble(self.args)
+        self.args.keep_default = ['defaultNote']
+        resume.assemble(self.args)
+        self.assertEqual(self.compiled_inputs['defaultNote'], 'none')
+        self.args.keep_default = []
+        value = self.file('adopt.txt', 'new default')
+        self.args.set = ['defaultNote=@' + str(value)]
+        resume.assemble(self.args)
+        self.assertEqual(self.compiled_inputs['defaultNote'], 'new default')
+
+    def test_rejudge_adoption_from_legacy_source_is_explicitly_refused(self):
+        path = self.file('rejudge.json', '{"gate":{"nonce":"new","reason":"operator request"}}')
+        self.args.set_json = ['rejudge=@' + str(path)]
+        with self.assertRaisesRegex(ValueError, 'RESUME-LEGACY-REJUDGE'):
+            resume.assemble(self.args)
+
+    def test_new_defaults_are_embedded_and_unset_removes_stray_key(self):
+        self.set_defaults({'added': 'value'})
+        self.args.unset = ['repairB']
+        resume.assemble(self.args)
+        self.assertEqual(self.compiled_inputs['added'], 'value')
+        self.assertNotIn('repairB', self.compiled_inputs)
+
+    def test_unknown_update_warns_and_plan_is_retained(self):
+        value = self.file('typo.txt', 'text')
+        self.args.set = ['typo=@' + str(value)]
+        with mock.patch('sys.stderr', new_callable=__import__('io').StringIO) as err:
+            workflow = resume.assemble(self.args)
+        self.assertIn('RESUME-UNUSED-SET: typo', err.getvalue())
+        plan = workflow['args']['_rerunPlan']
+        raw = Path(plan['path']).read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), plan['sha256'])
+        self.assertIn('rerun plan: live repair', json.loads(raw)['plan'])
+
+    def test_run_forces_utf8_in_child(self):
+        # Prove the environment is supplied on every platform, not just on Windows.
+        with mock.patch.dict(os.environ, {'PYTHONIOENCODING': ''}):
+            output = resume._run([sys.executable, '-c', 'import os; print(os.environ.get("PYTHONIOENCODING")); print("caf\u00e9 \u2014")'], self.root)
+        self.assertEqual(output.splitlines(), ['utf-8', 'caf\u00e9 \u2014'])
+
+
+class InlineCleanup(CompilerIntegration):
+    def test_unbound_inline_input_is_refused_and_record_rejects_unbound_summary(self):
+        workflow = self.initial()
+        self.assertIn('inline', self.execute(workflow, {'extra': 'unarchived text'})['error'])
+        result = self.execute(workflow)['summary']
+        result['inputs']['extra'] = 'unarchived text'
+        raw = self.file('unbound.json', json.dumps(result))
+        rejected = self.command('record-run.py', '--root', self.root, '--graph', self.graph,
+                                '--run-id', 'wf_unbound', '--result', raw, want=2)
+        self.assertIn('RESUME-INPUT-UNBOUND', rejected.stderr)
+
+
+class PlanCleanup(Fixture):
+    def test_legacy_plan_preserves_unchanged_prefix_until_first_change(self):
+        compiler = resume._module('compile-graph')
+        import replay_memo
+        replay_memo = compiler._sibling('replay_memo')
+        run_artifacts = compiler._sibling('run_artifacts')
+        for argv in [('init', '-q'), ('config', 'user.name', 'fixture'), ('config', 'user.email', 'test@example.invalid')]:
+            subprocess.run(['git', *argv], cwd=self.root, check=True)
+        self.file('source', 'base')
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'base'], cwd=self.root, check=True)
+        ir = {'version': 1, 'name': 'legacy', 'campaign': 'legacy', 'treeGuard': False, 'budget': {'maxNodes': 3},
+              'nodes': [{'id': 'n' + str(i), 'contract': 'FindingsV1', 'prompt': 'Read {{A.' + key + '}}.'} for i, key in enumerate(['a', 'b', 'c'])]}
+        public = {'a': r'C:\Program Files\café\state.json', 'b': 'B', 'c': 'C'}
+        results = {'n' + str(i): {'findings': []} for i in range(3)}
+        contracts = compiler.load_contracts(str(SCRIPTS.parent / 'contracts'))
+        source = compiler.emit(ir, contracts, embedded_args=public)
+        launch = {'nonce': 'old', 'since': '2026-10-28T00:00:00Z'}
+        body = dict(source=source, args={'_base': resume.fresh_base(self.root)}, results=results, readings=[])
+        # Node writes UTF-8 even when Windows Python defaults pipes to cp1252.
+        with mock.patch.object(locale, 'getpreferredencoding', return_value='cp1252'), mock.patch.object(locale, 'getencoding', return_value='cp1252', create=True):
+            dry = subprocess.run(['node', str(SCRIPTS / 'graph-plan.js')], input=json.dumps(body), text=True, encoding='utf-8', capture_output=True, check=True)
+        calls = json.loads(dry.stdout)['calls']
+        self.assertEqual(calls[0]['prompt'], compiler.LONG_PREAMBLE + 'Read ' + public['a'] + '.')
+        prefix = [dict(promptSha256=hashlib.sha256(c['prompt'].encode()).hexdigest(), optsSha256=replay_memo.memo_key(c['opts']), label=c['opts']['label']) for c in calls]
+        artifact = {'summary': {'launch': launch, 'inputs': public, 'results': results}}
+        real_sibling = compiler._sibling
+        with mock.patch.object(compiler, '_sibling', side_effect=lambda name: {'replay_memo': replay_memo, 'run_artifacts': run_artifacts}.get(name) or real_sibling(name)), mock.patch.object(run_artifacts, 'read', return_value=(artifact, 'f' * 64)), mock.patch.object(replay_memo, 'build_memo', return_value={'_memo': {}, '_prefix': prefix}):
+            same = compiler.rerun_plan(ir, contracts, public, str(self.root), 'wf_prior')
+            changed = compiler.rerun_plan(ir, contracts, dict(public, b='CHANGED'), str(self.root), 'wf_prior')
+        self.assertEqual([x['status'] for x in same], ['prefix'] * 3)
+        self.assertEqual([x['status'] for x in changed], ['prefix', 'live', 'live'])
+        self.assertIn('arg changed: b', changed[1]['cause'])
+        self.assertIn('after first changed call n1', changed[2]['cause'])
+        journal = [dict(prompt=c['prompt'], start={'opts': c['opts']}, done={'type': 'result'}) for c in calls]
+        with mock.patch.object(compiler, '_sibling', side_effect=lambda name: {'replay_memo': replay_memo, 'run_artifacts': run_artifacts}.get(name) or real_sibling(name)), mock.patch.object(run_artifacts, 'read', return_value=(artifact, 'f' * 64)), mock.patch.object(replay_memo, 'build_memo', return_value={'_memo': {}, '_prefix': []}), mock.patch.object(replay_memo, '_journal_calls', return_value=journal):
+            legacy = compiler.rerun_plan(ir, contracts, public, str(self.root), 'wf_prior')
+        self.assertEqual([x['status'] for x in legacy], ['prefix'] * 3)
+
 
 
 if __name__ == "__main__":

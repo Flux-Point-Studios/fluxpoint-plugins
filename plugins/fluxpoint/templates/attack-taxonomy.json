@@ -172,6 +172,67 @@
         }
       ],
       "waived": {}
+    },
+    {
+      "language": "compact",
+      "note": "Compact contracts and Midnight builders require generator-backed TypeScript/JavaScript or Python tests, or a scoped waiver. Static declaration coverage does not prove runtime execution.",
+      "classes": [
+        {
+          "id": "attack_transcript_gas_vs_state_growth",
+          "applies": "compact-contract-or-midnight-builder",
+          "property": "Declared transcript gas fits current submission state with headroom, including populated tries; deploy-time empty-state measurements alone cannot satisfy it.",
+          "fuzz": "Post at least three entries sequentially and concurrently, and vary existing map depth and size."
+        },
+        {
+          "id": "attack_concurrent_state_conflict",
+          "applies": "compact-contract-or-midnight-builder",
+          "property": "Concurrent inserts either both land consistently or one retries safely from current state; no accepted update is lost.",
+          "fuzz": "Race same-key and distinct-key inserts against growing state."
+        },
+        {
+          "id": "attack_maintenance_authority",
+          "applies": "compact-contract-or-midnight-builder",
+          "property": "An immutable deployment refuses every upgrade or authority replacement; a mutable control proves the tested path is reachable.",
+          "fuzz": "Try empty, random, substituted and committee authority modes with real signature controls."
+        },
+        {
+          "id": "attack_verifier_binding",
+          "applies": "compact-contract-or-midnight-builder",
+          "property": "The verifier binds the contract address, circuit, statement, network genesis and required finality.",
+          "fuzz": "Swap each binding independently and vary finality proofs."
+        },
+        {
+          "id": "attack_lookalike_deploy",
+          "applies": "compact-contract-or-midnight-builder",
+          "property": "Deployment inspection rejects swapped verifier keys, extra operations, added authority and pre-seeded state.",
+          "fuzz": "Mutate each deployed artifact and initial-state field independently."
+        },
+        {
+          "id": "attack_witness_egress",
+          "applies": "compact-contract-or-midnight-builder",
+          "property": "Private witness material does not escape through proof servers, logs or errors.",
+          "fuzz": "Generate malformed witnesses with distinctive private bytes and inspect all errors and outbound boundaries."
+        },
+        {
+          "id": "attack_disclosure_minimality",
+          "applies": "compact-contract-or-midnight-builder",
+          "property": "Only explicitly justified public values are disclosed; private witness changes preserve the declared disclosure policy.",
+          "fuzz": "Vary private preimages and inspect public outputs and disclosures."
+        },
+        {
+          "id": "attack_ledger_version_pin",
+          "applies": "compact-contract-or-midnight-builder",
+          "property": "Compiler, runtime and ledger target versions match deployment pins; incompatible versions refuse before submission.",
+          "fuzz": "Vary compiler/runtime and ledger version combinations around supported pins."
+        },
+        {
+          "id": "attack_replay",
+          "applies": "compact-contract-or-midnight-builder",
+          "property": "A proof or transaction cannot be reused across contracts, networks or consumed nonces.",
+          "fuzz": "Replay captured proofs and signed transactions with altered domain, state and nonce."
+        }
+      ],
+      "waived": {}
     }
   ]
 }

@@ -50,7 +50,19 @@ if [ -f "$compacted" ]; then
   fi
 fi
 
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+fpl_recall_section() {
+recall_py="$(dirname "$0")/recall.py"
+if [ "${FPL_RECALL_INJECT:-1}" = "1" ] && [ -f "$recall_py" ]; then
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 5 "$FPL_PY" "$recall_py" --for-session --refresh 2>/dev/null \
+      || echo "- Memory recall skipped (overran its 5s slot); run /fluxpoint:recall for the ranked view."
+  else
+    "$FPL_PY" "$recall_py" --for-session --refresh 2>/dev/null || true
+  fi
+fi
+}
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { fpl_recall_section; exit 0; }
 
 # The commit this session starts from, so the Stop gate can tell work done
 # this session from history it inherited — including work that was committed
@@ -128,7 +140,7 @@ fi
 # because the answer to it is a gate and never another lesson. Silent in a
 # repo that has filed nothing, and it exits 0 no matter what.
 rec_py="$(dirname "$0")/recurrence-guard.py"
-if [ -f "$rec_py" ] && [ -f "$sd/memory.jsonl" ]; then
+if [ -f "$rec_py" ]; then
   "$FPL_PY" "$rec_py" --for-session 2>/dev/null || true
 fi
 
@@ -148,15 +160,7 @@ fi
 # and the section is silent when the recall corpus is empty. The wall
 # clock guard exists because a hook that can wedge a session is a worse
 # failure than the memory it was protecting.
-recall_py="$(dirname "$0")/recall.py"
-if [ "${FPL_RECALL_INJECT:-1}" = "1" ] && [ -f "$recall_py" ]; then
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 5 "$FPL_PY" "$recall_py" --for-session 2>/dev/null \
-      || echo "- Memory recall skipped (overran its 5s slot); run /fluxpoint:recall for the ranked view."
-  else
-    "$FPL_PY" "$recall_py" --for-session 2>/dev/null || true
-  fi
-fi
+fpl_recall_section
 
 # Local gate evidence is deliberately outside the tracked work file: a final
 # Stop must not leave a clean branch dirty or create parallel-branch conflicts.

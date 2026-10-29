@@ -13,8 +13,10 @@ This tool closes that gap without adding a store or a writer. It compiles a
 DERIVED index — a typed graph plus a lexical index plus optional dense
 vectors — from the append-only stores that already exist, the way
 compile-graph.py compiles the IR: deterministically, with no model in the
-loop, byte-identical for identical sources. The index lives under
-gitignored .claude/fluxpoint/index/ and is a rebuildable cache; the stores
+loop, byte-identical for identical sources. Repository indexes live under
+gitignored .claude/fluxpoint/index/<schema>/; external corpus indexes live
+once in the user's cache directory and are fused at read time. Both are
+rebuildable caches; the stores
 stay the only truth, and a malformed line in a SOURCE store is still a hard
 error, while a damaged INDEX file is deleted and rebuilt out loud.
 
@@ -43,25 +45,35 @@ order, so /fluxpoint:graph-run can feed args._seen from here and the
 compiled graph's advisory-seed contract is untouched.
 """
 import argparse
+import atexit
 import datetime
 import json
 import math
+import inspect
 import os
 import re
 import subprocess
+import hashlib
+import tempfile
+import time
+import uuid
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import memory as memory_mod  # noqa: E402 - sibling module, house idiom
 import embedder  # noqa: E402
+import recall_sources  # noqa: E402
+from workfile_lock import workfile_lock  # noqa: E402
 
-INDEX_DIR = os.path.join(".claude", "fluxpoint", "index")
+INDEX_BASE = os.path.join(".claude", "fluxpoint", "index")
 RUNS_DIR = os.path.join(".claude", "fluxpoint", "runs")
 CEX = ".fluxpoint-cex.jsonl"
+_REFRESH_CHILDREN = []
+atexit.register(lambda: [child.poll() for child in _REFRESH_CHILDREN])
 GRAPH_F, LEX_F, META_F = "graph.json", "lex.json", "index.meta.json"
 
-DOC_KINDS = {"lesson", "cex", "decision", "primitive"}
+DOC_KINDS = {"lesson", "cex", "decision", "primitive", "note"}
 NODE_KINDS = DOC_KINDS | {"tag", "file", "run", "campaign", "gnode"}
 EDGE_KINDS = {"TAGGED", "PRODUCED_IN", "KILLED_BY", "AT_NODE", "TOUCHES",
               "PART_OF", "PINS", "SUPERSEDES", "DECIDED_IN", "CONSUMES",
@@ -124,7 +136,8 @@ def _sha_file(path):
 
 def _parse_ts(ts):
     try:
-        return datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        value = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        return value if value.tzinfo else value.replace(tzinfo=datetime.timezone.utc)
     except ValueError:
         return None
 
@@ -154,29 +167,56 @@ def tokenize(text):
     return toks
 
 
+def index_dir(root):
+    return os.path.abspath(os.path.join(root, INDEX_BASE, INDEX_SCHEMA))
+
+
+def shared_index_dir(root):
+    corpora = sorted(recall_sources.corpus_roots(root), key=_dumps)
+    identity = {"corpora": corpora}
+    # Codex has a user-wide store but its reader applies a project cwd policy.
+    # Different policy views must never reuse each other's private passages.
+    if any(c["format"] == "codex-memories" for c in corpora):
+        identity["scope"] = recall_sources.project_view(root)["identity"]
+    key = hashlib.sha256(_dumps(identity).encode()).hexdigest()
+    cache = os.environ.get("XDG_CACHE_HOME") or (os.path.join(os.environ["LOCALAPPDATA"], "Cache") if os.name == "nt" and os.environ.get("LOCALAPPDATA") else os.path.join(os.path.expanduser("~"), ".cache"))
+    return os.path.abspath(os.path.join(cache, "fluxpoint", "recall", INDEX_SCHEMA, key))
+
+
+def writer_identity():
+    try:
+        with open(os.path.join(HERE, "..", "plugin.json"), encoding="utf-8") as source:
+            version = json.load(source).get("version", "unknown")
+    except (OSError, ValueError):
+        version = "unknown"
+    return {"version": version, "schema": INDEX_SCHEMA}
+
+
 # ---------------------------------------------------------------- sources
 
+def _run_directories(root):
+    shared = memory_mod.runs_path(root) if hasattr(memory_mod, "runs_path") else os.path.join(root, RUNS_DIR)
+    return list(dict.fromkeys([os.path.abspath(os.path.join(root, RUNS_DIR)), os.path.abspath(shared)]))
+
+
 def _read_runs(root):
-    """{runId: artifact}. A malformed artifact is fatal, the same rule
-    resolve_imports applies: what the index contains must not depend on
-    which artifacts happened to parse."""
-    d = os.path.join(root, RUNS_DIR)
+    """Shared durable artifacts plus legacy checkout artifacts; malformed sources refuse."""
     out = {}
-    if not os.path.isdir(d):
-        return out
-    for fn in sorted(os.listdir(d)):
-        if not fn.endswith(".json"):
-            continue
-        p = os.path.join(d, fn)
-        try:
-            with open(p, encoding="utf-8") as fh:
-                art = json.load(fh)
-        except (OSError, json.JSONDecodeError) as e:
-            raise SystemExit(f"recall: {p} is not readable JSON: {e}")
-        if not isinstance(art, dict):
-            raise SystemExit(f"recall: {p} must contain a JSON object")
-        rid = art.get("runId") or fn[:-5]
-        out[rid] = art
+    for directory in _run_directories(root):
+        if not os.path.isdir(directory): continue
+        for filename in sorted(os.listdir(directory)):
+            if not filename.endswith(".json"): continue
+            path = os.path.join(directory, filename)
+            try:
+                with open(path, encoding="utf-8") as fh: artifact = json.load(fh)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise SystemExit(f"recall: {path} is not readable JSON: {exc}")
+            if not isinstance(artifact, dict):
+                raise SystemExit(f"recall: {path} must contain a JSON object")
+            run_id = artifact.get("runId") or filename[:-5]
+            previous = out.get(run_id)
+            if previous is None or str(artifact.get("when") or "") >= str(previous.get("when") or ""):
+                out[run_id] = artifact
     return out
 
 
@@ -242,22 +282,50 @@ def _read_substrate(root):
 
 def _source_fingerprints(root):
     fp = {}
-    mem = memory_mod.path_for(root)
-    fp["memory.jsonl"] = _sha_file(mem) if os.path.exists(mem) else "absent"
+    paths = memory_mod.source_paths(root) if hasattr(memory_mod, "source_paths") else [memory_mod.path_for(root)]
+    existing = [path for path in paths if os.path.exists(path)]
+    fp["memory.jsonl"] = hashlib.sha256("|".join(path + ":" + _sha_file(path) for path in existing).encode()).hexdigest() if existing else "absent"
     sub = os.path.join(root, "substrate.json")
     fp["substrate.json"] = _sha_file(sub) if os.path.exists(sub) else "absent"
     cex = os.path.join(root, CEX)
     fp["cex.jsonl"] = _sha_file(cex) if os.path.exists(cex) else "absent"
-    d = os.path.join(root, RUNS_DIR)
+    directories = _run_directories(root)
     parts = []
-    if os.path.isdir(d):
-        for fn in sorted(os.listdir(d)):
-            if fn.endswith(".json"):
-                parts.append(f"{fn}:{_sha_file(os.path.join(d, fn))}")
-    import hashlib
-    fp["runs"] = (hashlib.sha256("|".join(parts).encode()).hexdigest()
-                  if os.path.isdir(d) else "absent")
+    for directory in directories:
+        if os.path.isdir(directory):
+            for filename in sorted(os.listdir(directory)):
+                if filename.endswith(".json"):
+                    parts.append(f"{directory}/{filename}:{_sha_file(os.path.join(directory, filename))}")
+    fp["runs"] = hashlib.sha256("|".join(parts).encode()).hexdigest() if any(os.path.isdir(d) for d in directories) else "absent"
     return fp
+
+
+def _corpus_fingerprints(root):
+    rows = []
+    for corpus in sorted(recall_sources.corpus_roots(root), key=_dumps):
+        files = []
+        for path in recall_sources.files(corpus):
+            try:
+                stat = path.stat()
+                files.append([path.relative_to(corpus["path"]).as_posix(), stat.st_size, stat.st_mtime_ns])
+            except OSError:
+                files.append([str(path), "unreadable"])
+        rows.append({**corpus, "files": files})
+    scoped = {"corpora": rows}
+    if any(row["format"] == "codex-memories" for row in rows):
+        scoped["projectView"] = recall_sources.project_view(root)
+    return hashlib.sha256(_dumps(scoped).encode()).hexdigest()
+
+
+# Schema identity describes everything needed to interpret derived files. Older
+# plugin versions keep their own slot and never overwrite this reader's cache.
+INDEX_SCHEMA = hashlib.sha256(_dumps({
+    "format": 2, "docs": sorted(DOC_KINDS), "nodes": sorted(NODE_KINDS),
+    "edges": sorted(EDGE_KINDS), "tokenizer": inspect.getsource(tokenize),
+    "fingerprints": inspect.getsource(_source_fingerprints) + inspect.getsource(_corpus_fingerprints),
+    "corpusReader": inspect.getsource(recall_sources),
+}).encode()).hexdigest()[:20]
+INDEX_DIR = os.path.join(INDEX_BASE, INDEX_SCHEMA)
 
 
 def _source_doc_counts(root):
@@ -275,12 +343,147 @@ def _source_doc_counts(root):
     primitives, _ = _read_substrate(root)
     return {"lesson": len(lessons), "decision": len(decisions),
             "cex": len(counterexamples),
-            "primitive": len({row["id"] for row in primitives})}
+            "primitive": len({row["id"] for row in primitives}),
+            "note": sum(len(recall_sources.files(corpus)) for corpus in recall_sources.corpus_roots(root))}
 
 
 # ------------------------------------------------------------------ build
 
+def _atomic_text(path, payload):
+    fd, temporary = tempfile.mkstemp(prefix=".recall-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(payload)
+        for attempt in range(6):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 5: raise
+                time.sleep(.02 * (attempt + 1))
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+
+
+def _atomic_json(path, obj):
+    _atomic_text(path, _dumps(obj))
+
+
+def _compile_lex(nodes):
+    lex_docs, df = {}, {}
+    for nid, node in sorted(nodes.items()):
+        if node.get("kind") not in DOC_KINDS:
+            continue
+        toks = tokenize(node.get("text") or "")
+        tf = {}
+        for token in toks:
+            tf[token] = tf.get(token, 0) + 1
+        lex_docs[nid] = {"len": len(toks), "tf": tf}
+        for token in tf:
+            df[token] = df.get(token, 0) + 1
+    count = len(lex_docs)
+    return {"version": 1, "tokenizer": "fpl-ident-v1", "k1": K1, "b": B,
+            "N": count, "avgdl": sum(d["len"] for d in lex_docs.values()) / count if count else 0.,
+            "df": df, "docs": lex_docs}
+
+
+def _slot_stale(slot, sources):
+    meta = _read_json_path(os.path.join(slot, META_F))
+    if not isinstance(meta, dict) or meta.get("sources") != sources:
+        return True
+    for filename, expected in (meta.get("files") or {}).items():
+        try:
+            stat = os.stat(os.path.join(slot, filename))
+            if [stat.st_size, stat.st_mtime_ns] != expected:
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _shared_index(root):
+    slot = shared_index_dir(root)
+    graph, lex, meta = [_read_json_path(os.path.join(slot, fn)) for fn in (GRAPH_F, LEX_F, META_F)]
+    if any(not isinstance(obj, dict) for obj in (graph, lex, meta)):
+        return None, None, "shared memory index not built yet"
+    if not isinstance(graph.get("nodes"), dict) or not isinstance(lex.get("docs"), dict):
+        return None, None, "shared memory index schema mismatch; rebuild pending"
+    if len({obj.get("generation") for obj in (graph, lex, meta)}) != 1:
+        return None, None, "shared memory index generation mismatch; rebuild pending"
+    if any(node.get("kind") not in NODE_KINDS for node in graph.get("nodes", {}).values()):
+        return None, None, "shared memory index schema mismatch; rebuild pending"
+    return graph, lex, None
+
+
+def _meta_view(root):
+    meta = _load_json(root, META_F)
+    if meta is None:
+        return None
+    meta = dict(meta)
+    meta["kinds"] = dict(meta.get("kinds") or {})
+    if not meta["kinds"]:
+        graph = _load_json(root, GRAPH_F) or {}
+        meta["kinds"] = {kind: 0 for kind in DOC_KINDS}
+        for node in graph.get("nodes", {}).values():
+            kind = node.get("kind")
+            if kind in meta["kinds"]:
+                meta["kinds"][kind] += 1
+    shared = _read_json_path(os.path.join(shared_index_dir(root), META_F)) or {}
+    for key in ("docs", "nodes", "edges", "pending"):
+        meta[key] = meta.get(key, 0) + shared.get(key, 0)
+    for kind, count in shared.get("kinds", {}).items():
+        meta["kinds"][kind] = meta["kinds"].get(kind, 0) + count
+    return meta
+
+
+def _build_shared(root, embed_backfill=False, transport=None):
+    slot = shared_index_dir(root)
+    os.makedirs(slot, mode=0o700, exist_ok=True)
+    with workfile_lock(os.path.join(slot, "build")):
+        source_fp = {"notes": _corpus_fingerprints(root)}
+        dense_spec = embedder.resolve()
+        if not _slot_stale(slot, source_fp):
+            meta = _read_json_path(os.path.join(slot, META_F))
+            if not embed_backfill and meta.get("denseSpec") == dense_spec:
+                return meta
+            nodes = _read_json_path(os.path.join(slot, GRAPH_F))["nodes"]
+            meta.update(_sync_vectors(root, nodes, embed_backfill, transport, slot=slot))
+            meta.update(writer=writer_identity(), denseSpec=dense_spec)
+            _atomic_json(os.path.join(slot, META_F), meta)
+            return meta
+        nodes, diagnostics = recall_sources.notes(root)
+        for diagnostic in diagnostics:
+            print("recall: " + diagnostic, file=sys.stderr)
+        graph = {"version": 1, "nodes": nodes, "edges": []}
+        lex = _compile_lex(nodes)
+        generation = hashlib.sha256(_dumps({"sources": source_fp, "graph": graph, "lex": lex}).encode()).hexdigest()
+        graph["generation"] = lex["generation"] = generation
+        for filename, obj in ((GRAPH_F, graph), (LEX_F, lex)):
+            _atomic_json(os.path.join(slot, filename), obj)
+        dense = _sync_vectors(root, nodes, embed_backfill, transport, slot=slot)
+        meta = {"version": 2, "writer": writer_identity(), "sources": source_fp,
+                "generation": generation, "docs": lex["N"], "nodes": len(nodes), "edges": 0,
+                "kinds": {"note": len(nodes)}, "denseSpec": dense_spec, **dense,
+                "files": {fn: [os.stat(os.path.join(slot, fn)).st_size, os.stat(os.path.join(slot, fn)).st_mtime_ns]
+                          for fn in (GRAPH_F, LEX_F)}}
+        _atomic_json(os.path.join(slot, META_F), meta)
+        return meta
+
+
 def build(root, embed_backfill=False, transport=None):
+    idx = index_dir(root)
+    os.makedirs(idx, exist_ok=True)
+    with workfile_lock(os.path.join(idx, "build")):
+        stats = _build(root, embed_backfill, transport)
+    shared = _build_shared(root, embed_backfill, transport)
+    for key in ("docs", "nodes", "edges", "pending"):
+        stats[key] += shared.get(key, 0)
+    for kind, count in shared.get("kinds", {}).items():
+        stats["kinds"][kind] = stats["kinds"].get(kind, 0) + count
+    return stats
+
+
+def _build(root, embed_backfill=False, transport=None):
     """Compile the index. Returns a stats dict; degradations are in it.
 
     graph.json and lex.json are byte-identical across rebuilds from
@@ -288,6 +491,7 @@ def build(root, embed_backfill=False, transport=None):
     body). The vector file depends on the active provider and is cached by
     content hash, so a rebuild re-embeds only new or changed cards.
     """
+    source_fp = _source_fingerprints(root)
     rows = memory_mod.read(root)          # hard-fails on a malformed line
     runs = _read_runs(root)
     cexes = _read_cex(root)
@@ -305,6 +509,7 @@ def build(root, embed_backfill=False, transport=None):
         return nid
 
     for ident, hist in sorted(histories.items()):
+        hist.sort(key=memory_mod.history_order)
         latest = hist[-1]
         tag, key = latest.get("tag"), latest.get("dedupeKey")
         nid = f"lesson:{ident}"
@@ -453,28 +658,18 @@ def build(root, embed_backfill=False, transport=None):
              "edges": sorted(list(e) for e in edges)}
 
     docs = {nid: n for nid, n in nodes.items() if n["kind"] in DOC_KINDS}
-    lex_docs, df = {}, {}
-    for nid in sorted(docs):
-        toks = tokenize(docs[nid].get("text") or "")
-        tf = {}
-        for t in toks:
-            tf[t] = tf.get(t, 0) + 1
-        lex_docs[nid] = {"len": len(toks), "tf": tf}
-        for t in tf:
-            df[t] = df.get(t, 0) + 1
-    n_docs = len(lex_docs)
-    lex = {"version": 1, "tokenizer": "fpl-ident-v1", "k1": K1, "b": B,
-           "N": n_docs,
-           "avgdl": (sum(d["len"] for d in lex_docs.values()) / n_docs)
-           if n_docs else 0.0,
-           "df": df, "docs": lex_docs}
+    lex = _compile_lex(docs)
+    n_docs = lex["N"]
 
-    idx = os.path.join(root, INDEX_DIR)
+    generation = hashlib.sha256(_dumps({"sources": source_fp, "graph": graph, "lex": lex}).encode()).hexdigest()
+    graph["generation"] = lex["generation"] = generation
+    idx = index_dir(root)
     os.makedirs(idx, exist_ok=True)
+    ignore = os.path.join(root, ".claude", "fluxpoint", ".gitignore")
+    if not os.path.exists(ignore):
+        with open(ignore, "w", encoding="utf-8") as fh: fh.write("*\n")
     for fn, obj in ((GRAPH_F, graph), (LEX_F, lex)):
-        with open(os.path.join(idx, fn), "w", encoding="utf-8",
-                  newline="\n") as fh:
-            fh.write(_dumps(obj))
+        _atomic_json(os.path.join(idx, fn), obj)
 
     kinds = {kind: sum(1 for n in docs.values() if n["kind"] == kind)
              for kind in sorted(DOC_KINDS)}
@@ -484,14 +679,13 @@ def build(root, embed_backfill=False, transport=None):
              "pending": 0, "provider": "none"}
     stats.update(_sync_vectors(root, docs, embed_backfill, transport))
 
-    meta = {"version": 1, "sources": _source_fingerprints(root),
+    meta = {"version": 2, "writer": writer_identity(), "sources": source_fp, "generation": generation,
+            "files": {fn: [os.stat(os.path.join(idx, fn)).st_size, os.stat(os.path.join(idx, fn)).st_mtime_ns] for fn in (GRAPH_F, LEX_F)},
             "docs": n_docs, "pending": stats["pending"],
             "provider": stats["provider"],
             "droppedPaths": dropped_paths, "staleKills": stale_kills,
             "kinds": kinds}
-    with open(os.path.join(idx, META_F), "w", encoding="utf-8",
-              newline="\n") as fh:
-        fh.write(_dumps(meta))
+    _atomic_json(os.path.join(idx, META_F), meta)
     return stats
 
 
@@ -526,17 +720,17 @@ def _mark_stale_kills(root, nodes, edges):
     return marked
 
 
-def _vec_path(root, spec):
+def _vec_path(root, spec, slot=None):
     safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", spec["model"])
-    return os.path.join(root, INDEX_DIR,
+    return os.path.join(slot or index_dir(root),
                         f"vec-{spec['provider']}-{safe_model}-{spec['dims']}.jsonl")
 
 
-def _load_vectors(root, spec):
+def _load_vectors(root, spec, slot=None):
     """{docId: {sha, vec}} from the active provider's file. A damaged
     vector file is a cache, not a store: it is discarded out loud and the
     rows become pending, because a hook must never die on it."""
-    p = _vec_path(root, spec)
+    p = _vec_path(root, spec, slot)
     if not os.path.exists(p):
         return {}
     out = {}
@@ -562,12 +756,13 @@ def _load_vectors(root, spec):
     return out
 
 
-def _sync_vectors(root, docs, backfill, transport):
+def _sync_vectors(root, docs, backfill, transport, slot=None):
     spec = embedder.resolve()
     if spec["provider"] == "none":
         return {"pending": len(docs), "provider": "none"}
-    have = _load_vectors(root, spec)
-    want = {nid: (docs[nid].get("text") or "") for nid in sorted(docs)}
+    have = _load_vectors(root, spec, slot)
+    want = {nid: (docs[nid].get("text") or "") for nid in sorted(docs)
+            if docs[nid].get("kind") != "note" or os.environ.get("FPL_EMBEDDER") not in (None, "", "none")}
     keep, missing = {}, []
     for nid, text in want.items():
         sha = embedder.text_sha(text)
@@ -587,14 +782,14 @@ def _sync_vectors(root, docs, backfill, transport):
         except embedder.EmbedError as e:
             print(f"recall: dense backfill failed ({e}); "
                   f"{len(missing)} card(s) stay pending", file=sys.stderr)
-    p = _vec_path(root, spec)
-    with open(p, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(_dumps({"version": 1, "provider": spec["provider"],
-                         "model": spec["model"], "dims": spec["dims"],
-                         "dtype": "f32", "normalized": True}) + "\n")
-        for nid in sorted(keep):
-            fh.write(_dumps({"id": nid, "sha": keep[nid]["sha"],
-                             "v": embedder.pack(keep[nid]["vec"])}) + "\n")
+    p = _vec_path(root, spec, slot)
+    lines = [_dumps({"version": 1, "provider": spec["provider"],
+                     "model": spec["model"], "dims": spec["dims"],
+                     "dtype": "f32", "normalized": True})]
+    for nid in sorted(keep):
+        lines.append(_dumps({"id": nid, "sha": keep[nid]["sha"],
+                             "v": embedder.pack(keep[nid]["vec"])}))
+    _atomic_text(p, "\n".join(lines) + "\n")
     return {"pending": len(missing), "provider": spec["provider"],
             "embedded": embedded}
 
@@ -602,7 +797,10 @@ def _sync_vectors(root, docs, backfill, transport):
 # ------------------------------------------------------------------- load
 
 def _load_json(root, fn):
-    p = os.path.join(root, INDEX_DIR, fn)
+    return _read_json_path(os.path.join(index_dir(root), fn))
+
+
+def _read_json_path(p):
     if not os.path.exists(p):
         return None
     try:
@@ -618,7 +816,13 @@ def is_stale(root):
     meta = _load_json(root, META_F)
     if not meta:
         return True
-    return meta.get("sources") != _source_fingerprints(root)
+    if meta.get("sources") != _source_fingerprints(root): return True
+    for filename, expected in (meta.get("files") or {}).items():
+        try:
+            actual = os.stat(os.path.join(index_dir(root), filename))
+            if [actual.st_size, actual.st_mtime_ns] != expected: return True
+        except OSError: return True
+    return _slot_stale(shared_index_dir(root), {"notes": _corpus_fingerprints(root)})
 
 
 def ensure_index(root, offline=True, allow_rebuild=True):
@@ -633,7 +837,7 @@ def ensure_index(root, offline=True, allow_rebuild=True):
     note = None
     if is_stale(root):
         if allow_rebuild:
-            build(root, embed_backfill=not offline)
+            build(root, embed_backfill=False)
         else:
             note = ("memory index lags the stores; ranking reflects the "
                     "last build — refresh with: py.sh recall.py --build")
@@ -645,17 +849,44 @@ def ensure_index(root, offline=True, allow_rebuild=True):
         if not allow_rebuild:
             return None, None, "memory index not built yet"
         raise SystemExit("recall: index rebuild produced no readable index")
+    meta = _load_json(root, META_F) or {}
+    generations = [obj.get("generation") for obj in (graph, lex, meta)]
+    if len(set(generations)) != 1:
+        if allow_rebuild:
+            build(root, embed_backfill=False)
+            return ensure_index(root, offline=offline, allow_rebuild=False)
+        return None, None, "memory index generation mismatch; rebuild pending"
     for nid, n in graph["nodes"].items():
         if n.get("kind") not in NODE_KINDS:
             raise SystemExit(
                 f"recall: {nid} has unknown kind {n.get('kind')!r} — the "
                 f"index registry is closed; rebuild with --build")
+    shared, shared_lex, shared_note = _shared_index(root)
+    if shared_note:
+        return None, None, shared_note
+    if shared is not None:
+        generation = hashlib.sha256((graph["generation"] + shared["generation"]).encode()).hexdigest()
+        graph = {**graph, "nodes": {**graph["nodes"], **shared["nodes"]},
+                 "edges": graph["edges"] + shared["edges"], "generation": generation}
+        docs = {**lex["docs"], **shared_lex["docs"]}
+        df = dict(lex["df"])
+        for token, count in shared_lex["df"].items():
+            df[token] = df.get(token, 0) + count
+        lex = {"version": 1, "tokenizer": "fpl-ident-v1", "k1": K1, "b": B,
+               "N": len(docs), "avgdl": sum(d["len"] for d in docs.values()) / len(docs) if docs else 0.,
+               "docs": docs, "df": df, "partitions": [lex, shared_lex], "generation": generation}
     return graph, lex, note
 
 
 # -------------------------------------------------------------------- legs
 
 def bm25(lex, query_tokens, limit=50):
+    if lex.get("partitions"):
+        scores = {}
+        for partition in lex["partitions"]:
+            for rank, (nid, _) in enumerate(bm25(partition, query_tokens, limit)):
+                scores[nid] = scores.get(nid, 0) + 1 / (RRF_K + rank + 1)
+        return sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:limit]
     if not query_tokens or not lex["N"]:
         return []
     scores = {}
@@ -688,6 +919,7 @@ def dense_leg(root, query, offline, diagnostics, limit=50):
                            f"{spec['provider']} configured)")
         return []
     vecs = _load_vectors(root, spec)
+    vecs.update(_load_vectors(root, spec, shared_index_dir(root)))
     if not vecs:
         diagnostics.append(f"dense leg empty (no vectors cached for "
                            f"{spec['provider']} {spec['model']}; run --build --embed)")
@@ -850,8 +1082,15 @@ def search(root, query="", files=None, tags=None, center=None, as_of=None,
             view = _decision_as_of(n, as_of_dt)
             if view is None:
                 continue
-        if n["kind"] == "lesson":
-            if as_of_dt is not None:
+        if n["kind"] == "note":
+            note_when = _parse_ts(n.get("when"))
+            if as_of_dt is not None and note_when is not None and note_when > as_of_dt:
+                continue
+            if n.get("status") == "superseded" and not include_superseded:
+                continue
+            score *= n.get("weight", 1.0)
+        if n["kind"] in ("lesson", "note"):
+            if as_of_dt is not None and n["kind"] == "lesson":
                 view = _version_as_of(n, as_of_dt)
                 if view is None:
                     continue
@@ -871,8 +1110,11 @@ def search(root, query="", files=None, tags=None, center=None, as_of=None,
 
     records.sort(key=lambda r: (-r["score"], r["id"]))
 
-    kept, tag_count = [], {}
+    kept, tag_count, note_files = [], {}, set()
     for r in records:
+        if r["kind"] == "note":
+            if r.get("file") in note_files: continue
+            note_files.add(r.get("file"))
         toks = tokenize(r.get("text") or "")
         if any(_jaccard(toks, tokenize(o.get("text") or "")) > 0.85
                for o in kept):
@@ -950,6 +1192,8 @@ def render_lines(records, diagnostics, budget_bytes=4000, header=None):
         line = f"    ({status}) {label} — {body[:160]}"
         runs = r.get("runs") or []
         bits = []
+        if r.get("origin"): bits.append(str(r["origin"]))
+        if r.get("session"): bits.append(str(r["session"]))
         if runs:
             bits.append(f"run {runs[-1]}")
         if r.get("when"):
@@ -1030,10 +1274,14 @@ def render_seedmap(root, records, tags):
 
 # ------------------------------------------------------------- for-session
 
-def for_session(root):
+def for_session(root, refresh_index=False):
     """The SessionStart section: offline, capped, never rebuilding, silent
     when there is nothing to say. Exit 0 unconditionally — a hook that can
     wedge a session is a worse failure than the memory it was protecting."""
+    if refresh_index:
+        try: request_refresh(root)
+        except (OSError, ValueError, SystemExit) as exc:
+            print(f"- FluxPoint recall refresh unavailable: {exc}")
     query = _work_query(root)
     if not query:
         try:
@@ -1043,7 +1291,7 @@ def for_session(root):
             return 0
         if not source_docs:
             return 0
-        meta = _load_json(root, META_F) or {}
+        meta = _meta_view(root) or {}
         indexed = int(meta.get("docs") or 0)
         if not meta:
             print(f"- FluxPoint recall has {source_docs} source document(s) "
@@ -1104,34 +1352,29 @@ def for_session(root):
                       f"current index; {source_docs} source document(s) "
                       "remain available for an explicit query.")
         return 0
-    header = ("- FluxPoint context recalled for this work, most relevant "
+    source = ("FPL_RECALL_QUERY" if os.environ.get("FPL_RECALL_QUERY", "").strip() else
+              "FPL_RECALL_QUERY_FILE" if os.environ.get("FPL_RECALL_QUERY_FILE") else "WORK.md or LOOP.md")
+    header = (f"- FluxPoint context recalled for this work, ranked against {source}, most relevant "
               "first (offline ranking; advisory — a re-found item is "
               "still judged on its merits):")
     emit_lines(records[:5], diagnostics, budget_bytes=1200, header=header)
     return 0
 
 
-def _informative_overlap(root, query, nid):
-    """Distinct informative query tokens the doc actually matches.
+STOPWORDS = set("a an and are as at be been but by can do does for from had has have how i if in into is it its me my of on or our should so than that the their them then there these they this those to was we were what when where which who why will with would you your".split())
 
-    Informative = at least 3 chars and present in under half the corpus,
-    so a stopword shared with every lesson ('the', 'is', a ubiquitous
-    path segment) cannot clear a precision floor by itself.
-    """
-    lex = _load_json(root, LEX_F)
-    if not lex or nid not in (lex.get("docs") or {}):
-        return 0
+
+def _informative_overlap(lex, query, nid):
+    """Count distinct input words, excluding common English stopwords."""
+    if not lex or nid not in (lex.get("docs") or {}): return 0
     n = max(1, lex.get("N") or 1)
     doc_tf = lex["docs"][nid].get("tf") or {}
     hits = set()
-    for t in set(tokenize(query)):
-        if len(t) < 3:
-            continue
-        df = lex.get("df", {}).get(t, 0)
-        if not df or df / n > 0.5:
-            continue
-        if t in doc_tf:
-            hits.add(t)
+    for raw in re.findall(r"[A-Za-z0-9_./-]+", query or ""):
+        for token in tokenize(raw):
+            df = lex.get("df", {}).get(token, 0)
+            if len(token) >= 3 and token not in STOPWORDS and df and df / n <= .5 and token in doc_tf:
+                hits.add(raw.lower()); break
     return len(hits)
 
 
@@ -1177,10 +1420,11 @@ def for_prompt(root):
                       "document(s) available. Run /fluxpoint:recall build.")
         return 0
     strong = []
+    _, lex, _ = ensure_index(root, offline=True, allow_rebuild=False)
     for r in records:
         independent = {"lex", "dense", "ident"} & set(r.get("legs") or [])
         if (len(independent) >= 2
-                or _informative_overlap(root, prompt, r["id"]) >= 2):
+                or _informative_overlap(lex, prompt, r["id"]) >= 2):
             strong.append(r)
         if len(strong) >= 3:
             break
@@ -1194,6 +1438,16 @@ def for_prompt(root):
 
 
 def _work_query(root):
+    explicit = os.environ.get("FPL_RECALL_QUERY", "").strip()
+    if explicit: return explicit[:512]
+    path = os.environ.get("FPL_RECALL_QUERY_FILE")
+    if path:
+        try:
+            with open(os.path.join(root, path), encoding="utf-8") as fh:
+                text = fh.read(16384)
+            return recall_sources._front(text)[1].strip().encode("utf-8")[:512].decode("utf-8", errors="ignore")
+        except OSError:
+            return ""
     for fn in ("WORK.md", "LOOP.md"):
         p = os.path.join(root, fn)
         if not os.path.exists(p):
@@ -1224,7 +1478,48 @@ def _session_files(root):
 
 # -------------------------------------------------------------------- main
 
-def refresh(root, embed=True):
+def request_refresh(root):
+    """One detached keyless rebuild per root, never on an empty corpus."""
+    cfg = recall_sources.config(root)
+    if os.environ.get("FPL_RECALL_REFRESH", str(int(cfg.get("refresh", True)))) == "0": return False
+    if not is_stale(root): return False
+    memory_paths = memory_mod.source_paths(root) if hasattr(memory_mod, "source_paths") else [memory_mod.path_for(root)]
+    have_sources = any(os.path.isfile(p) and os.path.getsize(p) for p in memory_paths)
+    have_sources = have_sources or bool(_read_substrate(root)[0]) or os.path.isfile(os.path.join(root, CEX))
+    have_sources = have_sources or any(os.path.isdir(d) and any(f.endswith(".json") for f in os.listdir(d)) for d in _run_directories(root))
+    have_sources = have_sources or any(recall_sources.files(c) for c in recall_sources.corpus_roots(root))
+    if not have_sources: return False
+    idx = index_dir(root)
+    os.makedirs(idx, exist_ok=True)
+    lock = os.path.join(idx, "refresh.lock")
+    try:
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        try:
+            if time.time() - os.stat(lock).st_mtime <= 300: return False
+            os.unlink(lock)
+        except FileNotFoundError: pass
+        try: fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError: return False
+    token = uuid.uuid4().hex
+    with os.fdopen(fd, "w", encoding="ascii") as fh: fh.write(token)
+    argv = [sys.executable, os.path.abspath(__file__), "--root", os.path.abspath(root),
+            "--build", "--refresh-lock", lock, "--refresh-lock-token", token]
+    kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    try:
+        if os.name == "nt":
+            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            try: child = subprocess.Popen(argv, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kwargs)
+            except OSError: child = subprocess.Popen(argv, creationflags=flags, **kwargs)
+        else: child = subprocess.Popen(argv, start_new_session=True, **kwargs)
+        _REFRESH_CHILDREN[:] = [p for p in _REFRESH_CHILDREN if p.poll() is None]
+        _REFRESH_CHILDREN.append(child)
+    except BaseException:
+        os.unlink(lock); raise
+    return True
+
+
+def refresh(root, embed=False):
     """record-run.py's pass: rebuild after filing. Returns a stats dict."""
     return build(root, embed_backfill=embed)
 
@@ -1241,6 +1536,9 @@ def main():
     g.add_argument("--for-session", action="store_true")
     g.add_argument("--for-prompt", action="store_true",
                    help="UserPromptSubmit hook body: hook JSON on stdin")
+    ap.add_argument("--refresh", action="store_true", help="with --for-session: request detached keyless refresh")
+    ap.add_argument("--refresh-lock", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--refresh-lock-token", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--embed", action="store_true",
                     help="with --build: backfill dense vectors (needs a key)")
     ap.add_argument("--files", default="",
@@ -1260,13 +1558,20 @@ def main():
     a = ap.parse_args()
 
     if a.for_session:
-        return for_session(a.root)
+        return for_session(a.root, refresh_index=a.refresh)
 
     if a.for_prompt:
         return for_prompt(a.root)
 
     if a.build:
-        stats = build(a.root, embed_backfill=a.embed)
+        try:
+            stats = build(a.root, embed_backfill=a.embed)
+        finally:
+            if a.refresh_lock:
+                try:
+                    with open(a.refresh_lock, encoding="ascii") as fh: owner = fh.read()
+                    if owner == a.refresh_lock_token: os.unlink(a.refresh_lock)
+                except FileNotFoundError: pass
         print(f"recall: indexed {stats['docs']} doc(s), {stats['nodes']} "
               f"node(s), {stats['edges']} edge(s); dense: "
               f"{stats['provider']}" +
@@ -1292,7 +1597,7 @@ def main():
                                ("runs", "runs"),
                                ("cex.jsonl", ".fluxpoint-cex.jsonl"),
                                ("substrate.json", "substrate.json")))
-        meta = _load_json(a.root, META_F)
+        meta = _meta_view(a.root)
         if not meta:
             print("recall: no index built yet — run --build; recognized "
                   f"sources: {source_state}")
@@ -1313,8 +1618,10 @@ def main():
               f"; documents: lessons {kinds.get('lesson', 0)}, "
               f"decisions {kinds.get('decision', 0)}, "
               f"counterexamples {kinds.get('cex', 0)}, "
-              f"primitives {kinds.get('primitive', 0)}; recognized sources: "
+              f"primitives {kinds.get('primitive', 0)}, notes {kinds.get('note', 0)}; recognized sources: "
               f"{source_state}")
+        corpus_writer = (_read_json_path(os.path.join(shared_index_dir(a.root), META_F)) or {}).get("writer", "not built")
+        print(f"recall: schema {INDEX_SCHEMA}; repo writer {meta.get('writer', writer_identity())}; repo slot {index_dir(a.root)}; corpus writer {corpus_writer}; corpus slot {shared_index_dir(a.root)}")
         return 0
 
     if a.format == "seedmap" and not a.tag:

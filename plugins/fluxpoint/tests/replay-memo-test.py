@@ -76,8 +76,7 @@ class ReplayMemoTests(unittest.TestCase):
         prompt = rm._sentinel_base() + '\nLIVE TREE READING NONCE: ' + nonce + ' point ' + point
         if request:
             prompt += '\nREJUDGE NONCE: ' + request['nonce'] + '\nREJUDGE LAUNCH NONCE: ' + nonce
-            if 'note' in request:
-                prompt += '\nOPERATOR REJUDGE NOTE (verbatim):\n' + request['note']
+
         if tree['branch'] is not None:
             prompt += ('\nAlso run exactly: git -C ' + json.dumps(tree['repository']) + ' ls-remote origin '
                        + json.dumps('refs/heads/' + tree['branch'])
@@ -465,6 +464,86 @@ class ReplayMemoTests(unittest.TestCase):
         expected = subprocess.check_output(["node", "-e", script], text=True)
         self.assertEqual(rm.memo_key(value), expected)
         self.assertEqual(rm.memo_key(value), hashlib.sha256(rm.canonical(value).encode()).hexdigest())
+
+
+class ReplayFollowup(ReplayMemoTests):
+    def test_workflow_computed_frame_and_worktree_note_are_unwrapped(self):
+        for index, call in enumerate(self.calls):
+            task = call['prompt']
+            frame = ('[Workflow harness — user request]\nThe user requested this campaign.\n\n'
+                     '[Workflow harness — computed task] The task text below was computed at runtime by a workflow script.\n'
+                     'The computed task text follows:\n\n' + ''.join('  ' + line for line in task.splitlines(keepends=True)) +
+                     '\n\n---\nYou are running in an isolated git worktree at /tmp/runtime-tree.')
+            self.write_rows(self.directory / ('agent-a' + str(index) + '.jsonl'), [dict(type='user', message=dict(role='user', content=frame))])
+        self.assertEqual(len(self.build()['_memo']), 2)
+        self.write_rows(self.directory / 'agent-a0.jsonl', [dict(type='user', message=dict(role='user', content='[Workflow harness — unknown] changed format'))])
+        with self.assertRaisesRegex(rm.ReplayError, 'unknown Workflow prompt frame'):
+            self.build()
+
+    def test_native_frame_without_journal_options_or_timestamps(self):
+        for event in self.events:
+            event.pop('opts', None)
+            event.pop('timestamp', None)
+        for index, call in enumerate(self.calls):
+            call['prompt'] = 'Fluxpoint-Call-Opts-SHA256: ' + rm.memo_key(call['opts']) + '\n' + call['prompt']
+            framed = ('[Workflow harness — computed task] The task text below was computed at runtime by a workflow script.\nThe computed task text follows:\n\n' +
+                      ''.join('  ' + line for line in call['prompt'].splitlines(keepends=True)) +
+                      '\n\n---\nYou are running in an isolated git worktree at /tmp/worktree.')
+            self.write_rows(self.directory / ('agent-a' + str(index) + '.jsonl'), [
+                dict(type='user', timestamp='2026-10-28T00:00:00Z', message=dict(role='user', content=framed)),
+                dict(type='assistant', timestamp='2026-10-28T00:02:00Z', message=dict(role='assistant', content='done'))])
+        for record in self.records:
+            call = self.calls[0 if record['node'] == 'build' else 2]
+            record['prompt'] = record['payload']['prompt'] = call['prompt']
+        self.records[0]['key'] = rm.memo_key(self.records[0]['payload'])
+        self.records[1]['payload']['ancestors'] = [self.records[0]['key']]
+        self.records[1]['key'] = rm.memo_key(self.records[1]['payload'])
+        self.save()
+        memo = self.build()['_memo']
+        self.assertEqual(len(memo), 2)
+        self.assertEqual(next(iter(memo.values()))['cost']['minutes'], 2)
+
+    def test_memo_transport_contains_digests_instead_of_repeated_prompts(self):
+        for entry in self.build()['_memo'].values():
+            self.assertNotIn('prompt', entry)
+            self.assertNotIn('payload', entry)
+            self.assertEqual(len(entry['promptSha256']), 64)
+            self.assertEqual(entry['payloadSha256'], entry['key'])
+
+    def test_lone_surrogate_hash_matches_javascript(self):
+        value = {'prompt': 'a\ud800b'}
+        program = 'const crypto=require("crypto");process.stdout.write(crypto.createHash("sha256").update(JSON.stringify({prompt:"a\\ud800b"})).digest("hex"))'
+        expected = subprocess.check_output(['node', '-e', program], text=True)
+        self.assertEqual(rm.memo_key(value), expected)
+        _, digest = run_artifacts.write(self.root, 'wf_surrogate', {'runId': 'wf_surrogate', 'summary': {'value': value}})
+        restored, _ = run_artifacts.read(self.root, 'wf_surrogate', digest)
+        self.assertEqual(restored['summary']['value'], value)
+
+    def test_final_branch_reading_is_derived_from_last_corroborated_gate(self):
+        latest = dict(self.tree, tip='c' * 40)
+        sentinel = self.sentinel('before gate2', tree=latest)
+        call = dict(prompt='Judge the combined branch', opts={'label':'gate2', 'effort':'high'}, result={'sha':'c' * 40, 'exit':0})
+        for index, value in [(3, sentinel), (4, call)]:
+            aid = 'a' + str(index)
+            self.calls.append(value)
+            self.events += [dict(type='started', agentId=aid, opts=value['opts']), dict(type='result', agentId=aid, result=value['result'])]
+            self.write_rows(self.directory / ('agent-' + aid + '.jsonl'), [dict(type='user', message=dict(role='user', content=value['prompt']))])
+        payload = dict(campaign='test', compiler=self.compiler, launch=self.launch, id='gate2', prompt=call['prompt'], opts=call['opts'], tree=latest, ancestors=[self.records[1]['key']])
+        self.records.append(dict(node='gate2', key=rm.memo_key(payload), payload=payload, prompt=call['prompt'], result=call['result'], mode='live', replay='tree', reading=latest, readingCallIndex=3, callIndex=4))
+        self.summary['results']['gate2'] = call['result']
+        self.save()
+        entry = self.build()['_memo'][self.records[0]['key']]
+        self.assertEqual(entry['verifiedReading']['tip'], 'b' * 40)
+        self.assertEqual(entry['sourceFinalReading']['tip'], 'c' * 40)
+
+    def test_absolute_graph_alias_resolves_to_project(self):
+        alias = self.root / 'alias'
+        try:
+            alias.symlink_to(self.root, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(str(exc))
+        result = rm._porcelain(' M LIVE.md\n M src.py', str(self.root), str(self.root), str(alias / 'LIVE.md'))
+        self.assertEqual(result, 'M src.py')
 
 
 if __name__ == "__main__":

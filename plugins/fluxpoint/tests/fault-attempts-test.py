@@ -50,7 +50,7 @@ if os.environ.get('FPL_FAULT_SLEEP'):
  import time; time.sleep(float(os.environ['FPL_FAULT_SLEEP']))
 reference=os.environ.get('FPL_REFERENCE_FIXTURE')=='1'
 if reference:
- assert not pathlib.Path('.git').exists(), 'reference must judge an archive'
+ assert pathlib.Path('.git').is_dir(), 'reference must judge a self-contained Git clone'
  if os.environ.get('FPL_REFERENCE_RED'): print('FAILED test_reference.py'); sys.exit(4)
 elif n==1 or os.environ.get('FPL_NATIVE_RED'):
  print(os.environ['FPL_CRASH_LOG']); sys.exit(9)
@@ -113,7 +113,7 @@ sys.exit(subprocess.call(command,cwd=root,env=env))
     def check(self, row, used=None, node='gate'):
         summary = {'launch': self.launch, 'tree': {'baseline': {'head': self.git('rev-parse', 'HEAD')}},
                    'contracts': {node: 'HarnessCheckV1'}, 'prove': {node: 'suite'},
-                   'results': {node: {'gate': 'suite', 'exit': row['exit'], 'attestId': row['attestId']}}}
+                   'results': {node: {'gate': 'suite', 'exit': row['exit'], 'attestId': row['attestId'], 'sha': row['treeSha']}}}
         if used is not None:
             return at._check_cited(self.rows(), node, 'suite', summary['results'][node], self.launch,
                                    self.git('rev-parse', 'HEAD'), used, str(self.root))
@@ -388,14 +388,14 @@ sys.exit(subprocess.call(command,cwd=root,env=env))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('schema-only exit gate runs declared gate', result.stderr)
         source = (SCRIPTS / 'compile-graph.py').read_text()
-        self.assertIn('A red whose wrapper row carries fault can be settled only by attest.py --rerun-fault', source)
+        self.assertIn('A red whose wrapper row carries fault can be settled only by ${ATTEST} --rerun-fault', source)
 
     def test_record_run_blocks_unsettled_red_and_retains_fault_event_count(self):
         self.crash()
         _, green = self.run_gate()
         summary = {'campaign': 'fault fixture', 'outcome': 'COMPLETE', 'launch': self.launch,
                    'tree': {'baseline': {'head': self.git('rev-parse', 'HEAD')}}, 'contracts': {'gate': 'HarnessCheckV1'},
-                   'prove': {'gate': 'suite'}, 'results': {'gate': {'gate': 'suite', 'exit': 0, 'attestId': green['attestId']}}}
+                   'prove': {'gate': 'suite'}, 'results': {'gate': {'gate': 'suite', 'exit': 0, 'attestId': green['attestId'], 'sha': green['treeSha']}}}
         graph = self.root / 'WORK.md'
         graph.write_text('## Evidence\n\n| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n')
         proc = subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'), '--root', str(self.root),

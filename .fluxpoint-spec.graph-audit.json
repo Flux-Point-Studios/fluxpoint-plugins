@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "goal": "Resolve graph audit coverage failures reported in issues #221, #222 and #223 and repository root propagation in #158",
+  "asset": "The existing graph audit probe grammar and emitted Workflow runtime",
+  "scope": [
+    "Probed-node prompt validation",
+    "Typed future git operands",
+    "Deterministic safe git forms and audit authoring guidance",
+    "Repository root and structural check propagation to all audit seats and results"
+  ],
+  "outOfScope": [
+    "Authenticated runtime transcript evidence (#197)",
+    "Executing future mutating commands during audits"
+  ],
+  "decisions": [
+    {
+      "id": "safe-probe-coverage",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should graph audits probe future git operands and reductions?",
+        "options": [
+          {
+            "option": "locked-packet",
+            "argued_by": "model",
+            "strongest_objection": "Adds a manifest and lock that must be revised when requirements change"
+          },
+          {
+            "option": "advisory-prose",
+            "argued_by": "model",
+            "strongest_objection": "The existing compiler accepts mutating graphs with no spec or decisions"
+          },
+          {
+            "option": "universal-proof",
+            "argued_by": "model",
+            "strongest_objection": "Would require new models and checker support for every implementation language"
+          }
+        ],
+        "chosen": "locked-packet",
+        "rationale": "Retain the existing probe grammar and typed data; allow a same-frame git read shape for fully typed future operands, and generate the safe form for git writes before dispatch. Reductions require no worker prompt.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Read graph-audit.js probe plan, grammarPart and shapeRefusal; issues #221, #222 and #223 reproduce incomplete coverage on valid graph shapes."
+        ]
+      },
+      "costs": [
+        {
+          "option": "locked-packet",
+          "cost": "Two tracked artifacts and requirement-specific check maintenance",
+          "basis": "estimate",
+          "evidence": [
+            "Design scope; no elapsed implementation time estimate claimed"
+          ]
+        },
+        {
+          "option": "advisory-prose",
+          "cost": "No new runtime checks; unmet requirements can remain invisible",
+          "basis": "measured",
+          "evidence": [
+            "Mutating graph without spec compiled with exit 0"
+          ]
+        },
+        {
+          "option": "universal-proof",
+          "cost": "Per-language proof and conformance work with unmeasured maintenance cost",
+          "basis": "unknown",
+          "evidence": [
+            "Existing proof integrations have different semantics; no universal adapter exists in this repository"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "future-git-coverage",
+      "statement": "Only probed nodes require prompts; typed future git operands can use a read in the same git frame, undeclared git writes receive deterministic safe reads, and incorrect types, frames and mutating forms remain incomplete. Audit seats and results carry an explicit repository root and refuters receive the structural check summary.",
+      "decisions": [
+        "safe-probe-coverage"
+      ],
+      "checks": [
+        "graph-audit-tests"
+      ],
+      "counterexample": "A deterministic reduce node kills the plan or a typed git switch cannot obtain coverage while a writer form passes."
+    }
+  ],
+  "checks": [
+    {
+      "id": "graph-audit-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/audit-workflow-test.py"
+      ],
+      "scope": "Execute the graph-audit workflow's probe receipts, declarations, templates, data placeholders, bindings and verdict text under stubbed agents",
+      "assumptions": [
+        "Stubbed agents return the receipts under test; the runtime isolation hook itself is not exercised"
+      ],
+      "timeoutSeconds": 300
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "A generated safe read does not execute the original mutation",
+      "resolution": "Report it as shape-only and leave original command semantics to attested gates."
+    }
+  ]
+}

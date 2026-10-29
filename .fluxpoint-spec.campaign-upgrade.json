@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "goal": "Make campaign schema and record upgrades explicit without inventing legacy reference coverage",
+  "asset": "Existing packet input closure and shared safe tightening precondition",
+  "scope": [
+    "Effective guard field compatibility (#181)",
+    "Legacy reference lock diagnostics and record compatibility",
+    "Explicit recorder unpinned allowances"
+  ],
+  "outOfScope": [
+    "Changing legacy run provenance",
+    "Silently adding reference coverage to historical identities",
+    "Packet reference projection (separate compiler change)"
+  ],
+  "decisions": [
+    {
+      "id": "campaign-upgrades",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should newer compilers and recorders handle contracts and identities from an in-flight older campaign?",
+        "options": [
+          {
+            "option": "validate-and-label-legacy",
+            "argued_by": "model",
+            "strongest_objection": "Historical reference bytes cannot gain provenance retroactively; the coverage gap must stay visible"
+          },
+          {
+            "option": "reject-all-history",
+            "argued_by": "model",
+            "strongest_objection": "A plugin update prevents recording completed work even when packet bytes and obligations still match"
+          }
+        ],
+        "chosen": "validate-and-label-legacy",
+        "rationale": "Refuse ineffective guard schemas before launch. Permit exact historical packet identities for recording only with an explicit uncovered-reference statement; retain operator unpinned allowances.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue181 reproductions show unchanged archives called edited and old schemas compile without emitted-guard fields",
+          "Six CLI/compiler regressions exercise the migration boundary"
+        ]
+      },
+      "costs": [
+        {
+          "option": "validate-and-label-legacy",
+          "cost": "One compatibility helper, explicit metadata and regression coverage",
+          "basis": "estimate",
+          "evidence": [
+            "Existing packet hashes and recorder Evidence are reusable"
+          ]
+        },
+        {
+          "option": "reject-all-history",
+          "cost": "Replay and execution must restart across version updates",
+          "basis": "measured",
+          "evidence": [
+            "Issue181 in-flight campaign reproduction"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "upgrade-compatibility",
+      "statement": "Old schema fields required by emitted guards fail compilation with migration context; genuine legacy identities can be recorded with explicit missing-reference coverage and explicit unpinned allowances",
+      "decisions": [
+        "campaign-upgrades"
+      ],
+      "checks": [
+        "upgrade-tests"
+      ],
+      "counterexample": "Missing TreeCheckV1.root compiles or unchanged archive is reported edited after lock format upgrade"
+    }
+  ],
+  "checks": [
+    {
+      "id": "upgrade-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/campaign-upgrade-test.py"
+      ],
+      "scope": "Actual compiler validation and spec/record CLIs exercise legacy formats and unchanged/changed packet bytes",
+      "assumptions": [
+        "Historical references were unbound and cannot be reconstructed retroactively"
+      ],
+      "timeoutSeconds": 60
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Should positional directories also be skipped?",
+      "resolution": "No, positional paths and PATH_FLAGS remain explicit inputs; only option values naming directories are skipped."
+    }
+  ]
+}

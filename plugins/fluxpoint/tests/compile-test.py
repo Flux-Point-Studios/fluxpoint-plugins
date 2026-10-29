@@ -1248,10 +1248,10 @@ def prove_ci_and_launch_case():
         ("  and so is a nonce that is not a plain token",
          "attest.py --stamp" in str(bad_nonce.get("err")), bad_nonce),
         ("the prove node is told to bind its gate run to this run's nonce",
-         "FPL_ATTEST_NONCE=${LAUNCH.nonce}" in js and "provePreamble(\"ci\") +" in js
+         "--nonce ${LAUNCH.nonce}" in js and "provePreamble(\"ci\") +" in js
          and "--match-head-commit" in js, "preamble"),
         ("  and to name the stamped project root to attest.py",
-         "const ROOT_ARG = " in js and "attest.py --ci${ROOT_ARG}" in js
+         "const ROOT_ARG = " in js and "${ATTEST} --ci${ROOT_ARG}" in js
          and "--last ${gate}${ROOT_ARG}" in js, "root"),
         ("  single-quoted, so no path can expand or run in the shell",
          root_arg_literal(js), "literal"),
@@ -1367,8 +1367,8 @@ const agent=async(p,o)=>{const label=String(o.label); calls.push({label,p});
         ("repair executes until every slice passes", normal.get("r", {}).get("outcome") == "COMPLETE"),
         ("passing slice drops out of later rounds", [x["label"] for x in calls if x["label"].startswith("fix:")] == ["fix:a:r1", "fix:b:r1", "fix:b:r2"]),
         ("failed check reaches next fix", any(x["label"] == "fix:b:r2" and '"exit":1' in x["p"] for x in calls)),
-        ("round output paths are versioned", any('/launch1/b/r2/' in x["p"] for x in calls if x["label"] == "fix:b:r2")),
-        ("fresh-tree checker receives patch artifact directory", any("git archive" in x["p"] and "/launch1/b/r2/" in x["p"] for x in calls if x["label"] == "check:b:r2")),
+        ("round output paths are versioned", any('/launch1/' + '1' * 64 + '/b/r2/' in x["p"] for x in calls if x["label"] == "fix:b:r2")),
+        ("fresh-tree checker receives patch artifact directory", any("git archive" in x["p"] and ('/launch1/' + '1' * 64 + '/b/r2/') in x["p"] for x in calls if x["label"] == "check:b:r2")),
         ("integration runs each round over cumulative passing items", [x["label"] for x in calls if x["label"].startswith("merge:")] == ["merge:r1", "merge:r2"]),
         ("cap is INCOMPLETE with pending item identities", cap.get("r", {}).get("outcome") == "INCOMPLETE" and any(x.get("data", {}).get("pending") == ["a", "b"] for x in cap.get("r", {}).get("provenance", []))),
         ("failed integration reopens passed items", any(x["label"] == "fix:a:r2" and "composition failure" in x["p"] for x in conflict.get("calls", []))),

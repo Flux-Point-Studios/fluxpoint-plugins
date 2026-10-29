@@ -42,7 +42,7 @@ IDENT = re.compile(r"^[a-z][a-z0-9-]*$")
 # must demonstrably change what the compiler produces.
 IR_FIELDS = {
     "version", "name", "campaign", "budget", "defaults", "roles", "lists",
-    "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard", "authorizedBy",
+    "nodes", "requiredArgs", "argDefaults", "imports", "treeGuard", "authorizedBy", "specificationContext",
 }
 NODE_FIELDS = {
     "id", "phase", "prompt", "contract", "role", "effort", "model", "agentType",
@@ -72,7 +72,7 @@ REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate"
 REDUCE_FIELDS = {"from", "over", "dedupeBy", "sortBy", "order", "topK"}
 MEMORY_FIELDS = {"seed", "emit", "key", "priors", "classBy"}
 BUDGET_FIELDS = {"maxNodes", "verifyFloorTokens", "nodeFloorTokens",
-                 "maxEstimatedTokens", "cacheTtl"}
+                 "maxEstimatedTokens", "cacheTtl", "repairContextBytes"}
 ROLE_FIELDS = {"agentType", "effort", "model"}
 DEFAULTS_FIELDS = {"effort", "model"}
 # The prompt-cache time-to-live the graph is written for. The runtime sets
@@ -110,14 +110,15 @@ MODEL_MULT = (("haiku", 0.25), ("sonnet", 0.5))
 # identical. Only author-controlled text is priced here; the fixed harness
 # wording each call carries is what PREFIX_TOKENS already stands for.
 PROMPT_TOKENS_PER_BYTE = 1
+REPAIR_CONTEXT_BYTES = 32768  # enforced UTF-8 ceiling for each dynamic repair value
 # Expansions whose size is only known at run time. They are named in the
 # estimate's assumptions rather than guessed, so a reader knows which part
 # of a prompt the number cannot see.
-UNPRICED_EXPANSIONS = ("prev", "decisions", "seen", "winner")
+UNPRICED_EXPANSIONS = ("prev", "lastCheck", "decisions", "seen", "winner")
 # Tokens whose value differs between calls of ONE node. The prompt cache is
 # prefix-keyed, so a fan-out's workers share the text before the first of
 # these and nothing after it.
-VARYING_ROOTS = {"item", "i", "seen"}
+VARYING_ROOTS = {"item", "i", "seen", "prev", "lastCheck"}
 LONG_PREAMBLE = (
     "LONG COMMANDS — a command that may run past 600 seconds must use the fluxpoint plugin's "
     'scripts/py.sh longrun.py start --log <file> -- <command> <args>, or attest.py --run <gate> --detach '
@@ -181,7 +182,7 @@ def extract_ir(md_text):
         raise GraphError(f"IR block is not valid JSON: {e}")
 
 
-def load_contracts(contracts_dir):
+def load_contracts(contracts_dir, snapshots=None, root="."):
     """{$id: schema} for a directory. Two files claiming one $id is an error:
     which one binds used to depend on the loader — the compiler kept the
     last in sorted order, release.py the first — so a park could be released
@@ -191,8 +192,12 @@ def load_contracts(contracts_dir):
         return out
     for fn in sorted(os.listdir(contracts_dir)):
         if fn.endswith(".schema.json"):
-            with open(os.path.join(contracts_dir, fn), encoding="utf-8") as fh:
-                schema = json.load(fh)
+            if snapshots is None:
+                with open(os.path.join(contracts_dir, fn), encoding="utf-8") as fh:
+                    schema = json.load(fh)
+            else:
+                import specification
+                schema = json.loads(specification.file_snapshot(root, os.path.join(contracts_dir, fn), snapshots).decode("utf-8"))
             cid = schema.get("$id", fn.split(".")[0])
             if cid in where:
                 raise GraphError(f"{contracts_dir}: {where[cid]} and {fn} both declare "
@@ -202,7 +207,7 @@ def load_contracts(contracts_dir):
     return out
 
 
-def resolve_contracts(shipped_dir, header=None, explicit=None, root="."):
+def resolve_contracts(shipped_dir, header=None, explicit=None, root=".", snapshots=None):
     """(contracts, description) for one compile.
 
     `--contracts` replaces the set wholesale, as it always has. A graph
@@ -222,18 +227,22 @@ def resolve_contracts(shipped_dir, header=None, explicit=None, root="."):
     import specification
     rel = str(specification.in_repo(header, "CONTRACTS:"))
     local_dir = os.path.join(root or ".", rel)
-    local = load_contracts(local_dir)
+    local = load_contracts(local_dir, snapshots=snapshots, root=root)
     if not local:
         raise GraphError(
             f"CONTRACTS: {header} names no directory of *.schema.json contracts "
             f"under {root or '.'} — the header is honored, so a missing set is an "
             f"error rather than a silent fallback to the shipped contracts")
     replaced = sorted(set(local) & set(shipped))
+    missing = [cid + '.' + prop for cid in replaced
+               for prop in sorted(set(shipped[cid].get('properties', {})) - set(local[cid].get('properties', {})))]
     merged = dict(shipped)
     merged.update(local)
     desc = (f"shipped + {header} ({len(local) - len(replaced)} added"
             + (f", {len(replaced)} overriding: {', '.join(replaced)}" if replaced else "")
             + ")")
+    if missing:
+        desc += '; repository copies omit shipped properties: ' + ', '.join(missing)
     return merged, desc
 
 
@@ -607,7 +616,7 @@ def after_ids(n):
 def ancestors(n, by_id):
     found = set()
     def visit(node):
-        for dep in after_ids(node):
+        for dep in after_ids(node) + ([(node.get("reduce") or {}).get("from")] if node.get("reduce") else []):
             if isinstance(dep, str) and dep not in found and dep in by_id:
                 found.add(dep)
                 visit(by_id[dep])
@@ -648,6 +657,29 @@ def _remote_syntax(value):
                              and bool(re.fullmatch(r'(?:[^/@:]+@)?(?:\[[^]]+\]|[^/:]+):.+', value)))
 
 
+def _forge_host(host):
+    host = host.lower()
+    return host[4:] if host in ('www.github.com', 'www.gitlab.com', 'www.bitbucket.org') else host
+
+
+def _ssh_host(host, port=None, user=None):
+    """Read OpenSSH's effective local configuration without connecting."""
+    import subprocess
+    command = ['ssh', '-G']
+    if port is not None:
+        command += ['-p', str(port)]
+    if user:
+        command += ['-l', user]
+    try:
+        run = subprocess.run(command + ['--', host], capture_output=True, text=True, encoding='utf-8', timeout=5)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError('cannot resolve effective SSH destination; use an unambiguous remote URL') from exc
+    facts = dict(line.split(None, 1) for line in run.stdout.splitlines() if len(line.split(None, 1)) == 2)
+    if run.returncode or not facts.get('hostname') or not facts.get('port', '').isdigit():
+        raise ValueError('cannot resolve effective SSH destination; use an unambiguous remote URL')
+    return _forge_host(facts['hostname']), int(facts['port'])
+
+
 def _destination_identity(repo, branch):
     import posixpath
     from urllib.parse import urlsplit, unquote
@@ -660,24 +692,27 @@ def _destination_identity(repo, branch):
             elif re.match(r'^/[A-Za-z]:', repo):
                 repo = repo[1:]
         else:
-            host = (url.hostname or '').lower()
+            host = _forge_host(url.hostname or '')
+            port = url.port
+            if url.scheme == 'ssh':
+                host, port = _ssh_host(host, port, url.username)
             path = unquote(url.path).strip('/')
             if host in ('github.com', 'gitlab.com', 'bitbucket.org'):
                 path = path.lower()
             path = path.removesuffix('.git')
-            port = url.port
             if (url.scheme, port) in (('http', 80), ('https', 443), ('ssh', 22)):
                 port = None
             return ('remote:' + host + (':' + str(port) if port else '') + '/' + path, branch)
     scp = re.fullmatch(r'(?:[^/@:]+@)?(\[[^]]+\]|[^/:]+):(.+)', repo) if not re.match(r'^[A-Za-z]:', repo) else None
     if scp:
         host, path = scp.groups()
-        host = host.strip('[]')
+        user = repo.split('@', 1)[0] if '@' in repo.split(':', 1)[0] else None
+        host, port = _ssh_host(host.strip('[]'), user=user)
         path = path.strip('/')
         if host.lower() in ('github.com', 'gitlab.com', 'bitbucket.org'):
             path = path.lower()
         path = path.removesuffix('.git')
-        return ('remote:' + host.lower() + '/' + path, branch)
+        return ('remote:' + host.lower() + (':' + str(port) if port != 22 else '') + '/' + path, branch)
     repo = repo.replace('\\', '/')
     if re.match(r'^[A-Za-z]:', repo) and not re.match(r'^[A-Za-z]:/', repo):
         raise ValueError('drive-relative repository paths have no stable push identity')
@@ -920,11 +955,20 @@ def validate_repair(n, seen, ir, contracts):
     return f
 
 
+GUARD_FIELDS = {
+    'RedTeamV1': ('coverage', 'red-team coverage coherence', '1.44.0'),
+    'SliceV1': ('packetConflict', 'locked-packet conflict halt', '1.46.0'),
+    'TreeCheckV1': ('root', 'checkout identity sentinel', '1.45.0'),
+}
+
+
 def validate(ir, contracts, gates=None, agents=None, specification=None, embedded_args=None, repository_root=None):
     """Return a list of findings. Empty list means the graph may compile."""
     f = []
     if ir.get("version") != 1:
         f.append("IR version must be 1")
+    if ir.get("specificationContext", "inline") not in ("inline", "reference"):
+        f.append("specificationContext must be 'inline' or 'reference'")
     if "treeGuard" in ir and not isinstance(ir["treeGuard"], bool):
         f.append("treeGuard must be a boolean — it disables the shared-tree "
                  "sentinel, and a truthy non-bool would read as a policy "
@@ -933,6 +977,12 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
         f.append("campaign: required, one line naming the goal")
 
     nodes = ir.get("nodes") or []
+    effective = {n.get('contract') for n in nodes}
+    if ir.get('treeGuard', True): effective.add('TreeCheckV1')
+    for cid in sorted(effective & set(GUARD_FIELDS)):
+        field, guard, version = GUARD_FIELDS[cid]
+        if field not in (contracts.get(cid) or {}).get('properties', {}):
+            f.append(f'{cid}.{field}: emitted {guard} requires this declared property (added in {version}); update the repository contract copy')
     if not nodes:
         f.append("nodes: at least one node required")
     lists = ir.get("lists") or {}
@@ -940,6 +990,15 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
     if lane_graph and not ir.get('treeGuard', True):
         f.append('lanes require treeGuard: the fresh fork sentinel also prevents call-index cache replay after the fork')
     by_id = {n.get('id'): n for n in nodes}
+    for effect in nodes:
+        if effect.get('irreversible'):
+            protected = ancestors(effect, by_id)
+            # Legacy declaration order also orders effects with no after edge.
+            if not after_ids(effect):
+                protected.update(n.get('id') for n in nodes[:nodes.index(effect)])
+            for node_id in sorted(protected):
+                if by_id.get(node_id, {}).get('replay'):
+                    f.append(f"node '{node_id}': irreversible ancestor cannot use memo replay; guards must execute in the current launch")
     pushes_lanes = {}
     roles = ir.get("roles") or {}
     seen = {}
@@ -1001,6 +1060,8 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
                 f.append(f"{where}: cites requires independent:true")
             elif gates is None or getattr(gates, 'findings', ()) or any(gate not in gates for gate in cites):
                 f.append(f"{where}: cites needs valid manifest-declared gates")
+            if nid in repair_scoped:
+                f.append(f"{where}: repair nodes cannot use cites; repair checks use fixed snapshot packet evidence")
             if ir.get('treeGuard') is False:
                 f.append(f"{where}: cites requires the tree guard for manifest witness/coverage policy")
             if n.get('reduce') or n.get('actor', 'agent') != 'agent':
@@ -1828,6 +1889,9 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
             f"budget.cacheTtl must be one of {', '.join(sorted(CACHE_TTLS))} — "
             f"'{ttl}' names no prompt-cache lifetime the runtime offers, and an "
             f"unknown value would price every hop as warm while nothing is")
+    context_cap = budget.get('repairContextBytes', REPAIR_CONTEXT_BYTES)
+    if type(context_cap) is not int or not 1 <= context_cap <= 1048576:
+        f.append('budget.repairContextBytes must be an integer from 1 to 1048576 UTF-8 bytes')
     cap = budget.get("maxEstimatedTokens")
     if cap is not None:
         if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
@@ -1870,6 +1934,8 @@ def warnings(ir, agents=None, specification=None, gates=None):
     refusing to build."""
     w = []
     for node in ir.get('nodes') or []:
+        if SUBST.findall(str(node.get("prompt", ""))).count("prev") > 1:
+            w.append(f"node '{node.get('id', '?')}': whole {{{{prev}}}} expands more than once; project only the needed fields")
         if node.get('verify', 'schema-only') != 'schema-only' or not re.match(r'^exit\s', str(node.get('haltWhen', ''))):
             continue
         for name, command in getattr(gates, 'commands', {}).items():
@@ -2016,8 +2082,19 @@ def warnings(ir, agents=None, specification=None, gates=None):
         cur = nodes[i]
         if is_reduce(cur) or cur.get("actor", "agent") != "agent":
             continue
+        previous = nodes[i - 1]
+        if previous.get('lane') and cur.get('lane') and previous['lane'] != cur['lane']:
+            continue
         if not (cur.get("after") or cur.get("honors") or cur.get("verifies")):
             serial.append((nodes[i - 1].get("id", "?"), cur.get("id", "?")))
+    shared_branches = {}
+    for node in nodes:
+        target = branch_target(node, {x.get('id'): x for x in nodes}) if node.get('mutates') else None
+        if target:
+            shared_branches.setdefault((target['repository'], target['branch']), []).append(node['id'])
+    for (repository, branch), builders in shared_branches.items():
+        if len(builders) > 1:
+            w.append(f"builders {', '.join(builders)} share {repository}#{branch}: replay compares with the source run's final tip; intermediate gates whose judged tip differs must execute live, so opt-ins can cost more than serial prefix replay")
     if serial:
         pairs = ", ".join(f"'{a}' -> '{b}'" for a, b in serial[:3])
         more = f" (+{len(serial) - 3} more)" if len(serial) > 3 else ""
@@ -2096,7 +2173,7 @@ def plan_groups(ir):
                                        "park": False, "kind": "work", "node": work, "track": frozenset()})
                         groups.append({"calls": [(work.get("id", "?") + ":diff-refute", ("", "medium"))] * (count * refuters),
                                        "park": False, "kind": "refute", "track": frozenset()})
-                        groups.append({"calls": [("repair-witness", sentinel)] * (count * (4 + 2 * (seats + refuters))),
+                        groups.append({"calls": [("repair-witness", sentinel)] * (count * (5 + 2 * (seats + refuters))),
                                        "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()})
                 if tree_guard:
                     groups.extend([{"calls": [("tree-check", sentinel)], "park": False, "sentinel": True, "kind": "sentinel", "track": frozenset()} for _ in range(2 if repair_integrations(n) else 1)])
@@ -2210,10 +2287,12 @@ def _item_value(item, tok):
     return "undefined" if v is _MISSING else _js_text(v)
 
 
-def _expansion_bytes(tok, ir, item=None, index=0):
+def _expansion_bytes(tok, ir, item=None, index=0, bounds=None):
     """Bytes one {{token}} is estimated to render to. 0 when unknowable —
     unpriced_expansions() names those."""
     root = tok.split(".")[0].split("[")[0]
+    if bounds and root in bounds:
+        return bounds[root]
     if root == "A":
         defaults = ir.get("argDefaults") or {}
         if "." not in tok:
@@ -2229,7 +2308,7 @@ def _expansion_bytes(tok, ir, item=None, index=0):
     return 0
 
 
-def prompt_bytes(texts, ir, item=None, index=0):
+def prompt_bytes(texts, ir, item=None, index=0, bounds=None):
     """(shared, varying) UTF-8 bytes of the author text one call carries.
 
     `shared` is everything before the first token whose value differs
@@ -2246,11 +2325,11 @@ def prompt_bytes(texts, ir, item=None, index=0):
             if not split and tok.split(".")[0].split("[")[0] in VARYING_ROOTS:
                 shared += lit
                 split = True
-                varying += _expansion_bytes(tok, ir, item, index)
+                varying += _expansion_bytes(tok, ir, item, index, bounds)
             elif split:
-                varying += lit + _expansion_bytes(tok, ir, item, index)
+                varying += lit + _expansion_bytes(tok, ir, item, index, bounds)
             else:
-                shared += lit + _expansion_bytes(tok, ir, item, index)
+                shared += lit + _expansion_bytes(tok, ir, item, index, bounds)
             pos = m.end()
         tail = _utf8(text[pos:])
         if split:
@@ -2258,6 +2337,32 @@ def prompt_bytes(texts, ir, item=None, index=0):
         else:
             shared += tail
     return shared, varying
+
+
+def project_specification(specification, ir):
+    """Only rebuildable reference metadata enters node context in reference mode."""
+    if not specification or ir.get("specificationContext", "inline") == "inline":
+        return specification
+    packet = specification.get("packet") or {}
+    return {"contextMode": "reference", "identity": specification["identity"],
+            "path": specification.get("path") or ".fluxpoint-spec.json",
+            "projectRoot": specification.get("projectRoot") or ".",
+            "catalogue": {kind: [row["id"] for row in packet.get(kind, [])]
+                          for kind in ("requirements", "checks", "decisions")}}
+
+
+def reference_context_prefix(projected, plugin=None):
+    import hashlib
+    import shlex
+    plugin = plugin or _sibling("plugin_identity").current()
+    digest = hashlib.sha256(json.dumps(projected["identity"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    command = "bash " + shlex.quote(plugin["root"] + "/scripts/py.sh") + " specification.py --check --root " + shlex.quote(projected.get("projectRoot") or ".") + " --spec " + shlex.quote(projected["path"]) + " --check-identity " + digest + " --plugin-pin " + shlex.quote(json.dumps(plugin, sort_keys=True, separators=(",", ":")))
+    return ("First command, from your working tree's repository root: " + command + ". "
+            "Stop if it fails. This compares the current packet, proof baseline and referenced archive digests "
+            "with this graph's exact compiled identity, even if a changed packet was re-locked. "
+            "Then read only the requirement, binding check scopes and rulings needed for your task from the named packet; "
+            "resolve path#/pointer fields against the verified archives. Read the full packet when challenging its completeness. "
+            "Do not substitute a newer packet or omit applicable requirements. Catalogue and identity follow:\n")
 
 
 def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
@@ -2291,8 +2396,10 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
     per_node, raw = {}, {}
     # One token per ASCII serialization byte is deliberately conservative.
     # Do not assume the packet, after a varying preamble, shares the cache.
-    spec_input = (len(SPEC_PREAMBLE) + len(json.dumps(specification, ensure_ascii=True,
-                                                    separators=(',', ':'))) + 1) if specification else 0
+    projected_spec = project_specification(specification, ir)
+    reference_prefix = reference_context_prefix(projected_spec) if projected_spec and projected_spec.get("contextMode") == "reference" else ""
+    spec_input = (len((SPEC_PREAMBLE + reference_prefix).encode("utf-8")) + len(json.dumps(projected_spec, ensure_ascii=True,
+                                                    separators=(',', ':'))) + 1) if projected_spec else 0
     for g in plan_groups(ir):
         if not persist:
             tracks.pop(g["track"], None)
@@ -2319,7 +2426,10 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
                     texts = [str(n.get("prompt", ""))]
                     items = g.get("items") or [None]
                     item = items[ci % len(items)]
-                shared, varying = prompt_bytes(texts, ir, item, ci)
+                repair_ids = repair_owned(ir) | {node.get('id') for node in repair_loops(ir)}
+                context_cap = budget.get('repairContextBytes', REPAIR_CONTEXT_BYTES)
+                bounds = {'prev': context_cap, 'lastCheck': context_cap} if n.get('id') in repair_ids and nid == n.get('id') and type(context_cap) is int and context_cap > 0 else None
+                shared, varying = prompt_bytes(texts, ir, item, ci, bounds)
                 shared += literal
                 seen_text = is_warm and (key, nid) in warm_prompts
                 text = (shared * (CACHED_PREFIX_FRACTION if seen_text else 1.0)
@@ -2332,7 +2442,7 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
                 warm.add(key)
             raw[nid] = raw.get(nid, 0.0) + cost
             rec = per_node.setdefault(nid, {"calls": 0, "estimatedTokens": 0, "effort": effort,
-                                            "model": model or "default"})
+                                            "model": model or "default", "specificationInputTokens": 0 if g.get("sentinel") else spec_input})
             rec["calls"] += 1
     # Rounded once per node, and the headline is the sum of those: a profile
     # that does not add up to the estimate beside it is two numbers to argue
@@ -2347,6 +2457,7 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
         "assumptions": {"prefixTokens": PREFIX_TOKENS,
                         "specificationInputTokens": spec_input,
                         "promptTokensPerByte": PROMPT_TOKENS_PER_BYTE,
+                        "repairContextBytes": budget.get("repairContextBytes", REPAIR_CONTEXT_BYTES),
                         "unpricedExpansions": list(UNPRICED_EXPANSIONS),
                         "cachedPrefixFraction": CACHED_PREFIX_FRACTION,
                         "workTokens": WORK_TOKENS, "effortMult": EFFORT_MULT,
@@ -2375,7 +2486,8 @@ def unpriced_expansions(ir, embedded_args=None):
             for tok in SUBST.findall(text):
                 root = tok.split(".")[0].split("[")[0]
                 label = None
-                if root in UNPRICED_EXPANSIONS:
+                bounded_repair = n.get("id") in (repair_owned(ir) | {node.get("id") for node in repair_loops(ir)}) and root in ("prev", "lastCheck")
+                if root in UNPRICED_EXPANSIONS and not bounded_repair:
                     label = "{{" + (root + ".*" if root == "decisions" else root) + "}}"
                 elif root == "A":
                     arg = tok.split(".")[1].split("[")[0] if "." in tok else None
@@ -2579,6 +2691,8 @@ def opts(n, ir, phase, label, schema_expr=None):
     roles = ir.get("roles") or {}
     role = roles.get(n.get("role"), {})
     schema = schema_expr or 'C[' + js_str(n['contract']) + ']'
+    if prove_gate(n):
+        schema = 'judgedSchema(' + schema + ')'
     if n.get('cites'):
         schema = 'citationSchema(' + schema + ', ' + json.dumps(n['cites']) + ')'
     parts = [f"label: {label}", f"phase: {js_str(phase)}", f"schema: {schema}"]
@@ -2772,7 +2886,11 @@ def launch_requirements_note(ir):
 
 
 def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=None,
-         project_prefix="", embedded_args=None):
+         project_prefix="", embedded_args=None, replay_state=None):
+    if specification and ir.get('specificationContext') == 'reference' and project_prefix:
+        specification = dict(specification, projectRoot=project_prefix.rstrip('/'))
+    if embedded_args is not None:
+        embedded_args = dict({key: value for key, value in (ir.get('argDefaults') or {}).items() if not key.startswith('_')}, **embedded_args)
     nodes = ir["nodes"]
     lists = ir.get("lists") or {}
     nodes_by_id = {x.get("id"): x for x in nodes}
@@ -2807,6 +2925,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
                                   if not label.endswith('(priced at default)')])
     launch = launch_requirements(ir, embedded_args)
     version = compiler_version()
+    plugin = _sibling("plugin_identity").current()
     L = []
     a = L.append
     a("// GENERATED by fluxpoint compile-graph.py — DO NOT EDIT.")
@@ -2819,10 +2938,13 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
       f"against spent)")
     if unpriced_note(est):
         a(f"// {unpriced_note(est)}")
+    a("const PLUGIN = " + json.dumps(plugin, ensure_ascii=False, sort_keys=True) + ";")
     a("export const meta = {")
     a(f"  name: {js_str(ir.get('name') or 'graph-campaign')},")
     a(f"  description: {js_str(ir['campaign'])},")
     a(f"  compilerVersion: {js_str(version)},")
+    a("  specificationContext: " + js_str(ir.get("specificationContext", "inline")) + ",")
+    a("  plugin: PLUGIN,")
     a("  launchRequirements: " + json.dumps(public_launch_requirements(launch)) + ",")
     a("  phases: [")
     for p in phases:
@@ -2848,8 +2970,15 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("    : typeof args === 'string' && args.trim()")
     a("    ? (() => { try { return JSON.parse(args) } catch { return { target: args } } })()")
     a("    : {}")
+    if modern or replay_state is not None:
+        import hashlib
+        packed_state = json.dumps(replay_state or {}, ensure_ascii=True, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        a('const REPLAY_STATE = ' + packed_state + ';')
+        a('const REPLAY_STATE_SHA256 = ' + json.dumps(hashlib.sha256(packed_state.encode('utf-8')).hexdigest()) + ';')
+        a("for (const key of ['_memo', '_prefix']) if (Object.prototype.hasOwnProperty.call(A, key)) throw new Error('compiled replay state cannot be overridden inline: ' + key)")
+        a("Object.assign(A, REPLAY_STATE)")
     if embedded_args is not None:
-        a("for (const key of Object.keys(ARGS)) if (Object.prototype.hasOwnProperty.call(A, key)) throw new Error('embedded launch argument cannot be overridden inline: ' + key)")
+        a("for (const key of Object.keys(A)) if (!key.startsWith('_')) throw new Error('embedded launch argument cannot be overridden inline: ' + key)")
         a("Object.assign(A, ARGS)")
     for req in launch["args"]:
         shape = req["name"] + (" {" + ", ".join(req["fields"]) + "}" if req["fields"] else "")
@@ -2868,8 +2997,10 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("function tokenText(v) { return v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v) }")
     a("function longPreamble() { return " + js_str(LONG_PREAMBLE) + "; }")
     if specification:
-        a("const SPECIFICATION = " + json.dumps(specification, ensure_ascii=True))
-        a("function specificationPreamble() { return " + js_str(SPEC_PREAMBLE) + " + JSON.stringify(SPECIFICATION) + '\\n'; }")
+        projected = project_specification(specification, ir)
+        a("const SPECIFICATION = " + json.dumps(projected, ensure_ascii=False))
+        prefix = SPEC_PREAMBLE + (reference_context_prefix(projected, plugin) if projected.get("contextMode") == "reference" else "")
+        a("function specificationPreamble() { return " + js_str(prefix) + " + JSON.stringify(SPECIFICATION) + '\\n'; }")
     a("// Resolved inputs are logged, never silently defaulted behind your back.")
     a("log(`inputs: ${JSON.stringify(A)}`)")
     # What the spec priced, next to what the run will meter. The profile is
@@ -2967,15 +3098,18 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("const ROOT_ARG = typeof LAUNCH.root === 'string' && LAUNCH.root ? \" --root '\" + LAUNCH.root.replace(/'/g, \"'\\\\''\") + \"'\" : ''")
         a("// Injected ahead of each prove: node's prompt. The nonce is what makes")
         a("// the witness's row this run's; a gate run without it is cited as STALE.")
+        a('const quoteShell = value => "\'" + String(value).replace(/\'/g, "\'\\\\\'\'") + "\'"')
+        a("const ATTEST = 'bash ' + quoteShell(PLUGIN.root + '/scripts/py.sh') + ' attest.py --plugin-pin ' + quoteShell(JSON.stringify(PLUGIN))")
         a("function provePreamble(gate) {")
         a("  return longPreamble() + (gate === 'ci'")
-        a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run the fluxpoint plugin's scripts/py.sh attest.py --ci${ROOT_ARG} --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
-        a("    : `PROVE GATE ${gate} — run the command .fluxpoint-gates.json declares for '${gate}' exactly, prefixed with FPL_ATTEST_NONCE=${LAUNCH.nonce} and nothing else around it (no pipe, no || true). If it can outlive one tool call, run the fluxpoint plugin's scripts/py.sh attest.py --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground attest.py --await${ROOT_ARG} <token>. A red whose wrapper row carries fault can be settled only by attest.py --rerun-fault <attestId>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}; await its one sequential native/reference pair and cite the pair. Every other red stays red. Never rerun until green: a later pass does not erase any unsettled red at the same tree and nonce. Return gate '${gate}', the exit, and the attestId the witness recorded (scripts/py.sh attest.py --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
+        a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run ${ATTEST} --ci${ROOT_ARG} --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
+        a("    : `PROVE GATE ${gate} — use the pinned witness command, which verifies the compiler identity before executing the declared gate: ${ATTEST} --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground ${ATTEST} --await <token>${ROOT_ARG}. A red whose wrapper row carries fault can be settled only by ${ATTEST} --rerun-fault <attestId>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}; await its one sequential native/reference pair and cite the pair. Every other red stays red. Never rerun until green: a later pass does not erase any unsettled red at the same tree and nonce. Return gate '${gate}', the exit, the full judged commit sha, and the attestId the witness recorded (${ATTEST} --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
         a("}")
         a("const CITES = " + json.dumps({n['id']: n['cites'] for n in cited_nodes}, sort_keys=True))
         a("function citesPreamble(gates) {")
-        a("  return `INDEPENDENT STEP CITATIONS: for gate ci use attest.py --ci with the forge target directly; no local alias exists. For each other gate of ${JSON.stringify(gates)}, start the manifest's local lane with scripts/py.sh attest.py --run <gate>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}. Concurrently poll scripts/py.sh attest.py --reuse <gate>${ROOT_ARG} --pr <PR> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), in foreground slices of at most 570 seconds. Coverage, witness pins and packet base come only from the manifest. Undecided (3) means continue/collect the local lane, never pass. A completed failure from either source is red even if the other is green. Only a green forge result may cancel the local token with attest.py --cancel${ROOT_ARG} <token>; collect/await cancellation and inspect whether the local lane already completed red. Never end your turn with a local lane running. Return your normal contract plus sha (the full judged commit) and citations: exactly one {gate, exit, attestId, sha, target} per declared step, with full judged SHA and target pr:N or ref:branch. For a local winner retain sha and target as well, so record-run checks the other source for red. Never cite a builder's local row.\\n\\n`")
+        a("  return `INDEPENDENT STEP CITATIONS: for gate ci use ${ATTEST} --ci with the forge target directly; no local alias exists. For each other gate of ${JSON.stringify(gates)}, start the manifest's local lane with ${ATTEST} --run <gate>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}. Concurrently poll ${ATTEST} --reuse <gate>${ROOT_ARG} --pr <PR> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), in foreground slices of at most 570 seconds. Coverage, witness pins and packet base come only from the manifest. Undecided (3) means continue/collect the local lane, never pass. A completed failure from either source is red even if the other is green. Only a green forge result may cancel the local token with ${ATTEST} --cancel <token>${ROOT_ARG}; collect/await cancellation and inspect whether the local lane already completed red. Never end your turn with a local lane running. Return your normal contract plus sha (the full judged commit) and citations: exactly one {gate, exit, attestId, sha, target} per declared step, with full judged SHA and target pr:N or ref:branch. For a local winner retain sha and target as well, so record-run checks the other source for red. Never cite a builder's local row.\\n\\n`")
         a("}")
+        a("function judgedSchema(schema) { return { ...schema, required: [...new Set([...(schema.required || []), 'sha'])], properties: { ...schema.properties, sha: {type:'string', pattern:'^[0-9a-f]{40}$'} } } }")
         a("function citationSchema(schema, gates) {")
         a("  return { ...schema, required: [...new Set([...(schema.required || []), 'sha', 'citations'])], properties: { ...schema.properties, sha: { ...((schema.properties || {}).sha || {}), type: 'string', pattern: '^[0-9a-f]{40}$' }, citations: { type: 'array', minItems: gates.length, maxItems: gates.length, items: { type: 'object', additionalProperties: false, required: ['gate', 'exit', 'attestId', 'sha', 'target'], properties: { gate: { type: 'string', enum: gates }, exit: { type: 'integer' }, attestId: { type: 'string', minLength: 1 }, sha: { type: 'string', pattern: '^[0-9a-f]{40}$' }, target: { type: 'string', minLength: 1 } } } } } }")
         a("}")
@@ -2992,6 +3126,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  if (typeof r.exit !== 'number') return `${id}: no integer exit`")
         a("  if (!r.attestId) return `${id}: no attestId — an exit code nothing witnessed`")
         a("  if (gate === 'ci' && !r.sha) return `${id}: CI verdict names no commit — the merge cannot be pinned to it`")
+        a("  if (!/^[0-9a-f]{40}$/.test(r.sha || '')) return `${id}: verdict names no exact judged commit (sha)`")
         a("  return null")
         a("}")
         a("")
@@ -3005,6 +3140,31 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         expected = {n["id"]: list_var(n["foreach"]) for n in nodes if n.get("contract") == "RedTeamV1" and n.get("foreach")}
         a("const RED_TEAM_EXPECTED = {" + ", ".join(json.dumps(k) + ": " + v for k, v in expected.items()) + "}")
         a("const RED_TEAM_CHECKS = {}")
+        a("const REVIEW_GATE_EVIDENCE = {}")
+        a("const REVIEW_GATE_NODES = " + json.dumps({node['id']: {'prove': prove_gate(node), 'cites': node.get('cites', [])} for node in nodes if prove_gate(node) or node.get('cites')}))
+        a("function gateEvidencePreamble(id) {")
+        a("  const pointers = []; const nonce = (A._launch || {}).nonce || null")
+        a("  for (const [node, declaration] of Object.entries(REVIEW_GATE_NODES)) for (const r of (Array.isArray(RESULTS[node]) ? RESULTS[node] : [RESULTS[node]]).filter(Boolean)) {")
+        a("    const rows = declaration.prove ? [{...r, gate: declaration.prove}] : (Array.isArray(r.citations) ? r.citations : []).filter(c => c && declaration.cites.includes(c.gate))")
+        a("    for (const row of rows) if (row && typeof row.attestId === 'string') pointers.push({node, gate: row.gate, attestId: row.attestId, exit: row.exit, sha: row.sha || null, logSha256: row.logSha256 || null, nonce, runtime: row.runtime || null})")
+        a("  }")
+        a("  REVIEW_GATE_EVIDENCE[id] = pointers")
+        a("  if (!pointers.length) return ''")
+        a("  return 'UPSTREAM SUITE EVIDENCE — candidate witness pointers, not worker proof. Read each applicable source row with ' + ATTEST + ' --show <attestId>' + ROOT_ARG + ' --nonce ' + nonce + '. A green row at the reviewed head and launch is suite evidence: cite it and do not rerun a covered suite. Spend tool time on attacks, valid controls and new PoCs. Rerun only for a named claim and record that reason. coverage.suites names claimed gate coverage; coverage.citedGates contains reused {gate,attestId,exit,sha,logSha256,nonce,runtime?}; coverage.executedGates records your own witnessed runs with a reason naming the claim. Missing/red/stale evidence is a blocker. Unknown runtime remains unknown. The recorder validates all citations against source rows.\\n' + JSON.stringify(pointers) + '\\n'")
+        a("}")
+        a("function reviewGateCitationIssue(c) {")
+        a("  const suites = c.suites === undefined ? [] : c.suites, reused = c.citedGates === undefined ? [] : c.citedGates, own = c.executedGates === undefined ? [] : c.executedGates")
+        a("  if (!Array.isArray(suites) || suites.some(g => typeof g !== 'string' || !g) || new Set(suites).size !== suites.length || !Array.isArray(reused) || !Array.isArray(own)) return 'invalid review suite coverage'")
+        a("  const claims = [...reused, ...own], heads = new Set((c.subject || []).map(s => s.head)), nonce = (A._launch || {}).nonce")
+        a("  if (claims.some(r => !r || typeof r.gate !== 'string' || !r.gate || typeof r.attestId !== 'string' || !r.attestId || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(r.sha || '') || !/^[0-9a-f]{64}$/.test(r.logSha256 || '') || r.exit !== 0 || typeof r.nonce !== 'string' || r.nonce !== nonce || !heads.has(r.sha))) return 'review citation is malformed, red or names another head/launch'")
+        a("  if (new Set(claims.map(r => r.gate + ':' + r.attestId)).size !== claims.length) return 'review repeats an execution citation'")
+        a("  if (suites.some(g => !claims.some(r => r.gate === g))) return 'review suite claim has no execution witness'")
+        a("  if (own.some(r => typeof r.reason !== 'string' || r.reason.trim().length < 10)) return 'own suite rerun must name the claim it tests'")
+        a("  const offered = Object.values(REVIEW_GATE_EVIDENCE).flat()")
+        a("  if (own.some(r => offered.some(p => p.gate === r.gate && p.attestId === r.attestId))) return 'own rerun cites an upstream execution; record it as reused'")
+        a("  if (reused.some(r => !offered.some(p => p.gate === r.gate && p.attestId === r.attestId))) return 'review citation was not offered by an upstream gate'")
+        a("  return null")
+        a("}")
         terminals = {}
         for gate in nodes:
             if gate.get("contract") != "RedTeamV1" or not gate.get("haltWhen"):
@@ -3012,15 +3172,19 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             sources = red_team_sources(gate, ir)
             if not sources:
                 continue
-            stages, visited, current = [], set(), gate
-            while current:
-                dep = current.get("after") or (current.get("reduce") or {}).get("from")
-                if not dep or dep in visited:
-                    break
-                visited.add(dep)
-                current = nodes_by_id.get(dep)
-                if current and (current.get("contract") == "RedTeamV1" or is_reduce(current)):
-                    stages.append(dep)
+            stages, visited, pending = [], set(), [gate]
+            while pending:
+                current = pending.pop()
+                deps = after_ids(current) + ([(current.get("reduce") or {}).get("from")] if current.get("reduce") else [])
+                for dep in deps:
+                    if not isinstance(dep, str) or dep in visited:
+                        continue
+                    visited.add(dep)
+                    producer = nodes_by_id.get(dep)
+                    if producer:
+                        if producer.get("contract") == "RedTeamV1" or is_reduce(producer):
+                            stages.append(dep)
+                        pending.append(producer)
             terminals[gate["id"]] = {"sources": sources, "stages": stages}
         a("const RED_TEAM_TERMINALS = " + json.dumps(terminals))
 
@@ -3068,7 +3232,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  if (!c || !Array.isArray(c.subject) || !c.subject.length || !Number.isSafeInteger(c.attackers) || c.attackers < 1 || !Array.isArray(c.lenses) || !c.lenses.length || c.lenses.some(x => typeof x !== 'string' || !x.trim()) || new Set(c.lenses).size !== c.lenses.length || typeof c.sampled !== 'boolean') return 'SHIP without complete coverage metadata'")
         a("  const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i")
         a("  if (c.subject.some(s => !s || typeof s.repository !== 'string' || !s.repository.trim() || !oid.test(s.base) || !oid.test(s.head) || ['files','additions','deletions'].some(k => !Number.isSafeInteger(s[k]) || s[k] < 0)) || new Set(c.subject.map(s => s.repository)).size !== c.subject.length) return 'SHIP with invalid or unpinned reviewed range/counts'")
-        a("  return null")
+        a("  return reviewGateCitationIssue(c)")
         a("}")
         a("function redTeamIncoherent(r) {")
         a("  if (!r || typeof r !== 'object') return null")
@@ -3167,11 +3331,12 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("// could, since it has no filesystem.")
         a("const LEDGER = A._ledger")
         a("const LEDGER_WRITES = []")
-        a("// FNV-1a over the resolved prompt. A change-detector, not a security")
-        a("// boundary: a different prompt is a different operation and earns a")
-        a("// new key, which is also why editing a ceremony prompt re-arms it.")
-        a("// The confirm gate is what backstops that.")
-        a("function ledgerKey(id, prompt) {")
+        if not modern:
+            with open(os.path.join(os.path.dirname(__file__), 'graph-replay.js'), encoding='utf-8') as helpers:
+                a(helpers.read().split('const CALL_RECORDS')[0])
+        a("function ledgerKey(id, prompt) { return `${campaign}|${id}|sha256:${sha256(prompt)}` }")
+        a("// Read prior FNV keys during migration so an already-fired effect never re-arms.")
+        a("function legacyLedgerKey(id, prompt) {")
         a("  let h = 2166136261")
         a("  for (let i = 0; i < prompt.length; i++) {")
         a("    h ^= prompt.charCodeAt(i); h = Math.imul(h, 16777619)")
@@ -3188,7 +3353,9 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("")
     if repair_loops(ir):
         a("const REPAIR_LAUNCH = A._launch")
-        a("function repairRoundDir(key, round) { return REPAIR_LAUNCH.root.replace(/[/\\\\]$/, '') + '/.claude/fluxpoint/rounds/' + REPAIR_LAUNCH.nonce + '/' + key + '/r' + round + '/'; }")
+        a("const REPAIR_PACKET = " + json.dumps(specification.get("path") if specification else None))
+        a("const REPAIR_CONTEXT_BYTES = " + str((ir.get("budget") or {}).get("repairContextBytes", REPAIR_CONTEXT_BYTES)))
+        a("function repairRoundDir(key, round) { return REPAIR_LAUNCH.root.replace(/[/\\\\]$/, '') + '/.claude/fluxpoint/rounds/' + REPAIR_LAUNCH.nonce + '/' + A._replayLaunchNonce + '/' + key + '/r' + round + '/'; }")
         a("const FIX_ORIGINS = []")
         with open(os.path.join(os.path.dirname(__file__), "repair-origins.js"), encoding="utf-8") as helpers:
             a(helpers.read())
@@ -3239,11 +3406,15 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("let INCOMPLETE = false")
     a("function summary(outcome) {")
     a("  const final = outcome === 'COMPLETE' && INCOMPLETE ? 'INCOMPLETE' : outcome")
-    extra = ""
+    extra = f", compilerVersion: {js_str(version)}, plugin: PLUGIN"
+    if embedded_args is not None:
+        extra += ", argDefaults: " + json.dumps(ir.get('argDefaults') or {}, ensure_ascii=True) + ", rerunPlan: A._rerunPlan || null"
+    if modern or replay_state is not None:
+        extra += ", replayStateSha256: REPLAY_STATE_SHA256"
     if any((n.get("repeat") or {}).get("classBy") for n in nodes):
         extra += ", recurringClasses: RECURRING_CLASSES"
     if specification:
-        extra += ", specification: SPECIFICATION.identity"
+        extra += ", specification: SPECIFICATION.identity, specificationContext: SPECIFICATION.contextMode || 'inline'"
         if specification.get("path"):
             extra += ", specificationPath: SPECIFICATION.path"
     if any(n.get("irreversible") for n in nodes):
@@ -3300,7 +3471,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     a("  const inputs = Object.fromEntries(Object.entries(A).filter(([k]) => !k.startsWith('_')))")
     if any(n.get("contract") == "RedTeamV1" for n in nodes):
         a("  const redTeamReviews = { terminals: RED_TEAM_TERMINALS, checks: RED_TEAM_CHECKS, expected: Object.fromEntries(Object.entries(RED_TEAM_EXPECTED).map(([id, items]) => [id, { attackers: items.length, lenses: items.map(x => x.key).filter(x => typeof x === 'string') }])) }")
-        extra += ", redTeamReviews"
+        extra += ", redTeamReviews, reviewGateEvidence: REVIEW_GATE_EVIDENCE"
     a("  return { campaign, outcome: final, results: RESULTS, provenance: PROVENANCE,")
     a(f"           contracts: CONTRACTS, inputs{extra} }}")
     a("}")
@@ -3383,6 +3554,8 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("    spawn(")
         if specification:
             a("      specificationPreamble() +")
+        if any(node.get("contract") == "RedTeamV1" for node in nodes):
+            a("      (codeReview ? gateEvidencePreamble(label) : '') +")
         a("      `Attempt to REFUTE this claim. ${claimText}\\n\\n` + (priors || '') +")
         a("        `Re-read the underlying code or evidence YOURSELF; do not trust the claim's own summary. ` +")
         a("        `Hunt for the reason it is wrong: a guard upstream, a type that forbids the state, a test that pins it. ` +")
@@ -3539,15 +3712,22 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             a("  const gateId = point.startsWith('before ') ? point.slice(7) : null")
             a("  target = target || (gateId && REPLAY_NODES[gateId] && REPLAY_NODES[gateId].target) || null")
             a("  const unique = FORKED || forceLive || !!target || !!(gateId && (A.rejudge || {})[gateId]) || !!(gateId && REPLAY_NODES[gateId] && REPLAY_NODES[gateId].fresh)")
-            a("  const extra = (unique ? '\\nLIVE TREE READING NONCE: ' + A._replayLaunchNonce + ' point ' + point : '') + (gateId ? rejudgeText(gateId) : '')")
+            a("  const extra = (unique ? '\\nLIVE TREE READING NONCE: ' + A._replayLaunchNonce + ' point ' + point : '') + (gateId ? rejudgeText(gateId, false) : '')")
             a("  const branchPrompt = target ? '\\nAlso run exactly: git -C ' + JSON.stringify(target.repository) + ' ls-remote origin ' + JSON.stringify('refs/heads/' + target.branch) + '. Return the sole full hexadecimal commit in tip, and the exact declared repository and branch as repository and branch. No matches or multiple matches means tip must be empty. Never use a worker-reported sha.' : ''")
-            a("  const treeSchema = target ? { ...C.TreeCheckV1, required: [...new Set([...(C.TreeCheckV1.required || []), 'root','repository','branch','tip'])], properties: { ...C.TreeCheckV1.properties, repository: { type: 'string' }, branch: { type: 'string' }, tip: { type: 'string' } } } : C.TreeCheckV1")
-        a("  const r = await agent(longPreamble() + 'Run exactly three commands in the repository at "
-          "the current working directory and return their output verbatim in the "
-          "schema, nothing else: `git rev-parse --show-toplevel` as root, `git rev-parse HEAD` as head, and `git status "
-          "--porcelain` as porcelain (empty string when clean). Do not fix, clean, "
-          "or explain anything.'" + (" + extra + branchPrompt, " if modern else ", ") +
-          "{ label: `tree-check:${point}`, phase, schema: " + ("treeSchema" if modern else "C['TreeCheckV1']") + ", effort: 'low' })")
+            a("  const treeSchema = target ? { ...C.TreeCheckV1, required: [...new Set([...(C.TreeCheckV1.required || []), 'root','repository','branch','tip'])], properties: { ...C.TreeCheckV1.properties, root: { type: 'string' }, repository: { type: 'string' }, branch: { type: 'string' }, tip: { type: 'string' } } } : C.TreeCheckV1")
+        sentinel_base = ("longPreamble() + 'Run exactly three commands in the repository at "
+                         "the current working directory and return their output verbatim in the "
+                         "schema, nothing else: `git rev-parse --show-toplevel` as root, `git rev-parse HEAD` as head, and `git status "
+                         "--porcelain` as porcelain (empty string when clean). Do not fix, clean, or explain anything.'")
+        if modern:
+            a("  const treeOptions = { label: `tree-check:${point}`, phase, schema: treeSchema, effort: 'low' }")
+            a("  let request = " + sentinel_base + " + extra + branchPrompt")
+            a("  const canPrefix = !forceLive && !(gateId && ((A.rejudge || {})[gateId] || REPLAY_NODES[gateId].fresh))")
+            a("  const stable = canPrefix ? prefixTreePrompt(request, treeOptions) : request")
+            a("  const usedPrefixNonce = stable !== request")
+            a("  const r = await agent(stable, treeOptions)")
+        else:
+            a("  const r = await agent(" + sentinel_base + ", { label: `tree-check:${point}`, phase, schema: C['TreeCheckV1'], effort: 'low' })")
         a("  if (!r) {")
         a("    note('tree-check', 'DEAD', `${point}: sentinel died — tree state unknown`)")
         a("    INCOMPLETE = true; TREE.unknown = true")
@@ -3560,7 +3740,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             a("    Object.assign(rec, { repository: target.repository, branch: target.branch, tip: r.tip.trim().toLowerCase() })")
             a("  } else Object.assign(rec, { repository: rec.root, branch: null, tip: rec.head })")
             a("  const readingId = gateId || (point.startsWith('replay ') ? point.slice(7) : null)")
-            a("  if (readingId) { LIVE_READINGS[readingId] = readingValue(rec); LIVE_READING_CALLS[readingId] = CALL_RECORDS.indexOf(CALL_STATE['tree-check:' + point]) }")
+            a("  if (readingId) { const call = CALL_STATE['tree-check:' + point]; LIVE_READINGS[readingId] = readingValue(rec); LIVE_READING_CALLS[readingId] = CALL_RECORDS.indexOf(call); LIVE_READING_FRESH[readingId] = !usedPrefixNonce && call && call.mode === 'live' }")
         a("  TREE.checks.push(rec)")
         a("  if (!TREE.baseline) { TREE.baseline = rec; return true }")
         a("  if (rec.head === TREE.baseline.head && rec.porcelain === TREE.baseline.porcelain) return true")
@@ -3846,6 +4026,8 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         pre = "basePreamble() + "
     if ir.get("authorizedBy") and (n.get("mutates") or n.get("irreversible")):
         pre = "authorizationPreamble() + " + pre
+    if n.get("contract") == "RedTeamV1":
+        pre += f"gateEvidencePreamble({js_str(nid)}) + "
     if n.get("contract") == "RedTeamV1" and n.get("haltWhen") and red_team_sources(n, ir):
         pre += f"redTeamPreamble({json.dumps(red_team_sources(n, ir))}) + "
     if n.get('cites'):
@@ -3871,7 +4053,7 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
     # with itself about why.
     has_parked = any(o.get("actor", "agent") != "agent" for o in ir["nodes"])
     dep = n.get("after") or (n.get("reduce") or {}).get("from")
-    guard = has_parked and dep and (n.get("actor", "agent") == "agent" or replay_features(ir))
+    guard = has_parked and dep
     if guard:
         check = (f"{json.dumps(dep)}.some(id => BLOCKED.has(id))" if isinstance(dep, list) else f"BLOCKED.has({js_str(dep)})")
         a(f"if ({check}) {{")
@@ -4005,17 +4187,21 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         a(f"let ok_{var} = true")
         if n.get("irreversible"):
             key = f"k_{var}"
+            a(f"const prompt_{var} = {prompt}")
+            prompt = f"prompt_{var}"
             a(f"const {key} = ledgerKey({js_str(nid)}, {prompt})")
             # A replayed node must not also be filed 'OK'. Reporting a
             # ceremony that did not happen the same way as one that did is
             # the whole failure this is here to prevent.
-            a(f"const replayed_{var} = {key} in LEDGER")
+            a(f"const old_{key} = legacyLedgerKey({js_str(nid)}, {prompt})")
+            a(f"const hit_{key} = {key} in LEDGER ? {key} : old_{key} in LEDGER ? old_{key} : null")
+            a(f"const replayed_{var} = hit_{key} !== null")
             a(f"let {raw}")
             a(f"if (replayed_{var}) {{")
             a(f"  log(`REPLAYED-FROM-LEDGER at {nid}: already recorded against this "
               f"campaign — the effect is not performed again`)")
             a(f"  note({js_str(nid)}, 'REPLAYED', 'once-only ledger hit; effect not repeated')")
-            a(f"  {raw} = LEDGER[{key}].result")
+            a(f"  {raw} = LEDGER[hit_{key}].result")
             a("} else {")
             a(f"  if (!confirmed({js_str(nid)})) {{")
             a(f"    note({js_str(nid)}, 'REFUSED', 'irreversible node not named in confirm')")
@@ -4196,7 +4382,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
             for token in SUBST.findall(work["prompt"]):
                 if token.startswith("prev."):
                     mapping[token] = f"tokenText(({prev} || {{}})[{js_str(token.split('.', 1)[1])}] ?? null)"
-        mapping.update(roundDir="roundDir", lastCheck="tokenText(lastCheck)")
+        mapping.update(roundDir="roundDir", lastCheck="tokenText(repairFeedback(lastCheck))")
         checker_snapshot = work.get("contract") == "FixCheckV1" and work.get("isolation") == "measure"
         pre = "" if checker_snapshot else "measurePreamble() + " if work.get("isolation") == "measure" else "basePreamble() + " if work.get("mutates") or work.get("isolation") else ""
         if ir.get("authorizedBy") and (work.get("mutates") or work.get("irreversible")):
@@ -4223,6 +4409,8 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     a(f"  const batch_{var} = await parallel(pending_{var}.map(state => async () => {{")
     a("    const { item, i, lastCheck } = state")
     a("    const requiredClasses = state.recurring || []")
+    a(f"    const feedbackIssue = repairContextIssue(repairFeedback(lastCheck))")
+    a(f"    if (feedbackIssue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'CONTEXT-LIMIT', feedbackIssue); return state }}")
     a("    const reframeBrief = requiredClasses.length ? 'REFRAME REQUIRED: two or more consecutive checks failed on ' + JSON.stringify(requiredClasses) + '. State the authoritative system-of-record invariant. Adopt or refute a class-level rewire with a command and observed measurement, or remove the mechanism. Return structured reframe {classes,invariant,classRewire,disposition:adopt|refute|remove,measurement:{command,result}}. Another narrow patch is refused.\\n' : ''")
     a(f"    const roundDir = repairRoundDir(item.key, round_{var})")
     a(f"    if (!affordable(`{fixer['id']}:${{item.key}}`)) {{ abort_{var} = 'BUDGET-EXHAUSTED'; return {{ ...state, roundDir }} }}")
@@ -4232,7 +4420,9 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
         a(f"    if (Object.prototype.hasOwnProperty.call(fixed, 'packetConflict')) {{ abort_{var} = 'HALTED'; note({js_str(fixer['id'])}, 'PACKET-CONFLICT', 'Locked-check conflict requires a recorded operator ruling'); return {{ ...state, fixed, roundDir }} }}")
         a(f"    const resourceIssue = repairResourcesIssue(fixed)")
         a(f"    if (resourceIssue) {{ abort_{var} = 'HALTED'; note({js_str(nid)}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: item.key, round: round_{var} }}); return {{ ...state, fixed, roundDir }} }}")
-    a(f"    const patches = [...(state.patches || []), {{ item: item.key, round: round_{var}, patch: roundDir + 'patch.diff' }}]")
+    a("    const contextIssue = repairContextIssue(fixed)")
+    a(f"    if (contextIssue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'CONTEXT-LIMIT', contextIssue); return {{ ...state, fixed, roundDir }} }}")
+    a(f"    const patches = [...(state.patches || []), {{ item: item.key, round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: fixed.patchSha256 }}]")
     a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: [...state.targetClasses] }}")
     a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay the reproduction and its valid control on the bare launch base and EACH listed complete patch in a fresh base archive, not cumulatively. Use repair-replay.py to obtain originEvidence. New code location or identifier age is not origin evidence. Missing replay/control means INCOMPLETE. Attack every sharedResources writer and reader supplied by the fixer, including existing writers reached by a new reader.\\n'")
 
@@ -4297,20 +4487,25 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     if integration:
         merge, review = (by_id[k] for k in integration)
         mfield, mop, mlit = halt_parts(review)
-        a(f"  if (passed_{var}.length) {{")
+        a(f"  if (passed_{var}.length && (!pending_{var}.length || round_{var} < {int(rep['maxRounds'])})) {{")
         a(f"    const roundDir = repairRoundDir('_integration', round_{var})")
         a(f"    const lastCheck = integrationLast_{var}")
         a(f"    const requiredClasses = integrationRecurring_{var}")
         a("    const reframeBrief = requiredClasses.length ? 'REFRAME REQUIRED for merged-tree classes ' + JSON.stringify(requiredClasses) + ': state the authoritative invariant and adopt/refute the class rewire with a command and measured result, or remove the mechanism. Return structured reframe evidence; the independent review must validate it.\\n' : ''")
         a(f"    if (!affordable({js_str(merge['id'])})) {{ INCOMPLETE = true; return summary('BUDGET-EXHAUSTED') }}")
-        a(f"    const merged = await spawn(reframeBrief + {prompt(merge, 'passed_' + var)}, {opts(merge, ir, merge.get('phase', phase_name), '`' + merge['id'] + ':r${round_' + var + '}`')})")
+        a(f"    const integrationInputs = passed_{var}.map(s => ({{ item: s.item.key, patches: s.patches, packetEdits: s.fixed.packetEdits || [], siblings: s.fixed.siblings || [], sharedResources: s.fixed.sharedResources || [] }}))")
+        a("    const inputIssue = repairContextIssue(integrationInputs, repairFeedback(lastCheck))")
+        a(f"    if (inputIssue) {{ INCOMPLETE = true; note({js_str(merge['id'])}, 'CONTEXT-LIMIT', inputIssue); return summary('INCOMPLETE') }}")
+        a(f"    const merged = await spawn(reframeBrief + {prompt(merge, 'integrationInputs')}, {opts(merge, ir, merge.get('phase', phase_name), '`' + merge['id'] + ':r${round_' + var + '}`')})")
         a(f"    RESULTS[{js_str(merge['id'])}] = merged")
         a("    if (!merged) { INCOMPLETE = true; return summary(DECLINED ? 'BUDGET-EXHAUSTED' : 'NODE-DEAD') }")
         if merge.get("contract") == "SliceV1":
             a(f"    if (Object.prototype.hasOwnProperty.call(merged, 'packetConflict')) {{ INCOMPLETE = true; note({js_str(merge['id'])}, 'PACKET-CONFLICT', 'Locked-check conflict requires a recorded operator ruling'); return summary('HALTED') }}")
             a("    const resourceIssue = repairResourcesIssue(merged)")
             a(f"    if (resourceIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: '_integration', round: round_{var} }}); return summary('HALTED') }}")
-        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff' }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))] }}")
+        a("    const mergedIssue = repairContextIssue(merged)")
+        a(f"    if (mergedIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'CONTEXT-LIMIT', mergedIssue); return summary('INCOMPLETE') }}")
+        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: merged.patchSha256 }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))] }}")
         a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay bare base and EVERY component patch separately on fresh base archives, then the complete integrated patch. Only a harm absent from base and all component patches but reproduced on the integrated patch is cross-slice. Attack the complete sharedResources writer/reader list from the integration result.\\n'")
 
         a(f"    if (requiredClasses.length && !validReframe_{var}(merged.reframe, requiredClasses)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'third narrow integration patch refused'); return summary('REFRAME-REQUIRED') }}")
@@ -4727,10 +4922,12 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     if source.get('ledger'):
         runtime_args['_ledger'] = {r['key']: r for r in source['ledger'] if isinstance(r, dict) and 'key' in r}
     readings = [r.get('verifiedReading') for r in replay.get('_memo', {}).values()]
-    readings += [(r.get('payload') or {}).get('tree') for r in replay.get('_memo', {}).values()]
+    readings += [r.get('tree', (r.get('payload') or {}).get('tree')) for r in replay.get('_memo', {}).values()]
     readings += [r for r in (source.get('tree') or {}).get('checks', []) if isinstance(r, dict) and r.get('tip')]
     readings = [r for r in readings if isinstance(r, dict)]
-    compiled = emit(ir, contracts, imports_resolved, specification=specification, embedded_args=public_args)
+    runtime_args.pop('_memo', None)
+    runtime_args.pop('_prefix', None)
+    compiled = emit(ir, contracts, imports_resolved, specification=specification, embedded_args=public_args, replay_state=replay)
     try:
         result = subprocess.run(['node', os.path.join(os.path.dirname(__file__), 'graph-plan.js')],
                                 input=json.dumps(dict(source=compiled, args=runtime_args, results=source.get('results') or {}, readings=readings), ensure_ascii=False),
@@ -4739,7 +4936,8 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
         raise ValueError('--plan needs Node.js to render the exact generated program locally; it never spawns an agent') from exc
     if result.returncode:
         raise ValueError('plan rendering refused: ' + result.stderr.strip())
-    rendered = json.loads(result.stdout)['summary']
+    rendered_output = json.loads(result.stdout)
+    rendered = rendered_output['summary']
     requested = set(public_args.get('rejudge') or {})
     reached = {r.get('gate') for r in rendered.get('rejudges', [])}
     if requested - reached:
@@ -4747,11 +4945,41 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     records = {r['node']: r for r in rendered.get('memoRecords', [])}
     old_inputs = source.get('inputs') or {}
     effective = dict(ir.get('argDefaults') or {}, **public_args)
+    legacy_modes = {}
+    if not replay_features(ir, public_args):
+        import hashlib
+        prefix = replay.get('_prefix', [])
+        calls = rendered_output.get('calls') or []
+        if not prefix:
+            try:
+                prior_calls = helper._journal_calls(run_id, projects)
+                prefix = [dict(promptSha256=hashlib.sha256(helper.utf8_bytes(c['prompt'])).hexdigest(),
+                               optsSha256=helper.memo_key(c['start'].get('opts', c['start'].get('options'))),
+                               label=c['start'].get('label', (c['start'].get('opts') or {}).get('label')))
+                          for c in prior_calls if c.get('prompt') is not None and (c.get('done') or {}).get('type') == 'result']
+            except helper.ReplayError:
+                prefix = []
+        open_prefix, first_changed = True, None
+        for index, call in enumerate(calls):
+            prior = prefix[index] if index < len(prefix) else None
+            match = bool(open_prefix and prior and prior['promptSha256'] == hashlib.sha256(helper.utf8_bytes(call['prompt'])).hexdigest()
+                         and prior['optsSha256'] == helper.memo_key(call['opts']))
+            label = call['opts'].get('label')
+            if not match:
+                open_prefix = False
+                first_changed = first_changed or label
+            legacy_modes.setdefault(label, ('prefix', 'unchanged runtime call prefix') if match else ('live', 'after first changed call ' + str(first_changed)))
     rows = []
     for n in ir['nodes']:
         nid = n['id']
         record = records.get(nid)
-        if record and record['mode'] == 'prefix':
+        if nid in legacy_modes:
+            status, cause = legacy_modes[nid]
+            if status == 'live':
+                changed = [t.split('.')[1] for t in SUBST.findall(str(n.get('prompt', ''))) if t.startswith('A.') and effective.get(t.split('.')[1]) != old_inputs.get(t.split('.')[1])]
+                if changed:
+                    cause = 'arg changed: ' + ', '.join(sorted(set(changed)))
+        elif record and record['mode'] == 'prefix':
             status, cause = 'prefix', 'unchanged runtime call prefix'
         elif record and record['mode'] == 'memo':
             status, cause = 'memo if the live read matches', 'same inputs and replayed ancestors; branch reading still required'
@@ -4774,10 +5002,18 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
                         if effective.get(key) != old_inputs.get(key):
                             changed.append(key)
                 cause = ('live ancestor ' + ', '.join(live) if live else 'arg changed: ' + ', '.join(sorted(set(changed))) if changed else 'no matching verified memo/prefix entry')
-        entries = [e for e in replay.get('_memo', {}).values() if e.get('payload', {}).get('id') == nid]
+        entries = [e for e in replay.get('_memo', {}).values() if e.get('node', e.get('payload', {}).get('id')) == nid]
         entries += [e for e in replay.get('_prefix', []) if e.get('label') == nid]
         cost = next((e['cost'] for e in entries if isinstance(e.get('cost'), dict)), {'minutes': None, 'tokens': None})
         rows.append(dict(node=nid, status=status, cause=cause, minutes=cost.get('minutes'), tokens=cost.get('tokens')))
+    shared = {}
+    for node in ir['nodes']:
+        if node.get('mutates'):
+            target = branch_target(node, {x.get('id'): x for x in ir['nodes']})
+            if target:
+                shared.setdefault((target['repository'], target['branch']), []).append(node['id'])
+    if rows and any(len(ids) > 1 for ids in shared.values()):
+        rows[0]['warning'] = 'shared-branch opt-ins can execute more work than serial prefix replay: builders require the source-final tip, while each gate retains its exact judged tip'
     return rows
 
 
@@ -4785,6 +5021,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("graph", nargs="?", default="WORK.md", help="path to WORK.md (or any file with a graph-ir block)")
     ap.add_argument("-o", "--out", help="path to write the compiled .graph.js")
+    ap.add_argument('--replay-state', help='embed harness-verified _memo/_prefix JSON into immutable compiled source')
     ap.add_argument("--args", help="embed non-underscore args from JSON; none explicitly removes embedded args")
     ap.add_argument("--check", action="store_true", help="validate and measure the compiled script")
     ap.add_argument('--plan', action='store_true', help='render a deterministic rerun plan using verified prior results, without agents')
@@ -4819,7 +5056,13 @@ def main():
 
     projection = None
     embedded_args = None
+    replay_state = None
     try:
+        if args.replay_state:
+            with open(args.replay_state, encoding='utf-8') as fh:
+                replay_state = json.load(fh, object_pairs_hook=spec_mod.unique_keys)
+            if not isinstance(replay_state, dict) or set(replay_state) - {'_memo', '_prefix'}:
+                raise ValueError('--replay-state must contain only harness _memo and _prefix fields')
         if args.args and args.args != "none":
             with open(args.args, encoding="utf-8") as fh:
                 embedded_args = json.load(fh, object_pairs_hook=spec_mod.unique_keys)
@@ -4851,7 +5094,8 @@ def main():
             header = projected_header
         ir = extract_ir(text)
         contracts, contracts_desc = resolve_contracts(
-            shipped_dir, header.get("CONTRACTS"), args.contracts, args.gates_root)
+            shipped_dir, header.get("CONTRACTS"), args.contracts, args.gates_root,
+            snapshots=projection[2] if projection else None)
     except (OSError, GraphError, ValueError, TypeError) as e:
         print(f"graph-compile: {e}", file=sys.stderr)
         return 1
@@ -4861,12 +5105,17 @@ def main():
               file=sys.stderr)
         return 1
 
+    if embedded_args is not None:
+        for key, value in (ir.get('argDefaults') or {}).items():
+            if key in embedded_args and embedded_args[key] != value:
+                print(f"graph-compile: warning — argDefault {key} differs from embedded value; embedded value controls this launch", file=sys.stderr)
+        embedded_args = dict({key: value for key, value in (ir.get('argDefaults') or {}).items() if not key.startswith('_')}, **embedded_args)
     agents = load_agents(args.gates_root)
     gates = load_gates(args.gates_root)
     findings = validate(ir, contracts, gates, agents, embedded_args=embedded_args, repository_root=args.gates_root)
     if not findings:
         findings.extend(prose_pin_findings(text, ir))
-    if not findings and args.check:
+    if not findings:
         findings.extend(probe_findings(ir, embedded_args))
     specification = None
     spec_path = header.get("SPEC")
@@ -4880,6 +5129,8 @@ def main():
                 packet, identity = projection[:2]
             specification = {"packet": packet, "identity": identity,
                              "path": os.path.relpath(packet_file, args.gates_root).replace(os.sep, "/")}
+            if ir.get('specificationContext') == 'reference':
+                specification['projectRoot'] = git_prefix(args.gates_root).rstrip('/') or '.'
             findings = validate(ir, contracts, gates, agents, specification, embedded_args, repository_root=args.gates_root)
         except (OSError, ValueError, TypeError) as e:
             print(f"graph-compile: spec required before implementation: {e}", file=sys.stderr)
@@ -4896,6 +5147,9 @@ def main():
         identity_sha = hashlib.sha256(json.dumps(projection[1], sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
         print(f"graph-compile: projection only — current packet {projection[3]['sha256']}; "
               f"projected packet {projection[1]['sha256']}; projected identity {identity_sha}; no packet or lock written")
+        contract_edits = sorted(rel for rel in projection[2] if rel.endswith('.schema.json'))
+        if contract_edits:
+            print('graph-compile: projected contracts: ' + ', '.join(contract_edits))
         try:
             spec_mod.load(args.gates_root, spec=spec_path)
         except (OSError, ValueError, TypeError) as exc:
@@ -4930,6 +5184,8 @@ def main():
             return 1
         print('Rerun plan (no agents; branch memo hits remain conditional on a fresh live reading):')
         for row in rows:
+            if row.get('warning'):
+                print('Plan warning: ' + row['warning'])
             minutes = 'unknown' if row['minutes'] is None else str(row['minutes'])
             tokens = 'unknown' if row['tokens'] is None else str(row['tokens'])
             print(f"{row['node']}: {row['status']} — {row['cause']}; recorded minutes={minutes}, tokens={tokens}")
@@ -4937,11 +5193,12 @@ def main():
 
     est = estimate_tokens(ir, contracts, specification, embedded_args)
     cap = (ir.get("budget") or {}).get("maxEstimatedTokens")
+    context_line = ("; packet context " + ir.get("specificationContext", "inline") + " " + str(est["assumptions"]["specificationInputTokens"]) + " estimated input tokens/call") if specification else ""
     blind = unpriced_note(est)
     cost_line = (f"~{est['total']:,} estimated tokens"
                  + (f" of {cap:,} allowed" if cap is not None else "")
                  + f" ({est['cold']} cold prefill(s) of {est['calls']} call(s), "
-                 f"prompt-cache TTL {est['ttl']}"
+                 f"prompt-cache TTL {est['ttl']}" + context_line
                  + (f"; {blind}" if blind else "") + ")")
     # --check measures exactly the script compilation would write.
     try:
@@ -4951,7 +5208,7 @@ def main():
         graph_rel = "../"
     js = emit(ir, contracts, resolved, specification,
               graph_file=None if graph_rel.startswith("../") else graph_rel,
-              project_prefix=git_prefix(args.gates_root), embedded_args=embedded_args)
+              project_prefix=git_prefix(args.gates_root), embedded_args=embedded_args, replay_state=replay_state)
     script_bytes = len(js.encode("utf-8"))
     headroom = args.max_script_bytes - script_bytes
     size_line = ("projected " if projection is not None else "") + f"script {script_bytes:,} bytes, headroom {headroom:,} of {args.max_script_bytes:,} bytes"
@@ -4962,8 +5219,9 @@ def main():
         print(f"graph-compile: warning — {size_line}; below {args.script_headroom_bytes:,}-byte margin", file=sys.stderr)
     if args.check_script:
         try:
+            _sibling("plugin_identity").from_script(args.check_script)
             actual = os.path.getsize(args.check_script)
-        except OSError as e:
+        except (OSError, ValueError) as e:
             print(f"graph-compile: launch script: {e}", file=sys.stderr)
             return 1
         if actual > args.max_script_bytes:

@@ -125,7 +125,7 @@ const PROBE_VERDICT = {
 }
 const PROBE_PLAN = {
   type: 'object', required: ['nodes', 'argDefaults'], properties: {
-    nodes: { type: 'array', items: { type: 'object', required: ['id', 'prompt'], properties: {
+    nodes: { type: 'array', items: { type: 'object', required: ['id'], properties: {
       id: { type: 'string' }, prompt: { type: 'string' }, isolation: {}, mutates: { type: 'boolean' }, probe: {},
     } } }, argDefaults: { type: 'object' }, lists: { type: 'object' },
   },
@@ -446,12 +446,16 @@ function helpRefusal(words, other) {
   const operand = WRITERS.includes(name) && prefix.slice(1).find(w => !unquote(w).startsWith('-'))
   return operand ? `puts the help flag after an operand of ${name} (${operand}), which a POSIXLY_CORRECT build acts on first` : ''
 }
-function shapeRefusal(command, form) {
+function shapeRefusal(command, form, typed = false) {
   const a = shellParts(command), b = shellParts(form)
   if (!a || !b) return 'it does not parse under the probe grammar'
   if (!sameFrame(a, b, 0)) return 'it changes an operator, a part or a $(...) substitution'
   let shaped = 0
   for (let i = 0; i < a.parts.length; i++) {
+    const x = gitCommand(a.parts[i]), y = gitCommand(b.parts[i])
+    // A fully typed future operand need not exist at audit time. A git read
+    // in the same repository frame probes the boundary without creating it.
+    if (typed && x && y && same(x.prefix, y.prefix) && readOnlyGit(y)) { shaped++; continue }
     if (grammarPart(a.parts[i], b.parts[i])) continue
     const why = helpRefusal(a.parts[i], b.parts[i])
     if (why) return `part ${i + 1} ${why}`
@@ -492,8 +496,21 @@ function declarationRefusal(command, d, resolve) {
       || laterBound(form).some(name => !later.includes(name))) {
     return 'the form carries a placeholder or token the command does not'
   }
-  const why = shapeRefusal(fillData(command, data), fillData(form, data))
+  const why = shapeRefusal(fillData(command, data), fillData(form, data), names.length + later.length > 0)
   return why ? 'shape form refused: ' + why : ''
+}
+function gitReadForm(command) {
+  const parsed = shellParts(command)
+  if (!parsed || !grammarCommand(command)) return null
+  let changed = false
+  const parts = parsed.parts.map(words => {
+    const git = gitCommand(words)
+    if (!git || readOnlyGit(git)) return words.join(' ')
+    changed = true
+    return [...git.prefix, 'status'].join(' ')
+  })
+  const form = parts.map((part, i) => part + (i < parsed.operators.length ? ' ' + parsed.operators[i] + ' ' : '')).join('')
+  return changed && safeCommandShape(command, form) ? form : null
 }
 // What a probed node must receipt, and how. `blockers` are the reasons no
 // receipt set can complete the probe; `unresolved` names commands holding a
@@ -553,7 +570,16 @@ function probeCoverage(node, bindings, standIn) {
     blockers.push(spelling ? `${c}: ${spelling}`
       : `no probe declaration for ${c}: it is outside the read-only grammar, so declare it in the node's probe.commands or probe.templates`)
   }
-  return { prescribed, required, declared, blockers, unresolved }
+  // Give the worker a deterministic safe form for grammar-known git writes.
+  // Explicit declarations retain their exact receipt contract; older valid
+  // grammar receipts still pass the usual same-frame check.
+  const forms = new Map(declared)
+  for (const command of required) {
+    if (forms.has(command) || named.has(command) || unresolved.includes(command)) continue
+    const run = gitReadForm(command)
+    if (run) forms.set(command, { kind: 'shape', run })
+  }
+  return { prescribed, required, declared, forms, blockers, unresolved }
 }
 // The evidence one receipt carries: 'read-only' when the exact command ran,
 // 'shape-only' when a safe form ran in its place. Neither is semantic proof.
@@ -567,6 +593,7 @@ function receiptKind(receipt, coverage) {
 // ---------------------------------------------------------------- inputs --
 
 const A = typeof args === 'string' ? JSON.parse(args) : (args || {})
+if (A.root !== undefined && !nonEmpty(A.root)) throw new Error('graph-audit: args.root must be a non-empty repository path')
 if (typeof A.graph !== 'string' || !A.graph.trim()) {
   throw new Error('graph-audit: args.graph is required: the WORK.md or GRAPH.*.md to audit')
 }
@@ -612,6 +639,10 @@ const RUN_LENSES = MODE === 'single' ? [SINGLE] : resolveLenses(A.lenses)
 
 // --------------------------------------------------------------- prompts --
 
+function repositoryContext() {
+  return A.root ? `The repository under audit is ${A.root}; resolve every relative path there. Run any structural compile check from that directory with --root ${JSON.stringify(A.root)}.` : ''
+}
+
 function settledBlock() {
   if (!SETTLED.length) return 'SETTLED: nothing yet. No earlier round is on record for this graph.'
   return 'SETTLED: earlier rounds fixed or refuted these. Re-raise one only with new measured evidence ' +
@@ -622,6 +653,7 @@ function settledBlock() {
 function lensPrompt(lens) {
   return [
     `Audit the Graph Engineering IR in ${A.graph}.`,
+    repositoryContext(),
     `Read ${A.pluginRoot}/agents/graph-auditor.md first. Its scope, checklist and severity scale are yours; ` +
       'return findings through the structured output rather than its table, and leave the verdict to the caller.',
     A.check
@@ -643,6 +675,7 @@ function reducePrompt(raw) {
   const items = raw.map(f => ({ id: f.id, lens: f.lens, severity: f.severity, title: f.title, failurePath: f.failurePath }))
   return [
     'Merge duplicate audit findings. You do not judge them.',
+    repositoryContext(),
     'Each finding below came from one lens of a multi-lens audit of the same graph, and several lenses often reach ' +
       'the same defect. Put findings in one cluster when they describe the same failure path: the same broken ' +
       'mechanism reaching the same bad outcome, however it is worded. Findings that touch the same node or file ' +
@@ -662,6 +695,8 @@ function refutePrompt(d, lens) {
   return [
     `Refute a finding from an audit of the Graph Engineering IR in ${A.graph}. ` +
       `The audit's scope and severity scale are in ${A.pluginRoot}/agents/graph-auditor.md.`,
+    repositoryContext(),
+    A.check ? `The structural check is already clean. Its summary: ${A.check}` : 'The structural check is already clean.',
     [
       `FINDING ${d.id}, ${d.severity}, raised by ${d.sources.join(', ')}: ${d.title}`,
       `Failure path: ${d.failurePath}`,
@@ -871,6 +906,7 @@ function summarize(raw, judged, dead, verifiers, deadVerifiers) {
   return {
     mode: MODE,
     graph: A.graph,
+    ...(A.root ? { root: A.root } : {}),
     lenses: RUN_LENSES.map(l => l.id),
     deadLenses: dead,
     probes: PROBE_REPORTS, deadProbes: DEAD_PROBES,
@@ -920,7 +956,7 @@ if (HISTORY.length >= 2) {
   if (common.length || (last.counts.confirmed > 0 && last.counts.confirmed >= before.counts.confirmed)) {
     const why = `plateau: ${common.length ? common.join(', ') : 'confirmed count did not fall'}`
     log(`verdict: REWIRE (${why})`)
-    return {mode: MODE, graph: A.graph, verdict: 'REWIRE', why, plateau: true,
+    return {mode: MODE, graph: A.graph, ...(A.root ? { root: A.root } : {}), verdict: 'REWIRE', why, plateau: true,
       recurringClasses: common, confirmed: last.confirmed,
       unverified: Array.isArray(last.unverified) ? last.unverified : [],
       refuted: Array.isArray(last.refuted) ? last.refuted : [],
@@ -937,12 +973,13 @@ log(`graph-audit: ${MODE} mode over ${A.graph}, ${RUN_LENSES.length} lens(es) ` 
 // older callers get an explicit discovery read instead of skipping probes.
 let probeIR = A.ir
 const DEAD_PROBES = [], PROBE_REPORTS = [], probeRaw = []
+const needsProbe = n => n.isolation !== 'measure' && (n.isolation === true || n.isolation === 'worktree' || n.mutates === true)
 if (probeIR === undefined) {
   phase('Probe')
-  probeIR = await agent(`Read the exact graph-ir JSON in ${A.graph}. Return EVERY node's id, prompt, isolation, mutates, probe and foreach fields unchanged, plus argDefaults and lists. Do not execute commands or omit non-isolated nodes; this is a mechanical probe plan, not an audit.`,
+  probeIR = await agent(repositoryContext() + '\n\n' + `Read the exact graph-ir JSON in ${A.graph}. Return EVERY node's id, prompt when present, isolation, mutates, probe and foreach fields unchanged, plus reduce when present, argDefaults and lists. Do not execute commands or omit non-isolated nodes; this is a mechanical probe plan, not an audit.`,
     { label: 'probe-plan', phase: 'Probe', schema: PROBE_PLAN, effort: 'low' })
 }
-if (!probeIR || !Array.isArray(probeIR.nodes) || !probeIR.nodes.every(n => n && typeof n.id === 'string' && n.id.trim() && typeof n.prompt === 'string'
+if (!probeIR || !Array.isArray(probeIR.nodes) || !probeIR.nodes.every(n => n && typeof n.id === 'string' && n.id.trim() && (!needsProbe(n) || typeof n.prompt === 'string')
       && (n.isolation === undefined || [true, false, 'worktree', 'measure'].includes(n.isolation))
       && (n.mutates === undefined || typeof n.mutates === 'boolean'))
     || new Set(probeIR.nodes.map(n => n.id)).size !== probeIR.nodes.length
@@ -950,22 +987,22 @@ if (!probeIR || !Array.isArray(probeIR.nodes) || !probeIR.nodes.every(n => n && 
   DEAD_PROBES.push('plan')
   probeIR = { nodes: [], argDefaults: {} }
 }
-const PROBES = probeIR.nodes.filter(n => n.isolation !== 'measure' &&
-  (n.isolation === true || n.isolation === 'worktree' || n.mutates === true))
+const PROBES = probeIR.nodes.filter(needsProbe)
 const probeArgs = { ...(probeIR.argDefaults || {}), ...(A.bindings || {}) }
 const COVERAGE = new Map(PROBES.map(n => [n.id, probeCoverage(n, probeArgs)]))
 function probePrompt(n) {
   const prompt = resolveBindings(n.prompt, probeArgs)
   const coverage = COVERAGE.get(n.id)
   return [
+    repositoryContext(),
     `Probe isolated node ${n.id} from ${A.graph}. Read its actual prompt in that file and ${A.pluginRoot}/agents/graph-auditor.md. Compare it with the resolved prompt below; a stale or mismatched plan is incomplete coverage. This agent has isolation: worktree, matching the node's runtime boundary.`,
-    'Run each command the prompt prescribes ONLY in a non-mutating safe read form. Preserve its shell shape: the same git -C target, cd target, $(...) substitution, &&, ; and | chaining. Replace mutating subcommands such as fetch, worktree add, checkout or writes with safe reads such as status, rev-parse HEAD or a genuinely non-mutating --dry-run. Never fetch, change refs, add worktrees, deploy, delete, write shared files or execute an unreviewed program. If a safe equivalent cannot preserve the shape, mark it UNRESOLVED and incomplete; do not execute the mutation.',
+    'Run each command the prompt prescribes ONLY in a non-mutating safe read form. Preserve its shell shape: the same git -C target, cd target, $(...) substitution, &&, ; and | chaining. Replace mutating subcommands such as fetch, worktree add, checkout or writes with safe reads such as the deterministic status forms in DECLARED FORMS. Never fetch, change refs, add worktrees, deploy, delete, write shared files or execute an unreviewed program. If a safe equivalent cannot preserve the shape, mark it UNRESOLVED and incomplete; do not execute the mutation.',
     'Record original command, safe command actually sent to the tool, ACCEPTED / REFUSED / UNRESOLVED, and the exact runtime hook response or measured output. An ordinary Git syntax error, a failed prerequisite or an earlier && short-circuit is UNRESOLVED, not evidence that the runtime accepted the unexecuted shape. Resolve foreach item operands from the graph lists. Missing tools or unresolved command operands leave coverage incomplete; data-only context placeholders do not require executing future nodes. If no command is prescribed, return commands:[] and a concrete noCommandsReason.',
     'For every hook refusal, return a finding with the command and hook text as evidence, a concrete failurePath, severity, title, rewire, defectClass and classRewire. Empty findings do not discharge incomplete command coverage. Return completed only after every prescribed safe command shape was reached. These results certify prescribed commands only: agents may later invent compound commands outside this probe.',
     'Return exactly one command receipt for each PRESCRIBED COMMANDS entry, copying original verbatim. Preserve all compound operators, command substitutions and global Git operands in safe. Unsupported syntax or programs cannot receive complete coverage. If the inventory misses a prescribed command, report a blocker rather than claiming completion.',
-    "DECLARED FORMS maps a prescribed command to the node's reviewed probe declaration in the IR. Send exactly its run text as safe, and nothing else for that command: read-only runs the exact command; shape runs a --help form that proves the isolation hook admits that executable, cwd and argv prefix without running the command's effect. Never put a value of your own in place of a <placeholder>. An illustrative template in the prompt is covered by its declared instances, which PRESCRIBED COMMANDS already lists.",
+    "DECLARED FORMS maps a prescribed command to the node's reviewed probe declaration in the IR. Send exactly its run text as safe, and nothing else for that command: read-only runs the exact command; shape runs a reviewed --help prefix or a generated same-frame git read. A typed future git operand may also use a declared same-frame git read. These forms probe the isolation boundary without running the original effect. Never put a value of your own in place of a <placeholder>. An illustrative template in the prompt is covered by its declared instances, which PRESCRIBED COMMANDS already lists.",
     'PRESCRIBED COMMANDS:\n' + JSON.stringify(coverage.required),
-    'DECLARED FORMS:\n' + JSON.stringify(Object.fromEntries(coverage.declared)),
+    'DECLARED FORMS:\n' + JSON.stringify(Object.fromEntries(coverage.forms)),
     'RESOLVED PROMPT:\n' + prompt,
     'ARGUMENT BINDINGS:\n' + JSON.stringify(probeArgs),
     'NODE AND LISTS:\n' + JSON.stringify({ node: n, lists: probeIR.lists || {} }),

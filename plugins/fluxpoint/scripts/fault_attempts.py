@@ -1,6 +1,5 @@
 """One consumed crash, one sequential native/reference pair, retained provenance."""
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -8,7 +7,6 @@ import re
 import shlex
 import subprocess
 import sys
-import tarfile
 import tempfile
 
 import background as bg
@@ -16,7 +14,7 @@ import fault_policy
 
 DIRECTORY = os.path.join('.claude', 'fluxpoint', 'attest-bg')
 RUNNER_FIELDS = ('gate', 'exit', 'nonce', 'headSha', 'treeSha', 'manifestSha256', 'logSha256',
-                 'attempt', 'dirty', 'tree', 'host', 'commandSha', 'referenceImage', 'pinsSha256',
+                 'attempt', 'dirty', 'dirtyPaths', 'treeOid', 'tree', 'host', 'commandSha', 'referenceImage', 'pinsSha256',
                  'deployedLaneSha256', 'dependencies', 'resolutionChecked', 'cancelled')
 
 
@@ -156,20 +154,29 @@ def reference_resolution(log, hashes):
 
 
 def _snapshot(tree, commit, target):
-    result = subprocess.run(['git', '-C', tree, 'archive', commit], capture_output=True, check=True)
-    with tarfile.open(fileobj=io.BytesIO(result.stdout)) as package:
-        for member in package.getmembers():
-            path = Path(member.name)
-            if path.is_absolute() or '..' in path.parts or member.isdev():
-                raise ValueError('unsafe archive member')
-            if member.issym() or member.islnk():
-                link = Path(member.linkname)
-                if link.is_absolute() or '..' in link.parts:
-                    raise ValueError('escaping archive link')
-        package.extractall(target)
-    prefix = subprocess.run(['git', '-C', tree, 'rev-parse', '--show-prefix'], text=True,
-                            capture_output=True, check=True).stdout.strip()
-    return os.path.join(target, prefix)
+    """A full independent Git checkout; export attributes cannot alter bytes."""
+    source = subprocess.run(['git', '-C', tree, 'rev-parse', '--show-toplevel'],
+                            text=True, capture_output=True, check=True).stdout.strip()
+    entries = subprocess.run(['git', '-C', source, 'ls-tree', '-rz', commit],
+                             capture_output=True, check=True).stdout.split(b'\0')
+    for entry in entries:
+        if not entry:
+            continue
+        facts, name = entry.split(b'\t', 1)
+        mode, kind, oid = facts.decode('ascii').split()
+        if mode == '160000':
+            raise ValueError('reference snapshot cannot silently omit a submodule')
+        if mode == '120000':
+            link = subprocess.run(['git', '-C', source, 'cat-file', 'blob', oid],
+                                  capture_output=True, check=True).stdout.decode('utf-8')
+            if (link.startswith(('/', '\\')) or re.match(r'^[A-Za-z]:', link)
+                    or '..' in link.replace('\\', '/').split('/')):
+                raise ValueError('escaping reference snapshot link')
+    subprocess.run(['git', 'clone', '--no-local', '--no-checkout', '--', source, target],
+                   capture_output=True, check=True)
+    subprocess.run(['git', '-C', target, 'checkout', '--detach', '--force', commit],
+                   capture_output=True, check=True)
+    return target
 
 
 def verify_pair(at, root, rows, pair, launch, gates=None):
@@ -190,7 +197,7 @@ def verify_pair(at, root, rows, pair, launch, gates=None):
         raise ValueError('fault pair payload differs from its retained wrapper log')
     logs = [witnessed(at, root, row) for row in (original, native, reference)]
     for row in (original, native, reference):
-        if (any(row.get(key) != pair.get(key) for key in ('gate', 'headSha', 'treeSha', 'nonce', 'manifestSha256'))
+        if (any(row.get(key) != pair.get(key) for key in ('gate', 'treeSha', 'treeOid', 'nonce', 'manifestSha256'))
                 or row.get('manifestSha256') != launch.get('manifestSha256')
                 or row.get('commandSha') != at.sha(gates[pair['gate']])
                 or str(row.get('started') or '') < str(launch.get('since') or '')):
@@ -232,30 +239,50 @@ def verify_pair(at, root, rows, pair, launch, gates=None):
     return ids
 
 
-def retained_red_mismatches(at, root, rows, cited, launch):
-    """Check retained execution scope before selecting mutable log rows.
+def _content(at, root, row):
+    oid = row.get('treeOid')
+    if isinstance(oid, str) and re.fullmatch(r'[0-9a-f]{40}', oid):
+        return oid
+    commit = row.get('treeSha') or row.get('headSha')
+    return at.content_oid(root, commit) if commit else ''
 
-    A wrapper completion is a second retained view of a known execution.
-    Removing its row or editing gate/tree/nonce/time must not erase a red.
-    This does not make two locally writable files a cryptographic boundary.
-    """
+
+def _same_content(at, root, row, cited):
+    left, right = _content(at, root, row), _content(at, root, cited)
+    if left and right:
+        return left == right and bool(row.get('dirty')) == bool(cited.get('dirty'))
+    # Legacy or unavailable source objects cannot justify excluding a retained
+    # failure. A new clean execution records its content identity explicitly.
+    return True
+
+
+def _in_scope(at, root, row, cited, launch):
+    return (row.get('gate') == cited.get('gate')
+            and (row.get('nonce') or '') in ('', launch.get('nonce'))
+            and str(row.get('started') or row.get('when') or '') >= str(launch.get('since') or '')
+            and _same_content(at, root, row, cited))
+
+
+def retained_red_mismatches(at, root, rows, cited, launch):
+    """Known unfinished/error executions and altered completed reds stay visible."""
     store = bg.Store(root, DIRECTORY)
-    tree = cited.get('treeSha') or cited.get('headSha')
     problems = []
     for path in sorted(Path(store.directory).glob('*.json')):
         rec = store.read(path.stem)
-        if (not rec or rec.get('status') not in ('DONE', 'CANCELLED') or
-                not rec.get('attestId') or type(rec.get('exit')) is not int or rec['exit'] == 0 or
-                rec.get('gate') != cited.get('gate') or rec.get('nonce') != launch.get('nonce') or
-                not at._same_commit(rec.get('treeSha') or rec.get('headSha'), tree) or
-                str(rec.get('started') or '') < str(launch.get('since') or '')):
+        if not rec or not _in_scope(at, root, rec, cited, launch):
             continue
-        hits = [r for r in rows if r.get('attestId') == rec['attestId']]
-        if (len(hits) != 1 or hits[0].get('witness') != 'wrapper' or
-                hits[0].get('token') != rec['token'] or
-                hits[0].get('started') != rec.get('started') or
-                bool(hits[0].get('cancelRequested')) != bool(rec.get('cancelRequested')) or
-                any(hits[0].get(k) != rec.get(k) for k in RUNNER_FIELDS)):
+        if rec.get('status') in ('RUNNING', 'ERROR'):
+            problems.append(str(rec.get('token') or path.stem) + ' (unfinished or failed runner; no authenticated verdict)')
+            continue
+        if (rec.get('status') not in ('DONE', 'CANCELLED') or not rec.get('attestId')
+                or type(rec.get('exit')) is not int or rec['exit'] == 0):
+            continue
+        hits = [row for row in rows if row.get('attestId') == rec['attestId']]
+        if (len(hits) != 1 or hits[0].get('witness') != 'wrapper'
+                or hits[0].get('token') != rec['token']
+                or hits[0].get('started') != rec.get('started')
+                or bool(hits[0].get('cancelRequested')) != bool(rec.get('cancelRequested'))
+                or any(hits[0].get(key) != rec.get(key) for key in RUNNER_FIELDS)):
             problems.append(str(rec['attestId']) + ' (retained red history missing or altered)')
     return problems
 
@@ -263,10 +290,8 @@ def retained_red_mismatches(at, root, rows, cited, launch):
 def unclosed_reds(at, root, rows, cited, launch, fresh_forge_green=False):
     """A later pass never erases a red attempt in the same run and tree."""
     retained_issues = retained_red_mismatches(at, root, rows, cited, launch)
-    tree = cited.get('treeSha') or cited.get('headSha')
-    reds = [row for row in rows if row.get('gate') == cited.get('gate') and at._same_commit(row.get('treeSha') or row.get('headSha'), tree)
-            and row.get('nonce') == launch.get('nonce') and type(row.get('exit')) is int and row['exit'] != 0
-            and str(row.get('started') or row.get('when') or '') >= str(launch.get('since') or '')]
+    reds = [row for row in rows if _in_scope(at, root, row, cited, launch)
+            and type(row.get('exit')) is int and row['exit'] != 0]
     if fresh_forge_green:
         kept = []
         for row in reds:
@@ -277,7 +302,7 @@ def unclosed_reds(at, root, rows, cited, launch, fresh_forge_green=False):
         reds = kept
     closed, receipts = set(), set()
     for pair in rows:
-        if pair.get('gate') == cited.get('gate') and at._same_commit(pair.get('treeSha'), tree) and pair.get('nonce') == launch.get('nonce') and pair.get('faultPair'):
+        if _in_scope(at, root, pair, cited, launch) and pair.get('faultPair'):
             try:
                 ids = verify_pair(at, root, rows, pair, launch)
                 closed.add(pair['faultPair']['original'])
@@ -358,7 +383,7 @@ def rerun(at, root, original_id, nonce, detach=False, token=None, tree=None):
                 with tempfile.TemporaryDirectory(prefix='fluxpoint-reference-') as scratch:
                     snapshot = _snapshot(tree, original['treeSha'], scratch)
                     at._execute(root, original['gate'], at.now(), leg_token, nonce, snapshot,
-                                control_token=token, attempt=attempt, reference={'treeSha': original['treeSha']})
+                                control_token=token, attempt=attempt, reference={'treeSha': original['treeSha'], 'projectPrefix': at._git(tree, 'rev-parse', '--show-prefix')})
             else:
                 at._execute(root, original['gate'], at.now(), leg_token, nonce, tree,
                             control_token=token, attempt=attempt)
@@ -379,6 +404,7 @@ def rerun(at, root, original_id, nonce, detach=False, token=None, tree=None):
         pair = {'attestId': 'att_' + at.sha(token)[:20], 'token': token, 'witness': 'wrapper',
                 'gate': original['gate'], 'command': original['command'], 'commandSha': original['commandSha'],
                 'exit': code, 'headSha': original['headSha'], 'treeSha': original['treeSha'], 'nonce': nonce,
+                'treeOid': original.get('treeOid'),
                 'dirty': False,
                 'cancelled': False, 'cancelRequested': False,
                 'manifestSha256': launch['manifestSha256'], 'started': started, 'when': at.now(),

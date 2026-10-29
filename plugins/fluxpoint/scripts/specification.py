@@ -369,6 +369,24 @@ def project(root, edits, spec=None, graph=None):
             if packet_paths(root, headers(projected).get('SPEC'))[0].resolve() != packet_file.resolve():
                 raise ValueError(f'packetEdits cannot redirect graph {rel} to a different SPEC packet')
             allowed.add(rel)
+    # Contract overlays are part of the same reviewable graph proposal. Allow
+    # only schemas under an explicitly named, repository-contained overlay.
+    graphs = [root / rel for rel in allowed if rel.endswith('.md')]
+    overlays = set()
+    for path in graphs:
+        for contents in (file_snapshot(root, path), file_snapshot(root, path, snapshots)):
+            if not re.search(r'^```json[ \t]+graph-ir[ \t]*$', contents.decode('utf-8'), re.M):
+                continue
+            declaration = headers(contents.decode('utf-8')).get('CONTRACTS')
+            if declaration:
+                directory = (root / in_repo(declaration, 'CONTRACTS:')).resolve()
+                if not directory.is_relative_to(root):
+                    raise ValueError('CONTRACTS: overlay must stay inside the repository')
+                overlays.add(directory)
+    for rel in set(snapshots) - allowed:
+        path = (root / rel).resolve()
+        if path.name.endswith('.schema.json') and any(path.parent == directory for directory in overlays):
+            allowed.add(rel)
     if set(snapshots) - allowed:
         raise ValueError('packetEdits target files outside this packet, its references and graph: '
                          + ', '.join(sorted(set(snapshots) - allowed)))
@@ -391,8 +409,9 @@ def freeze_harness(root, doc, lock_file, references=None):
         previous = set(old.get('harness', {}))
         if references is not None:
             previous.update(set(old.get('references', {})) - set(references))
-    inputs = packet_inputs.Inputs(root, doc)
-    inputs.include_locked(previous)
+    inputs = packet_inputs.Inputs(root, doc, frozen=previous)
+    for warning in sorted(inputs.warnings):
+        print('specification: warning: ' + warning, file=sys.stderr)
     return inputs.hashes()
 
 
@@ -402,9 +421,8 @@ def input_report(root, doc, identity, spec=None, closure=False):
     packet, lock_file = packet_paths(root, spec)
     lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
     validate_lock_maps(lock)
-    inputs = packet_inputs.Inputs(root, doc, closure, allow_missing=True)
+    inputs = packet_inputs.Inputs(root, doc, closure, allow_missing=True, frozen=lock.get('harness', {}))
     checks = [check['id'] for check in doc['checks']]
-    inputs.include_locked(lock.get('harness', {}))
     for path, kind in ((packet, 'packet'), (lock_file, 'lock'),
                        (root / BASELINE, 'baseline'), (root / '.fluxpoint-gates.json', 'gates')):
         for cid in checks:
@@ -428,10 +446,18 @@ def planned_touches(inputs, report, paths):
         rel = inputs.rel(inputs.path(query))
         held = [row for row in report['inputs']
                 if rel == '.' or row['path'] == rel or row['path'].startswith(rel.rstrip('/') + '/')]
+        ambient = (Path(rel).name in ('conftest.py', '__init__.py', 'pytest.ini', 'tox.ini',
+                                      'setup.cfg', 'pyproject.toml', 'package.json')
+                   or any(Path(rel).name == prefix + suffix for prefix in ('vite.config', 'vitest.config')
+                          for suffix in packet_inputs.JS_SUFFIXES))
+        if ambient:
+            parent = Path(rel).parent
+            held += [row for row in report['inputs'] if Path(row['path']).is_relative_to(parent)
+                     and row not in held]
         if held:
             conflicts.append({'path': rel, 'inputs': held,
                               'checks': sorted({cid for row in held for cid in row['checks']})})
-    return {'touches': paths, 'conflicts': conflicts,
+    return {'touches': paths, 'conflicts': conflicts, 'warnings': report.get('warnings', []),
             'scope': 'Declared paths only, not edit permission or evidence; live Stop and run recording still check drift.'}
 
 
@@ -443,8 +469,7 @@ def harness_record(root, spec=None):
     if not isinstance(expected, dict):
         raise ValueError('lock harness must be a map of paths to SHA-256 digests')
     doc = json.loads(packet_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
-    inputs = packet_inputs.Inputs(root, doc, allow_missing=True)
-    inputs.include_locked(expected)
+    inputs = packet_inputs.Inputs(root, doc, allow_missing=True, frozen=expected)
     current = inputs.hashes()
     for rel in expected:
         in_repo(rel, 'locked harness input')
@@ -459,7 +484,17 @@ def harness_record(root, spec=None):
     return {'sha256': fingerprint, 'files': current, 'changedPaths': changed}
 
 
+def strict_harness(root, spec=None):
+    """Refuse drift in the exact checkout/snapshot where a gate runs."""
+    changed = harness_record(root, spec)['changedPaths']
+    if changed:
+        raise ValueError('locked harness inputs changed: ' + ', '.join(changed)
+                         + '; review and authorize a --lock-harness ruling before verification')
+
+
 def validate_lock_maps(lock):
+    if 'lockFormat' in lock and (type(lock['lockFormat']) is not int or lock['lockFormat'] != 2):
+        raise ValueError('unsupported specification lock format')
     for key in ('references', 'harness'):
         values = lock.get(key, {})
         if (not isinstance(values, dict)
@@ -579,13 +614,22 @@ def declared_packets(root):
     """
     root = Path(root)
     specs = [None]
+    seen = {packet_paths(root)[0].resolve()}
     for f in [root / 'WORK.md', root / 'LOOP.md'] + sorted(root.glob('GRAPH.*.md')):
         try:
             s = graph_headers(f).get('SPEC')
         except (OSError, ValueError):
             continue
-        if s and s not in specs:
-            specs.append(s)
+        if s:
+            try:
+                packet = packet_paths(root, s)[0].resolve()
+            except ValueError:
+                if s not in specs:
+                    specs.append(s)  # Callers handle malformed declarations per packet.
+                continue
+            if packet not in seen:
+                specs.append(s)
+                seen.add(packet)
     return specs
 
 
@@ -608,7 +652,7 @@ def required(root):
                                            work.read_text(encoding='utf-8'), re.M)))
 
 
-def load(root, locked=True, spec=None, snapshots=None):
+def load(root, locked=True, spec=None, snapshots=None, allow_missing_inputs=False):
     root = Path(root)
     packet_file, lock_file = packet_paths(root, spec)
     if locked and snapshots is not None:
@@ -623,7 +667,7 @@ def load(root, locked=True, spec=None, snapshots=None):
         if references:
             identity['references'] = references
         # Validate explicit dependencies even before a harness is frozen.
-        harness_inputs(root, doc, allow_missing=locked, closure=False)
+        harness_inputs(root, doc, allow_missing=locked or allow_missing_inputs, closure=False)
         ids = {oid for check in doc['checks'] for oid in check.get('obligations', [])}
         if ids:
             module = importlib.util.spec_from_file_location('spec_guard', Path(__file__).with_name('spec-guard.py'))
@@ -638,14 +682,43 @@ def load(root, locked=True, spec=None, snapshots=None):
         if not isinstance(lock, dict):
             raise ValueError('spec lock must be an object')
         validate_lock_maps(lock)
-        for rel in sorted(set(lock.get('references', {})) | set(identity.get('references', {}))):
-            if lock.get('references', {}).get(rel) != identity.get('references', {}).get(rel):
-                errors.append(f'a file the packet points into changed since lock: {rel}')
-        if {k: v for k, v in lock.items() if k != 'harness'} != identity:
+        if identity.get('references') and 'references' not in lock:
+            errors.append('lock has no references map (written before 1.44.0); review '
+                          + ', '.join(sorted(identity['references'])) + ' and re-lock')
+        else:
+            for rel in sorted(set(lock.get('references', {})) | set(identity.get('references', {}))):
+                if lock.get('references', {}).get(rel) != identity.get('references', {}).get(rel):
+                    errors.append(f'a file the packet points into changed since lock: {rel}')
+        if {k: v for k, v in lock.items() if k not in ('harness', 'lockFormat')} != identity:
             errors.append('spec, obligation or proof baseline changed since lock; review the change and re-lock')
     if errors:
         raise ValueError('; '.join(errors))
     return doc, identity
+
+
+def recording_identity(root, claimed, spec=None):
+    """Verify a record's packet without inventing coverage absent from old locks.
+
+    Legacy acceptance requires exact packet, baseline and obligation identities.
+    Reference bytes were never bound by that format; retain that limitation in
+    both the artifact and Evidence instead of claiming a modern identity.
+    """
+    _, current = load(root, locked=False, spec=spec, allow_missing_inputs=True)
+    _, lock_file = packet_paths(root, spec)
+    lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
+    if not isinstance(lock, dict): raise ValueError('spec lock must be an object')
+    validate_lock_maps(lock)
+    locked_identity = {k: v for k, v in lock.items() if k not in ('harness', 'lockFormat')}
+    old_current = {k: v for k, v in current.items() if k != 'references'}
+    legacy_lock = 'references' not in lock and bool(current.get('references')) and locked_identity == old_current
+    if locked_identity != current and not legacy_lock:
+        raise ValueError('spec, obligation, reference or proof baseline changed since lock; review and re-lock')
+    if claimed == current and not legacy_lock:
+        return current, {'references': 'bound', 'lockFormat': lock.get('lockFormat', 1)}
+    if current.get('references') and isinstance(claimed, dict) and 'references' not in claimed and claimed == old_current:
+        return current, {'references': 'uncovered-legacy', 'paths': sorted(current['references']),
+                         'lockFormat': lock.get('lockFormat', 1)}
+    raise ValueError('run specification differs from the locked packet')
 
 
 def run_checks(root, doc, stack):
@@ -737,7 +810,10 @@ def main():
     parser.add_argument('--spec', help='packet path relative to --root (default ' + SPEC + ')')
     parser.add_argument('--graph', help="a graph file whose SPEC: header names the packet")
     parser.add_argument('--gate', help='declared gate whose attested pass permits --lock-harness')
+    parser.add_argument('--check-identity', help='expected SHA-256 of the canonical compiled identity (with --check)')
+    parser.add_argument('--plugin-pin', help='expected compiler installation identity as JSON')
     parser.add_argument('--closure', action='store_true', help='include computed test-support closure in --inputs')
+    parser.add_argument('--strict-harness', action='store_true', help='refuse locked harness drift at this root before and after checks')
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--lock', action='store_true')
     action.add_argument('--lock-harness', action='store_true')
@@ -749,6 +825,14 @@ def main():
     args = parser.parse_args()
     root = Path(args.root).resolve()
     try:
+        if args.plugin_pin:
+            import plugin_identity
+            expected_plugin = json.loads(args.plugin_pin)
+            plugin_identity.verify(expected_plugin)
+            if expected_plugin != plugin_identity.current():
+                raise ValueError('PLUGIN-PIN: specification helper differs from the compiled installation')
+        if args.check_identity and (not args.check or not re.fullmatch(r'[0-9a-f]{64}', args.check_identity)):
+            raise ValueError('--check-identity requires --check and a SHA-256 hex digest')
         spec = args.spec
         if not spec and not args.graph and args.run:
             # Without --spec or --graph the runner reads the state file's own
@@ -772,8 +856,14 @@ def main():
         if args.if_present and not spec and not required(root):
             print('specification: legacy loop without a spec; no requirements checked')
             return 0
+        if args.strict_harness and not (args.check or args.run):
+            raise ValueError('--strict-harness is only for --check or --run')
         packet_file, lock_path = packet_paths(root, spec)
         doc, identity = load(root, locked=not args.lock, spec=spec)
+        if args.check_identity:
+            actual = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            if actual != args.check_identity:
+                raise ValueError('packet differs from the exact compiled identity; review and recompile before continuing')
         name = packet_file.relative_to(root).as_posix()
         if args.gate and not args.lock_harness:
             raise ValueError('--gate is only for --lock-harness')
@@ -794,9 +884,11 @@ def main():
         if args.lock:
             frozen = freeze_harness(root, doc, lock_path, identity.get('references', {}))
             with lock_path.open('w', encoding='utf-8', newline='\n') as lock_file:
-                lock_file.write(json.dumps(dict(identity, harness=frozen), indent=2) + '\n')
+                lock_file.write(json.dumps(dict(identity, harness=frozen, lockFormat=2), indent=2) + '\n')
             print(f"specification: locked {name} {identity['sha256']}; checks have not run")
             return 0
+        if args.strict_harness:
+            strict_harness(root, spec)
         print(f"specification: validated {name} {identity['sha256']}", flush=True)
         for check in doc['checks']:
             scope = check['scope']
@@ -809,6 +901,8 @@ def main():
                 raise ValueError('recursive specification check or invalid check stack')
             result = run_checks(root, doc, stack + [str(root)])
             _, after = load(root, spec=spec)
+            if args.strict_harness:
+                strict_harness(root, spec)
             if after != identity:
                 raise ValueError('spec, obligation or proof baseline changed during checks')
             return result

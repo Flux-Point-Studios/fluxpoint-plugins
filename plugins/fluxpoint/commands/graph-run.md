@@ -54,10 +54,12 @@ Workflow tool requires.
      names (default `.fluxpoint-spec.json` at the repository root), and a
      `CONTRACTS:` header overlays a repo-local contract directory on the
      shipped contracts; the `--check` line names both, so confirm they are
-     the ones this campaign was written against. The compiler embeds the
-     packet in node context. Verify the packet covers this goal, its check commands are
+     the ones this campaign was written against. The compiler uses the graph's `specificationContext`: shipped templates pass a
+     compact packet reference and exact identity, while older graphs inline it.
+     Reference-mode nodes first run the emitted `--check-identity` command, then
+     read their applicable requirements and binding scopes from the verified file. Verify the packet covers this goal, its check commands are
      wired into the repo harness, and it and its lock are committed for
-     isolated nodes. On Codex's fallback, pass the embedded packet to each
+     isolated nodes. On Codex's fallback, pass the same packet context and first-command instruction to each
      node and preserve its identity in the summary; recording rejects a
      stale or omitted identity. Do not re-lock a changed spec to repair a
      failing implementation; review the requirement change first.
@@ -76,6 +78,10 @@ Workflow tool requires.
    recompile, or the spec and the executor start lying to each other.
    Repeat preflight on the exact file before invoking Workflow:
    `bash "$ROOT/scripts/py.sh" compile-graph.py <graph> --check --check-script .claude/workflows/<name>.graph.js`.
+   The exact-script check also verifies the embedded plugin root, version and
+   witness/helper hashes. A missing installation, changed code or missing pin
+   stops launch. Keep the compiling installation unchanged for the campaign;
+   node prompts name its absolute pinned launcher.
    Both checks enforce the Workflow limit of 524,288 UTF-8 bytes and print
    headroom; below 16 KiB is a warning. `--max-script-bytes` overrides the
    limit only when the selected launcher supports the new limit.
@@ -95,7 +101,9 @@ Workflow tool requires.
    `references/structured-resume.md` for evidence pins and exact argument carry.
 4. Load whatever state the graph refuses to start without.
    `resume.py` supplies these readings and a fresh 32-byte
-   `_replayLaunchNonce` automatically. Treat `_memo`, `_prefix`,
+   `_replayLaunchNonce` automatically. The verified `_memo` and `_prefix`
+   are embedded into the compiled source, and are never copied into the
+   Workflow arguments. Treat
    `_resumeFromRunId` and `_replayLaunchNonce` as script-produced provenance;
    never manufacture a memo from model-written arguments or old verdict text.
    Record the launch reading, fresh at every launch including a resume:

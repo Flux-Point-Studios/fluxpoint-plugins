@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "sha256": "ba90fcb4fdf159724a15ef461f715950ff96e5e75cd27d7556074922480fe77a",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/packet-inputs-test.py": "9f8829c21a1021ac33fa1495a214f3ee30442a72ba8d404460bd561031a9a8fb"
+  },
+  "lockFormat": 2
+}

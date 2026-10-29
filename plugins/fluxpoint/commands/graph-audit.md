@@ -65,12 +65,15 @@ is for a graph run.
    Code) with
    ```
    {scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/graph-audit.js",
-    args: {graph: "<graph>", pluginRoot: "${CLAUDE_PLUGIN_ROOT}",
+    args: {graph: "<graph>", root: "<absolute repository root under audit>", pluginRoot: "${CLAUDE_PLUGIN_ROOT}",
            ir: <the exact parsed graph-ir JSON>, bindings: <actual campaign args, if known>,
            check: "<the --check summary line>", settled: ["<title>", ...],
            history: [<recorded rounds from step 3>]}}
    ```
-   with args as a real JSON object. Before Lenses, a `Probe` phase runs one
+   with args as a real JSON object. `root` is optional for older callers; supply
+   it when the audited tree differs from the session cwd. Every seat receives
+   this root for relative evidence paths, and results retain it. Refuters also
+   receive the structural check summary. Before Lenses, a `Probe` phase runs one
    agent with `isolation: 'worktree'` per node declaring `isolation: true`,
    `isolation: 'worktree'`, or `mutates: true`. A `measure` node uses its
    frozen snapshot and does not get this runtime-worktree probe. Without
@@ -83,7 +86,9 @@ is for a graph run.
    Each probe reads the actual node prompt and tries its prescribed commands
    only in safe, non-mutating read forms. Preserve the `git -C` target,
    `cd` target, `$(...)`, and `&&`, `;`, `|` chaining while replacing mutating
-   subcommands with reads. These shapes can be refused by the runtime's
+   subcommands with reads. The workflow supplies deterministic `git status`
+   forms for git writes, retaining their global options and compound operators.
+   These shapes can be refused by the runtime's
    isolation hook even when they work in the launch checkout. Never run
    fetches, ref changes, worktree creation, shared writes or deployments in
    the name of probing. If a safe equivalent cannot retain the shape, report
@@ -148,7 +153,11 @@ is for a graph run.
      probe runs the form with that type's fixed dummy, never a value of its
      own. A read-only command cannot carry either. `{{A.x}}` is a launch
      binding: it resolves from `argDefaults` and `bindings` and is never
-     typed as data.
+     typed as data. A fully typed git command may use a same-frame git read
+     as its shape form, for example `git switch --detach {{prev.sha}}` with
+     `data: {"prev.sha": "sha"}` and `form: "git status"`. This also covers
+     a future commit in a read such as `git merge-base --is-ancestor
+     {{prev.sha}} HEAD`; the probe does not require that commit to exist.
    - A `template` is an illustrative command from the prompt, with `<name>`
      or `...` placeholders. Its `instances` are the concrete commands the
      node runs; each must match the template and is receipted like any

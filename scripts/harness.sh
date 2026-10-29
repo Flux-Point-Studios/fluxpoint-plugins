@@ -237,11 +237,15 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
         step "substrate suites" substrate_tests ;;
     esac
     case "$f" in
-      "$PLUGIN"/scripts/recall.py | "$PLUGIN"/scripts/embedder.py)
+      "$PLUGIN"/scripts/recall.py | "$PLUGIN"/scripts/recall_sources.py | "$PLUGIN"/scripts/embedder.py)
         step "hybrid recall pipeline" "$FPL_PY" "$PLUGIN/tests/recall-test.py"
+        step "recall source maintenance" "$FPL_PY" "$PLUGIN/tests/recall-maintenance-test.py"
         step "embedder quarantine" "$FPL_PY" "$PLUGIN/tests/embedder-test.py" ;;
       "$PLUGIN"/scripts/inject-state.sh | "$PLUGIN"/scripts/prompt-recall.sh)
-        step "hybrid recall pipeline" "$FPL_PY" "$PLUGIN/tests/recall-test.py" ;;
+        step "hybrid recall pipeline" "$FPL_PY" "$PLUGIN/tests/recall-test.py"
+        step "warm prompt recall" "$FPL_PY" "$PLUGIN/tests/prompt-recall-daemon-test.py" ;;
+      "$PLUGIN"/scripts/prompt-recall-daemon.py | "$PLUGIN"/scripts/prompt-recall-client.mjs)
+        step "warm prompt recall" "$FPL_PY" "$PLUGIN/tests/prompt-recall-daemon-test.py" ;;
       "$PLUGIN"/scripts/memory.py | "$PLUGIN"/scripts/recurrence-guard.py)
         step "recurrence gate" "$FPL_PY" "$PLUGIN/tests/recurrence-test.py"
         step "lessons across runs" "$FPL_PY" "$PLUGIN/tests/memory-test.py" ;;
@@ -289,6 +293,8 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     step "compiler invariants" "$FPL_PY" "$PLUGIN/tests/compile-test.py"
     step "graph lanes, replay and rejudgment" "$FPL_PY" "$PLUGIN/tests/graph-replay-test.py"
     step "journal and transcript replay provenance" "$FPL_PY" "$PLUGIN/tests/replay-memo-test.py"
+    step "compiler and execution cleanup regressions" "$FPL_PY" "$PLUGIN/tests/execution-cleanup-test.py"
+    step "attested harness state and content dirt" "$FPL_PY" "$PLUGIN/tests/harness-dirt-test.py"
     step "carried resume arguments and evidence pins" "$FPL_PY" "$PLUGIN/tests/resume-test.py"
     step "transitive packet inputs and repair preflight" "$FPL_PY" "$PLUGIN/tests/packet-inputs-test.py"
     step "recurring classes force reframe" "$FPL_PY" "$PLUGIN/tests/recurring-class-test.py"
@@ -318,6 +324,11 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     step "migration against pre-1.0 fixtures" bash "$PLUGIN/tests/migrate-test.sh"
     step "STATUS vocabulary" "$FPL_PY" "$PLUGIN/tests/status-vocab-test.py"
     step "proof-strength ratchet" bash "$PLUGIN/tests/proof-guard-test.sh"
+    step "Python type escape hatches" "$FPL_PY" "$PLUGIN/tests/python-hatches-test.py"
+    step "Shared recall corpus indexes" "$FPL_PY" "$PLUGIN/tests/recall-shared-index-test.py"
+    step "Campaign schema and record upgrades" "$FPL_PY" "$PLUGIN/tests/campaign-upgrade-test.py"
+    step "Codex memory corpus scoping" "$FPL_PY" "$PLUGIN/tests/codex-memory-test.py"
+    step "Midnight attack taxonomy" "$FPL_PY" "$PLUGIN/tests/compact-taxonomy-test.py"
     step "statement ratchet" bash "$PLUGIN/tests/spec-guard-test.sh"
     step "counterexample ledger (executed)" bash "$PLUGIN/tests/cex-test.sh"
     step "mutation ratchet (executed)" bash "$PLUGIN/tests/mutation-test.sh"
@@ -332,7 +343,10 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     step "once-only ledger (executed)" "$FPL_PY" "$PLUGIN/tests/ledger-test.py"
     step "execution attestation (executed)" bash "$PLUGIN/tests/attest-test.sh"
     step "retained crash attempts and reference reruns" "$FPL_PY" "$PLUGIN/tests/fault-attempts-test.py"
+    step "forge coverage and provider launch regressions" "$FPL_PY" "$PLUGIN/tests/forge-coverage-test.py"
+    step "forge stored identities and deployed witness regressions" "$FPL_PY" "$PLUGIN/tests/forge-identity-test.py"
     step "forge witness identity and coverage" "$FPL_PY" "$PLUGIN/tests/forge-evidence-test.py"
+    step "content-bound red retention and interrupted fault executions" "$FPL_PY" "$PLUGIN/tests/fault-retention-test.py"
     step "forge and local gate race preserves red attempts" "$FPL_PY" "$PLUGIN/tests/forge-fault-race-test.py"
     step "shared long-command runner (executed)" "$FPL_PY" "$PLUGIN/tests/longrun-test.py"
     step "deployed dependency resolution" "$FPL_PY" "$PLUGIN/tests/deployed-test.py"
@@ -342,7 +356,14 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
       "$FPL_PY" "$PLUGIN/scripts/prompt-audit.py"
     step "lessons across runs (executed)" "$FPL_PY" "$PLUGIN/tests/memory-test.py"
     step "recurrence gate (executed)" "$FPL_PY" "$PLUGIN/tests/recurrence-test.py"
+    step "review suite evidence reuse (executed)" "$FPL_PY" "$PLUGIN/tests/review-gate-evidence-test.py"
+    step "packet reference context (executed)" "$FPL_PY" "$PLUGIN/tests/specification-reference-test.py"
+    step "compiled witness identity (executed)" "$FPL_PY" "$PLUGIN/tests/plugin-identity-test.py"
     step "hybrid recall pipeline (executed)" "$FPL_PY" "$PLUGIN/tests/recall-test.py"
+    step "warm prompt recall (executed)" "$FPL_PY" "$PLUGIN/tests/prompt-recall-daemon-test.py"
+    step "recall project/config isolation (executed)" "$FPL_PY" "$PLUGIN/tests/recall-isolation-test.py"
+    step "recall source maintenance (executed)" "$FPL_PY" "$PLUGIN/tests/recall-maintenance-test.py"
+    step "durable memory storage (executed)" "$FPL_PY" "$PLUGIN/tests/memory-storage-test.py"
     step "embedder quarantine (executed)" "$FPL_PY" "$PLUGIN/tests/embedder-test.py"
     step "graph metrics aggregator (executed)" "$FPL_PY" "$PLUGIN/tests/metrics-test.py"
     step "repair origin replay + resources + live tallies (executed)" "$FPL_PY" "$PLUGIN/tests/repair-origin-test.py"

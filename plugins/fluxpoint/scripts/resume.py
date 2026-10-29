@@ -49,14 +49,20 @@ def _json(path):
 
 
 def _run(command, root):
-    proc = subprocess.run(command, cwd=root, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, text=True, encoding="utf-8")
+    try:
+        proc = subprocess.run(command, cwd=root, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                              env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+    except UnicodeError as exc:
+        raise ValueError('RESUME-COMMAND-FAILED: child output is not UTF-8') from exc
+    if proc.stdout is None or proc.stderr is None:
+        raise ValueError('RESUME-COMMAND-FAILED: child output could not be decoded')
     if proc.returncode:
         raise ValueError("RESUME-COMMAND-FAILED: " + " ".join(str(x) for x in command) +
-                         "\n" + (proc.stderr or proc.stdout).strip())
-    if proc.stderr.strip():
+                         "\n" + (proc.stderr or proc.stdout or "no command diagnostics").strip())
+    if (proc.stderr or "").strip():
         print(proc.stderr.rstrip(), file=sys.stderr)
-    return proc.stdout
+    return proc.stdout or ""
 
 
 def fresh_base(root):
@@ -120,6 +126,11 @@ def assemble(args):
         ir = compiler.extract_ir(handle.read())
     resuming = args.run is not None
     prior, source_sha = _artifact(root, args.run) if resuming else (None, None)
+    if resuming and (prior.get("plugin") is not None or prior.get("prove") or prior.get("cites")):
+        import plugin_identity
+        pinned = plugin_identity.verify(prior.get("plugin"))
+        if pinned != plugin_identity.current():
+            raise ValueError("PLUGIN-PIN: resume helper differs from the compiled installation; run resume.py from " + pinned["root"])
     allowances = list(args.unpinned_ok)
     if resuming:
         carried = recover(root, prior)
@@ -142,17 +153,45 @@ def assemble(args):
                         if not key.startswith("_")}, **carried)
     before = canonical(carried)
     updates = _updates(args)
-    assembled = dict(carried, **updates)
+    unsets = set(getattr(args, 'unset', []) or [])
+    if any(not key or key.startswith('_') for key in unsets) or unsets & set(updates):
+        raise ValueError('RESUME-UNSET: use non-underscore keys not also named by --set')
+    defaults = ir.get('argDefaults') or {}
+    keeps = set(getattr(args, 'keep_default', []) or [])
+    if keeps - set(defaults):
+        raise ValueError('RESUME-KEEP-DEFAULT: no current default for ' + ', '.join(sorted(keeps - set(defaults))))
+    if unsets & set(defaults):
+        raise ValueError('RESUME-UNSET: remove the IR argDefault first: ' + ', '.join(sorted(unsets & set(defaults))))
+    tokens = set(compiler.SUBST.findall(json.dumps(ir)))
+    recognized = set(defaults) | {'rejudge'} | {t.split('.')[1].split('[')[0] for t in tokens if t.startswith('A.')}
+    if 'A' not in tokens:
+        for key in sorted(set(updates) - recognized):
+            print('resume: RESUME-UNUSED-SET: ' + key + ' is not read by any node or harness field', file=sys.stderr)
+    changed_defaults = []
+    if resuming:
+        old_defaults = prior.get('argDefaults')
+        for key, value in defaults.items():
+            changed = (key in old_defaults and canonical(old_defaults[key]) != canonical(value)) if isinstance(old_defaults, dict) else (key in carried and canonical(carried[key]) != canonical(value))
+            if changed and key not in updates and key not in keeps:
+                changed_defaults.append(key)
+        if changed_defaults:
+            raise ValueError('RESUME-DEFAULT-DRIFT: ' + ', '.join(sorted(changed_defaults)) + '; adopt with --set key=@file or retain with --keep-default key')
+    adopted = {key: value for key, value in defaults.items() if key not in carried and key not in updates}
+    for key in sorted(adopted):
+        print('resume: adopted new argDefault ' + key, file=sys.stderr)
+    assembled = {key: value for key, value in dict(carried, **adopted, **updates).items() if key not in unsets}
+    named_changes = set(updates) | set(adopted) | unsets
     assembled = prepare_pinned_inputs(root, assembled, allowances)
     if resuming:
         original = json.loads(before)
         for key in set(original) | set(assembled):
-            if key not in updates and (key not in original or key not in assembled or
+            if key not in named_changes and (key not in original or key not in assembled or
                     canonical(original[key]) != canonical(assembled[key])):
                 raise ValueError("RESUME-CARRIED-DRIFT: " + key + " changed without --set")
 
     # Read the base before writing local state. Never make a fresh launch stamp
     # for a resume: proofs and repair patch identity stay bound to the old one.
+    replay_state = {}
     launch_args = {"_base": fresh_base(root), "_replayLaunchNonce": secrets.token_hex(32)}
     requirements = compiler.launch_requirements(ir, embedded_args=assembled)["args"]
     needs_launch = any(item["name"] == "_launch" and item["required"] for item in requirements)
@@ -170,6 +209,8 @@ def assemble(args):
         if not isinstance(prior_results, dict):
             raise ValueError("RESUME-RESULTS-INVALID: recorded results must be an object")
         rejudge = assembled.get("rejudge")
+        if rejudge and 'memoRecords' not in prior:
+            raise ValueError('RESUME-LEGACY-REJUDGE: source has no replay call protocol; adding rejudge changes every runtime key. Start a fresh reviewed launch with replay enabled first.')
         if isinstance(rejudge, dict) and rejudge:
             launch_args["_priorResults"] = {key: prior_results[key] for key in rejudge if key in prior_results}
         memo = _module("replay_memo").build_memo(root, args.run, launch,
@@ -177,7 +218,7 @@ def assemble(args):
                       artifact_sha256=source_sha)
         if not isinstance(memo, dict) or set(memo) - {"_memo", "_prefix"}:
             raise ValueError("RESUME-MEMO: loader returned unsupported launch fields")
-        launch_args.update(memo)
+        replay_state = memo
     else:
         launch_args["_launch"] = _module("attest").stamp(root)
     for name, script in (("_ledger", "ledger"), ("_releases", "release")):
@@ -191,6 +232,9 @@ def assemble(args):
     staging_dir = Path(root) / ".claude/fluxpoint/launch-args"
     staging_dir.mkdir(parents=True, exist_ok=True)
     descriptor, staged = tempfile.mkstemp(prefix="args-", suffix=".json", dir=str(staging_dir))
+    state_descriptor, staged_state = tempfile.mkstemp(prefix="replay-", suffix=".json", dir=str(staging_dir))
+    with os.fdopen(state_descriptor, 'w', encoding='utf-8', newline='\n') as handle:
+        json.dump(replay_state, handle, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(canonical(assembled))
@@ -202,17 +246,31 @@ def assemble(args):
                 command += ["--projects", args.projects]
             plan = _run(command, root)
             print(plan.rstrip(), file=sys.stderr)
+            plan_record = {'sourceRunId': args.run, 'sourceArtifactSha256': source_sha,
+                           'argsSha256': hashlib.sha256(canonical(assembled).encode('utf-8')).hexdigest(), 'plan': plan}
+            plan_raw = (canonical(plan_record) + '\n').encode('utf-8')
+            plan_digest = hashlib.sha256(plan_raw).hexdigest()
+            plans = Path(root) / '.claude/fluxpoint/plans'
+            plans.mkdir(parents=True, exist_ok=True)
+            plan_path = plans / (args.run + '-' + plan_digest + '.json')
+            if plan_path.exists() and plan_path.read_bytes() != plan_raw:
+                raise ValueError('RESUME-PLAN-HASH: immutable plan changed')
+            if not plan_path.exists():
+                with plan_path.open('xb') as handle:
+                    handle.write(plan_raw)
+            launch_args['_rerunPlan'] = {'path': str(plan_path), 'sha256': plan_digest}
         diagnostics = _run([sys.executable, str(HERE / "compile-graph.py"), graph,
-                            "--args", staged, "--gates-root", root, "--out", output], root)
+                            "--args", staged, "--gates-root", root, "--out", output, "--replay-state", staged_state], root)
         if diagnostics.strip():
             print(diagnostics.rstrip(), file=sys.stderr)
         exact = _run([sys.executable, str(HERE / "compile-graph.py"), graph,
                       "--args", staged, "--gates-root", root, "--check",
-                      "--check-script", output], root)
+                      "--check-script", output, "--replay-state", staged_state], root)
         if exact.strip():
             print(exact.rstrip(), file=sys.stderr)
     finally:
         os.unlink(staged)
+        os.unlink(staged_state)
     workflow = {"scriptPath": output, "args": launch_args}
     if resuming:
         workflow["resumeFromRunId"] = args.run
@@ -228,6 +286,8 @@ def main(argv=None):
     source.add_argument("--args", help="initial non-underscore args JSON, before the first launch")
     parser.add_argument("--set", action="append", default=[], help="key=@file; UTF-8 text is preserved exactly")
     parser.add_argument("--set-json", action="append", default=[], help="key=@file; structured JSON such as rejudge")
+    parser.add_argument('--unset', action='append', default=[], help='remove a carried non-underscore key; remove its IR default first')
+    parser.add_argument('--keep-default', action='append', default=[], help='explicitly keep a carried value when its IR default changed')
     parser.add_argument("--unpinned-ok", action="append", default=[], help="explicit absolute evidence path exception")
     parser.add_argument("--out", help="compiled output (default .claude/workflows/<name>.graph.js)")
     parser.add_argument("--projects", help="runtime projects directory for journal/transcript verification")

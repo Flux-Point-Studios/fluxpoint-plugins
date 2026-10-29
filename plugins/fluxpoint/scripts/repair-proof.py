@@ -2,11 +2,10 @@
 """Fixed-command witness and fresh base-archive snapshots for repair review.
 
 The Workflow sandbox cannot read files. Its independent sentinel invokes this
-helper, returns raw bytes, and the compiled JS derives the digest and hunks.
+helper, returns a compact digest-bound manifest, and the compiled JS verifies it.
 The recorder later re-reads the actual file; neither model's digest is trusted.
 """
 import argparse
-import base64
 import hashlib
 import importlib.util
 import io
@@ -22,7 +21,7 @@ import tempfile
 import time
 
 from process_tree import remove_tree
-from repair_diff import manifest
+from repair_diff import compact_manifest, manifest_digest
 
 
 def git(root, *args):
@@ -40,15 +39,16 @@ def read(root, base, patch, item, round_):
     data = path.read_bytes()
     if len(data) > 16 * 1024 * 1024:
         raise ValueError('repair patch exceeds the 16 MiB review witness limit')
-    # Validate encoding/hunk syntax here as well; JS independently repeats it.
-    manifest(data)
+    measured = compact_manifest(data)
     return dict(status='READ', base=base, patch=str(path), item=item, round=round_,
-                rawPatch=base64.b64encode(data).decode('ascii'))
+                manifest=measured, manifestSha256=manifest_digest(measured))
 
 
-def materialize(root, base, patch, digest, item, round_):
+def materialize(root, base, patch, digest, item, round_, manifest_sha256=None):
     witness = read(root, base, patch, item, round_)
-    data = base64.b64decode(witness['rawPatch'])
+    data = Path(patch).read_bytes()
+    if manifest_sha256 is not None and witness['manifestSha256'] != manifest_sha256:
+        raise ValueError('patch manifest changed since the harness read')
     if hashlib.sha256(data).hexdigest() != digest:
         raise ValueError('patch changed since the harness read')
     package = git(root, 'archive', base)
@@ -69,9 +69,14 @@ def materialize(root, base, patch, digest, item, round_):
                                  input=data, capture_output=True)
         if applied.returncode:
             raise ValueError('patch cannot apply to fresh launch-base archive: ' + applied.stderr.decode(errors='replace'))
+        # Directory packet inputs use the archived-and-patched index. This
+        # repository is owned scratch only; source refs and index are untouched.
+        git(snapshot, 'init', '-q')
+        git(snapshot, 'add', '-f', '-A', '--', '.')
         token = secrets.token_hex(32)
         info = dict(status='READY', snapshot=str(snapshot), token=token, base=base,
-                    patchSha256=digest, item=item, round=round_)
+                    patchSha256=digest, manifestSha256=witness['manifestSha256'], item=item, round=round_,
+                    snapshotTree=git(snapshot, 'write-tree').decode().strip())
         (parent / 'witness.json').write_text(json.dumps(info), encoding='utf-8')
         return info
     except BaseException:
@@ -163,6 +168,58 @@ def execute(snapshot, token, control, attack, timeout, series=None):
     return result
 
 
+def check_packet(snapshot, token, spec, timeout=600):
+    """Run the fixed packet runner in the exact already-patched owned tree."""
+    from process_tree import ProcessTree, CleanupPending
+    import specification
+    path, info = snapshot_info(snapshot, token)
+    packet = specification.in_repo(spec, 'repair packet')
+    marker = path.parent / 'active-command'
+    fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    try:
+        git(path, 'add', '-A', '--', '.')
+        if git(path, 'write-tree').decode().strip() != info.get('snapshotTree'):
+            raise ValueError('checker changed the pinned repair snapshot before the packet check')
+    except BaseException:
+        marker.unlink()
+        raise
+    argv = [sys.executable, str(Path(__file__).with_name('specification.py')),
+            '--root', str(path), '--spec', str(packet), '--run', '--strict-harness']
+    start, drained, tree = time.monotonic(), False, None
+    try:
+        with tempfile.TemporaryFile() as output:
+            tree = ProcessTree(argv, path, output)
+            tree.resume()
+            try:
+                code = tree.proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                code = 124
+            # The fixed runner owns descendants even after an early parent exit.
+            if tree.running():
+                tree.terminate()
+            tree.proc.wait(timeout=5)
+            deadline = time.monotonic() + 5
+            while tree.running():
+                if time.monotonic() >= deadline:
+                    raise CleanupPending('packet check process cleanup could not be confirmed')
+                time.sleep(0.02)
+            drained = True
+            output.seek(0)
+            excerpt = output.read(16000).decode('utf-8', errors='replace')
+        result = dict(kind='packet-check', status='CHECKED', base=info['base'],
+                      patchSha256=info['patchSha256'], spec=str(packet), argv=argv,
+                      exit=code, elapsedMs=(time.monotonic() - start) * 1000, output=excerpt)
+        with (path.parent / 'observations.jsonl').open('a', encoding='utf-8') as log:
+            log.write(json.dumps(result) + '\n')
+        return result
+    finally:
+        if tree is not None:
+            tree.close()
+        if drained:
+            marker.unlink()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='mode', required=True)
@@ -173,10 +230,14 @@ def main():
         p.add_argument('--round', type=int, required=True)
         if mode == 'materialize':
             p.add_argument('--sha256', required=True)
-    for mode in ('cleanup', 'execute'):
+            p.add_argument('--manifest-sha256', required=True)
+    for mode in ('cleanup', 'execute', 'check'):
         p = sub.add_parser(mode)
         p.add_argument('--snapshot', required=True)
         p.add_argument('--token', required=True)
+        if mode == 'check':
+            p.add_argument('--spec', required=True)
+            p.add_argument('--timeout', type=float, default=600)
         if mode == 'execute':
             p.add_argument('--control', required=True)
             p.add_argument('--attack', required=True)
@@ -187,9 +248,13 @@ def main():
         if args.mode == 'read':
             result = read(args.root, args.base, args.patch, args.item, args.round)
         elif args.mode == 'materialize':
-            result = materialize(args.root, args.base, args.patch, args.sha256, args.item, args.round)
+            result = materialize(args.root, args.base, args.patch, args.sha256, args.item, args.round, args.manifest_sha256)
         elif args.mode == 'cleanup':
             result = cleanup(args.snapshot, args.token)
+        elif args.mode == 'check':
+            if not 0 < args.timeout < 86400:
+                raise ValueError('timeout must be finite and between zero and one day')
+            result = check_packet(args.snapshot, args.token, args.spec, args.timeout)
         else:
             if not 0 < args.timeout < 86400:
                 raise ValueError('timeout must be finite and between zero and one day')

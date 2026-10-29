@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "goal": "Bind red retention to judged content and preserve interrupted executions while classifying external interpreter crashes correctly",
+  "asset": "Attestation wrapper, fault policy and sequential reference reruns",
+  "scope": [
+    "Content and commit identities on every local citation",
+    "No-nonce and unfinished execution retention after launch",
+    "Actual judged-tree dirt, failure hook coverage, pseudo-frame and xdist crash parsing",
+    "Self-contained exact Git snapshots for reference legs"
+  ],
+  "outOfScope": [
+    "Excusing assertion failures, timeouts, repository crashes or unknown unfinished executions",
+    "Native Windows live crash reproduction in this Linux executor"
+  ],
+  "decisions": [
+    {
+      "id": "content-bound-retention",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "What identity and evidence keep a failed gate from being erased by a later green?",
+        "options": [
+          {
+            "option": "content-and-retained-executions",
+            "argued_by": "model",
+            "strongest_objection": "Legacy rows need conservative handling and old local claims need a judged sha"
+          },
+          {
+            "option": "commit-id-and-completion-only",
+            "argued_by": "model",
+            "strongest_objection": "An empty commit, a missing nonce or a killed runner erases red scope"
+          }
+        ],
+        "chosen": "content-and-retained-executions",
+        "rationale": "Bind claims to exact judged commits, group retained failures by content plus dirt, and block unknown incomplete executions.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue177 reproduces red laundering by empty commits, missing nonce and killed runners",
+          "The gate runner already retains process identity and Git commit provenance"
+        ]
+      },
+      "costs": [
+        {
+          "option": "content-and-retained-executions",
+          "cost": "One Git tree-object observation and bounded retained-record scan",
+          "basis": "estimate",
+          "evidence": [
+            "Existing runner records store identity/time"
+          ]
+        },
+        {
+          "option": "commit-id-and-completion-only",
+          "cost": "Unsettled red executions disappear from scope",
+          "basis": "estimate",
+          "evidence": [
+            "Issue177 sections1 and3"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "retained-red-content",
+      "statement": "Every local claim names its exact judged commit, and reds for the same content/dirt survive empty commits, missing nonce and unfinished/error runner records.",
+      "decisions": [
+        "content-bound-retention"
+      ],
+      "checks": [
+        "fault-retention-followups"
+      ],
+      "counterexample": "A later green at another commit or after killing the runner erases a retained red"
+    },
+    {
+      "id": "real-execution-boundary",
+      "statement": "Failure hooks retain runtime exit errors, clean linked gates ignore unrelated root edits, external pseudo-frame/xdist crashes classify, and references run exact committed bytes with Git metadata.",
+      "decisions": [
+        "content-bound-retention"
+      ],
+      "checks": [
+        "fault-retention-followups"
+      ],
+      "counterexample": "A missing .git or truncated xdist summary blocks a valid reference pair"
+    }
+  ],
+  "checks": [
+    {
+      "id": "fault-retention-followups",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/fault-retention-test.py"
+      ],
+      "scope": "Actual gates, linked worktree and Git clone; deterministic retained records and stack fixtures",
+      "assumptions": [
+        "Local execution records remain an honest-executor boundary",
+        "No Linux fixture establishes native Windows process-exit translation"
+      ],
+      "timeoutSeconds": 180
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Can unknown or killed executions be treated as successful cancellation?",
+      "resolution": "No. Unknown records remain blockers; only authenticated cancellation and fresh covering CI evidence can yield."
+    }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/tests/fault-attempts-test.py"
+  ]
+}

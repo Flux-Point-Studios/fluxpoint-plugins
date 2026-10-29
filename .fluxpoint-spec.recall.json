@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "goal": "Make recall corpus discovery, safe refresh and session orientation reliable",
+  "asset": "Derived recall index and session context",
+  "scope": [
+    "Safe lexical query rebuilding and deterministic source metadata",
+    "Ancestor and explicitly configured read-only note corpora",
+    "Detached keyless refresh and consistent index generations",
+    "Independent-word prompt precision and explicit worker briefs"
+  ],
+  "outOfScope": [
+    "Persistent query daemon",
+    "Shared split indexes across checkouts",
+    "Automatic cross-host memory synchronization"
+  ],
+  "decisions": [
+    {
+      "id": "recall-derived-maintenance",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should recall discover local knowledge and refresh without blocking hooks or sending documents unexpectedly?",
+        "options": [
+          {
+            "option": "derived-configured-corpora",
+            "argued_by": "model",
+            "strongest_objection": "Source discovery and concurrent cache publication need clear bounds and regression tests"
+          },
+          {
+            "option": "patch-plugin-cache",
+            "argued_by": "model",
+            "strongest_objection": "Auto-updates discard local source and refresh customizations"
+          },
+          {
+            "option": "persistent-query-service",
+            "argued_by": "model",
+            "strongest_objection": "Adds lifecycle and authentication work beyond source discovery and reliable refresh"
+          }
+        ],
+        "chosen": "derived-configured-corpora",
+        "rationale": "Keep sources read-only, make corpus roots explicit and derive a fresh atomic cache; hooks launch detached keyless rebuilds.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Open issue reproductions #147-152 #159 #161 #163 and current source inspection"
+        ]
+      },
+      "costs": [
+        {
+          "option": "derived-configured-corpora",
+          "cost": "Maintain a bounded Markdown reader, configuration validation and atomic derived cache writes",
+          "basis": "estimate",
+          "evidence": [
+            "Existing recall lexical retrieval and workfile_lock cover ranking and serialized publication"
+          ]
+        },
+        {
+          "option": "patch-plugin-cache",
+          "cost": "Every plugin update requires reapplying local edits and risks silently dropping context",
+          "basis": "measured",
+          "evidence": [
+            "Issue #152 documents cache version replacement behavior"
+          ]
+        },
+        {
+          "option": "persistent-query-service",
+          "cost": "Add process lifetime, client framing, authentication and invalidation protocols",
+          "basis": "unknown",
+          "evidence": [
+            "Issue #153 requests warm queries; no deployment or benchmark evidence yet"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "recall-safe-maintenance",
+      "statement": "Queries never backfill documents; hooks reach non-git roots and detached refresh; corpora remain distinct, dated and current; mixed generations never rank",
+      "decisions": [
+        "recall-derived-maintenance"
+      ],
+      "checks": [
+        "recall-maintenance-tests"
+      ],
+      "counterexample": "An empty child corpus hides an ancestor, one compound counts twice, a query embeds documents, or a mixed cache answers as current"
+    }
+  ],
+  "checks": [
+    {
+      "id": "recall-maintenance-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/recall-maintenance-test.py"
+      ],
+      "scope": "Real hook, source discovery, precision, atomic cache and detached refresh paths",
+      "assumptions": [
+        "Platform process creation and filesystem atomic rename honor their documented contracts"
+      ],
+      "timeoutSeconds": 90
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does a detached rebuild or configured corpus authorize document embeddings?",
+      "resolution": "No. Refresh and ordinary queries rebuild keyless; explicit build --embed is required for document backfill, and external notes require explicit FPL_EMBEDDER selection."
+    }
+  ]
+}

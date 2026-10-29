@@ -624,7 +624,7 @@ r = subprocess.run(
 report("for-prompt recalls a primitive-only index without memory.jsonl",
        r.returncode == 0 and "prim:beacon-decoder" in r.stdout,
        "primitive source reached prompt recall")
-expected_kinds = {"cex": 0, "decision": 0, "lesson": 0, "primitive": 3}
+expected_kinds = {"cex": 0, "decision": 0, "lesson": 0, "primitive": 3, "note": 0}
 meta_path = os.path.join(primitive_only, recall.INDEX_DIR, recall.META_F)
 with open(meta_path, encoding="utf-8") as fh:
     primitive_meta = json.load(fh)
@@ -669,7 +669,7 @@ mixed_source = scratch(
 mixed_counts = recall._source_doc_counts(mixed_source)
 report("source fallback counts each typed identity once",
        mixed_counts == {"lesson": 1, "decision": 1,
-                        "cex": 1, "primitive": 1},
+                        "cex": 1, "primitive": 1, "note": 0},
        str(mixed_counts))
 r = run_cli(mixed_source, "--for-session")
 report("no-query cold start names every available source kind",

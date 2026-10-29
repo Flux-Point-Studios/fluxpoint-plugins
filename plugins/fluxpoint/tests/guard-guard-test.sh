@@ -148,6 +148,9 @@ done
 if [ -e "$WORK/killed/.fluxpoint-guards-restoring" ]; then
   kill -TERM "$gg_pid" 2>/dev/null
   wait "$gg_pid" 2>/dev/null
+  # Native Windows termination can skip every interpreter cleanup callback.
+  # The next invocation recovers the durable journal before checking guards.
+  "$FPL_PY" "$GG" --root "$WORK/killed" --check >/dev/null 2>&1
   grep -q 'if amount > 100' "$WORK/killed/server.py" \
     && ok "SIGTERM mid-proof still restores the guard" "intact" \
     || bad "SIGTERM mid-proof still restores the guard" "LEFT DISABLED"
@@ -309,6 +312,9 @@ rm -rf "$WORK/wired/.fluxpoint-guards.json"
 ( cd "$WORK/wired" && env -u CLAUDE_PLUGIN_ROOT FPL_PLUGIN_ROOT="$PLUGIN" \
   bash scripts/harness.sh --full >/dev/null 2>&1 )
 check "scaffolded harness: no manifest stays dormant, not loud" 0 "$?"
+
+"$FPL_PY" "$PLUGIN/tests/guard-recovery-test.py"
+check "restart recovers abrupt native termination and preserves unsafe state" 0 "$?"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

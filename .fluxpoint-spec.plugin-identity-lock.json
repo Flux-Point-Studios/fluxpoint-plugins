@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "sha256": "6018bf8f269536e55209aa587d2d03ad58fbe031735960f0c5d85b9ed7e649ce",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/plugin-identity-test.py": "68f1493915003155270256c694566cc36fd6025d2d667422129601d3aee488df"
+  },
+  "lockFormat": 2
+}

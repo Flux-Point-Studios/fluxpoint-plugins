@@ -25,13 +25,14 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
 ```json graph-ir
 {
   "version": 1,
+  "specificationContext": "reference",
   "name": "feature-campaign",
   "campaign": "Council-designed, loop-implemented, independently gated feature slice",
   "budget": {
     "maxNodes": 100,
     "verifyFloorTokens": 50000,
     "cacheTtl": "1h",
-    "maxEstimatedTokens": 2500000
+    "maxEstimatedTokens": 1450000
   },
   "defaults": {
     "effort": "medium"

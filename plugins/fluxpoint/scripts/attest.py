@@ -44,15 +44,12 @@ what a command exited with, not whether the command was worth running: a
 declared gate that is itself weakened is `fpl_harness_modified`'s problem
 and the proof-guard ratchet's, not this file's.
 
-The third bounds everything above it: PostToolUse has been measured NOT to
-fire when a Bash call fails, so in practice this log may contain only passes.
-The reader below handles every failure shape the runtime can send, and that
-branch is currently exercised by fixtures rather than by observed payloads.
-Read the consequence carefully — UNATTESTED on a `prove:` node carries no
-information about whether the gate passed, so the binding between a claimed
-exit and the runtime's own holds for zeros and is silent about reds. A node
-claiming green with no row is therefore the shape worth suspecting, and
-record-run.py reports it separately for that reason.
+Claude Code uses PostToolUseFailure for a failed Bash call; hooks.json routes
+that event to this reader too. Its error field reports "Command failed with
+exit code N". Codex supplies a completed-shell header for either outcome.
+An UNATTESTED claim carries no information about whether the gate passed.
+Unreadable exits remain unattested. Compiled prove nodes use the managed
+wrapper so every pending, failed and completed execution is retained.
 
 What this is not: a boundary against an agent that sets out to forge. The
 log is a file in the working tree, and an agent with a shell can append a
@@ -78,6 +75,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import background as bg
 import forge_evidence as forge
 import fault_policy
+import plugin_identity
+PRODUCER = plugin_identity.current()
 from process_tree import bash_path
 
 GATES = ".fluxpoint-gates.json"
@@ -239,7 +238,7 @@ def _unbash(n):
     return s[2:] if s.startswith("./") else s
 
 
-EXIT_RE = re.compile(r"\A\s*Error: Exit code (\d+)")
+EXIT_RE = re.compile(r"\A\s*(?:Error: Exit code|Command failed with exit code) (-?\d+)")
 # Codex hands every completed Bash call to the hook as one string: a header
 # of `Wall time: …` and `Process exited with code N` (the classic shell tool
 # writes `Exit code: N`), then `Output:` and the output itself.
@@ -701,24 +700,78 @@ def head_sha(root):
         return ""
 
 
-def dirty(root):
-    """Unknown content state is dirty. Only untracked attestation metadata is omitted."""
+def content_oid(root, commit="HEAD"):
+    if commit != "HEAD" and (not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit)):
+        return ""
+    return _git(root, "rev-parse", commit + "^{tree}")
+
+
+def dirty_paths(root, harness=True):
+    """Classify observed dirt, retaining the paths at execution time."""
     import subprocess
+    import evidence_table
     try:
         p = subprocess.run(['git', '-C', root, 'status', '--porcelain=v1', '-z',
                             '--untracked-files=all', '--ignore-submodules=none'],
                            capture_output=True, timeout=10)
-        if p.returncode:
-            return True
-        # -z keeps whitespace, newlines and quoted names unambiguous. Renames
-        # are already dirty from their first entry, so need no special pairing.
-        for entry in p.stdout.split(b'\0'):
-            if entry and not (entry.startswith(b'?? .claude/fluxpoint/') and
-                              entry[3:].split(b'/')[2] in (b'attest.jsonl', b'attest-bg')):
-                return True
-        return False
-    except (OSError, subprocess.TimeoutExpired):
-        return True
+        top = subprocess.run(['git', '-C', root, 'rev-parse', '--show-toplevel'],
+                             capture_output=True, text=True, timeout=10)
+        if p.returncode or top.returncode:
+            raise OSError('git status unavailable')
+        result, entries, index = [], p.stdout.split(b'\0'), 0
+        while index < len(entries):
+            entry = entries[index]
+            index += 1
+            if not entry:
+                continue
+            state, raw_path = entry[:2], entry[3:]
+            path = os.fsdecode(raw_path)
+            kind = 'content'
+            if state == b'??' and (path.startswith('.claude/workflows/') or
+                    (path.startswith('.claude/fluxpoint/') and path.split('/')[2] in ('attest.jsonl', 'attest-bg'))):
+                kind = 'harness'
+            elif harness and not any(ch in state for ch in b'RCD?'):
+                baseline = subprocess.run(['git', '-C', root, 'show', 'HEAD:' + path], capture_output=True, timeout=10)
+                current_path = os.path.join(top.stdout.strip(), path)
+                try:
+                    before = baseline.stdout.decode('utf-8')
+                    with open(current_path, encoding='utf-8', newline='') as handle:
+                        after = handle.read()
+                    graph = (os.path.basename(path) in ('WORK.md', 'LOOP.md') or
+                             bool(re.search(r'^ {0,3}```(?:json\s+graph-ir|graph-ir)', before, re.M)))
+                    in_root = os.path.commonpath([os.path.realpath(root), os.path.realpath(current_path)]) == os.path.realpath(root)
+                    if baseline.returncode == 0 and in_root and graph and evidence_table.harness_only_change(before, after):
+                        kind = 'harness'
+                except (OSError, UnicodeError):
+                    pass
+            result.append({'path': path, 'kind': kind, 'root': os.path.realpath(root)})
+            # Porcelain -z adds the original name after a rename/copy. Both
+            # paths are content, never separately interpreted as metadata.
+            if any(ch in state for ch in b'RC') and index < len(entries):
+                result.append({'path': os.fsdecode(entries[index]), 'kind': 'content', 'root': os.path.realpath(root)})
+                index += 1
+        return result
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        return [{'path': '<git status unavailable>', 'kind': 'content', 'root': os.path.realpath(root)}]
+
+
+def dirty(root):
+    return any(item['kind'] == 'content' for item in dirty_paths(root))
+
+
+def _execution_dirt(root, tree, reference=False):
+    # The manifest is independently bound by its byte hash. Unrelated edits
+    # in the coordinator checkout do not change a linked gate's execution.
+    return dirty_paths(tree, harness=os.path.realpath(tree) == os.path.realpath(root))
+
+
+def _merge_dirt(*snapshots):
+    found = {}
+    for item in (p for snapshot in snapshots for p in snapshot):
+        key = item['root'], item['path']
+        if key not in found or item['kind'] == 'content':
+            found[key] = item
+    return list(found.values())
 
 
 def _hook_tree(root, payload, command):
@@ -819,6 +872,7 @@ def stamp(root=None):
 
 
 def append_row(root, row):
+    row["producer"] = dict(PRODUCER)
     p = path_for(root)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "a", encoding="utf-8", newline="\n") as fh:
@@ -842,7 +896,8 @@ def record(root, payload):
     if not gate or not cd_in_project(root, command, payload.get("cwd"),
                                      (getattr(gates, "cds", None) or {}).get(gate, "")):
         return None, []
-    resp = payload.get("tool_response")
+    resp = (payload.get("error") if payload.get("hook_event_name") == "PostToolUseFailure"
+            else payload.get("tool_response"))
     # A backgrounded launch returns IMMEDIATELY with a success-shaped payload
     # — stdout/stderr/interrupted and no exit code — before the gate has done
     # anything, and completion later arrives as a task notification, never as
@@ -867,6 +922,7 @@ def record(root, payload):
     out = resp if isinstance(resp, dict) else {"stdout": str(resp)}
     log = f"{out.get('stdout') or ''}\n---\n{out.get('stderr') or ''}"
     session = str(payload.get("session_id") or "")
+    observed_dirt = _execution_dirt(root, _hook_tree(root, payload, command))
     row = {
         # The raw command and its nonce are part of the identity: two
         # executions that normalize alike in one second (a nonce-prefixed
@@ -881,7 +937,11 @@ def record(root, payload):
         "logSha256": sha(log),
         "headSha": head_sha(root),
         "treeSha": _tree_sha(root, payload, command),
-        "dirty": dirty(root) or dirty(_hook_tree(root, payload, command)),
+        "treeOid": content_oid(_hook_tree(root, payload, command)),
+        "tree": os.path.abspath(_hook_tree(root, payload, command)),
+        "manifestSha256": fault_policy.manifest_sha(root),
+        "dirty": any(p["kind"] == "content" for p in observed_dirt),
+        "dirtyPaths": observed_dirt,
         "when": when,
         "sessionId": session,
         # Subagent Bash calls fire this hook too, and a gate run inside a
@@ -925,6 +985,7 @@ def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
     """
     root = os.path.abspath(root)
     tree = os.path.abspath(tree or root)
+    nonce = nonce or os.environ.get("FPL_ATTEST_NONCE", "")
     gates, findings = load_gates(root)
     for f in findings:
         print(f"attest: {f}", file=sys.stderr)
@@ -956,7 +1017,9 @@ def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
         # moment this returns finds it. No pid yet: the child writes its own
         # when it starts, and never after this line could overwrite a DONE.
         _bg_write(root, {"token": token, "gate": gate, "status": "RUNNING",
-                         "pid": None, "started": started})
+                         "pid": None, "started": started, "nonce": nonce,
+                         "treeSha": head_sha(tree), "treeOid": content_oid(tree),
+                         "dirty": any(p["kind"] == "content" for p in _execution_dirt(root, tree))})
         # Absolute paths: the child starts in `tree`, and a relative root
         # resolved a second time from there named a directory that does not
         # exist — the child exited on a missing manifest, silently.
@@ -990,9 +1053,10 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
     # commit for every witness. Where the gate actually ran is treeSha.
     head = head_sha(root)
     tree_head = head_sha(tree)
-    was_dirty = dirty(root) or (dirty(tree) if not reference else False)
+    initial_dirt = _execution_dirt(root, tree, reference)
     if reference:
         tree_head = reference['treeSha']
+    tree_content = content_oid(tree, tree_head)
     manifest_hash = fault_policy.manifest_sha(root)
     if attempt:
         import fault_attempts
@@ -1002,7 +1066,8 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
     log = os.path.join(_bg_dir(root), f"{token}.log")
     _bg_write(root, {"token": token, "gate": gate, "status": "RUNNING",
                      "pid": os.getpid(), "started": started, "headSha": head,
-                     "log": log, "nonce": nonce, "treeSha": tree_head,
+                     "log": log, "nonce": nonce, "treeSha": tree_head, "treeOid": tree_content,
+                     "dirty": any(p["kind"] == "content" for p in initial_dirt),
                      "manifestSha256": manifest_hash, "attempt": attempt})
     print(f"attest: running {gate} as {token} — collect it with "
           f"attest.py --await {token}", flush=True)
@@ -1019,6 +1084,9 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
         if reference:
             import fault_attempts
             raw_reference, pins_hashes = fault_attempts.reference_command(_api(), root, gates, gate, raw)
+            if reference.get('projectPrefix'):
+                import shlex
+                raw_reference = 'cd ' + shlex.quote(reference['projectPrefix']) + ' && ' + raw_reference
             command, cwd = fault_policy.reference_argv(gates.reference, tree, raw_reference), tree
         else:
             command, cwd, _ = deployed_invocation(tree, gates, gate) if deployed else ([bash_path(), '-c', raw], tree, [])
@@ -1030,14 +1098,19 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
     with open(log, "rb") as fh:
         log_bytes = fh.read()
     text = log_bytes.decode("utf-8", "replace")
+    observed_dirt = _merge_dirt(initial_dirt, _execution_dirt(root, tree, reference))
+    if head_sha(tree) != tree_head or fault_policy.manifest_sha(root) != manifest_hash:
+        observed_dirt.append({'path': '<HEAD moved during execution>', 'kind': 'content', 'root': os.path.realpath(root)})
     row = {
         "attestId": "att_" + sha(f"{started}|{norm}|{code}|{token}")[:12],
         "gate": gate, "command": norm, "commandSha": sha(norm), "exit": code,
         "logSha256": hashlib.sha256(log_bytes).hexdigest(), "headSha": head, "treeSha": tree_head,
+        "treeOid": tree_content,
         "started": started, "when": now(), "sessionId": "", "agent": "",
         "witness": "wrapper", "token": token, "nonce": nonce, "tree": os.path.abspath(tree),
         "host": host, "manifestSha256": manifest_hash,
-        'dirty': was_dirty or dirty(root) or (not reference and (dirty(tree) or head_sha(tree) != tree_head)) or head_sha(root) != head,
+        'dirty': any(p['kind'] == 'content' for p in observed_dirt),
+        'dirtyPaths': observed_dirt,
     }
     if attempt:
         row['attempt'] = attempt
@@ -1077,7 +1150,7 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
     if not completed.get('attestId'):
         print(f"attest: {gate} cancelled; command exit {code}; nothing attested", flush=True)
         return 130
-    print(f"attest: {gate} exit {code} -> {row['attestId']}", flush=True)
+    print(f"attest: {gate} exit {code} -> {row['attestId']} sha {tree_head}", flush=True)
     return code
 
 
@@ -1243,7 +1316,7 @@ def _same_commit(a, b):
     return len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a))
 
 
-def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=None, gates=None):
+def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=None, gates=None, plugin=None):
     """Hold a `prove:` node to the attestation it cited.
 
     The node names an attestId; the hook wrote that row when the command
@@ -1276,6 +1349,9 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
         return {**base, "status": "MISMATCH",
                 "detail": (f"cites attestation {cited}, which is not in the log. "
                            f"Nothing recorded that execution.")}
+    if plugin is not None and row.get("producer") != plugin:
+        return {**base, "status": "MISMATCH",
+                "detail": "citation producer differs from the graph's pinned plugin witness"}
     if row.get("gate") != gate:
         return {**base, "status": "MISMATCH",
                 "detail": (f"cites {cited}, which attests gate "
@@ -1331,20 +1407,26 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
                 raise ValueError("forge PR/ref head moved since the gate judged it")
             if facts['exit'] is None or facts['exit'] != claimed:
                 raise ValueError("current forge verdict disagrees with the claim or is undecided")
-            if gate != 'ci' and (row.get('packetSha') != ci.get('packetSha') or
-                                  row.get('configBlobs') != facts['configBlobs']):
+            if (row.get('packetSha') != ci.get('packetSha') or
+                    row.get('configBlobs') != facts['configBlobs']):
                 raise ValueError("reuse pointer disagrees with current pinned config blobs")
             fresh_forge_green = claimed == 0 and facts['exit'] == 0
         except (OSError, RuntimeError, ValueError, KeyError, TypeError) as e:
             return {**base, "status": "MISMATCH", "detail": "forge re-read refused: " + str(e)}
-    elif row.get('dirty') is not False:
-        return {**base, "status": "STALE", "detail": "local row is dirty or predates content binding; rerun on a clean tree"}
-    if (head and row.get("witness") not in ("forge", "reuse") and row.get("headSha")
-            and not _same_commit(row["headSha"], head)):
-        return {**base, "status": "STALE",
-                "detail": (f"cites {cited}, which ran on commit "
-                           f"{str(row['headSha'])[:12]}, but this campaign ran on "
-                           f"{str(head)[:12]}")}
+    elif row.get('dirty') is not False or any(p.get('kind') == 'content' for p in (row.get('dirtyPaths') or []) if isinstance(p, dict)):
+        paths = ', '.join(p.get('path', '?') for p in (row.get('dirtyPaths') or []) if isinstance(p, dict) and p.get('kind') == 'content')
+        return {**base, "status": "STALE", "detail": "local row is dirty or predates content binding; rerun on a clean tree" + (": " + paths if paths else "")}
+    if row.get("witness") not in ("forge", "reuse") and (
+            not isinstance(r.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", r["sha"])
+            or r["sha"] != row.get("treeSha")):
+        return {**base, "status": "MISMATCH",
+                "detail": "local claim must name the exact commit the gate judged (sha)"}
+    if row.get('witness') not in ('forge', 'reuse') and root and (launch or {}).get('manifestSha256'):
+        expected_manifest = launch['manifestSha256']
+        if (row.get('manifestSha256') != expected_manifest
+                or fault_policy.manifest_sha(root) != expected_manifest):
+            return {**base, 'status': 'MISMATCH',
+                    'detail': 'gate manifest differs from the consumed launch policy'}
     if row.get('cancelled'):
         return {**base, "status": "STALE", "detail": "cancelled execution is not a gate verdict"}
     if row.get('witness') not in ('forge', 'reuse') and root:
@@ -1403,15 +1485,21 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
 def _check_deployed(root, gates, gate, row, claim, check):
     lanes = {name: lane for name, lane in getattr(gates, "deployed", {}).items()
              if lane["gate"] == gate}
-    if not lanes or check['status'] != 'ATTESTED' or row.get('faultPair') or row.get('witness') in ('forge', 'reuse'):
+    if not lanes or check['status'] != 'ATTESTED':
+        return
+    if row.get('witness') != 'wrapper':
+        check.update(status='MISMATCH', detail='deployed gate requires a wrapper run with a checked dependency resolution')
+        return
+    if row.get('faultPair'):
+        return  # Its retained wrapper executions were checked by verify_pair.
+    if claim.get('exit') == 0 and not row.get('resolutionChecked'):
+        check.update(status='MISMATCH', detail='deployed gate requires a wrapper run with a checked dependency resolution')
         return
     current = {}
     for name, lane in lanes.items():
         with open(os.path.join(root, lane['pins']), 'rb') as fh:
             current[name] = hashlib.sha256(fh.read()).hexdigest()
-    if row.get('witness') != 'wrapper' or (claim.get('exit') == 0 and not row.get('resolutionChecked')):
-        check.update(status='MISMATCH', detail='deployed gate requires a wrapper run with a checked dependency resolution')
-    elif row.get('pinsSha256') != current:
+    if row.get('pinsSha256') != current:
         check.update(status='STALE', detail='deployed pins changed since the attested execution')
     elif row.get('commandSha') != sha(gates[gate]) or row.get('deployedLaneSha256') != deployed_lane_sha(gates, gate):
         check.update(status='STALE', detail='deployed gate command or lane changed since the attested execution')
@@ -1427,8 +1515,13 @@ def verify_claims(root, summary):
     gates, findings = load_gates(root)
     # A CI-only manifest ({"gates": {}, "ci": ...}) still has a witness to
     # hold prove:ci citations to; returning early filed them unchecked.
-    if findings or (not gates and not load_ci(root)):
+    if findings:
         return [], findings
+    if not gates and not load_ci(root):
+        import review_gates
+        if review_gates.declared(summary):
+            return [], ['review suite claims require a valid gate manifest and execution witnesses']
+        return [], []
     for field in ('results', 'contracts', 'prove', 'cites'):
         value = (summary or {}).get(field)
         if value is not None and not isinstance(value, dict):
@@ -1439,6 +1532,10 @@ def verify_claims(root, summary):
         if (not isinstance(steps, list) or not steps or any(not isinstance(gate, str) or
                 gate not in gates and gate != 'ci' for gate in steps) or len(set(steps)) != len(steps)):
             return [], ['run summary cites must contain unique manifest gate lists']
+    plugin = (summary or {}).get("plugin")
+    if plugin is not None:
+        try: plugin_identity.check_shape(plugin)
+        except ValueError as exc: return [], [str(exc)]
     rows = read(root)
     results = (summary or {}).get("results") or {}
     contracts = (summary or {}).get("contracts") or {}
@@ -1468,7 +1565,7 @@ def verify_claims(root, summary):
                                        'detail': 'cited step sha must match the node exact judged sha'})
                     else:
                         check = _check_cited(rows, node + ':' + gate, gate, mine[0],
-                                             launch, head, used, root=root, gates=gates)
+                                             launch, head, used, root=root, gates=gates, plugin=plugin)
                         row = next((a for a in rows if a.get('attestId') == mine[0].get('attestId')), {})
                         _check_deployed(root, gates, gate, row, mine[0], check)
                         checks.append(check)
@@ -1482,7 +1579,7 @@ def verify_claims(root, summary):
                 # An ExecutionV1 cites its attestation directly, so the check
                 # is against the id rather than a command string it never
                 # carries.
-                check = _check_cited(rows, node, declared, r, launch, head, used, root=root, gates=gates)
+                check = _check_cited(rows, node, declared, r, launch, head, used, root=root, gates=gates, plugin=plugin)
                 row = next((a for a in rows if a.get("attestId") == r.get("attestId")), {})
                 _check_deployed(root, gates, declared, row, r, check)
                 checks.append(check)
@@ -1520,6 +1617,8 @@ def verify_claims(root, summary):
             for gate in steps:
                 checks.append({'node': node, 'gate': gate, 'declared': True, 'status': 'MISMATCH',
                                'detail': 'declared cited node produced no result'})
+    import review_gates
+    checks.extend(review_gates.verify(_api(), root, summary or {}, rows, gates))
     return checks, []
 
 
@@ -1546,7 +1645,9 @@ def main():
     ap.add_argument("--ref", help="with --ci: the branch or tag whose tip the forge names")
     ap.add_argument("--nonce", default="",
                     help="with --run or --ci: the run nonce from args._launch")
+    ap.add_argument("--plugin-pin", default=os.environ.get("FPL_PLUGIN_PIN"), help="expected compiled plugin identity as JSON")
     g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--self-check", action="store_true", help="verify and print this execution witness identity")
     g.add_argument("--record", action="store_true")
     g.add_argument("--list", action="store_true")
     g.add_argument("--verify", action="store_true")
@@ -1559,9 +1660,23 @@ def main():
     g.add_argument("--check-ci", action="store_true", help="validate the CI policy and refuse the harness own status identity")
     g.add_argument("--stamp", action="store_true",
                    help="print a launch stamp for args._launch")
+    g.add_argument("--show", metavar="ATTEST_ID", help="print one source attest row as JSON without executing it")
     g.add_argument("--last", metavar="GATE",
                    help="print the newest attested row of GATE (with --nonce: of this run)")
     a = ap.parse_args()
+    if a.plugin_pin:
+        try:
+            expected = json.loads(a.plugin_pin)
+            plugin_identity.verify(expected)
+            if expected != PRODUCER:
+                raise ValueError("PLUGIN-PIN: this witness was loaded from a different installation")
+            os.environ["FPL_PLUGIN_PIN"] = json.dumps(expected, sort_keys=True)
+        except (OSError, ValueError, TypeError) as exc:
+            print("attest: " + str(exc), file=sys.stderr)
+            return 2
+    if a.self_check:
+        print(json.dumps(PRODUCER, sort_keys=True))
+        return 0
     if a.root is None:
         a.root = project_root(".")
 
@@ -1578,6 +1693,14 @@ def main():
         import fault_attempts
         return fault_attempts.rerun(_api(), a.root, a.rerun_fault, a.nonce,
                                     a.detach, a.token, a.tree)
+    if a.show:
+        row = next((row for row in read(a.root) if row.get("attestId") == a.show
+                    and (not a.nonce or row.get("nonce") == a.nonce)), None)
+        if row is None:
+            print("attest: source row not found for this id/nonce", file=sys.stderr)
+            return 1
+        print(json.dumps(row, sort_keys=True))
+        return 0
     if a.last:
         mine = [r for r in read(a.root) if r.get("gate") == a.last
                 and (not a.nonce or r.get("nonce") == a.nonce)]
@@ -1589,7 +1712,8 @@ def main():
             return 1
         r = mine[-1]
         print(f"{r['attestId']} gate {r['gate']} exit {r['exit']} when {r.get('when')} "
-              f"witness {r.get('witness') or 'hook'} nonce {r.get('nonce') or '-'}")
+              f"witness {r.get('witness') or 'hook'} nonce {r.get('nonce') or '-'} "
+              f"sha {r.get('treeSha') or r.get('headSha') or 'unknown'}")
         return 0
     if a.await_:
         return await_gate(a.root, a.await_, a.timeout, a.until)
@@ -1611,7 +1735,7 @@ def main():
         except (OSError, RuntimeError, ValueError) as e:
             print('attest: cannot establish CI identity: ' + str(e), file=sys.stderr)
             return 3
-        print('attest: CI identity policy checked')
+        print('attest: CI identity policy checked for gh stored accounts and GH_TOKEN/GITHUB_TOKEN; other credential stores are outside this check')
         return 0
     if a.ci or a.reuse:
         return attest_ci(a.root, a.sha, a.wait, a.timeout, a.pr, a.ref, a.nonce, a.reuse)

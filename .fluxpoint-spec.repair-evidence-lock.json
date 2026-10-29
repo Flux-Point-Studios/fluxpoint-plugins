@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "sha256": "bbdab9e02a93746d16fd878a15dab3fb24588dee404bd29efe4b9d4e31dcb1f0",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/packet-projection-test.py": "5437bf2cb4d66d0bb6df4b1f4f56658de90f6faaa585f04e7f8daec377d081c2",
+    "plugins/fluxpoint/tests/repair-proof-test.py": "3ff7dee99d734cff3764aa3c26995519f952a9f0e543e00095f9e5e120255f1f"
+  },
+  "lockFormat": 2
+}

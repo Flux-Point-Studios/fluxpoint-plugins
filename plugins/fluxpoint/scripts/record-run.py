@@ -36,6 +36,14 @@ PROOF_RANK = {"NOT-APPLICABLE": 0, "SOUND": 1, "UNPROVEN": 2, "WEAKENED": 3}
 SEVERITY_RANK = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
 
+def wait_filename(campaign, node):
+    """Keep both readable components and hash their complete identity."""
+    import hashlib
+    slug = lambda value: "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in value)
+    digest = hashlib.sha256(json.dumps([campaign, node], ensure_ascii=True).encode("utf-8")).hexdigest()[:16]
+    return f"{slug(campaign)[:80]}.{slug(node)[:40]}.{digest}.json"
+
+
 def red_team_coverage_issue(coverage):
     """Validate the durable scope of a SHIP independently of schema execution."""
     if not isinstance(coverage, dict):
@@ -66,7 +74,8 @@ def red_team_coverage_issue(coverage):
         return "SHIP coverage repeats a lens"
     if type(coverage.get("sampled")) is not bool:
         return "SHIP coverage must declare whether the review sampled"
-    return None
+    import review_gates
+    return review_gates.shape(coverage)
 
 
 def red_team_coverage_records(summary):
@@ -341,6 +350,10 @@ def derive(summary):
                     # Worst exit across every harness node: one red run is
                     # the campaign's answer, whatever a later one says.
                     harness = e if harness in (None, 0) else harness
+            if c == "FixCheckV1" and isinstance(r.get("packetCheck"), dict):
+                e = r["packetCheck"].get("exit")
+                if type(e) is int:
+                    harness = e if harness in (None, 0) else harness
             if node not in exempt and (c == "RedTeamV1" or (c is None and r.get("verdict") in ("SHIP", "BLOCK"))):
                 v = r.get("verdict")
                 why = red_team_incoherent(r)
@@ -360,14 +373,14 @@ def derive(summary):
     return harness, verdict, blocked, proof, proof_surface, incoherent
 
 
-def repair_receipts(summary, graph):
+def repair_receipts(summary, graph, root=None):
     """Freeze the actual graph's independent checker descriptors at recording."""
     import importlib.util
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "repair_checks.py")
     spec = importlib.util.spec_from_file_location("repair_checks_recorder", path)
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
-    frozen = helper.from_graph(graph)
+    frozen = helper.from_graph(graph, root=root)
     commits, problems = helper.checked(summary, frozen)
     return frozen, commits, problems
 
@@ -395,6 +408,8 @@ def main():
     ap.add_argument("--state-dir", default=None,
                     help="must resolve to <root>/.claude/fluxpoint/runs")
     ap.add_argument("--root", default=".", help="repo root holding .claude/fluxpoint")
+    ap.add_argument('--unpinned-ok', action='append', default=[], metavar='ABSOLUTE_PATH',
+                    help='explicitly record an input path without a byte pin (repeatable; retained in artifact)')
     args = ap.parse_args()
     args.root = os.path.realpath(args.root)
     canonical_runs = os.path.realpath(os.path.join(args.root, ".claude", "fluxpoint", "runs"))
@@ -431,10 +446,43 @@ def main():
     except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
         print(f"record-run: ledger append failed: {e}", file=sys.stderr)
 
+    waits = summary.get("waits") or []
+    wait_names = [wait_filename(summary.get("campaign", ""), w.get("node", "")) for w in waits]
+    if len(set(wait_names)) != len(wait_names):
+        print("record-run: duplicate wait identity; no wait or run artifact written", file=sys.stderr)
+        return 2
+
+    if summary.get('argsSha256') is not None:
+        try:
+            from embedded_args import recover
+            recover(args.root, summary)
+        except (OSError, ValueError, TypeError) as exc:
+            print('record-run: immutable input verification failed: ' + str(exc), file=sys.stderr)
+            return 2
+    if summary.get('rerunPlan'):
+        try:
+            import hashlib
+            plan_ref = summary['rerunPlan']
+            plans = os.path.realpath(os.path.join(args.root, '.claude/fluxpoint/plans'))
+            path = os.path.realpath(plan_ref['path'])
+            if os.path.dirname(path) != plans:
+                raise ValueError('plan path is outside the canonical plan store')
+            with open(path, 'rb') as handle:
+                raw_plan = handle.read()
+            if hashlib.sha256(raw_plan).hexdigest() != plan_ref['sha256']:
+                raise ValueError('plan digest differs from the approved plan')
+            if json.loads(raw_plan)['argsSha256'] != summary.get('argsSha256'):
+                raise ValueError('plan arguments differ from the executed arguments')
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print('record-run: rerun plan verification failed: ' + str(exc), file=sys.stderr)
+            return 2
+
     # Pin bytes are harness inputs, not a claim an agent can vouch for. Do
     # this after the once-only ledger append, but before any run/Evidence row.
     try:
         import evidence_pins as _pins
+        if args.unpinned_ok:
+            summary['evidenceUnpinned'] = sorted(set(summary.get('evidenceUnpinned') or []) | set(args.unpinned_ok))
         _pins.validate_pinned_inputs(args.root, summary.get("inputs") or {},
                                      summary.get("evidenceUnpinned") or [])
     except (OSError, ValueError, TypeError) as e:
@@ -443,6 +491,7 @@ def main():
 
     import specification as _spec
     harness_identity = None
+    specification_coverage = None
     try:
         # The graph file's SPEC: header names the packet this campaign is
         # held to; a repository can carry one per campaign.
@@ -456,9 +505,7 @@ def main():
             if ran and spec_path and ran != spec_path:
                 raise ValueError(f"the run was compiled against {ran}, but {args.graph} "
                                  f"declares SPEC: {spec_path}")
-            _, identity = _spec.load(args.root, spec=spec_path or ran)
-            if summary.get("specification") != identity:
-                raise ValueError("run specification differs from the locked packet")
+            identity, specification_coverage = _spec.recording_identity(args.root, summary.get('specification'), spec=spec_path or ran)
             harness_identity = _spec.harness_record(args.root, spec=spec_path or ran)
         except (OSError, ValueError, TypeError) as e:
             print(f"record-run: spec verification failed: {e}", file=sys.stderr)
@@ -512,6 +559,13 @@ def main():
         # cited no attestation: the declared verification did not happen.
         outcome = "INCOMPLETE"
 
+    if d_harness not in (None, 0) and any(
+            contracts == "FixCheckV1" and any(isinstance(r.get("packetCheck"), dict)
+                and r["packetCheck"].get("exit") != 0 for r in _each((summary.get("results") or {}).get(node)))
+            for node, contracts in (summary.get("contracts") or {}).items()):
+        if outcome in ("COMPLETE", "UNKNOWN"):
+            outcome = "INCOMPLETE"
+
     # 1a. Irreversible effects were filed into the once-only ledger at step
     # 0, before anything in this script could refuse the record.
 
@@ -556,9 +610,8 @@ def main():
                 # moved the problem rather than solved it.
                 rec["runId"] = args.run_id
                 rec.setdefault("lastChecked", 0)
-                safe = "".join(ch if ch.isalnum() or ch in "-_" else "-"
-                               for ch in f"{campaign}.{w.get('node','')}")[:120]
-                with open(os.path.join(wdir, f"{safe}.json"), "w", encoding="utf-8", newline="\n") as fh:
+                safe = wait_filename(campaign, w.get('node', ''))
+                with open(os.path.join(wdir, safe), "w", encoding="utf-8", newline="\n") as fh:
                     json.dump(rec, fh, indent=2)
     except Exception as e:  # noqa: BLE001
         print(f"record-run: inbox/waits update failed: {e}", file=sys.stderr)
@@ -569,6 +622,8 @@ def main():
     # version — a check that starts by failing runs is a check people turn
     # off before it has established what normal looks like.
     attestation = None
+    import review_gates as _review_gates
+    review_declared = _review_gates.declared(summary)
     try:
         import attest as _attest
         checks, afindings = _attest.verify_claims(args.root, summary)
@@ -579,7 +634,7 @@ def main():
         # is the declared verification not happening, not a warning to print
         # beside a COMPLETE: a fabricated attestId would otherwise be filed
         # clean.
-        if afindings and outcome in ("COMPLETE", "UNKNOWN") and (summary.get("prove") or summary.get("cites") or {}):
+        if afindings and outcome in ("COMPLETE", "UNKNOWN") and (summary.get("prove") or summary.get("cites") or review_declared):
             outcome = "INCOMPLETE"
             print("record-run: the gate manifest is refused, so no prove: citation in "
                   "this run can be checked — filing it INCOMPLETE", file=sys.stderr)
@@ -674,7 +729,7 @@ def main():
                           file=sys.stderr)
     except Exception as e:  # noqa: BLE001 - a witness must never eat the record
         print(f"record-run: attestation cross-check failed: {e}", file=sys.stderr)
-        if summary.get('prove') or summary.get('cites'):
+        if summary.get('prove') or summary.get('cites') or review_declared:
             outcome = 'INCOMPLETE'
 
     # 1. Durable provenance artifact.
@@ -692,9 +747,27 @@ def main():
         replay_problems.append(str(exc))
         outcome = "REFUSED-REPLAY"
         print("record-run: REPLAY-PROVENANCE — " + str(exc), file=sys.stderr)
-    repair_checkers, checked, repair_problems = repair_receipts(summary, args.graph)
+    repair_checkers, checked, repair_problems = repair_receipts(summary, args.graph, root=args.root)
+    repair_journal = None
+    if checked:
+        try:
+            import repair_journal as _repair_journal
+            repair_journal = _repair_journal.corroborate(summary, args.run_id)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            repair_problems.append('REPAIR-JOURNAL-UNPROVEN: ' + str(exc))
+            checked = []
+    repair_evidence = None
+    if checked:
+        try:
+            import repair_checks as _repair_checks
+            repair_evidence = _repair_checks.retain_evidence(args.root, summary)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            repair_problems.append('REPAIR-EVIDENCE-UNRETAINED: ' + str(exc))
+            checked = []
     for issue in repair_problems:
         print("record-run: checked commit refused — " + issue, file=sys.stderr)
+    if repair_problems and outcome in ("COMPLETE", "UNKNOWN"):
+        outcome = "INCOMPLETE"
     os.makedirs(args.state_dir, exist_ok=True)
     art = os.path.join(args.state_dir, f"{args.run_id}.json")
     artifact_data = {
@@ -710,6 +783,8 @@ def main():
                 "checked": checked,
                 "repairCheckers": repair_checkers,
                 "repairCheckProblems": repair_problems,
+                "repairJournal": repair_journal,
+                "repairEvidence": repair_evidence,
                 "replayChecked": replay_checked,
                 "rejudges": rejudges,
                 "replayProblems": replay_problems,
@@ -720,6 +795,8 @@ def main():
                 "findings": findings,
                 "harnessExit": harness,
                 "harness": harness_identity,
+                "specificationCoverage": specification_coverage,
+                "recordingUnpinnedAllowances": args.unpinned_ok,
                 "redTeam": red_team,
                 "redTeamCoverage": red_team_coverage,
                 "proofAudit": proof_audit,
@@ -744,6 +821,7 @@ def main():
     lessons = None
     try:
         import memory as _memory
+        _memory.retain_run(args.root, args.run_id, art)
         written, mfindings = _memory.append_from_summary(
             args.root, summary, args.run_id, args.state_dir)
         for f in mfindings:
@@ -752,7 +830,7 @@ def main():
             killed = sum(1 for r in written if r["status"] == "killed")
             lessons = {"filed": len(written), "killed": killed}
             print(f"record-run: filed {len(written)} lesson(s), {killed} killed")
-    except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - never lose the Evidence row over this
         print(f"record-run: lesson filing failed: {e}", file=sys.stderr)
 
     # 1e. The recall index, refreshed after the lessons landed so the next
@@ -863,6 +941,8 @@ def main():
         proof_cell = proof_audit
     proof = (f"harness exit {harness}; red-team {red_team}; proof-audit {proof_cell}; "
              f"executor {args.executor}")
+    if specification_coverage and specification_coverage['references'] == 'uncovered-legacy':
+        proof += '; LEGACY reference files not covered: ' + ', '.join(cell(p, 500) for p in specification_coverage['paths'])
     if harness_identity:
         proof += f"; harness sha256 {harness_identity['sha256']}"
         if harness_identity['changedPaths']:

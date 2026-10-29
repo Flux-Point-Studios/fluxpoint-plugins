@@ -14,6 +14,7 @@ and all coverage files match a packet commit pinned in this manifest:
     "contexts": ["ci/python"],
     "witness": {"statusCreators": ["dedicated-ci-bot"], "checkRunApps": []},
     "packetSha": "0123456789012345678901234567890123456789",
+    "config": [".woodpecker/python.yml", "scripts/python-suite.sh", "pyproject.toml"],
     "covers": {
       "python-suite-312": {
         "contexts": ["ci/python"],
@@ -30,9 +31,15 @@ repository's reviewed values. The repository and github.com API host are explici
 argument or a field trusted from the attest log. `--reuse` has no base override.
 For App check runs, pin numeric `checkRunApps` IDs instead of a status creator.
 The harness runs `attest.py --check-ci --if-present`: exit 2 refuses malformed
-policy or a status creator equal to `gh api user`; exit 3 means the identity
-cannot be checked. Both stop the harness. A same-account Woodpecker installation
-cannot green until it uses a dedicated bot whose token is absent from this host.
+policy or a pinned creator found in the active token, any stored gh account
+(including inactive accounts), or a `GITHUB_TOKEN` masked by `GH_TOKEN`; exit 3
+means the inventory is unavailable. A gh version supporting `auth status --json`
+is required. Both failures stop the harness. The check covers gh stored accounts
+and `GH_TOKEN`/`GITHUB_TOKEN` only; credential helpers, netrc files, other tool
+configuration and CI secrets remain an operator boundary. Use a dedicated bot
+whose token is absent from every store agents can reach. CI-server tokens with
+push, restart or environment-override rights must also be inaccessible to agents,
+including secrets available to pipelines the agents can edit.
 These pins authenticate forge API provenance; they are not artifact signatures.
 
 The adapter reads every page of `/commits/<sha>/statuses` and all check runs,
@@ -42,15 +49,35 @@ red, including an old failed attempt followed by success. Skipped/neutral checks
 unpinned success, missing contexts, malformed responses and incomplete listings
 never green. A target that moves during observation is refused.
 
+A status linking a Woodpecker pipeline also requires a bounded source read of
+its pipeline API: parent must be zero, event must be push or pull_request, and
+the successful pipeline must name the exact judged commit and pipeline number.
+Restarts and manual runs cannot green. No GitHub or CI credentials are forwarded
+to that URL. If the provider API is private or unreadable, reuse is undecided;
+run the independent local lane. Other providers still rely on the credential
+isolation above, since a status alone does not expose arbitrary CI environment
+overrides.
+
 Coverage is deliberately conservative. Include the pipeline YAML, every tracked
-file its tokens reference, literal Python `-m` modules/package initializers,
-and static imports recursively referenced by those files. All tracked `pyproject.toml`, `setup.cfg`, `pytest.ini`, `tox.ini` and
-`conftest.py` files anywhere in the repository must be included, covering implicit
+file its executable tokens reference (including dot-directories), literal Python
+`-m` modules/package initializers, and static imports recursively referenced by
+those files. Comments and Python identifiers do not introduce dependencies;
+Python AST imports and path-bearing string literals do. Ordinary literal
+`getattr`/`hasattr` attribute reads are allowed, while dynamic names and
+import-performing attribute lookups are refused. All tracked `pyproject.toml`,
+`setup.cfg`, `pytest.ini`, `.pytest.ini`, `pytest.toml`, `.pytest.toml`, `tox.ini`
+and `conftest.py` files anywhere in the repository must be included, covering implicit
 reads without guessing working directories. Every listed file must exist as a
 regular blob with the same mode and object ID at the head and packet. Symlinks,
 truncated trees, mismatched content/object IDs, constructed shell paths and command
 substitution are refused. Dynamic pipelines or excessive coverage can use the
 independent local lane; an undecided reuse is never a pass.
+
+`ci.config` applies the same complete source pinning to `prove:ci`, including
+its pipeline YAML and executable closure. A source citation with no `ci.config`
+or `packetSha` cannot green. `--ci --sha` remains a diagnostic observation and
+cannot back a source citation. A deployed gate still requires its wrapper
+witness and checked dependency resolution; forge/reuse rows cannot replace it.
 
 An independent node of any object contract can declare
 `"cites": ["python-suite-312"]`. The compiler extends that node's result schema

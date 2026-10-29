@@ -19,7 +19,7 @@ step; do not stop at copying files.
    the repo has a pre-1.0 `LOOP.md`, stop and run `/fluxpoint:migrate`
    instead of writing a second state file.
 3. Ensure `.gitignore` contains `.claude/fluxpoint/`,
-   `.claude/worktrees/`, and `__pycache__/`. The worktrees entry
+   `.claude/worktrees/`, `.claude/workflows/`, and `__pycache__/`. The worktrees entry
    matters as soon as any campaign has a `mutates` node: those run in
    isolated trees under `.claude/worktrees/`, which must never be
    committed.
@@ -204,6 +204,14 @@ step; do not stop at copying files.
    classes). Comments, strings and non-test helper names do not count. Files
    importing Hypothesis are noted as properties; other matching tests are
    examples. Review the actual generators, assertions and documented bounds.
+   The **compact** taxonomy gates tracked `.compact` sources and JS/TS
+   builders importing `@midnight-ntwrk/*`. Its nine classes cover live-state
+   transcript gas, concurrency, maintenance authority, verifier binding,
+   lookalike deployments, witness egress, disclosure, ledger pins and replay.
+   Name each class in a fast-check or Hypothesis property test, or record a
+   scoped waiver. Example-only tests remain red for this taxonomy. Static
+   declarations do not establish that the test runs; execute the project
+   harness and inspect generator reachability too.
    `spec-guard.py --check` is red for each unspecified class until the
    test exists or the taxonomy's own `waived` object gives it a reason of
    at least twenty characters. A waiver is scoped to its taxonomy, so an

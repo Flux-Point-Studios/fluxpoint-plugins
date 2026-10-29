@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "goal": "Close CI coverage and provider launch gaps reported in issue 178",
+  "asset": "Forge source evidence and pinned coverage",
+  "scope": [
+    "Pinned executable dependency closure including dot directories and pytest config",
+    "Typed static Python scans without comment or identifier false dependencies",
+    "Pinned configuration for prove:ci and refusal of restarted/manual Woodpecker pipelines"
+  ],
+  "outOfScope": [
+    "Reconstructing invisible CI environment overrides",
+    "Trusting a pinned CI identity whose tokens or server restart credentials are available to agents"
+  ],
+  "decisions": [
+    {
+      "id": "source-backed-coverage",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "What establishes that the pinned CI status ran the reviewed check configuration?",
+        "options": [
+          {
+            "option": "source-and-launch-pins",
+            "argued_by": "model",
+            "strongest_objection": "Private provider APIs can be unavailable, requiring a local fallback"
+          },
+          {
+            "option": "creator-only",
+            "argued_by": "model",
+            "strongest_objection": "A restarted pipeline can skip tests and honestly post green"
+          }
+        ],
+        "chosen": "source-and-launch-pins",
+        "rationale": "Bind all source citations to reviewed blobs, preserve static executable closure and inspect observable provider restart metadata.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue178 reproduces hidden-directory script omission and mutable prove:ci config",
+          "Woodpecker pipeline parent reveals restarts but not caller environment values"
+        ]
+      },
+      "costs": [
+        {
+          "option": "source-and-launch-pins",
+          "cost": "One bounded provider observation for a pinned Woodpecker green and static dependency checks",
+          "basis": "estimate",
+          "evidence": [
+            "Existing GitHub tree/blob coverage handles source pinning"
+          ]
+        },
+        {
+          "option": "creator-only",
+          "cost": "Unjustified reuse of skipped execution",
+          "basis": "estimate",
+          "evidence": [
+            "Issue178 section2"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "coverage-completeness",
+      "statement": "Dot-directory script dependencies and all pytest config names must be pinned; comments and ordinary literal attribute access do not introduce phantom imports.",
+      "decisions": [
+        "source-backed-coverage"
+      ],
+      "checks": [
+        "coverage-followups"
+      ],
+      "counterexample": "CI invokes an omitted .ci/run.sh or new pytest.toml and coverage accepts it"
+    },
+    {
+      "id": "source-config-launch-pins",
+      "statement": "prove:ci requires pinned config, and a Woodpecker source green is accepted only from an observed original automatic pipeline for the same commit.",
+      "decisions": [
+        "source-backed-coverage"
+      ],
+      "checks": [
+        "coverage-followups"
+      ],
+      "counterexample": "A manual restart or changed prove:ci pipeline yields reusable green"
+    }
+  ],
+  "checks": [
+    {
+      "id": "coverage-followups",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/forge-coverage-test.py"
+      ],
+      "scope": "In-memory authoritative API fixture and actual static closure scanners",
+      "assumptions": [
+        "Pinned CI identities and CI-server restart credentials are unavailable to agents",
+        "Fixtures establish refusal logic, not live provider authorization"
+      ],
+      "timeoutSeconds": 120
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Can a commit status prove its entire CI environment?",
+      "resolution": "No. Operator credential isolation remains required; observable restarted/manual Woodpecker pipelines are refused and unavailable metadata cannot green."
+    }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/tests/forge-evidence-test.py"
+  ]
+}

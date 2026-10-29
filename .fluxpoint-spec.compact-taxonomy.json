@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "goal": "Require explicit Midnight attack class properties or waivers for Compact contracts and transaction builders",
+  "asset": "Existing attack taxonomy template and spec-guard enforcement",
+  "scope": [
+    "Nine Midnight classes (#186)",
+    "Compact source and Midnight builder detection",
+    "Property vs example distinction and waiver enforcement"
+  ],
+  "outOfScope": [
+    "Compact compiler integration (#185)",
+    "Proving generator reachability or native ledger correctness"
+  ],
+  "decisions": [
+    {
+      "id": "compact-taxonomy",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should Midnight-specific attack requirements join the existing taxonomy gate?",
+        "options": [
+          {
+            "option": "extend-taxonomy",
+            "argued_by": "model",
+            "strongest_objection": "Static source and generator detection does not prove test execution"
+          },
+          {
+            "option": "docs-only",
+            "argued_by": "model",
+            "strongest_objection": "Missing tests continue to pass the gate"
+          }
+        ],
+        "chosen": "extend-taxonomy",
+        "rationale": "Reuse spec-guard class names and scoped waivers, requiring generator-backed tests for the new contract taxonomy.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue #186 measured transcript gas failure with two state entries"
+        ]
+      },
+      "costs": [
+        {
+          "option": "extend-taxonomy",
+          "cost": "One language registry extension and focused regressions",
+          "basis": "estimate",
+          "evidence": [
+            "Existing Python/TypeScript evidence readers and scoped waivers are reusable"
+          ]
+        },
+        {
+          "option": "docs-only",
+          "cost": "Attack classes remain unchecked",
+          "basis": "measured",
+          "evidence": [
+            "No Midnight taxonomy shipped at issue filing"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "midnight-classes",
+      "statement": "Compact and Midnight builders activate all nine classes, and examples or missing tests fail unless each class has a justified scoped waiver",
+      "decisions": [
+        "compact-taxonomy"
+      ],
+      "checks": [
+        "compact-taxonomy-tests"
+      ],
+      "counterexample": "Gas state growth has no generator-backed test yet the gate is green"
+    }
+  ],
+  "checks": [
+    {
+      "id": "compact-taxonomy-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/compact-taxonomy-test.py"
+      ],
+      "scope": "Actual spec-guard CLI over temporary repositories with Compact and Midnight builder inputs",
+      "assumptions": [
+        "Source naming and generator imports establish declaration coverage only, not runtime execution"
+      ],
+      "timeoutSeconds": 60
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does a fast-check import prove the named property executes?",
+      "resolution": "No. This extends the existing static taxonomy contract. The full project test harness must still execute and establish generator reachability."
+    }
+  ]
+}

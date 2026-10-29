@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "sha256": "b3b5c0f4323ec21cd338ad187aa8104643a212182cf918e2634c15e95ba8f072",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/audit-workflow-test.py": "de5c61f67a371dda4cce5383eaf5e0eea61f69f243e25ed0ffcc44bd5cf748e4"
+  },
+  "lockFormat": 2
+}

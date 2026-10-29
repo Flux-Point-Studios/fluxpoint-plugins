@@ -76,7 +76,7 @@ class SpecificationTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def identity(self, name='.fluxpoint-spec-lock.json'):
-        return {k: v for k, v in json.loads((self.root / name).read_text()).items() if k != 'harness'}
+        return {k: v for k, v in json.loads((self.root / name).read_text()).items() if k not in ('harness', 'lockFormat')}
 
     def compile(self, ir=None):
         (self.root / 'WORK.md').write_text('```json graph-ir\n' + json.dumps(ir or graph()) + '\n```')

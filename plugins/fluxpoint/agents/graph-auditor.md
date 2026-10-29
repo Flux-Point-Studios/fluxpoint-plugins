@@ -16,7 +16,22 @@ The compiler already enforces structure — missing contracts, even panels,
 self-certifying mutators, dangling edges, budget overruns. Run it first
 (`bash <plugin>/scripts/py.sh compile-graph.py <graph> --check`) and stop if
 it is red; there is no point judging the semantics of a graph that cannot
-compile. Everything below is what the compiler cannot see.
+compile. When the caller supplies a clean structural check summary, reuse it.
+When a repository root is supplied, resolve every relative graph, evidence and
+source path there and run checks from that directory or with `--root <root>`.
+Everything below is what the compiler cannot see.
+
+Probe declarations separate execution shape from command effects. For a git
+command with a later-bound operand, declare `kind: "shape"`, type every operand
+in `data`, and use a git read with the same global options and repository target.
+For example, `git -C /repo switch {{prev.sha}}` can use `form: "git -C /repo status"`
+and `data: {"prev.sha": "sha"}`. The receipt is shape-only. For a read of a ref a
+later node creates, write the prompt as `git rev-parse <future-ref>` and declare
+`probe.templates: [{"template": "git rev-parse <future-ref>", "instances":
+["git rev-parse HEAD"]}]`; the existing `HEAD` instance probes the read without
+creating the future branch. Never substitute unreviewed values or execute the
+original mutation. The workflow supplies deterministic status forms for git
+writes; follow those forms instead of inventing a dry-run command.
 
 Scope: the IR you are pointed at, plus whatever code its nodes touch that
 you must read to judge a prompt or a tier. Use Bash to check claims — does

@@ -17,7 +17,7 @@ PLUGIN = Path(__file__).resolve().parents[1]
 SCRIPTS = PLUGIN / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
 from process_tree import CleanupPending
-from repair_diff import manifest, AXES, coverage_issue
+from repair_diff import manifest, compact_manifest, manifest_digest, AXES, coverage_issue
 import repair_checks
 
 
@@ -69,25 +69,33 @@ class RepairProof(unittest.TestCase):
         self.data = subprocess.run(['git', '-C', str(self.root), 'diff', '--binary', self.base, self.head],
                                    capture_output=True, check=True).stdout
         self.patches = []
-        for key in ('slice', '_integration'):
+        for key in ('slice', 'other', '_integration'):
             for number in (1, 2, 3):
-                path = self.root / '.claude/fluxpoint/rounds/launch' / key / ('r' + str(number)) / 'patch.diff'
+                path = self.root / '.claude/fluxpoint/rounds/launch' / ('1' * 64) / key / ('r' + str(number)) / 'patch.diff'
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(self.data)
                 self.patches.append(path)
         self.series = self.root / 'production-series.json'
         self.series.write_text('[0,22,41,187,230]\n', encoding='utf-8')
 
-    def run_graph(self, mode='pass', integration=False, rounds=1, nonce='1' * 64):
+    def run_graph(self, mode='pass', integration=False, rounds=1, nonce='1' * 64, specification=None):
         ir = copy.deepcopy(self.ir)
         ir['nodes'][1]['repeat']['maxRounds'] = rounds
+        if mode == 'partial':
+            ir['lists']['slices'].append({'key': 'other', 'targetClasses': ['decode']})
+        if nonce and nonce != '1' * 64:
+            import shutil
+            source = self.root / '.claude/fluxpoint/rounds/launch' / ('1' * 64)
+            target = source.parent / nonce
+            if not target.exists():
+                shutil.copytree(source, target)
         if integration:
             ir['nodes'][1]['repeat']['integrate'] = ['merge', 'review']
             ir['nodes'] += [
                 {'id': 'merge', 'after': 'check', 'mutates': True, 'contract': 'SliceV1', 'prompt': 'merge {{prev}}'},
                 {'id': 'review', 'after': 'merge', 'independent': True, 'verifies': 'merge',
                  'isolation': 'measure', 'contract': 'FixCheckV1', 'prompt': 'review {{prev}}', 'haltWhen': "verdict != 'PASS'"}]
-        js = CG.emit(ir, CONTRACTS).replace('export const meta', 'const meta')
+        js = CG.emit(ir, CONTRACTS, specification=specification).replace('export const meta', 'const meta')
         prefix = r'''
 import {writeFileSync,readFileSync,appendFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
@@ -95,7 +103,7 @@ const args=ARGS, mode=MODE, calls=[];
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async xs=>Promise.all(xs.map(f=>f()));
 const obs={command:'python attack.py',result:'exit 0: defended'},ctl={command:'python valid.py',result:'exit 0: valid control'};
-const slice={branch:'repair',diffSummary:'complete patch against pinned launch base',testsAdded:['test_attack'],harnessCommand:'pytest',harnessExit:0,evidence:['checked original attack and valid control'],sharedResources:[],siblings:[]};
+const slice={patchSha256:PATCH_SHA,branch:'repair',diffSummary:'complete patch against pinned launch base',testsAdded:['test_attack'],harnessCommand:'pytest',harnessExit:0,evidence:['checked original attack and valid control'],sharedResources:[],siblings:[]};
 const axes=['field','encoding','caller','network','role','path'];
 const sibling=(finding,axis,surface='checker-'+axis)=>({finding,invariant:'authoritative invariant',axis,surface,attack:obs,control:ctl,outcome:'DEFENDED',reason:'independent attack and valid control executed'});
 const executeProof=(p,harm=false)=>{
@@ -107,11 +115,13 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
   if(mode==='missing-witness'&&label.includes(':read:'))return null;
   if(mode==='patch-drift'&&label.includes(':after-review'))appendFileSync(PATCH_PATH,'\n');
   const command=p.split('COMMAND: ')[1].split('\n')[0];
-  try {return JSON.parse(execFileSync(BASH_EXEC,['-c',command],{encoding:'utf8'}));}
+  try {const result=JSON.parse(execFileSync(BASH_EXEC,['-c',command],{encoding:'utf8'}));if(mode==='manifest-drift'&&label.includes(':read:'))result.manifest.hunks=[];return result;}
   catch(e){try{return JSON.parse(e.stdout.toString('utf8'))}catch(_){return {status:'INCOMPLETE',issue:String(e)}}}
  }
  if(label.startsWith('fix:')||label.startsWith('merge:')){
   const r=structuredClone(slice);
+  if(mode==='context-overflow')r.diffSummary='x'.repeat(40000);
+  if(mode==='fixer-digest-drift')r.patchSha256='0'.repeat(64);
   if(mode==='packet-conflict-fix'&&label.startsWith('fix:'))r.packetConflict=null;
   if(mode==='packet-conflict-merge'&&label.startsWith('merge:'))r.packetConflict={checks:['locked'],nodes:['fix'],counterexample:'counterexample executed'};
   if(mode==='fixer-unrerun'||mode==='fixer-only')r.siblings=axes.map(axis=>sibling('decode',axis,'fixer-'+axis));
@@ -131,6 +141,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
   if(mode==='wrong-targets')r.targetClasses=[];
   if(mode==='uncited-na')r.siblings[0]={...r.siblings[0],outcome:'NOT-APPLICABLE',reason:'not applicable'};
   if(mode==='fixer-only')r.siblings=axes.map(axis=>sibling('decode',axis,'fixer-'+axis));
+  if(mode==='partial'&&label.includes(':other:'))r.verdict='FAIL';
   if(mode==='wrong-sha')r.diffCoverage.patchSha256='0'.repeat(64);
   if(mode==='missing-hunk')r.diffCoverage.hunks=[];
   if(mode==='extra-hunk')r.diffCoverage.hunks.push({id:'invented',surface:'other',attack:obs,control:ctl});
@@ -153,7 +164,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
   if(mode!=='unexecuted-attacker')executeProof(p,mode==='attacker-drops-harm'||mode==='claim-dropped-extra-harm'&&label.endsWith(':authority'));
   if(mode==='attacker-other-sha')r.patchSha256='0'.repeat(64);
   if(mode.startsWith('claim-')&&label.endsWith(':authority')){
-   const observed=reproduces=>({command:'python sibling_attack.py',result:reproduces?'exit 1: sibling harm':'exit 0: defended',controlCommand:'python valid.py',controlResult:'exit 0: valid',controlPassed:true,reproduces});
+   const observed=reproduces=>({command:mode==='claim-unrelated-reproduction'?'python unrelated_claim.py':ATTACK_COMMAND,result:reproduces?'exit 1: sibling harm':'exit 0: defended',controlCommand:CONTROL_COMMAND,controlResult:'exit 0: valid',controlPassed:true,reproduces});
    r.findings=[{finding:'unchecked sibling field in repaired invariant',severity:'HIGH',defectClass:'decode',invariant:'all sibling fields are guarded',classRewire:'guard the class at the shared boundary',measurement:'sibling_attack.py executed: harm observed',origin:'fix-introduced',introducedIn:1,
     originEvidence:{base:{snapshot:c.base,...observed(false)},targetClasses:c.targetClasses,rounds:c.patches.map(x=>({...x,...observed(!c.integrated)})),...(c.integrated?{integrated:{...c.integrated,...observed(true)}}:{})}}];
   }
@@ -163,14 +174,14 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
   if(mode==='claim-dead-refuter'&&label.endsWith(':scope'))return null;
   if(mode==='claim-harm-then-defended')executeProof(p,true);
   const measured=executeProof(p,mode==='claim-harm-refuted');
-  return {resolution:mode==='claim-refuted'||mode==='claim-fake-evidence'||mode==='claim-harm-refuted'||mode==='claim-harm-then-defended'?'REFUTED':mode==='claim-unresolved'?'UNRESOLVED':'CONFIRMED',attack:mode==='claim-fake-evidence'?obs:measured.attack,control:measured.control,contradiction:'executed case contradicts the claim at the intended boundary'};
+  return {resolution:mode==='claim-refuted'||mode==='claim-unrelated-reproduction'||mode==='claim-fake-evidence'||mode==='claim-harm-refuted'||mode==='claim-harm-then-defended'?'REFUTED':mode==='claim-unresolved'?'UNRESOLVED':'CONFIRMED',attack:mode==='claim-fake-evidence'?obs:measured.attack,control:measured.control,contradiction:'executed case contradicts the claim at the intended boundary'};
  }
  throw Error('unexpected call '+label);
 };
 '''
         args = {'_base': {'sha': self.base, 'porcelain': ''}, '_launch': {'root': str(self.root), 'nonce': 'launch'},
                 '_replayLaunchNonce': nonce, 'findings': ['Original targeted finding']}
-        values = {'ARGS': args, 'MODE': mode, 'PATCH_PATH': str(self.patches[0]), 'HEAD': self.head,
+        values = {'ARGS': args, 'MODE': mode, 'PATCH_SHA': manifest(self.data)['patchSha256'], 'PATCH_PATH': str(self.patches[0]), 'HEAD': self.head,
                   'BASH_EXEC': os.environ.get('FPL_BASH') or ('C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else 'bash'),
                   'SERIES_SHA': __import__('hashlib').sha256(self.series.read_bytes()).hexdigest(), 'SERIES': str(self.series),
                   'PYTHON_EXEC': sys.executable, 'HELPER_SCRIPT': str(SCRIPTS / 'repair-proof.py'),
@@ -193,6 +204,64 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
                 'provenance': result.get('r', {}).get('provenance', []),
             }), file=sys.stderr)
         return result
+
+    def test_fixed_packet_runner_binds_red_and_green_to_patched_snapshot(self):
+        fixtures = module('repair_packet_fixtures', Path(__file__).with_name('specification-test.py'))
+        import specification
+        for expect_green in (False, True):
+            with self.subTest(expect_green=expect_green):
+                doc = fixtures.packet()
+                doc['checks'][0]['argv'] = ['{python}', '-c', 'import pathlib; assert pathlib.Path("state.py").read_text() == "flag = True\\n"' if expect_green else 'raise SystemExit(9)']
+                (self.root / 'state.py').write_text('flag = False\n')
+                (self.root / specification.SPEC).write_text(json.dumps(doc))
+                locked = subprocess.run([sys.executable, str(SCRIPTS / 'specification.py'), '--root', str(self.root), '--lock'], capture_output=True, text=True)
+                self.assertEqual(locked.returncode, 0, locked.stderr)
+                self.git('add', 'state.py', specification.SPEC, specification.LOCK)
+                self.git('commit', '-qm', 'packet base')
+                self.base = self.git('rev-parse', 'HEAD')
+                self.prepare('flag = True\n')
+                packet, identity = specification.load(self.root)
+                spec = {'packet': packet, 'identity': identity, 'path': specification.SPEC}
+                result = self.run_graph(mode='packet-checked', specification=spec)
+                self.assertEqual(result['r']['outcome'], 'COMPLETE' if expect_green else 'INCOMPLETE')
+                calls = [c for c in result['calls'] if c['label'].startswith('repair-witness:check:')]
+                self.assertEqual(len(calls), 1)
+                if not expect_green:
+                    self.assertTrue(any(p['status'] == 'PACKET-CHECK-UNPROVEN' for p in result['r']['provenance']))
+                    self.assertFalse(any(':attack:' in c['label'] for c in result['calls']))
+
+    def test_large_patch_read_returns_compact_digest_bound_manifest(self):
+        self.prepare('flag = True\n# ' + 'large patch content ' * 7000 + '\n')
+        result = PROOF.read(self.root, self.base, str(self.patches[0]), 'slice', 1)
+        self.assertFalse('rawPatch' in result)
+        self.assertLess(len(json.dumps(result)), 3000)
+        self.assertEqual(result['manifest']['patchSha256'], manifest(self.data)['patchSha256'])
+        self.assertRegex(result['manifestSha256'], r'^[0-9a-f]{64}$')
+
+    def test_snapshot_has_index_for_directory_packet_inputs(self):
+        import specification
+        fixtures = module('repair_directory_packet', Path(__file__).with_name('specification-test.py'))
+        (self.root / 'probes').mkdir()
+        (self.root / 'probes' / 'run.py').write_text('print("checked")\n')
+        doc = fixtures.packet()
+        doc['checks'][0]['argv'] = ['{python}', 'probes/run.py']
+        doc['harnessInputs'] = ['probes']
+        (self.root / '.gitignore').write_text('probes/\n')
+        self.git('add', '-f', 'probes')
+        (self.root / specification.SPEC).write_text(json.dumps(doc))
+        (self.root / 'WORK.md').write_text('SPEC: ' + specification.SPEC + '\n```json graph-ir\n' + json.dumps(fixtures.graph()) + '\n```\n')
+        result = subprocess.run([sys.executable, str(SCRIPTS / 'specification.py'), '--root', str(self.root), '--lock'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.git('add', '.gitignore', specification.SPEC, specification.LOCK, 'WORK.md')
+        self.git('commit', '-qm', 'packet inputs')
+        self.base = self.git('rev-parse', 'HEAD')
+        self.prepare('flag = False\n')
+        s = PROOF.materialize(self.root, self.base, str(self.patches[0]), manifest(self.data)['patchSha256'], 'slice', 1)
+        self.addCleanup(lambda: PROOF.cleanup(s['snapshot'], s['token']))
+        checked = PROOF.check_packet(s['snapshot'], s['token'], specification.SPEC)
+        self.assertEqual(checked['exit'], 0, checked['output'])
+        compiled = subprocess.run([sys.executable, str(SCRIPTS / 'compile-graph.py'), 'WORK.md', '--check'], cwd=s['snapshot'], capture_output=True, text=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
 
     def test_clean_pass_spawns_independent_diff_attack_and_live_patch_receipt(self):
         result = self.run_graph()
@@ -239,7 +308,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
                 self.assertFalse(any(':attack:' in c['label'] for c in result['calls']))
 
     def test_sha_hunk_and_executed_control_failures_block_pass(self):
-        for mode in ('wrong-sha', 'missing-hunk', 'extra-hunk', 'missing-control', 'missing-witness'):
+        for mode in ('wrong-sha', 'missing-hunk', 'extra-hunk', 'missing-control', 'missing-witness', 'manifest-drift'):
             with self.subTest(mode=mode):
                 result = self.run_graph(mode)
                 self.assertEqual(result['r']['outcome'], 'INCOMPLETE')
@@ -271,7 +340,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         defended = self.run_graph('claim-refuted')
         self.assertEqual(defended['r']['outcome'], 'COMPLETE')
         self.assertEqual(len(defended['r']['repairDiffReviews'][0]['refuters']), 3)
-        for mode in ('claim-confirmed', 'claim-unresolved', 'claim-dead-refuter', 'claim-fake-evidence', 'claim-harm-refuted', 'claim-harm-then-defended'):
+        for mode in ('claim-confirmed', 'claim-unresolved', 'claim-dead-refuter', 'claim-fake-evidence', 'claim-unrelated-reproduction', 'claim-harm-refuted', 'claim-harm-then-defended'):
             with self.subTest(mode=mode):
                 result = self.run_graph(mode)
                 self.assertEqual(result['r']['outcome'], 'INCOMPLETE')
@@ -287,11 +356,39 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         self.assertIn('unchecked sibling field', fix_round2['p'])
         self.assertTrue(any(p['status'] == 'RECURRING-CLASS' for p in result['r']['provenance']))
 
+    def test_repair_context_bound_is_priced_and_enforced_before_spawning(self):
+        ir = copy.deepcopy(self.ir)
+        ir['budget']['repairContextBytes'] = 4096
+        priced = CG.estimate_tokens(ir, CONTRACTS)
+        ir['nodes'][1]['prompt'] += ' another {{prev}}'
+        twice = CG.estimate_tokens(ir, CONTRACTS)
+        self.assertGreaterEqual(twice['total'] - priced['total'], 4096)
+        self.assertFalse(any(token == '{{prev}}' for token, _ in twice['unpriced']))
+        self.assertTrue(any('whole {{prev}}' in w for w in CG.warnings(ir)))
+        result = self.run_graph('context-overflow')
+        self.assertEqual(result['r']['outcome'], 'INCOMPLETE')
+        self.assertTrue(any(p['status'] == 'CONTEXT-LIMIT' for p in result['r']['provenance']))
+        self.assertFalse(any(c['label'].startswith('check:') for c in result['calls']))
+
+    def test_terminal_partial_round_skips_integration_spend(self):
+        result = self.run_graph('partial', integration=True)
+        self.assertEqual(result['r']['outcome'], 'INCOMPLETE')
+        self.assertFalse(any(c['label'].startswith(('merge:', 'review:')) for c in result['calls']))
+        self.assertEqual(len(result['r']['fixOrigins']), 2)
+
+    def test_fixer_digest_must_match_attempt_artifact(self):
+        result = self.run_graph('fixer-digest-drift')
+        self.assertEqual(result['r']['outcome'], 'INCOMPLETE')
+        self.assertFalse(any(c['label'].startswith('check:') for c in result['calls']))
+
     def test_integration_runs_its_own_proof_tier(self):
         result = self.run_graph(integration=True)
         self.assertEqual(result['r']['outcome'], 'COMPLETE')
         self.assertEqual([r['item'] for r in result['r']['repairDiffReviews']], ['slice', '_integration'])
         self.assertTrue(result['r']['fixOrigins'][-1]['integration'])
+        merge = next(c for c in result['calls'] if c['label'].startswith('merge:'))
+        self.assertNotIn('checkerWitness', merge['p'])
+        self.assertNotIn('diffAttack', merge['p'])
 
     def test_deleted_guard_still_selects_its_surface_attacker(self):
         (self.root / 'state.py').write_text('if valid:\n    flag = False\n')
@@ -300,7 +397,8 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         self.base = self.git('rev-parse', 'HEAD')
         self.prepare('')
         measured = manifest(self.data)
-        self.assertEqual(measured['hunks'], [])
+        self.assertEqual(len(measured['hunks']), 1)
+        self.assertFalse(measured['hunks'][0]['added'])
         self.assertIn('guards', measured['changedSurfaces'])
         result = self.run_graph()
         self.assertEqual(result['r']['outcome'], 'COMPLETE')
@@ -376,6 +474,21 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         with self.assertRaises(ValueError):
             repair_checks.corroborated(artifact)
 
+    def test_fixed_packet_check_refuses_a_checker_changed_tree(self):
+        measured = manifest(self.data)
+        snapshot = PROOF.materialize(self.root, self.base, str(self.patches[0]), measured['patchSha256'], 'slice', 1)
+        self.addCleanup(lambda: PROOF.cleanup(snapshot['snapshot'], snapshot['token']))
+        (Path(snapshot['snapshot']) / 'state.py').write_text('flag = False\n')
+        with self.assertRaisesRegex(ValueError, 'changed the pinned repair snapshot'):
+            PROOF.check_packet(snapshot['snapshot'], snapshot['token'], '.fluxpoint-spec.json')
+
+    def test_surface_classification_matches_ascii_javascript_boundaries(self):
+        from repair_diff import surfaces
+        values = ['jsonñ = 1', 'ſleep(1)', 'Kif', 'json = 1']
+        script = (SCRIPTS / 'repair-proof.js').read_text() + '\nconsole.log(JSON.stringify(' + json.dumps(values) + '.map(repairSurfaces)));'
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), [surfaces(v) for v in values])
+
     def test_js_hash_and_manifest_match_exact_host_bytes(self):
         import base64
         import hashlib
@@ -402,8 +515,9 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         setup = "const A={_replayLaunchNonce:'" + '1' * 64 + "'},REPAIR_LAUNCH={root:'ignored'},REPAIR_PROOF_ARGV=['ignored'];let reply;const repairText=v=>typeof v==='string'&&!!v.trim();const agent=async()=>reply;\n"
         script = setup + (SCRIPTS / 'repair-proof.js').read_text(encoding='utf-8') + '\nconst cases=' + json.dumps(cases) + ';\n' + '''
 (async()=>{const results=[];for(const [name,expected,actual]of cases){
- const context={base:'a'.repeat(40),item:'slice',round:1,current:{patch:expected}};
- reply={status:'READ',base:context.base,item:context.item,round:1,patch:actual,rawPatch:''};
+ const context={base:'a'.repeat(40),item:'slice',round:1,current:{patch:expected,patchSha256:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}};
+ const manifest={patchSha256:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',hunks:[],changedSurfaces:['other']};
+ reply={status:'READ',base:context.base,item:context.item,round:1,patch:actual,manifest,manifestSha256:repairManifestDigest(manifest)};
  const result=await repairReadPatch(context);results.push([name,!result.issue]);
 }console.log(JSON.stringify(results));})();'''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', check=True)
@@ -416,7 +530,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
             PROOF.materialize(self.root, self.base, patch, '0' * 64, 'slice', 1)
         s = PROOF.materialize(self.root, self.base, patch, measured['patchSha256'], 'slice', 1)
         self.assertEqual((Path(s['snapshot']) / 'state.py').read_text(), 'flag = True\n')
-        self.assertFalse((Path(s['snapshot']) / '.git').exists())
+        self.assertTrue((Path(s['snapshot']) / '.git' / 'index').is_file())
         code = 'import pathlib; assert pathlib.Path("state.py").read_text()=="flag = True\\n"'
         command = shlex.join([sys.executable, '-c', code])
         observed = PROOF.execute(s['snapshot'], s['token'], command, command, 10)

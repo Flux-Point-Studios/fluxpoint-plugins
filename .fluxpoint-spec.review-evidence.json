@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "goal": "Let independent review lenses reuse source-verified upstream suite evidence",
+  "asset": "Red-team review scope and execution evidence",
+  "scope": [
+    "Compact upstream execution pointers in reviewer and refuter context",
+    "Typed reused and own-run suite citations",
+    "Source-row validation at record time",
+    "Named reasons for independent suite reruns"
+  ],
+  "outOfScope": [
+    "Treating suite passes as adversarial review coverage",
+    "Parallel review/gate scheduling",
+    "Claiming a known interpreter for opaque shell wrappers"
+  ],
+  "decisions": [
+    {
+      "id": "reuse-gate-witness",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should review lenses use suites that upstream gates already ran?",
+        "options": [
+          {
+            "option": "reuse-witness-pointers",
+            "argued_by": "model",
+            "strongest_objection": "Every citation must bind an actual green row to the reviewed head and launch"
+          },
+          {
+            "option": "rerun-every-suite",
+            "argued_by": "model",
+            "strongest_objection": "Duplicate suites and setup compete for host capacity and consume most review wall time"
+          }
+        ],
+        "chosen": "reuse-witness-pointers",
+        "rationale": "Send compact candidate pointers, fetch exact source rows with the pinned witness and verify typed citations against the log; reviewers spend their budget on attacks and rerun only for named claims.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue #182 measured 138 of342 review wall minutes spent duplicating upstream gate work"
+        ]
+      },
+      "costs": [
+        {
+          "option": "reuse-witness-pointers",
+          "cost": "Read source rows and verify citations, without suite execution",
+          "basis": "estimate",
+          "evidence": [
+            "Attest rows already bind SHA, nonce, log and runtime identity"
+          ]
+        },
+        {
+          "option": "rerun-every-suite",
+          "cost": "Measured41% redundant review wall time and shared-host contention",
+          "basis": "measured",
+          "evidence": [
+            "Issue #182 transcript bucket analysis"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "review-source-citations",
+      "statement": "Every typed suite claim names a verified upstream or own execution; reused rows can support many lenses at one head/nonce, mismatched red/stale/missing rows refuse clean recording, and own reruns name their claim",
+      "decisions": [
+        "reuse-gate-witness"
+      ],
+      "checks": [
+        "review-gate-tests"
+      ],
+      "counterexample": "A reviewer claims suite coverage with no execution or silently reruns a covered suite with no named claim"
+    },
+    {
+      "id": "review-manifest-presence",
+      "statement": "Review-only suite claims require a valid manifest and source verification; absent or refused policy cannot file suite coverage clean",
+      "decisions": [
+        "reuse-gate-witness"
+      ],
+      "checks": [
+        "review-gate-tests"
+      ],
+      "counterexample": "A RedTeamV1-only summary claims fabricated executedGates and records COMPLETE after its gate manifest is absent"
+    }
+  ],
+  "checks": [
+    {
+      "id": "review-gate-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/review-gate-evidence-test.py"
+      ],
+      "scope": "Emitted reviewer context, source attest rows, shared reuse and negative claim checks",
+      "assumptions": [
+        "Worker attack quality remains semantic review; suite passes do not establish adversarial coverage"
+      ],
+      "timeoutSeconds": 90
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does reusing one suite row make two verification gates independent?",
+      "resolution": "No. This reuse applies only to review evidence; independent prove nodes retain the one-execution-per-node rule."
+    }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/scripts/compile-graph.py",
+    "plugins/fluxpoint/scripts/record-run.py",
+    "plugins/fluxpoint/contracts"
+  ]
+}

@@ -1,6 +1,7 @@
 # Recorded crash reruns
 
-A failed attested gate remains red at its commit and launch nonce. Running it
+A failed attested gate remains red for its Git tree content and dirt state
+within the launch. Empty commits and amended commit ids do not erase it. Running it
 again until a green appears does not settle the failed attempt: `prove:` cites
 that green as `SUPERSEDED-RED`. A resume retains its original launch stamp and
 nonce, so it retains the failed attempts too.
@@ -19,7 +20,7 @@ A repository can declare a narrow exception for a measured interpreter crash:
     "id": "native311-unraisable-crash",
     "gates": ["offline"],
     "host": "3.11.0 Windows",
-    "exit": [3221225477],
+    "exit": [3221225477, 2816],
     "logMust": ["Windows fatal exception:", "collect_unraisable"],
     "logMustNot": []
   }]
@@ -30,6 +31,11 @@ Replace the example digest and signature with a real pinned runtime and measured
 crash. The manifest must be tracked. Signatures have exact fields, gate names,
 interpreter versions, platforms and nonzero crash exit codes. Unknown fields,
 mutable image tags, invalid regexes and timeout/cancellation codes are refused.
+On native Windows, direct/deployed Python reports an access violation as
+3221225477; Git Bash can map the same crash to 2816 for a shell-launched gate.
+Pin the exit values measured for the declared invocation path; the fatal-log
+marker, host and fixed exclusions must still match. This mapping is documented
+from the Windows issue evidence; Linux tests do not establish native behavior.
 The reference constructor is literal argv, with exactly one `{tree}` operand and
 whole `{image}` and `{command}` arguments. `{command}` expands to `sh -c` plus
 the declared command as one literal argument inside the reference runtime; the
@@ -49,7 +55,12 @@ matched lines, not an agent ruling.
 Plugin-fixed exclusions always apply: the retained log must include a
 faulthandler fatal marker and the current-thread stack. An assertion failure,
 pytest FAILED/ERROR line (except an xdist crashed-worker diagnostic), or any
-current-thread frame in the gate repository leaves the gate red. No stack on a
+current-thread frame in the gate repository leaves the gate red. Interpreter
+`<frozen ...>` frames are excluded. `<string>` is excluded for worker bootstrap
+frames, while an inline `python -c` gate keeps that frame as program code.
+Truncated xdist summaries are accepted only for an exact node id corroborated
+by the untrimmed crashed-worker report and node-down/replacement evidence;
+unrelated FAILED/ERROR items remain red. No stack on a
 hang, a cancellation, a timeout, or a signature added after launch can qualify.
 
 Run and collect a declared gate through the wrapper:
@@ -70,7 +81,10 @@ The gate tree must still have the same HEAD and have no staged changes, working
 copy changes or untracked files. Ignore `.claude/` as repository state so the
 runner's own evidence is not an untracked source change. The runner atomically
 consumes the crash once, runs the native gate once, then runs the same declared
-gate in the reference against a clean Git archive. It never overlaps those two
+gate in the reference against a self-contained Git clone checked out at the
+exact commit. Its `.git` directory supports Git-dependent tests; export-ignore
+and export-subst cannot change the source bytes. Escaping symlinks and
+unmaterialized submodules are refused. It never overlaps those two
 legs. `--await` and `--cancel` use the shared process-tree supervisor; cancellation
 cannot mint a green pair or reopen the consumed attempt.
 
@@ -82,15 +96,24 @@ tokens and raw SHA-256 hashes in the pair. Verification rereads all three logs,
 checks their wrapper completion records and launch/manifest/commit bindings,
 reclassifies the original crash and checks the reference digest and deployed
 resolution. All four attestation ids are reserved to that one verifying node.
-A later ordinary green can pass only after every red in scope has such a valid
-green pair. The run artifact and Evidence row retain the verified crash count.
+Every local `prove:` and `cites` result must name the full judged commit as
+`sha`; it must equal the gate execution tree commit. The wrapper prints it and
+`--last` includes it. The coordinator checkout may move or carry unrelated
+edits while a clean linked worktree is judged; the consumed manifest bytes
+remain bound separately. A later ordinary green can pass only after every red
+in scope has such a valid green pair. Nonce-less reds minted after launch are
+retained at matching content as well. The run artifact and Evidence row retain the verified crash count.
 Before filtering the writable log by gate, nonce, tree or launch time, the reader
 cross-checks known red wrapper completions in `attest-bg`. A missing row or altered
 identity cannot make that retained failure disappear. These are two retained
 local views, not a cryptographic boundary against rewriting all local evidence.
 An interrupted local loser can yield to CI only after its cancellation completion
 and log are authenticated and the covering forge green is re-read successfully;
-a completed assertion or crash stays red.
+a completed assertion or crash stays red. RUNNING records without a completed
+verdict and ERROR records block a later green even if the runner has died.
+An unknown execution is never inferred to have passed or to have been an
+authenticated cancelled loser. Inspect its retained token and logs, preserve
+the history, and begin a new explicitly reviewed launch if it cannot be settled.
 
 This is a gate-execution exception, not a node retry setting. Commands run outside
 attestation remain unwitnessed. Compiler warnings identify schema-only exit

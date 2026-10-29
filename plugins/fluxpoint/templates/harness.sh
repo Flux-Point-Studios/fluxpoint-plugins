@@ -179,7 +179,7 @@ full() {
     "$FPL_PY" "$FPL_GATE" --check-ci --if-present
   fi
   if need_gate specification.py .fluxpoint-spec.json .fluxpoint-spec-lock.json; then
-    "$FPL_PY" "$FPL_GATE" --run --if-present
+    "$FPL_PY" "$FPL_GATE" --run --if-present --strict-harness
   elif [ -f WORK.md ] && grep -Eq $'^SPEC:[ \t]*[^ \t\r]' WORK.md; then
     # Any packet WORK.md names, as specification.py reads it: the runner
     # checks the declared packet, so its absence cannot pass for "no spec".

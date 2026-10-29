@@ -81,7 +81,7 @@ class DeployedTests(unittest.TestCase):
         self.assertIn("missing not installed != 1.0", log)
         summary = {'launch': {'since': row['started'], 'nonce': 'n'},
                    'prove': {'check': 'api-deployed'}, 'contracts': {'check': 'HarnessCheckV1'},
-                   'results': {'check': {'exit': 1, 'attestId': row['attestId']}}}
+                   'results': {'check': {'exit': 1, 'attestId': row['attestId'], 'sha': row['treeSha']}}}
         self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]['status'], 'ATTESTED')
 
     def test_uncommitted_resolution_mismatch_remains_red_but_cannot_attest_a_commit(self):
@@ -93,7 +93,7 @@ class DeployedTests(unittest.TestCase):
         self.assertTrue(row["dirty"])
         summary = {"launch": {"since": row["started"], "nonce": "n"},
                    "prove": {"check": "api-deployed"}, "contracts": {"check": "HarnessCheckV1"},
-                   "results": {"check": {"exit": 1, "attestId": row["attestId"]}}}
+                   "results": {"check": {"exit": 1, "attestId": row["attestId"], "sha": row["treeSha"]}}}
         self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]["status"], "STALE")
 
     def test_unknown_tree_runs_but_cannot_attest_committed_content(self):
@@ -106,7 +106,7 @@ class DeployedTests(unittest.TestCase):
         self.assertEqual(row["treeSha"], "")
         summary = {"launch": {"since": row["started"], "nonce": "n"},
                    "prove": {"check": "api-deployed"}, "contracts": {"check": "HarnessCheckV1"},
-                   "results": {"check": {"exit": 0, "attestId": row["attestId"]}}}
+                   "results": {"check": {"exit": 0, "attestId": row["attestId"], "sha": row["treeSha"]}}}
         self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]["status"], "STALE")
 
     def test_nonexact_or_empty_pins_refuse(self):
@@ -160,7 +160,7 @@ class DeployedTests(unittest.TestCase):
         row = attest.read(str(self.root))[-1]
         summary = {'launch': {'since': row['started'], 'nonce': 'n'},
                    'prove': {'check': 'api-deployed'}, 'contracts': {'check': 'HarnessCheckV1'},
-                   'results': {'check': {'exit': 0, 'attestId': row['attestId']}}}
+                   'results': {'check': {'exit': 0, 'attestId': row['attestId'], 'sha': row['treeSha']}}}
         self.doc['gates']['api-deployed'] = f'"{self.python.as_posix()}" -c "pass"'
         self.save()
         self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]['status'], 'STALE')
@@ -175,7 +175,7 @@ class DeployedTests(unittest.TestCase):
         row = attest.read(str(self.root))[-1]
         summary = {"launch": {"since": row["started"], "nonce": "n"},
                    "prove": {"check": "api-deployed"}, "contracts": {"check": "HarnessCheckV1"},
-                   "results": {"check": {"exit": 0, "attestId": row["attestId"]}}}
+                   "results": {"check": {"exit": 0, "attestId": row["attestId"], "sha": row["treeSha"]}}}
         self.assertEqual(attest.verify_claims(str(self.root), summary)[0][0]["status"], "ATTESTED")
         path = Path(attest.path_for(str(self.root)))
         row["witness"] = "hook"

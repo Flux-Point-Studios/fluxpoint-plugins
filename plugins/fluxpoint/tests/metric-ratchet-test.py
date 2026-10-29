@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 
@@ -102,6 +103,22 @@ class Ratchets(unittest.TestCase):
         self.commit()
         self.cli('metric-guard', '--tighten', ok=False)
         self.assertEqual(json.loads((self.root / '.fluxpoint-metrics-baseline.json').read_text())['metrics']['cost']['value'], 10)
+
+    def test_tightening_uses_the_resolved_shell(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import ratchet
+        self.commit()
+        shell = str(self.root / 'resolved shell' / 'bash')
+        original = subprocess.run
+        calls = []
+        def run(argv, **kwargs):
+            if argv[0] == shell:
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, '', '')
+            return original(argv, **kwargs)
+        with mock.patch('ratchet.bash_path', return_value=shell), mock.patch('ratchet.subprocess.run', side_effect=run):
+            self.assertEqual(ratchet.green(str(self.root)), ratchet.head(str(self.root)))
+        self.assertEqual(calls, [[shell, 'scripts/harness.sh', '--full']])
 
     def test_tighten_json_reports_the_persisted_limit(self):
         self.metric()

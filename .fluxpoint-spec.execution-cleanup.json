@@ -1,0 +1,211 @@
+{
+  "version": 1,
+  "goal": "Correct compiler dependency, parked-node propagation and execution evidence cleanup regressions",
+  "asset": "Flux Point gate execution, proof/statement ratchets, retained run evidence and counterexample ledger",
+  "scope": [
+    "Compiler dependency ancestry through reducers",
+    "Parked descendant propagation and unique wait files",
+    "Probe validation parity on emission",
+    "Execution citation commit identity and pre-start journal failures",
+    "Single-copy irreversible prompt and parseable await preamble",
+    "Structured resume default reconciliation, explicit removals, immutable inputs, persisted rerun plans and UTF-8 child diagnostics",
+    "Attestation classifies exact harness STATUS and inserted Evidence/Decisions edits without exempting content changes",
+    "Replay provenance frames, compact compiled replay authority, live irreversible guards, defined Unicode hashing and SHA-256 ledger migration",
+    "Safe targeted-prefix reuse, source-final branch readings, lane warnings and effective SSH/forge identities"
+  ],
+  "outOfScope": [
+    "External workflow runtime cache redesign",
+    "Broad memory or repair lifecycle changes"
+  ],
+  "decisions": [
+    {
+      "id": "execution-cleanup",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should reported compiler defects be repaired?",
+        "options": [
+          {
+            "option": "focused-regressions",
+            "argued_by": "model",
+            "strongest_objection": "Several independent paths require executable coverage"
+          },
+          {
+            "option": "defer",
+            "argued_by": "model",
+            "strongest_objection": "Leaves concrete execution failures open"
+          }
+        ],
+        "chosen": "focused-regressions",
+        "rationale": "Reuse current orchestration and evidence protocols, preserving existing public semantics while fixing invalid edges and command shapes.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "GitHub issues 154,155,157,187,190,191,195,220 reproduced from current source"
+        ]
+      },
+      "costs": [
+        {
+          "option": "focused-regressions",
+          "cost": "Focused implementation and regression maintenance",
+          "basis": "estimate",
+          "evidence": [
+            "Current compiler and execution modules already expose the needed boundaries"
+          ]
+        },
+        {
+          "option": "defer",
+          "cost": "Repeated invalid launches",
+          "basis": "estimate",
+          "evidence": [
+            "Current compiler and execution modules already expose the needed boundaries"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "execution-cleanup-correctness",
+      "statement": "Blocked parks request no release, wait paths remain unique, reducer ancestry compiles, output validation matches check, execution citations bind sha, pre-start failures preserve journal readability, and emitted await syntax parses",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "execution-cleanup-tests"
+      ],
+      "counterexample": "A descendant park spawns, a long wait collides, a list dependency crashes emission, unchecked probe emits, a fabricated sha passes, or a pre-start event prevents resume"
+    },
+    {
+      "id": "structured-resume-followup",
+      "statement": "Changed defaults require explicit resolution, added defaults are bound, inline unknown inputs refuse, named removals work, plans retain provenance and subprocess output uses UTF-8",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "structured-resume-tests"
+      ],
+      "counterexample": "An ignored default change, unbound new input, unused typo without warning, unrecorded plan or Windows decoding crash"
+    },
+    {
+      "id": "harness-content-dirt",
+      "statement": "Harness-only root graph edits and untracked workflow artifacts are clean while any source, existing evidence, prompt, trusted config or linked worktree dirt is retained and named in the row",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "harness-dirt-tests"
+      ],
+      "counterexample": "An ordinary STATUS edit makes all gates stale, or a content edit is hidden by a broad Markdown exemption"
+    },
+    {
+      "id": "replay-followups",
+      "statement": "Runtime transcript frames normalize exactly, mixed readings stay recordable, replay state is compiled and compact, irreversible ancestors cannot memo, legacy rejudge refuses, sentinel notes stay isolated, path aliases and Unicode hash consistently, and new once-only keys use SHA-256 with legacy replay migration",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "replay-followup-tests",
+        "graph-replay-tests"
+      ],
+      "counterexample": "Wrapped native prompts refuse, a memo supplied inline turns red green, the operator carries two full prompt copies, a sentinel follows a note, or a malformed surrogate crashes hashing"
+    },
+    {
+      "id": "branch-replay-followup",
+      "statement": "Targeted prefix slots remain stable until a changed gate demands a fresh read, builders compare fresh tips with source final branch state, gates keep their exact judged tip, different lanes avoid serial warnings and effective SSH identities prevent alias races",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "graph-replay-tests",
+        "replay-followup-tests"
+      ],
+      "counterexample": "A declaration alone closes the prefix, a cached read authorizes a memo after a fork, a source-intermediate tip forces all builders live, or a remote alias bypasses lane exclusivity"
+    },
+    {
+      "id": "cited-cancel-command",
+      "statement": "The emitted cancellation command keeps its token next to --cancel before optional --root and parses with the pinned native witness",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "execution-cleanup-tests"
+      ],
+      "counterexample": "A stamped launch tells its cite seat to invoke --cancel --root ROOT TOKEN and cannot stop the local lane"
+    }
+  ],
+  "checks": [
+    {
+      "id": "execution-cleanup-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/execution-cleanup-test.py"
+      ],
+      "scope": "Execute focused compiler output, Node orchestration, actual CLI parsing and citation/journal validation",
+      "assumptions": [
+        "Fixture workflow runtime preserves the supported agent call contract"
+      ],
+      "timeoutSeconds": 120
+    },
+    {
+      "id": "structured-resume-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/resume-test.py"
+      ],
+      "scope": "Assemble and run actual compiled launches with immutable archives and focused mocked provenance boundaries",
+      "assumptions": [
+        "Runtime prefix predictions remain conditional on the recorded workflow call ordering"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "harness-dirt-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/harness-dirt-test.py"
+      ],
+      "scope": "Native git repositories and linked worktrees, real gate wrapper and exact Markdown diff policy",
+      "assumptions": [
+        "The root graph is tracked and Git supplies its committed baseline"
+      ],
+      "timeoutSeconds": 120
+    },
+    {
+      "id": "replay-followup-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/replay-memo-test.py"
+      ],
+      "scope": "Native journal and transcript fixtures, source corroboration, compact replay state and canonical hash parity",
+      "assumptions": [
+        "The versioned Workflow frame parser accepts only supported computed-task wrappers"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "graph-replay-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/graph-replay-test.py"
+      ],
+      "scope": "Execute actual emitted graph programs under local Workflow stubs to exercise replay, lanes, rejudge and irreversible validation",
+      "assumptions": [
+        "Local agent fixtures model the supported Workflow call ordering"
+      ],
+      "timeoutSeconds": 180
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Could a failed attempt with no agent have a real result to replay?",
+      "resolution": "Only empty-agent failed pre-start events are skipped; result or started events still refuse malformed identity."
+    }
+  ]
+}

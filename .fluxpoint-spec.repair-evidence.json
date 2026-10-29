@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "goal": "Make repair artifacts, projected contracts and independent checker executions verifiable without relaying patch bytes",
+  "asset": "Existing repair compiler, fixed helper snapshots and recorder receipts",
+  "scope": [
+    "Compact patch manifests",
+    "Attempt-scoped artifacts",
+    "Executable snapshot packet checks",
+    "Projected contract overlays",
+    "Bounded repair integration input"
+  ],
+  "outOfScope": [
+    "Semantic proof that an arbitrary checker is complete",
+    "Automatic residual claim rulings"
+  ],
+  "decisions": [
+    {
+      "id": "repair-evidence",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should repair workflows carry patch and packet-check evidence?",
+        "options": [
+          {
+            "option": "fixed-helper-evidence",
+            "argued_by": "model",
+            "strongest_objection": "Retains the model witness relay trust boundary"
+          },
+          {
+            "option": "raw-byte-relay",
+            "argued_by": "model",
+            "strongest_objection": "Ordinary patches exceed practical model transcription limits"
+          }
+        ],
+        "chosen": "fixed-helper-evidence",
+        "rationale": "Compute bounded manifests and fixed packet-check results in the existing host helper; retain independent recorder validation.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issues #200 through #206 describe concrete failures in current repair generation"
+        ]
+      },
+      "costs": [
+        {
+          "option": "fixed-helper-evidence",
+          "cost": "Extend existing Python and JS witnesses with regression tests",
+          "basis": "estimate",
+          "evidence": [
+            "Existing repair-proof and packet projection infrastructure"
+          ]
+        },
+        {
+          "option": "raw-byte-relay",
+          "cost": "Model transcription scales with patch bytes and fails on ordinary patches",
+          "basis": "measured",
+          "evidence": [
+            "Issue #200 rehearsed 24 KB, 50 KB and 100 KB patches; no witness returned the bytes"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "repair-evidence",
+      "statement": "A repair uses compact digest-bound manifests, fresh resume artifacts, runnable snapshot packet checks and projected contract schemas; impossible terminal integration is skipped",
+      "decisions": [
+        "repair-evidence"
+      ],
+      "checks": [
+        "repair-regressions",
+        "projection-regressions"
+      ],
+      "counterexample": "A 100 KB patch requires transcription, a stale attempt is reused, a red packet receives PASS, or an overlay edit is ignored"
+    }
+  ],
+  "checks": [
+    {
+      "id": "repair-regressions",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/repair-proof-test.py"
+      ],
+      "scope": "Execute fixed patch reads, archives, workflow PASS guards and recorder verification",
+      "assumptions": [
+        "Models relay fixed helper results honestly; tests also validate recorder host checks"
+      ],
+      "timeoutSeconds": 600
+    },
+    {
+      "id": "projection-regressions",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/packet-projection-test.py"
+      ],
+      "scope": "Execute read-only proposed packet, graph and contract projection compilation",
+      "assumptions": [
+        "Projected schemas remain subject to normal compiler validation"
+      ],
+      "timeoutSeconds": 120
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does the manifest prove patch semantics?",
+      "resolution": "No. It binds patch bytes to reviewer scope; checks and independent attacks remain required."
+    }
+  ]
+}

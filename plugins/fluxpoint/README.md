@@ -21,6 +21,27 @@ See the [documentation index](../../docs/README.md) for setup, feature guides
 and operator procedures. The sections below describe the installed plugin;
 older design decisions are preserved in `DESIGN-NOTES.md` and `ROADMAP.md`.
 
+Recall reads Claude Code topic notes and configured peer Markdown corpora, supports
+worker briefs, and refreshes its derived index in the background without embedding
+documents. External corpora share schema-specific user-cache indexes instead of
+copying note text into each checkout; retrieval fuses them with repository stores.
+Campaign lessons survive worktree deletion in a clone-wide store. See
+[corpus configuration and durable storage](../../docs/memory-recall.md#corpus-configuration-and-safe-refresh).
+
+Compiled graphs pin the plugin witness by root, version and code hashes. Gate
+rows record their producer; launch, resume and recording detect witness drift.
+See [witness identity](../../docs/witness-identity.md).
+
+Shipped graph templates pass locked packets by reference with an exact identity
+check before reading applicable scope, reducing repeated packet context. Existing
+graphs can opt in with `specificationContext: "reference"`; see the
+[packet format](references/spec-format.md#packet-context-by-reference).
+
+Review lenses receive upstream suite witness pointers and can cite the same green
+execution at one head and launch. Typed suite coverage is checked against source
+rows; own reruns name the claim under test. See
+[review gate evidence](../../docs/review-gate-evidence.md).
+
 ## Layout
 
 - `hooks/hooks.json` — one hook set for both runtimes: `SessionStart` state
@@ -45,7 +66,8 @@ older design decisions are preserved in `DESIGN-NOTES.md` and `ROADMAP.md`.
     fast-check and Blaster, plus the off-session seed sweep),
     `blaster.py` (opt-in Lean/SMT checks and retained replay receipts),
     `mutation-guard.py` (mutation score), `seam-guard.py` (module/Python/HTTP doubles and provider recordings),
-    `guard-guard.py` (named guards and the tests that hold them down),
+    `guard-guard.py` (named guards, their tests and
+    [interrupted verification recovery](../../docs/guard-recovery.md)),
     `pair-guard.py` (relations: co-change, parity, differential, bite and
     `--scan`), `plutus-budget.py` (on-chain size and execution units),
     `blueprint-guard.py` (the off-chain encoder against the CIP-57 schema),
@@ -57,13 +79,15 @@ older design decisions are preserved in `DESIGN-NOTES.md` and `ROADMAP.md`.
     `metrics.py` (per-campaign rates), `sweep.py` (plan and score an
     effort/model sweep: variants, a held-out split, pass-rate intervals).
     `resume.py`, `replay_memo.py` and `run_artifacts.py` bind launch/resume and
-    replay artifacts; `repair-proof.py`, `repair-replay.py`, `repair_diff.py`
-    and `unchecked-repairs.py` track fixes and their independent evidence.
+    replay artifacts; `repair-proof.py`, `repair-replay.py`, `repair_diff.py`,
+    `repair_journal.py` and `unchecked-repairs.py` track fixes and their independent evidence.
   - Operations: `box-health.py` and `watchdog.py` (machine observations and
     inbox wakeups); `longrun.py`, `background.py` and `process_tree.py`
     (long commands, logs, waits, cancellation and descendant cleanup).
   - Memory: `memory.py` (lessons), `recall.py` and `embedder.py` (the
-    derived graph and hybrid retrieval).
+    derived graph and hybrid retrieval); `prompt-recall-client.mjs` and
+    `prompt-recall-daemon.py` keep armed offline prompt queries warm
+    ([lifecycle and limits](../../docs/warm-prompt-recall.md)).
   - `prompt-audit.py` (advisory prompt hygiene) and `migrate.py` (pre-1.0
     migration: plan, apply, finalize).
 - `contracts/` — versioned schemas: `FindingsV1`, `VerdictV1`,
@@ -96,7 +120,7 @@ older design decisions are preserved in `DESIGN-NOTES.md` and `ROADMAP.md`.
   `WORK.verified.md` (opt-in: a `prover` node beside the builder),
   `WORK.repair.md` (independent repair checks),
   `WORK_PROMPT.md`, `loop.sh`, `attack-taxonomy.json` (the attack classes
-  a repo must specify for Aiken, TypeScript and Python, enforced by spec-guard
+  a repo must specify for Aiken, TypeScript, Python and Compact/Midnight, enforced by spec-guard
   once copied to `.fluxpoint-attacks.json`), `settings.snippet.json` for Claude Code
   and `codex.config.snippet.toml` for Codex, `tighten-baselines.yml` for
   scheduled review PRs, and `blaster/` for the bridge, manifest and model starter.
@@ -185,7 +209,10 @@ base and cannot disable the gate's code-change detection.
   invocation attests — `|| true` or a pipe reports a different exit and is
   credited to nothing. Missing legacy observations read `UNATTESTED` and
   establish neither success nor failure; strict `prove:` tiers require the
-  citations described above. Local evidence is writable and remains subject
+  citations described above, including the full judged commit `sha`. Both
+  success and failure hook events are recorded. Retained reds follow Git tree
+  content across empty commits; unfinished runners block later passes. Local
+  evidence is writable and remains subject
   to review and CI.
 - Compiled `.graph.js` files are build output. Never hand-edit them; edit
   the IR and recompile.
@@ -252,7 +279,10 @@ The same preflight checks [machine health](../../docs/box-health.md) before
 launch or resume, and the watchdog samples it on every poll.
 
 The [repair campaign](templates/WORK.repair.md) separates implementation from
-independent fix checks, replay and repair evidence. Direct repairs outside a
+independent fix checks, replay and repair evidence. Compact manifests bind
+review scope to patch bytes, each resume writes fresh artifacts, and a fixed
+helper runs packet checks in the reviewed snapshot before PASS counts. Repair
+context values have an enforced, explicitly priced `budget.repairContextBytes` bound. Direct repairs outside a
 graph stay unchecked until an independent run or explicit recorded acceptance
 discharges them. [Long commands](references/longrun.md),
 [deployed lanes](references/deployed-gates.md), [forge evidence](references/forge-evidence.md)
@@ -379,6 +409,11 @@ proved one.
   surface an autonomous caller actually reaches, so it is gated rather than
   trusted. `@ts-expect-error` is deliberately uncounted, because it fails
   the build once the error it names is fixed and so cannot rot in place.
+  Python sources and stubs count `type: ignore` / checker directives,
+  `no_type_check`, imported `Any` annotations and `typing.cast` calls using
+  token and AST parsing. Checker off switches in mypy and pyright configs
+  count too. Imports, docstrings, `assert_type` and `noqa` do not count.
+  Python alone stays dormant until `--baseline` explicitly arms the ratchet.
   A category this plugin adds after a repo armed is reported as new and
   left unratcheted until the next `--baseline`, so an upgrade never reds a
   diff nobody wrote.
@@ -402,8 +437,11 @@ proved one.
   the builder classes the off-chain TypeScript answers for. It is red for
   every class with neither a test of that name nor a waiver with a reason,
   each taxonomy gates only a repo that tracks its language, and a waiver
-  is scoped to its own taxonomy. A tracked language whose taxonomy is
-  missing from the manifest is named `NO TAXONOMY` with the classes the
+  is scoped to its own taxonomy.
+  The Compact/Midnight taxonomy requires generator-backed tests or waivers
+  for nine contract and transaction classes, including gas against growing
+  state and witness egress. Compact source or Midnight builder imports activate it.
+  A tracked language whose taxonomy is missing from the manifest is named `NO TAXONOMY` with the classes the
   template holds for it; that is a note until the manifest sets
   `"requireAllLanguages": true`, and a `"languages"` list names the halves
   a repo gates on purpose, printing any tracked language it leaves out as

@@ -663,7 +663,7 @@ def dod_findings(root, now, recorded):
 # is reported by name: this script would have no rule for deciding whether a
 # class in it is specified, and a taxonomy nothing can be decided about
 # passes every class it holds.
-TAXONOMY_LANGUAGES = ("aiken", "typescript", "python")
+TAXONOMY_LANGUAGES = ("aiken", "typescript", "python", "compact")
 
 
 def _near(lang):
@@ -695,17 +695,19 @@ NAMED_BY = {
     "aiken": "no Aiken test named",
     "typescript": "no TypeScript test title or declaration names",
     "python": "no Python pytest test function names",
+    "compact": "no generator-backed Midnight test names",
 }
 DORMANT_WHY = {
     "aiken": "no Aiken file is tracked",
     "typescript": "no TypeScript test file is tracked",
     "python": "no Python test file is tracked",
+    "compact": "no Compact source or Midnight transaction builder is tracked",
 }
 # How a tracked language and its classes are named when the manifest has no
 # taxonomy for it. TypeScript is tracked by its test files, the same signal
 # its dormancy reads, so the line says tests rather than source.
-TRACKED_AS = {"aiken": "Aiken", "typescript": "TypeScript tests", "python": "Python tests"}
-CLASS_KIND = {"aiken": "eUTxO", "typescript": "off-chain builder", "python": "hosted service"}
+TRACKED_AS = {"aiken": "Aiken", "typescript": "TypeScript tests", "python": "Python tests", "compact": "Compact/Midnight sources"}
+CLASS_KIND = {"aiken": "eUTxO", "typescript": "off-chain builder", "python": "hosted service", "compact": "Midnight contract"}
 # The shipped taxonomies, beside this script in the plugin. A missing
 # taxonomy is reported with what it leaves ungated, and the template is the
 # one place that list is written down.
@@ -940,6 +942,22 @@ def python_specified(root, files, ids):
     return hits
 
 
+def midnight_sources(root, tracked):
+    for rel in tracked:
+        if rel.endswith('.compact'):
+            return True
+        if rel.endswith(('.ts', '.tsx', '.js', '.mjs', '.cjs')):
+            try:
+                with open(os.path.join(root, rel), encoding='utf-8', errors='replace') as source:
+                    text = source.read()
+                text = strip_line_comments(strip_block(text, '/*', '*/', nested=False), '//')
+                if re.search(r'''(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)['"]@midnight-ntwrk/''', text):
+                    return True
+            except OSError:
+                pass
+    return False
+
+
 def taxonomy_context(root, now, tracked=None):
     """Per language: whether the taxonomy gates anything in this repo, and
     what it reads to decide a class is specified.
@@ -963,6 +981,9 @@ def taxonomy_context(root, now, tracked=None):
                   "tests": aiken},
         "typescript": {"dormant": not ts_files, "files": ts_files},
         "python": {"dormant": not py_files, "files": py_files},
+        "compact": {"dormant": not midnight_sources(root, tracked),
+                    "files": ts_files + [r for r in tracked if r.endswith(('.test.js', '.spec.js', '.test.mjs', '.spec.mjs'))],
+                    "python": py_files},
     }
 
 
@@ -978,6 +999,11 @@ def specified_in(root, tax, ctx):
         return {cid: tests[cid] for cid in ids if cid in tests}
     if tax['language'] == 'python':
         return python_specified(root, ctx['python']['files'], ids)
+    if tax['language'] == 'compact':
+        hits = typescript_specified(root, ctx['compact']['files'], ids)
+        for cid, evidence in python_specified(root, ctx['compact']['python'], ids).items():
+            hits.setdefault(cid, []).extend(evidence)
+        return hits
     return typescript_specified(root, ctx["typescript"]["files"], ids)
 
 
@@ -1127,6 +1153,9 @@ def class_findings(root, doc, ctx):
                 prop = cls.get("property") or "(no property text in the manifest)"
                 findings.append((oid, f"UNSPECIFIED — {NAMED_BY[lang]} `{cid}`. "
                                       f"The property to state: {prop}"))
+                continue
+            if lang == 'compact' and not any(fuzzed for _, fuzzed in where):
+                findings.append((oid, 'EXAMPLE ONLY — state this Midnight class over a fast-check or Hypothesis generator, or record a scoped waiver'))
                 continue
             if lang == "aiken":
                 if not any(" via " in t["statement"] for t in where):

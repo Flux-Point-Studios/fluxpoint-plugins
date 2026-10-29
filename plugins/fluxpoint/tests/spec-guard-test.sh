@@ -806,7 +806,7 @@ out="$(sg --check 2>&1)"
 case "$out" in *"NOT COVERED: taxonomy 'rust'"*"2 class(es) unchecked"*)
   ok "  it is named, with what it cost" "named" ;;
   *) bad "  it is named, with what it cost" "${out:0:70}" ;; esac
-case "$out" in *"aiken, typescript, python only"*) ok "  and the known languages are listed beside it" "listed" ;;
+case "$out" in *"aiken, typescript, python, compact only"*) ok "  and the known languages are listed beside it" "listed" ;;
   *) bad "  and the known languages are listed beside it" "silent" ;; esac
 case "$out" in *"attack:rust:"*) bad "  its classes are not findings" "red" ;;
   *) ok "  its classes are not findings" "unchecked" ;; esac

@@ -88,7 +88,7 @@ def write(root, run_id, row):
     latest.parent.mkdir(parents=True, exist_ok=True)
     if latest.exists():
         _snapshot(root, run_id, latest.read_bytes())
-    data = (json.dumps(row, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + '\n').encode('utf-8')
+    data = (json.dumps(row, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + '\n').encode('utf-8', 'backslashreplace')
     digest = _snapshot(root, run_id, data)
     fd, temporary = tempfile.mkstemp(prefix='.latest-', dir=str(latest.parent))
     try:

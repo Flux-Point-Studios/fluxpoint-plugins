@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "goal": "Resolve remaining packet closure and preflight regressions in issue #179",
+  "asset": "Static packet input closure and existing specification checks",
+  "scope": [
+    "Closure performance and deduplication",
+    "Command argument compatibility",
+    "Strict judged-tree harness drift",
+    "Opaque input warnings",
+    "Planned ambient files"
+  ],
+  "outOfScope": [
+    "Discovering arbitrary runtime-generated resources",
+    "Changing default diagnostic --check behavior"
+  ],
+  "decisions": [
+    {
+      "id": "packet-preflight-followup",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should decisions and requirements constrain implementation?",
+        "options": [
+          {
+            "option": "locked-packet",
+            "argued_by": "model",
+            "strongest_objection": "Adds a manifest and lock that must be revised when requirements change"
+          },
+          {
+            "option": "advisory-prose",
+            "argued_by": "model",
+            "strongest_objection": "The existing compiler accepts mutating graphs with no spec or decisions"
+          },
+          {
+            "option": "universal-proof",
+            "argued_by": "model",
+            "strongest_objection": "Would require new models and checker support for every implementation language"
+          }
+        ],
+        "chosen": "locked-packet",
+        "rationale": "Retain diagnostic compatibility while making judged snapshot checks strict; use frozen closure in the Stop hook and one memoized expansion in full closure queries. Report opaque loaders and planned ambient files before edits.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Read #179 reproductions and packet_inputs.py, specification.py, lib.sh and the scaffolded harness."
+        ]
+      },
+      "costs": [
+        {
+          "option": "locked-packet",
+          "cost": "Two tracked artifacts and requirement-specific check maintenance",
+          "basis": "estimate",
+          "evidence": [
+            "Design scope; no elapsed implementation time estimate claimed"
+          ]
+        },
+        {
+          "option": "advisory-prose",
+          "cost": "No new runtime checks; unmet requirements can remain invisible",
+          "basis": "measured",
+          "evidence": [
+            "Mutating graph without spec compiled with exit 0"
+          ]
+        },
+        {
+          "option": "universal-proof",
+          "cost": "Per-language proof and conformance work with unmeasured maintenance cost",
+          "basis": "unknown",
+          "evidence": [
+            "Existing proof integrations have different semantics; no universal adapter exists in this repository"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "preflight-followup",
+      "statement": "Frozen trust paths avoid live expansion; closure records expand once; project files and regex filters remain lockable; strict harness checks refuse drift in judged worktrees; opaque loaders warn; planned ambient files conflict with descendant locked inputs.",
+      "decisions": [
+        "packet-preflight-followup"
+      ],
+      "checks": [
+        "packet-closure-tests"
+      ],
+      "counterexample": "A worktree modifies a locked helper and remains strict-green, or a green Stop repeats the whole live closure walk."
+    }
+  ],
+  "checks": [
+    {
+      "id": "packet-closure-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/packet-inputs-test.py"
+      ],
+      "scope": "Exercise tracked support closure, live drift, planned locked edits and reachability",
+      "assumptions": [
+        "These local fixtures exercise the real helper and emitted JavaScript paths without authenticating a production Workflow or provisioning external CI identities"
+      ],
+      "timeoutSeconds": 180
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Static closure cannot discover all dynamic inputs",
+      "resolution": "Warn at known opaque loaders and retain explicit harnessInputs for dynamic resources."
+    }
+  ]
+}
