@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -212,8 +213,9 @@ class NativeBinding(unittest.TestCase):
         graph.write_text('```json graph-ir\n' + json.dumps(ir) + '\n```\n\n## Evidence\n\n| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n', encoding='utf-8')
         compiled = compiler.emit(ir, contracts)
         runner = self.root / 'compiled-native.mjs'
-        args = {'_base': {'sha':'a' * 40, 'root':str(self.root), 'porcelain':'', 'branch':'main'}}
-        if modern: args.update(_launch={'nonce':'fixed-launch','root':str(self.worktree)}, _replayLaunchNonce='current-native')
+        import attest
+        args = {'_base': {'sha':'a' * 40, 'root':str(self.root), 'porcelain':'', 'branch':'main'},
+                '_launch': attest.stamp(str(self.worktree)), '_replayLaunchNonce': secrets.token_hex(32)}
         runner.write_text('const args=' + json.dumps(args) + ';\n'
                           + 'const calls=[];let agent=async(p,o)=>{calls.push({prompt:p,opts:o});return ' + json.dumps(self.report) + '};\n'
                           + 'const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};\n'
@@ -236,9 +238,8 @@ class NativeBinding(unittest.TestCase):
         self.assertEqual(artifact['outcome'],'COMPLETE')
         self.assertTrue(artifact['nativeCommandBindings'][0]['bound'])
         self.assertIn('NATIVE-COMMAND-BOUND',(self.worktree/'WORK.md').read_text())
-        if modern:
-            self.assertEqual([row['mode'] for row in summary['callRecords']], ['live'])
-            self.assertEqual(artifact['replayProblems'], [])
+        self.assertEqual([row['mode'] for row in summary['callRecords']], ['live'])
+        self.assertEqual(artifact['replayProblems'], [])
         return summary
 
     def test_completion_order_and_boolean_integer_aliases_refuse(self):

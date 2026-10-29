@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -17,6 +17,7 @@ import tempfile
 
 from claude_local import LocalProvider, run_cli, text_content, text_reply, tool_reply
 from worktree_base_fixture import cg, CONTRACTS, commands, graph
+import attest
 import native_binding
 
 
@@ -40,7 +41,7 @@ def main():
         repo, origin, config, artifacts = [directory / name for name in ('repo', 'origin.git', 'config', 'artifacts')]
         repo.mkdir()
         git(repo, 'init', '-q', '-b', 'main'); git(repo, 'config', 'user.name', 'Local runtime fixture'); git(repo, 'config', 'user.email', 'fixture@example.invalid')
-        (repo / '.gitignore').write_text('.claude/settings.local.json\n', encoding='utf-8')
+        (repo / '.gitignore').write_text('.claude/settings.local.json\n.claude/fluxpoint/\n', encoding='utf-8')
         (repo / 'README.md').write_text('Private runtime isolation fixture.\n', encoding='utf-8')
         git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'Default branch fixture')
         subprocess.run(['git', 'init', '--bare', '-q', '-b', 'main', str(origin)], check=True)
@@ -58,6 +59,7 @@ def main():
         node = {'id': 'base-probe', 'contract': 'NativeReadingsV1', 'isolation': 'worktree',
                 'prompt': 'Runtime control: execute the emitted base-check commands in order, but immediately before the merge attempt this outside-write negative: ' + negative + '. It must be refused specifically by the worktree-isolation guard. A generic permission denial or a successful write invalidates the probe: stop. After the final HEAD reading, read your branch and clean status again. Never bypass permissions or disable sandboxing.'}
         source = cg.emit(graph([node]), CONTRACTS)
+        launch_args = {'_base': base, '_launch': attest.stamp(str(repo)), '_replayLaunchNonce': secrets.token_hex(32)}
         main_turn, worker_turn = [0], [0]
         observed = []
         def respond(body, _index):
@@ -67,7 +69,7 @@ def main():
                 if turn == 0:
                     if 'Workflow' not in names: return text_reply('BLOCKED: Workflow is unavailable in this actual runtime profile.')
                     return tool_reply('Skill', {'skill': 'workflow-authoring'}, 'main-0')
-                if turn == 1: return tool_reply('Workflow', {'script': source, 'args': {'_base': base}}, 'main-1')
+                if turn == 1: return tool_reply('Workflow', {'script': source, 'args': launch_args}, 'main-1')
                 return text_reply('The native captures determine acceptance; no model judgment is asserted.')
             results = [block for message in body['messages'] if message['role'] == 'user' and isinstance(message.get('content'), list)
                        for block in message['content'] if block.get('type') == 'tool_result' and str(block.get('tool_use_id', '')).startswith('worker-')]
@@ -88,13 +90,14 @@ def main():
         initial = [json.loads(line) for line in (artifacts / 'cli.jsonl').read_text(encoding='utf-8').splitlines() if line.startswith('{')]
         init = next(row for row in initial if row.get('type') == 'system' and row.get('subtype') == 'init')
         if init['permissionMode'] != 'default': raise ValueError('native probe did not preserve default permissions')
-        completion = None
-        for request in provider.requests:
-            for message in request['body']['messages']:
-                if message['role'] != 'user': continue
-                content = text_content(message.get('content'))
-                match = re.search(r'<task-notification>.*?<tool-use-id>main-1</tool-use-id>.*?<status>completed</status>.*?<result>([\s\S]*?)</result>', content, re.S)
-                if match: completion = json.loads(match[1])
+        completed = [row for row in initial if row.get('subtype') == 'task_notification'
+                     and row.get('tool_use_id') == 'main-1' and row.get('status') == 'completed']
+        if len(completed) != 1: raise ValueError('native Workflow lacks one completed output event')
+        # Completion previews truncate large compiler receipts and XML-escape
+        # prompts. Inspect the complete file named by the actual CLI event.
+        raw_output = Path(completed[0]['output_file']).read_bytes()
+        (artifacts / 'workflow-output.json').write_bytes(raw_output)
+        completion = json.loads(raw_output).get('result')
         if (not isinstance(completion, dict) or completion.get('outcome') != 'COMPLETE'
                 or (completion.get('worktreeBase') or {}).get('sha') != base['sha']):
             raise ValueError('the actual compiled Workflow did not complete on the expected base')
