@@ -749,8 +749,9 @@ the one before it and is judged against it. Where a change is justified,
 put it where the cache is cold anyway — on a node that waits on a park —
 and put same-effort work together; `graph-audit` judges whether
 the bump buys anything, because the compiler cannot know a task's shape.
-Whether `builder: high` is the right setting at all is a separate
-question, and it is asserted today, never measured; see DESIGN-NOTES.
+Whether a role's effort is right at all is a separate question. The
+feature template's role settings are measured (DESIGN-NOTES, "Measured on
+2026-10-29"): builder and red-team run at `medium`, architect at `medium`.
 
 ## Discovery loops
 

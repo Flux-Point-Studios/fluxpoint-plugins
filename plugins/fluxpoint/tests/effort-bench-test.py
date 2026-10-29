@@ -123,6 +123,21 @@ rep = json.loads(proc.stdout)["configs"]
 check("report: errored runs excluded, mean over graded runs",
       len(rep) == 1 and rep[0]["test"]["n"] == 2 and abs(rep[0]["test"]["score"] - 0.75) < 1e-9, rep)
 
+# 9. The recorded sweep: every run metered, served by the model it names,
+#    and graded on the split the current cases still produce.
+rec = os.path.join(HERE, "..", "bench", "effort", "results", "2026-10-29")
+rows = [json.loads(l) for l in open(os.path.join(rec, "results.jsonl"))]
+check("recorded sweep: full grid present", len(rows) == 3 * 3 * len(cases) * 3, len(rows))
+check("recorded sweep: no errored run", not any(r["error"] for r in rows))
+check("recorded sweep: each run served by the model it names",
+      all(r["served_models"] == [r["model"]] for r in rows))
+check("recorded sweep: each run metered", all(r["cost_usd"] > 0 for r in rows))
+check("recorded sweep: split matches the cases", all(r["split"] == split[r["case"]] for r in rows))
+check("recorded sweep: transcripts kept for train only",
+      not any("reply" in r for r in rows if r["split"] == "test"))
+cmp = bench.compare([r for r in rows if not r["error"]], "claude-opus-5-5")
+check("recorded sweep: builder curve flat on held-out cases", cmp["builder"]["flat_on_test"])
+
 if failures:
     print(f"{len(failures)} failed")
     sys.exit(1)

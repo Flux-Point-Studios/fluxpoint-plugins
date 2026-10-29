@@ -210,6 +210,78 @@ architect, builder and red-team effort/model grid. The existing sweep planner,
 train/test split and scorer prepare those runs; the unavailable authenticated
 runner and usage meter are the concrete blocker to completing #67 here.
 
+### Measured on 2026-10-29 (v1.49.0)
+
+The sweep has now run, on role-shaped calls rather than whole campaigns.
+`bench/effort/` holds 26 graded cases: 12 builder (hidden acceptance tests,
+eight single-module specs and four changes across a small codebase), 8
+red-team (two or three seeded defects plus decoys, F1 scored) and 6
+architect (files the change needs and the risks it must name). Each
+(model, effort, case, rep) was one authenticated headless `claude -p` call
+with `--model` and `--effort`. That is 3 models (Opus 5.5, Sonnet 5.5,
+Haiku 5.5), 3 efforts, 26 cases and 3 reps: 702 calls, no errors, every one
+served by the model it asked for. The meter reported $32.03 in total. Cost
+is the list price the CLI reports. The split is `sweep.py`'s, and 10 cases
+were held out. The raw rows, the split and the report are in
+`bench/effort/results/2026-10-29/`.
+
+Held-out score and cost per call on Opus, the default session model, with
+the shipped setting marked:
+
+| Role | low | medium | high | Cost at low / medium, relative to the shipped setting |
+|---|---|---|---|---|
+| builder (15 test runs each) | 1.000 | 1.000 | 1.000 (shipped) | 0.65 / 0.87 |
+| red-team (9) | 0.978 | 0.941 | 0.978 (shipped) | 0.56 / 0.86 |
+| architect (6) | 0.867 | 0.927 (shipped) | 0.827 | 0.80 / 1.00 |
+
+What the curve says:
+
+- **Builder is flat.** Every one of the nine settings scored 1.000 on the
+  held-out cases, Haiku at `low` included. Haiku `low` costs 3% of the
+  shipped Opus `high`. At this size of slice the builder is not bound by
+  thinking compute, which is the finding the issue named.
+- **Red-team effort is flat on Opus, but model choice is not.** On Opus,
+  `low` equals `high` on the held-out cases (+0.000, with the paired
+  interval at zero) for 56% of the cost. Every Sonnet and Haiku setting
+  lost 13 to 24 points on the held-out cases. Their train scores matched
+  Opus, so a cheaper model looked safe on the cases a tuner can read and
+  failed on the ones it cannot.
+- **Architect is not flat, and `high` over-thinks.** The shipped `medium`
+  is the best setting measured. Opus `high` is 0.10 worse on every held-out
+  pair. Opus `low` is 0.06 worse. Every Sonnet and Haiku setting is 0.05 to
+  0.23 worse.
+- **The train-only pick failed where model choice mattered.** The report's
+  pick rule chooses the cheapest setting within 0.05 of the baseline on
+  train. It chose Haiku for all three roles. That held for the builder, and
+  lost 0.15 on held-out architect and red-team cases. The held-out split is
+  what caught this.
+
+What changed: `WORK.feature.md` now runs `builder` and `red-team` at
+`medium` instead of `high`. `medium` is within the held-out interval of
+`high` for both roles and cheaper. `low` held as well, but the bench calls
+are smaller than a campaign slice, where the red-team's procedure (coverage
+matrix, attacks with controls, skeptic) is much longer than a case prompt,
+so the default moves one step rather than two. `architect` stays at
+`medium`, the measured best. No template pins a model. The red-team result
+argues for keeping Opus there, and the builder result argues that a builder
+on a smaller model is worth a campaign-level trial.
+
+Limits of this measurement:
+
+- One role call in isolation is not a campaign. There is no council, no
+  judges, no repair round and no harness gate. The cases are small enough
+  that one call finishes them.
+- The held-out sets are small: 5 builder, 3 red-team and 2 architect cases.
+  The bootstrap resamples cases, so with two architect cases its interval
+  is narrow only because it has few cases to draw from. Read the architect
+  row as direction, not as a measured margin.
+- Before the recorded sweep, pilot runs exposed unseeded real defects in
+  five red-team fixtures and a ceiling in the builder cases. The fixtures
+  were corrected, and the four multi-file builder cases added, before any
+  recorded run. No fixture changed during or after it.
+- `compile-graph.py`'s `EFFORT_MULT` and `MODEL_MULT` are still assumptions;
+  the bench measures cost per call, not the compiler's per-node estimate.
+
 ## What the smoke test established
 
 *(Historical record from v0.1/v0.2. Filenames are as they were then:

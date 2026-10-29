@@ -3,7 +3,7 @@
   "sha256": "f03f2d6cba2124a4717f2275a2b7d58ac9e122057242934affdaad709be33541",
   "proofBaselineSha256": null,
   "harness": {
-    "plugins/fluxpoint/bench/effort/README.md": "388922fa467973013810b2456a68e68022ead4e65e31cd0e4bcd82edbcd28629",
+    "plugins/fluxpoint/bench/effort/README.md": "d434fad81859517983f2d46938df2d017a23fe3a0c2f9b7cc7ab8b3cdfd93ac3",
     "plugins/fluxpoint/bench/effort/cases/a-audit/case.json": "049fffdf24599896a2f2175c35e0774306f6ec762025a7e168c3bb2f1b6464b2",
     "plugins/fluxpoint/bench/effort/cases/a-audit/repo/users/bulk.py": "be3454a3bc8729fb170609b49a109322e8988477e7bb50b7038e8f4e68314e86",
     "plugins/fluxpoint/bench/effort/cases/a-audit/repo/users/notify.py": "341354f8e6047f57eae592e11303a38932de7dd6fc472a71decc49961f2a6087",
@@ -196,7 +196,7 @@
     "plugins/fluxpoint/bench/effort/cases/r-session/case.json": "46425b5f8475fcaf5cf8c539ba142612b2ddbe5a33c14667fa10aeb7b671c0e0",
     "plugins/fluxpoint/bench/effort/cases/r-session/repo/session.py": "a613aaa7b1df43e7f07d599a11a2c105f8121a197833a1e5a79342963427810b",
     "plugins/fluxpoint/bench/effort/run.py": "7baf954637d928dff05622db9d8e128c887dc91d8395b9ede16d0e2139bd41dd",
-    "plugins/fluxpoint/tests/effort-bench-test.py": "88b4a9751c0f182428bc1dd1e98fe2d21f2f91896810bd42b88b4bf079a80f66"
+    "plugins/fluxpoint/tests/effort-bench-test.py": "a24ef47b8899be545a3e54175fdad2a701b122258173ad3ce1d621a291d5f18b"
   },
   "lockFormat": 2
 }
