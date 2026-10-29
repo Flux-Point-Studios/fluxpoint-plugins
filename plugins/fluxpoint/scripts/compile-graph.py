@@ -625,7 +625,7 @@ def ancestors(n, by_id):
 
 
 def replay_features(ir, embedded_args=None):
-    return (any(n.get('irreversible') or any(key in n for key in ("lane", "replay", "fresh", "pushes", "repository", "branch")) or isinstance(n.get('after'), list) for n in ir.get("nodes", []))
+    return (any(n.get('irreversible') or n.get('contract') == 'NativeReadingsV1' or any(key in n for key in ("lane", "replay", "fresh", "pushes", "repository", "branch")) or isinstance(n.get('after'), list) for n in ir.get("nodes", []))
             or bool((embedded_args or {}).get("rejudge")))
 
 
@@ -992,6 +992,8 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
     if not nodes:
         f.append("nodes: at least one node required")
     for node in nodes:
+        if node.get('contract') == 'NativeReadingsV1' and node.get('irreversible'):
+            f.append('NativeReadingsV1 is a current fixed-command preflight and cannot declare an irreversible once-only effect')
         if node.get('contract') == 'NativeReadingsV1' and (
                 node.get('isolation') not in (True, 'worktree') or node.get('foreach')
                 or node.get('repeat') or node.get('reduce') or panel_size(node)

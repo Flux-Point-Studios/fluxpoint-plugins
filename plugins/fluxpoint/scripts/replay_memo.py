@@ -693,6 +693,7 @@ def _validate_summary(root, summary, run_id, digest, launch, compiler, projects,
         unused.remove(call)
         validated.append(dict(prompt=receipt["prompt"], opts=receipt["opts"], result=None if (call.get('done') or {}).get('type') == 'failed' else _result(call['done']),
                               runId=run_id, artifactSha256=digest, agentId=call["agentId"], cost=call["cost"],
+                              completed=(call.get('done') or {}).get('type') == 'result',
                               foreignArtifactContent=(call.get('done') or {}).get('foreignArtifactContent') is True,
                               live=not receipt.get('source') and receipt.get('mode', 'live') == 'live'))
     _verify_push_checks(root, summary, validated, graph, unused, prefix_sources)
@@ -882,10 +883,15 @@ def build_memo(root, run_id, launch, compiler_version, projects=None, artifact_s
         if type(index) is not int or not 0 <= index < len(calls) or not calls[index]:
             continue
         call = calls[index]
-        if call.get('foreignArtifactContent') or call.get('result') is None:
-            continue
         prompt = ledger_prompt(call['prompt'], call['opts'])
         key = ledger_key(summary['campaign'], record['node'], prompt)
+        if not any(row.get('node') == record['node'] for row in histories) and call.get('completed'):
+            # Native completion remains evidence against automatic repetition
+            # even when taint or an outer result guard prevents accepting it.
+            effects[key] = dict(node=record['node'], resultSha256=memo_key(call['result']),
+                                historyOnly=True, source=None)
+        if call.get('foreignArtifactContent') or call.get('result') is None:
+            continue
         # nodePrompt can add a fresh nonce or pinned gate reading after the
         # stable once-only key is computed. Those decorated native calls do
         # not prove the original intent key. Retain their actual ledger

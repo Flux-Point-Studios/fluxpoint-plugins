@@ -117,6 +117,17 @@
         "captured-prefix-regressions"
       ],
       "counterexample": "A compiler isolation preamble changes a prompt-derived key and a carried confirm silently repeats a recorded effect"
+    },
+    {
+      "id": "native-fixed-current",
+      "statement": "NativeReadingsV1 fixed-command reports opt into fresh native invocations, always run a current worker instead of prefix or memo replay, and cannot declare an irreversible once-only effect",
+      "decisions": [
+        "captured-prefix"
+      ],
+      "checks": [
+        "native-fixed-regressions"
+      ],
+      "counterexample": "A restored fixed report claims current native command evidence, or a once-only effect repeats merely to obtain a new command transcript"
     }
   ],
   "checks": [
@@ -132,6 +143,21 @@
         "Local fixtures validate plugin behavior; they do not establish a live provider runtime result"
       ],
       "timeoutSeconds": 180
+    },
+    {
+      "id": "native-fixed-regressions",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/graph-replay-test.py",
+        "-k",
+        "native_fixed"
+      ],
+      "scope": "Validate accepted fixed preflight plus guarded once-only graph; execute two captured resumes and require a current fixed worker without repeating the effect; refuse fixed readings declared irreversible",
+      "assumptions": [
+        "Scripted Node workers test compiler dispatch and do not establish native command transcript binding"
+      ],
+      "timeoutSeconds": 60
     }
   ],
   "challenges": [

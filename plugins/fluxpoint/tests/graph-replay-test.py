@@ -404,6 +404,34 @@ class BranchReplayFollowup(unittest.TestCase):
             rows.append(row)
         return rows
 
+    def test_native_fixed_preflight_runs_live_across_captured_ledger_resume(self):
+        ir = graph([node('fixed',contract='NativeReadingsV1',isolation='worktree'),
+                    node('gate',after='fixed',verifies='fixed',independent=True,haltWhen='exit != 0',prompt='Judge {{prev}}'),
+                    node('effect',after='gate',irreversible=True,prompt='Act {{prev}}')])
+        ir.update(treeGuard=False,requiredArgs=['confirm'])
+        self.assertEqual(c.validate(ir,CONTRACTS),[])
+        body = "if(opts.label==='fixed') result={commands:['printf data'],readings:[{exit:0,output:'data\\n'}],...((opts.schema.required||[]).includes('baseSeen')?{baseSeen:head}:{})};"
+        first = execute(ir,args={'_ledger':{},'confirm':'effect'},body=body)['result']
+        self.assertEqual(first['outcome'],'COMPLETE')
+        ledger = {row['key']:row for row in first['ledger']}
+        for _ in range(2):
+            out = execute(ir,args={'_ledger':ledger,'confirm':'effect','_prefix':self.prefix(first)},body=body)
+            self.assertEqual(out['result']['outcome'],'COMPLETE')
+            self.assertEqual([call['opts']['label'] for call in out['rawCalls']],['fixed','gate'])
+            self.assertEqual(next(row for row in out['result']['callRecords'] if row['opts']['label']=='fixed')['mode'],'live')
+            self.assertFalse(out['result']['ledgerReplays'][0]['verified'])
+            first = out['result']
+
+    def test_native_fixed_preflight_requires_current_invocation_and_refuses_once_only_role(self):
+        ir = graph([node('fixed',contract='NativeReadingsV1',isolation='worktree')])
+        ir['treeGuard']=False
+        self.assertEqual(c.validate(ir,CONTRACTS),[])
+        self.assertTrue(c.replay_features(ir))
+        ir['nodes'].append(node('gate',after='fixed',verifies='fixed',independent=True,haltWhen='exit != 0'))
+        ir['nodes'].append(node('effect',after='gate',contract='NativeReadingsV1',isolation='worktree',irreversible=True))
+        ir['requiredArgs']=['confirm']
+        self.assertTrue(any('current fixed-command preflight' in problem for problem in c.validate(ir,CONTRACTS)))
+
     def test_targeted_reading_preserves_prefix_before_first_fork(self):
         ir = self.replay_graph()
         for n in ir['nodes']: n.pop('lane', None)

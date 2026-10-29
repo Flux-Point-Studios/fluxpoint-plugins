@@ -233,6 +233,10 @@ async function replaySpawn(prompt, options, invoke) {
     const before = await pushPrefix(owner, options)
     return reservedSpawn(prompt, options, (p, o) => guardedInvoke(owner, p, o, invoke, before))
   }
+  // Fixed-command preflight evidence belongs to this native invocation.
+  // A captured result has no current worker transcript to bind its commands.
+  const fixedReading = n.contract === 'NativeReadingsV1'
+  if (fixedReading) PREFIX_OPEN = false
   let reading = LIVE_READINGS[n.id] || null
   const rejudge = (A.rejudge || {})[n.id]
   let rejudgeRecord = null
@@ -257,7 +261,7 @@ async function replaySpawn(prompt, options, invoke) {
   const entry = (A._memo || {})[key]
   const prefixEntry = (A._prefix || [])[PREFIX_INDEX]
   const nativePrefix = prefixMatches(prompt, options)
-  let eligible = !nativePrefix && n.replay && !n.fresh && !n.irreversible && !n.redTeam && !rejudge && allAncestorsReplayed(n)
+  let eligible = !fixedReading && !nativePrefix && n.replay && !n.fresh && !n.irreversible && !n.redTeam && !rejudge && allAncestorsReplayed(n)
   if (eligible && n.mutates) {
     eligible = n.verifiedBy.length > 0 && entry && entry.verifiedReading && n.target
     if (eligible) {

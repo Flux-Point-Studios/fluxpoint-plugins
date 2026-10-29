@@ -117,6 +117,12 @@ whose ledger receipt is lost, whose result differs or whose current prompt key
 changes halts `LEDGER-CONFLICT`, even with carried confirmation. Use a reviewed
 new campaign or node identity for different intent.
 
+`NativeReadingsV1` preflights always run live: their fixed command evidence must
+bind to the current native worker transcript. They close the captured prefix
+and cannot use a memo. A completed irreversible native call whose outer guard
+rejects the result still leaves refusal history, even without an accepted
+ledger write; a resume cannot use carried confirmation to repeat it.
+
 The compiler's `--plan` owns replay decisions and rejects unknown or unreached
 rejudge gates. It compares rendered prompts and options with the verified
 prefix, marks calls before the first change as `prefix`, and marks later calls

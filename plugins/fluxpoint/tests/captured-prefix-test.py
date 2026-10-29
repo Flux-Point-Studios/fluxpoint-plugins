@@ -186,6 +186,36 @@ class CapturedPrefix(unittest.TestCase):
         self.assertNotIn('ceremony',[row['opts']['label'] for row in out3['rawCalls']])
         self.seal('wf_third',out3)
 
+    def test_completed_effect_without_accepted_ledger_write_cannot_repeat_after_prefix_miss(self):
+        for decorated,tainted in ((False,False),(True,False),(False,True),(True,True)):
+            with self.subTest(decorated=decorated,tainted=tainted):
+                self.ir['nodes'][2]['fresh']=decorated;self.write_graph()
+                first=self.initial();original=self.execute(first)
+                run='wf_unaccepted_'+str(decorated)+'_'+str(tainted)
+                artifact,_=self.seal(run,original,foreign='ceremony' if tainted else None)
+                # Model an outer result guard refusing a completed native
+                # effect before it can become an accepted ledger write.
+                artifact['summary']['ledger']=[]
+                artifact['summary']['results']['ceremony']=None
+                artifact['summary']['outcome']='WRONG-BASE'
+                run_artifacts.write(self.root,run,artifact)
+                (self.root/'.claude/fluxpoint/irreversible.jsonl').unlink()
+                self.ir['nodes'][0]['prompt']+=' Force earlier prefix miss.'
+                self.write_graph()
+                second,_=self.assemble(run);out=self.execute(second)
+                self.assertEqual(out['result']['outcome'],'LEDGER-CONFLICT')
+                self.assertNotIn('ceremony',[row['opts']['label'] for row in out['rawCalls']])
+
+    def test_native_completed_null_effect_still_prevents_automatic_repetition(self):
+        first=self.initial();original=self.execute(first,body="if(opts.label==='ceremony') result=null;")
+        self.assertEqual(original['result']['outcome'],'NODE-DEAD')
+        self.assertEqual(original['result']['ledger'],[])
+        self.seal('wf_null_effect',original)
+        self.ir['nodes'][0]['prompt']+=' Force earlier prefix miss.';self.write_graph()
+        second,_=self.assemble('wf_null_effect');out=self.execute(second)
+        self.assertEqual(out['result']['outcome'],'LEDGER-CONFLICT')
+        self.assertNotIn('ceremony',[row['opts']['label'] for row in out['rawCalls']])
+
     def test_conflicting_ledger_result_refuses_without_rearming(self):
         original=self.execute(self.initial());self.seal('wf_first',original)
         path=self.root/'.claude/fluxpoint/irreversible.jsonl'
