@@ -3387,6 +3387,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("const REPAIR_PROOF_ARGV = " + json.dumps([bash_path().replace("\\", "/"),
                                                      os.path.join(plugin_root, "scripts", "py.sh").replace("\\", "/"),
                                                      "repair-proof.py"]))
+        a("const REPAIR_REPLAY_ARGV = " + json.dumps([sys.executable.replace("\\", "/"), os.path.join(plugin_root, "scripts", "repair-replay.py").replace("\\", "/")]))
         a("const REPAIR_REVIEW_AGENT = " + js_str(os.path.join(plugin_root, "agents", "red-team-reviewer.md").replace("\\", "/")))
         with open(os.path.join(plugin_root, "workflows", "red-team.js"), encoding="utf-8") as source:
             catalogue = source.read()

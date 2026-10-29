@@ -293,6 +293,13 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         self.assertEqual(review['settled'], ['Original targeted finding'])
         self.assertTrue(all(r['status'] == 'CLEANED' for r in review['snapshots']))
         for call in result['calls']:
+            if call['label'] == 'check:slice:r1' or call['label'].startswith('repair-diff:') and ':attack:' in call['label']:
+                import repair_journal
+                command = call['p'].split('NATIVE ORIGIN REPLAY:', 1)[1].split('invoke ', 1)[1].split(' --root ', 1)[0]
+                parsed = repair_journal._helper_call(command + ' --root ' + shlex.quote(str(self.root))
+                    + ' --context saved.json --defect-class decode --control true --command false',
+                    str(PLUGIN), script='repair-replay.py')
+                self.assertEqual(parsed[0], 'replay')
             if ':attack:' in call['label'] or ':refute:' in call['label']:
                 self.assertNotIn('ORIGINAL_SECRET_REASON', call['p'])
                 self.assertNotIn('CHECKER_SECRET_REASON', call['p'])

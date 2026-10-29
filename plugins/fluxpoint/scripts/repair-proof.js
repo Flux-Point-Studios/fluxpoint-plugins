@@ -186,6 +186,9 @@ function repairSamePath(expected, actual) {
   return key(expected) === key(actual)
 }
 function repairIdentity(context) { const p = context.integrated || context.current; return {base:context.base,item:context.item,round:context.round,patch:p.patch} }
+function repairReplayBrief() {
+  return '\nNATIVE ORIGIN REPLAY: save the exact ORIGIN REPLAY CONTEXT as JSON; invoke '+REPAIR_REPLAY_ARGV.map(repairQuote).join(' ')+' --root '+repairQuote(REPAIR_LAUNCH.root)+' --context <saved-json> --defect-class <class> --control <valid-command> --command <reproduction>. Preserve its actual JSON; do not substitute an interpreter or helper.\n'
+}
 async function repairSentinel(mode, context, extra = {}, id = '') {
   const identity = repairIdentity(context)
   const args = ['cleanup','check'].includes(mode) ? extra : {...identity,root:REPAIR_LAUNCH.root,...extra}
@@ -238,7 +241,7 @@ async function repairCheckedSpawn(context, measured, prompt, options) {
   if (!snapshot || snapshot.status !== 'READY' || snapshot.base !== context.base || snapshot.patchSha256 !== measured.patchSha256 || !repairText(snapshot.snapshot) || typeof snapshot.token !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.token)) return {verdict:'INCOMPLETE',findings:[],blockers:['checker fresh base archive unavailable'],evidence:['harness could not materialize checker snapshot']}
   let result = null, cleanup = null, packetCheck = null
   try {
-    result = await spawn(repairSnapshotBrief(snapshot)+prompt,options)
+    result = await spawn(repairSnapshotBrief(snapshot)+repairReplayBrief()+prompt,options)
     if (REPAIR_PACKET !== null) packetCheck = await repairSentinel('check',context,{snapshot:snapshot.snapshot,token:snapshot.token,spec:REPAIR_PACKET},options.label)
   }
   finally { cleanup = await repairSentinel('cleanup',context,{snapshot:snapshot.snapshot,token:snapshot.token},options.label) }
@@ -264,7 +267,7 @@ async function repairDiffAttack(context, measured, phaseName) {
   const receipt = {version:1,...repairIdentity(context),patchSha256:measured.patchSha256,manifestSha256:measured.manifestSha256,readNonce:A._replayLaunchNonce,settled:repairOriginalTitles(),attackers:[],refuters:[],findings:[],followups:[],snapshots:[],blockers:[],clean:false}
   const attackSchema = {type:'object',required:['base','patchSha256','completed','evidence','blockers','findings'],properties:{base:{type:'string'},patchSha256:{type:'string'},completed:{type:'boolean'},evidence:{type:'array',minItems:1,items:{type:'string'}},blockers:{type:'array',items:{type:'string'}},findings:C.FixCheckV1.properties.findings}}
   const voteSchema = {type:'object',required:['resolution','attack','control','contradiction'],properties:{resolution:{enum:['REFUTED','CONFIRMED','UNRESOLVED']},attack:{type:'object'},control:{type:'object'},contradiction:{type:'string'}}}
-  const subject = 'PINNED PATCH SUBJECT: '+JSON.stringify(measured)+'\nORIGIN REPLAY CONTEXT: '+JSON.stringify(context)+'\nORIGINAL FINDINGS: '+JSON.stringify(A.findings || [])+'\nSETTLED ORIGINAL FINDINGS (context, never evidence): '+JSON.stringify(repairOriginalTitles())
+  const subject = 'PINNED PATCH SUBJECT: '+JSON.stringify(measured)+'\nORIGIN REPLAY CONTEXT: '+JSON.stringify(context)+'\nORIGINAL FINDINGS: '+JSON.stringify(A.findings || [])+'\nSETTLED ORIGINAL FINDINGS (context, never evidence): '+JSON.stringify(repairOriginalTitles())+repairReplayBrief()
   const snapshotPrompt = s => 'SNAPSHOT IDENTITY: '+JSON.stringify(s)+'\nFresh base-archive snapshot: '+s.snapshot+'; ownership token: '+s.token+'. Run all controls/attacks through '+repairHelperCommand('execute')+' --snapshot '+repairQuote(s.snapshot)+' --token '+repairQuote(s.token)+' --control <valid-command> --attack <case-command>. Copy its actual attack/control observations into refutation votes. That helper drains owned subprocesses and writes an independent execution log before returning. An evidence string without a logged execution cannot complete this seat. Do not run detached commands or mutate shared files. Missing tools/controls are blockers. '
   const observed = r => Array.isArray(r?._executed) && r._executed.length > 0 && r._executed.every(o => o && o.base === context.base && o.patchSha256 === measured.patchSha256 && repairObservation(o.attack) && repairObservation(o.control) && typeof o.reproduces === 'boolean')
   async function runSeat(id, prompt, schema) {
