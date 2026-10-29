@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sha256": "e7f571eecd095619ccba29ad37b828050152c901921cdc31e5243aa8f5526d9e",
+  "sha256": "a1b4ca7e24f23ce87cf8b83b81bdf2c638c300472b037e52e0191cf4488f02cb",
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/tests/execution-cleanup-test.py": "3f9eb9b15bce73d9767ab36cd5d3feaf9f83ef8b9e058dc3b2d7b7a415953d72",
-    "plugins/fluxpoint/tests/graph-replay-test.py": "104650648731dd2aec536f51f9779dea9806409cdc730308664b4490c9359622",
+    "plugins/fluxpoint/tests/graph-replay-test.py": "ef071a577fae32a5d32e9a8f2f6260ba2a2c569aaa0e40292cc790b9ba3ed1d1",
     "plugins/fluxpoint/tests/harness-dirt-test.py": "46b375352366e769b0812d9c4a6b6a1d982eb90ee25ad085310c0d0e451dd504",
-    "plugins/fluxpoint/tests/replay-memo-test.py": "8de1bb96ff13f7ba2411aa01127648f8c8f110b8629d68e1461ee1e4f7f7a980",
+    "plugins/fluxpoint/tests/replay-memo-test.py": "2c5c0ab4c8775a1fa3413d4530e9e7b608fdaf4dcc437111a74959aff238c34a",
     "plugins/fluxpoint/tests/resume-test.py": "a1e46f6b8d693d8c4138002dcd50d3dc9c70169bd2807bf6ebcbd931c0fa318a"
   },
   "lockFormat": 2

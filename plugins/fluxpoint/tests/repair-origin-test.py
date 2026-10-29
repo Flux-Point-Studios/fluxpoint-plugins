@@ -325,7 +325,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         self.assertTrue(any('differ from the slice targets' in p.get('detail', '') for p in data['r']['provenance']))
 
     def test_runtime_guard_refuses_missing_context_targets_even_for_pass(self):
-        source = (SCRIPTS / 'repair-origins.js').read_text()
+        source = (SCRIPTS / 'repair-origins.js').read_text(encoding='utf-8')
         program = source + '''
 const check={verdict:'PASS',findings:[],blockers:[],evidence:['independent check completed']};
 const patch={item:'parser',round:1,patch:'patch.diff'};
@@ -334,7 +334,7 @@ const bad=[base,{...base,targetClasses:null},{...base,targetClasses:'decode'},{.
 if(bad.some(c=>!repairCheckOrigins(check,c).issue)) process.exit(1);
 if(repairCheckOrigins(check,{...base,targetClasses:[]}).issue) process.exit(2);
 '''
-        proc = subprocess.run(['node', '-e', program], capture_output=True, text=True)
+        proc = subprocess.run(['node', '-'], input=program, capture_output=True, text=True, encoding='utf-8')
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_unproved_origin_identity_rounds_and_controls_refuse_classification(self):

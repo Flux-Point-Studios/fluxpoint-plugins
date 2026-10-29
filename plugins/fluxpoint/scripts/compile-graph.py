@@ -65,7 +65,7 @@ ISOLATION = {True, "worktree", "measure"}
 ACTORS = {"agent", "human", "third-party"}
 RELEASE_FIELDS = {"instructions", "proofContract", "whyNotAgent"}
 WAKE_FIELDS = {"check", "everyMinutes", "deadline"}
-REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter"}
+REPEAT_FIELDS = {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter", "severityFloor"}
 # A reduce node is deterministic code between agents: dedupe, rank, cut.
 # Use models for ambiguity and code for plumbing — a synthesis node that
 # receives every raw fan-out item pays a reasoning model to do a Set's job.
@@ -922,6 +922,10 @@ def validate_repair(n, seen, ir, contracts):
     if any(x.get("contract") == "FixCheckV1" for x in origin_checks):
         for item in items:
             targets = item.get("targetClasses") if isinstance(item, dict) else None
+            if isinstance(item, dict):
+                bound_issue = _sibling('repair_metrics').bounds_issue(item.get('operationalBounds'))
+                if bound_issue:
+                    f.append(f"{where}: {bound_issue}")
             if (not isinstance(targets, list) or not all(isinstance(c, str) and c.strip() for c in targets)
                     or len(set(targets)) != len(targets)):
                 f.append(f"{where}: repair slice targetClasses must be an explicit unique array of nonblank classes (use [] for none)")
@@ -932,6 +936,8 @@ def validate_repair(n, seen, ir, contracts):
             f.append(f"{where}: repair repeat.classBy must name fields of the checker findings")
         if isinstance(n.get("memory"), dict) and n["memory"].get("classBy") != classes:
             f.append(f"{where}: memory.classBy must agree with repeat.classBy")
+    if rep.get('severityFloor', 'MEDIUM') not in ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL'):
+        f.append(f"{where}: repeat.severityFloor must be LOW, MEDIUM, HIGH or CRITICAL")
     threshold = rep.get("reframeAfter", 2)
     if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 2:
         f.append(f"{where}: repeat.reframeAfter must be an integer >= 2")
@@ -985,6 +991,12 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
             f.append(f'{cid}.{field}: emitted {guard} requires this declared property (added in {version}); update the repository contract copy')
     if not nodes:
         f.append("nodes: at least one node required")
+    for node in nodes:
+        if node.get('contract') == 'NativeReadingsV1' and (
+                node.get('isolation') not in (True, 'worktree') or node.get('foreach')
+                or node.get('repeat') or node.get('reduce') or panel_size(node)
+                or judge_size(node) or node.get('actor', 'agent') != 'agent'):
+            f.append('NativeReadingsV1 requires one scalar agent with worktree isolation for native transcript binding')
     lists = ir.get("lists") or {}
     lane_graph = any('lane' in n for n in nodes)
     if lane_graph and not ir.get('treeGuard', True):
@@ -1457,6 +1469,8 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
             elif "until" in rep:
                 f += validate_repair(n, seen, ir, contracts)
             else:
+                if "severityFloor" in rep:
+                    f.append(f"{where}: repeat.severityFloor requires repeat.until")
                 if "integrate" in rep:
                     f.append(f"{where}: repeat.integrate requires repeat.until")
                 dry = rep.get("untilDryRounds")
@@ -2216,6 +2230,14 @@ def plan_groups(ir):
             extra_checks += sum(n.get('replay') == 'inputs' for n in ir.get('nodes', []))
             groups.extend({'calls': [('tree-check', sentinel)], 'park': False, 'sentinel': True,
                            'kind': 'sentinel', 'track': frozenset()} for _ in range(extra_checks))
+    # Ref guards do not consume maxNodes, but their fixed-command seats still
+    # cost tokens. Include both endpoints for every potentially executed call.
+    guarded_ids = {n['id'] for n in ir.get('nodes', []) if n.get('mutates') and n.get('pushes')}
+    guarded = [(g['track'], sum(any(label == nid or label.startswith(nid + ':') for nid in guarded_ids)
+                              for label, _ in g['calls'])) for g in groups if not g.get('sentinel')]
+    for track, count in guarded:
+        groups.extend({'calls': [('push-check', sentinel)], 'park': False, 'sentinel': True,
+                       'kind': 'sentinel', 'track': track} for _ in range(count * 2))
     return groups
 
 
@@ -3354,6 +3376,11 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     if repair_loops(ir):
         a("const REPAIR_LAUNCH = A._launch")
         a("const REPAIR_PACKET = " + json.dumps(specification.get("path") if specification else None))
+        residuals = [dict(claim, decisionId=did, recordId=value['recordId'])
+                     for did, value in (imports_resolved or {}).items()
+                     if str(value.get('recordId', '')).startswith('dec_')
+                     for claim in value.get('record', {}).get('acceptedRepairClaims', [])]
+        a("const REPAIR_RESIDUAL_RULINGS = " + json.dumps(residuals, ensure_ascii=True))
         a("const REPAIR_CONTEXT_BYTES = " + str((ir.get("budget") or {}).get("repairContextBytes", REPAIR_CONTEXT_BYTES)))
         a("function repairRoundDir(key, round) { return REPAIR_LAUNCH.root.replace(/[/\\\\]$/, '') + '/.claude/fluxpoint/rounds/' + REPAIR_LAUNCH.nonce + '/' + A._replayLaunchNonce + '/' + key + '/r' + round + '/'; }")
         a("const FIX_ORIGINS = []")
@@ -3368,6 +3395,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("const REPAIR_PROOF_ARGV = " + json.dumps([bash_path().replace("\\", "/"),
                                                      os.path.join(plugin_root, "scripts", "py.sh").replace("\\", "/"),
                                                      "repair-proof.py"]))
+        a("const REPAIR_REPLAY_ARGV = " + json.dumps([sys.executable.replace("\\", "/"), os.path.join(plugin_root, "scripts", "repair-replay.py").replace("\\", "/")]))
         a("const REPAIR_REVIEW_AGENT = " + js_str(os.path.join(plugin_root, "agents", "red-team-reviewer.md").replace("\\", "/")))
         with open(os.path.join(plugin_root, "workflows", "red-team.js"), encoding="utf-8") as source:
             catalogue = source.read()
@@ -3432,11 +3460,13 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     elif repair_loops(ir):
         extra += ", launch: REPAIR_LAUNCH"
     if repair_loops(ir):
-        extra += ", fixOrigins: FIX_ORIGINS, repairDiffReviews: REPAIR_DIFF_REVIEWS, repairReadNonce: A._replayLaunchNonce"
+        extra += ", repairAssuranceVersion: 2, fixOrigins: FIX_ORIGINS, repairDiffReviews: REPAIR_DIFF_REVIEWS, repairReadNonce: A._replayLaunchNonce, repairResidualRulings: REPAIR_RESIDUAL_RULINGS, repairFollowups: REPAIR_DIFF_REVIEWS.flatMap(r => r.followups || [])"
     if tree_guard:
         extra += ", tree: TREE"
     if modern:
         extra += ", memoRecords: MEMO_RECORDS, callRecords: CALL_RECORDS, rejudges: REJUDGES"
+        if any(n.get('pushes') for n in nodes):
+            extra += ", pushAssuranceVersion: 1, pushReadNonce: A._replayLaunchNonce, pushChecks: PUSH_CHECKS"
         if not prove_nodes and not repair_loops(ir):
             extra += ", launch: A._launch"
     if embedded_args is not None:
@@ -4030,6 +4060,9 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         pre += f"gateEvidencePreamble({js_str(nid)}) + "
     if n.get("contract") == "RedTeamV1" and n.get("haltWhen") and red_team_sources(n, ir):
         pre += f"redTeamPreamble({json.dumps(red_team_sources(n, ir))}) + "
+    if n.get('contract') == 'NativeReadingsV1':
+        pre = js_str('Fluxpoint-Native-Seat: ' + nid + '\n') + ' + ' + pre
+        pre += js_str('FIXED NATIVE READINGS. Use only Bash for the exact prescribed commands, including compiler base checks, once each in chronological order, then one StructuredOutput. No Read, other tools, background calls or extra inspection commands. Run from this isolated worktree. Return commands and one reading {exit,output} per command with complete literal runtime output; never condense it. A hook refusal with no readable exit uses null. For long output use an artifact {path,sha256} relative to this worktree, and have that exact command print only the sha256sum-style marker SHA256 followed by two spaces, path, and newline. The recorder independently reads the runtime journal, tool ids, cwd, output and artifact bytes; returned text is unbound until then.\n\n') + ' + '
     if n.get('cites'):
         pre += f"citesPreamble({json.dumps(n['cites'])}) + "
     if prove_gate(n):
@@ -4397,7 +4430,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     origin_checks = [n] + [by_id[k] for k in repair_integrations(n)]
     if any(x.get("contract") == "FixCheckV1" for x in origin_checks):
         a(f"if ({list_var(n['foreach'])}.some(item => !item || !repairTargets(item.targetClasses))) {{ note({js_str(nid)}, 'INVALID-TARGET-CLASSES', 'repair slices require explicit pinned targetClasses arrays'); return summary('INCOMPLETE') }}")
-    a(f"let pending_{var} = {list_var(n['foreach'])}.map((item, i) => ({{ item, i, lastCheck: null, targetClasses: Array.isArray(item.targetClasses) ? [...item.targetClasses] : [] }}))")
+    a(f"let pending_{var} = {list_var(n['foreach'])}.map((item, i) => ({{ item, i, lastCheck: null, targetClasses: Array.isArray(item.targetClasses) ? [...item.targetClasses] : [], operationalBounds: item.operationalBounds || null }}))")
     a(f"let passed_{var} = [], round_{var} = 0, integrationLast_{var} = null, integrationStreaks_{var} = [], integrationRecurring_{var} = []")
     a(f"const {var} = []")
     a(f"const validReframe_{var} = (r, classes, independent = false) => !!r && (!independent || r.validated === true) && Array.isArray(r.classes) && classes.every(c => r.classes.includes(c)) && ['adopt', 'refute', 'remove'].includes(r.disposition) && ['invariant', 'classRewire'].every(k => typeof r[k] === 'string' && r[k].trim()) && r.measurement && ['command', 'result'].every(k => typeof r.measurement[k] === 'string' && r.measurement[k].trim())")
@@ -4423,7 +4456,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     a("    const contextIssue = repairContextIssue(fixed)")
     a(f"    if (contextIssue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'CONTEXT-LIMIT', contextIssue); return {{ ...state, fixed, roundDir }} }}")
     a(f"    const patches = [...(state.patches || []), {{ item: item.key, round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: fixed.patchSha256 }}]")
-    a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: [...state.targetClasses] }}")
+    a(f"    const originContext = {{ base: BASE.sha, item: item.key, round: round_{var}, patches, current: patches[patches.length - 1], targetClasses: [...state.targetClasses], operationalBounds: state.operationalBounds, severityFloor: {js_str(rep.get('severityFloor', 'MEDIUM'))} }}")
     a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay the reproduction and its valid control on the bare launch base and EACH listed complete patch in a fresh base archive, not cumulatively. Use repair-replay.py to obtain originEvidence. New code location or identifier age is not origin evidence. Missing replay/control means INCOMPLETE. Attack every sharedResources writer and reader supplied by the fixer, including existing writers reached by a new reader.\\n'")
 
     a(f"    if (requiredClasses.length && !validReframe_{var}(fixed.reframe, requiredClasses)) {{ abort_{var} = 'REFRAME-REQUIRED'; note({js_str(nid)}, 'REFRAME-REQUIRED', `${{item.key}}: third narrow patch refused`, {{ classes: requiredClasses }}); return {{ ...state, fixed, roundDir }} }}")
@@ -4445,7 +4478,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
         a("    if (checked.verdict === 'PASS') {")
         a("      const coherent = repairCheckOrigins(checked, originContext)")
         a(f"      if (coherent.issue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, 'ORIGIN-UNPROVEN', coherent.issue); return {{ ...state, fixed, roundDir, lastCheck: checked, patches }} }}")
-        a("      const proofIssue = repairSiblingIssue(checked, originContext, fixed) || repairCoverageIssue(checked, patchManifest, fixed) || repairCheckerEvidenceIssue(checked, originContext, patchManifest)")
+        a("      const proofIssue = repairSiblingIssue(checked, originContext, fixed) || repairCoverageIssue(checked, patchManifest, fixed, originContext) || repairCheckerEvidenceIssue(checked, originContext, patchManifest)")
         a(f"      if (proofIssue) {{ abort_{var} = 'INCOMPLETE'; note({js_str(nid)}, proofIssue.split(':')[0], proofIssue); return {{ ...state, fixed, roundDir, lastCheck: checked, patches }} }}")
         a(f"      const review = await repairDiffAttack(originContext, patchManifest, {js_str(phase_name)})")
         a("      diffAttack = review.receipt")
@@ -4505,7 +4538,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
             a(f"    if (resourceIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'INVALID-SHARED-RESOURCES', resourceIssue, {{ item: '_integration', round: round_{var} }}); return summary('HALTED') }}")
         a("    const mergedIssue = repairContextIssue(merged)")
         a(f"    if (mergedIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'CONTEXT-LIMIT', mergedIssue); return summary('INCOMPLETE') }}")
-        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: merged.patchSha256 }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))] }}")
+        a(f"    const originContext = {{ base: BASE.sha, item: '_integration', round: round_{var}, patches: passed_{var}.flatMap(state => state.patches || []), integrated: {{ item: '_integration', round: round_{var}, patch: roundDir + 'patch.diff', patchSha256: merged.patchSha256 }}, targetClasses: [...new Set(passed_{var}.flatMap(state => state.targetClasses || []))], operationalBounds: repairCombineBounds(passed_{var}.map(state => state.operationalBounds)), severityFloor: {js_str(rep.get('severityFloor', 'MEDIUM'))} }}")
         a("    const originBrief = 'ORIGIN REPLAY CONTEXT: ' + JSON.stringify(originContext) + '\\nReplay bare base and EVERY component patch separately on fresh base archives, then the complete integrated patch. Only a harm absent from base and all component patches but reproduced on the integrated patch is cross-slice. Attack the complete sharedResources writer/reader list from the integration result.\\n'")
 
         a(f"    if (requiredClasses.length && !validReframe_{var}(merged.reframe, requiredClasses)) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'REFRAME-REQUIRED', 'third narrow integration patch refused'); return summary('REFRAME-REQUIRED') }}")
@@ -4532,7 +4565,7 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
             a("    if (integrated.verdict === 'PASS') {")
             a("      const coherent = repairCheckOrigins(integrated, originContext)")
             a(f"      if (coherent.issue) {{ INCOMPLETE = true; note({js_str(review['id'])}, 'ORIGIN-UNPROVEN', coherent.issue); return summary('INCOMPLETE') }}")
-            a("      const proofIssue = repairSiblingIssue(integrated, originContext, merged) || repairCoverageIssue(integrated, patchManifest, merged) || repairCheckerEvidenceIssue(integrated, originContext, patchManifest)")
+            a("      const proofIssue = repairSiblingIssue(integrated, originContext, merged) || repairCoverageIssue(integrated, patchManifest, merged, originContext) || repairCheckerEvidenceIssue(integrated, originContext, patchManifest)")
             a(f"      if (proofIssue) {{ INCOMPLETE = true; note({js_str(review['id'])}, proofIssue.split(':')[0], proofIssue); return summary('INCOMPLETE') }}")
             a(f"      const review = await repairDiffAttack(originContext, patchManifest, {js_str(review.get('phase', phase_name))})")
             a("      diffAttack = review.receipt")
@@ -4927,16 +4960,18 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     readings = [r for r in readings if isinstance(r, dict)]
     runtime_args.pop('_memo', None)
     runtime_args.pop('_prefix', None)
-    compiled = emit(ir, contracts, imports_resolved, specification=specification, embedded_args=public_args, replay_state=replay)
-    try:
-        result = subprocess.run(['node', os.path.join(os.path.dirname(__file__), 'graph-plan.js')],
-                                input=json.dumps(dict(source=compiled, args=runtime_args, results=source.get('results') or {}, readings=readings), ensure_ascii=False),
-                                capture_output=True, text=True, encoding='utf-8', timeout=30)
-    except FileNotFoundError as exc:
-        raise ValueError('--plan needs Node.js to render the exact generated program locally; it never spawns an agent') from exc
-    if result.returncode:
-        raise ValueError('plan rendering refused: ' + result.stderr.strip())
-    rendered_output = json.loads(result.stdout)
+    def render(shape, inputs, state):
+        compiled = emit(shape, contracts, imports_resolved, specification=specification, embedded_args=inputs, replay_state=state)
+        try:
+            result = subprocess.run(['node', os.path.join(os.path.dirname(__file__), 'graph-plan.js')],
+                                    input=json.dumps(dict(source=compiled, args=runtime_args, results=source.get('results') or {}, readings=readings), ensure_ascii=False),
+                                    capture_output=True, text=True, encoding='utf-8', timeout=30)
+        except FileNotFoundError as exc:
+            raise ValueError('--plan needs Node.js to render the exact generated program locally; it never spawns an agent') from exc
+        if result.returncode:
+            raise ValueError('plan rendering refused: ' + result.stderr.strip())
+        return json.loads(result.stdout)
+    rendered_output = render(ir, public_args, replay)
     rendered = rendered_output['summary']
     requested = set(public_args.get('rejudge') or {})
     reached = {r.get('gate') for r in rendered.get('rejudges', [])}
@@ -5002,18 +5037,52 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
                         if effective.get(key) != old_inputs.get(key):
                             changed.append(key)
                 cause = ('live ancestor ' + ', '.join(live) if live else 'arg changed: ' + ', '.join(sorted(set(changed))) if changed else 'no matching verified memo/prefix entry')
-        entries = [e for e in replay.get('_memo', {}).values() if e.get('node', e.get('payload', {}).get('id')) == nid]
-        entries += [e for e in replay.get('_prefix', []) if e.get('label') == nid]
-        cost = next((e['cost'] for e in entries if isinstance(e.get('cost'), dict)), {'minutes': None, 'tokens': None})
+        entries = [e for e in replay.get('_prefix', []) if e.get('label') == nid or str(e.get('label', '')).startswith(nid + ':')]
+        if not entries:
+            entries = [e for e in replay.get('_memo', {}).values() if e.get('node', e.get('payload', {}).get('id')) == nid]
+        cost = {}
+        for metric in ('minutes', 'tokens'):
+            values = [(e.get('cost') or {}).get(metric) for e in entries]
+            cost[metric] = sum(values) if values and all(isinstance(value, (int, float)) for value in values) else None
         rows.append(dict(node=nid, status=status, cause=cause, minutes=cost.get('minutes'), tokens=cost.get('tokens')))
-    shared = {}
-    for node in ir['nodes']:
-        if node.get('mutates'):
-            target = branch_target(node, {x.get('id'): x for x in ir['nodes']})
-            if target:
-                shared.setdefault((target['repository'], target['branch']), []).append(node['id'])
-    if rows and any(len(ids) > 1 for ids in shared.values()):
-        rows[0]['warning'] = 'shared-branch opt-ins can execute more work than serial prefix replay: builders require the source-final tip, while each gate retains its exact judged tip'
+    opt_ins = {'lane', 'pushes', 'repository', 'branch', 'replay', 'fresh'}
+    if rows and any(opt_ins.intersection(node) for node in ir['nodes']):
+        import copy
+        serial = copy.deepcopy(ir)
+        for node in serial['nodes']:
+            for key in opt_ins:
+                node.pop(key, None)
+        prior = copy.deepcopy(serial)
+        if 'argDefaults' in source:
+            prior['argDefaults'] = source['argDefaults']
+        old_calls = render(prior, old_inputs, {})['calls']
+        new_calls = render(serial, public_args, {})['calls']
+        prefix_open, serial_modes = True, {}
+        for index, call in enumerate(new_calls):
+            same = prefix_open and index < len(old_calls) and call == old_calls[index]
+            prefix_open = bool(same)
+            label = call['opts'].get('label', '')
+            owners = [n['id'] for n in ir['nodes'] if label == n['id'] or label.startswith(n['id'] + ':')]
+            if owners:
+                nid = max(owners, key=len)
+                serial_modes[nid] = 'live' if not same or serial_modes.get(nid) == 'live' else 'prefix'
+        for row in rows:
+            row['serialStatus'] = serial_modes.get(row['node'], 'not reached')
+        reached_actual = {n['id'] for n in ir['nodes'] if any(call['opts'].get('label') == n['id'] or call['opts'].get('label', '').startswith(n['id'] + ':')
+                                                            for call in rendered_output.get('calls', []))}
+        live = [row for row in rows if row['status'] == 'live' and row['node'] in reached_actual]
+        serial_live = [row for row in rows if row['serialStatus'] == 'live']
+        def totals(selected):
+            return dict(nodes=len(selected), knownMinutes=round(sum(row['minutes'] for row in selected if isinstance(row['minutes'], (int, float))), 6),
+                        unknownMinutes=sum(row['minutes'] is None for row in selected))
+        actual, without = totals(live), totals(serial_live)
+        rows[0]['comparison'] = dict(optIns=actual, serial=without,
+                                     assumption='same current graph, recorded prior inputs and fixed recorded node outputs, with lane/push/replay/fresh/branch opt-ins removed in both renders')
+        if actual['nodes'] > without['nodes'] or actual['knownMinutes'] > without['knownMinutes']:
+            rows[0]['warning'] = (f"opt-ins re-run more work than the serial counterfactual: {actual['nodes']} vs {without['nodes']} live nodes; "
+                                  f"{actual['knownMinutes']} vs {without['knownMinutes']} known recorded-node minutes "
+                                  f"({actual['unknownMinutes']} vs {without['unknownMinutes']} nodes have unknown minutes). "
+                                  'Memo predictions still require fresh branch matches; this comparison assumes the same current graph with recorded prior inputs.')
     return rows
 
 
@@ -5188,7 +5257,11 @@ def main():
                 print('Plan warning: ' + row['warning'])
             minutes = 'unknown' if row['minutes'] is None else str(row['minutes'])
             tokens = 'unknown' if row['tokens'] is None else str(row['tokens'])
-            print(f"{row['node']}: {row['status']} — {row['cause']}; recorded minutes={minutes}, tokens={tokens}")
+            serial_note = '; serial counterfactual=' + row['serialStatus'] if 'serialStatus' in row else ''
+            print(f"{row['node']}: {row['status']} — {row['cause']}; recorded minutes={minutes}, tokens={tokens}{serial_note}")
+        if rows and rows[0].get('comparison'):
+            comparison = rows[0]['comparison']
+            print('Serial comparison (known recorded-node minutes; unknown costs remain unknown): ' + json.dumps(comparison, sort_keys=True))
         return 0
 
     est = estimate_tokens(ir, contracts, specification, embedded_args)

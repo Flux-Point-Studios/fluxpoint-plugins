@@ -40,12 +40,14 @@ def manifest(data):
     """Hash exact bytes and inventory every added text/binary hunk ourselves."""
     digest = hashlib.sha256(data).hexdigest()
     lines = data.decode('utf-8').split('\n')
-    hunks, path = [], None
+    hunks, path, old_path = [], None, None
     for i, line in enumerate(lines):
         if line.startswith('diff --git '):
             path = line[len('diff --git '):]
+        elif line.startswith('--- '):
+            old_path = line[4:]
         elif line.startswith('+++ '):
-            path = line[4:]
+            path = old_path if line[4:] == '/dev/null' else line[4:]
         elif line.startswith('@@ '):
             match = re.match(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', line)
             if not match or path is None:
@@ -65,6 +67,9 @@ def manifest(data):
                 obligations.append('alarm-rate')
             if re.search(r'rate.?limit|token.?bucket|burst', content, re.I | re.ASCII):
                 obligations.append('provider-pool')
+            test_path = bool(re.search(r'(?:^|/)(?:tests?|__tests__)(?:/|$)|(?:^|/)(?:test_[^/]*|[^/]*[._](?:test|spec)\.[^/]+)$', path, re.I | re.ASCII))
+            if test_path:
+                obligations = []
             hunks.append(dict(id='h' + str(i), path=path, newStart=int(match[1]),
                               newLines=int(match[2]) if match[2] else 1,
                               added=added, surfaces=classified, obligations=obligations))
@@ -88,6 +93,34 @@ def compact_manifest(data):
 def manifest_digest(measured):
     canonical = json.dumps(measured, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(canonical.encode('ascii')).hexdigest()
+
+
+def manifest_path(raw):
+    """Decode Git's C-quoted UTF-8 path spelling for command coverage."""
+    if raw.startswith('a/') and ' b/' in raw:
+        raw = raw.rsplit(' b/', 1)[1]
+        raw = 'b/' + raw
+    if raw.startswith('"'):
+        data, index = bytearray(), 1
+        escapes = {'a': 7, 'b': 8, 't': 9, 'n': 10, 'v': 11, 'f': 12, 'r': 13, '"': 34, '\\': 92}
+        while index < len(raw):
+            char = raw[index]
+            if char == '"':
+                rest = raw[index + 1:].strip()
+                return manifest_path(rest) if rest.startswith('"b/') else re.sub(r'^[ab]/', '', data.decode('utf-8'))
+            if char == '\\':
+                index += 1
+                match = re.match(r'[0-7]{1,3}', raw[index:])
+                if match:
+                    data.append(int(match[0], 8)); index += len(match[0]); continue
+                if index >= len(raw) or raw[index] not in escapes:
+                    raise ValueError('unsupported Git path escape')
+                data.append(escapes[raw[index]])
+            else:
+                data.extend(char.encode('utf-8'))
+            index += 1
+        raise ValueError('unterminated Git quoted path')
+    return re.sub(r'^[ab]/', '', raw)
 
 
 def sibling_issue(rows, targets, fixer_rows=()):
@@ -118,7 +151,7 @@ def sibling_issue(rows, targets, fixer_rows=()):
     return None
 
 
-def coverage_issue(coverage, measured, resources=(), live_series=False):
+def coverage_issue(coverage, measured, resources=(), live_series=False, bounds=None):
     if not isinstance(coverage, dict) or coverage.get('patchSha256') != measured['patchSha256']:
         return 'DIFF-UNPROVEN: coverage must name the harness-measured patch SHA-256'
     rows = coverage.get('hunks')
@@ -129,19 +162,38 @@ def coverage_issue(coverage, measured, resources=(), live_series=False):
         return 'DIFF-UNPROVEN: every harness-listed added hunk needs exactly one coverage row'
     if any(r.get('surface') not in SURFACES or not observation(r.get('attack')) or not observation(r.get('control')) for r in rows):
         return 'DIFF-UNPROVEN: hunk surface, attack and control observations are required'
+    for hunk in measured['hunks']:
+        row = next(r for r in rows if r['id'] == hunk['id'])
+        try:
+            path = manifest_path(hunk['path'])
+        except (ValueError, UnicodeError):
+            return 'DIFF-UNPROVEN: hunk has an unsupported Git path spelling'
+        if path not in row['attack']['command']:
+            return 'DIFF-UNPROVEN: each hunk attack command must name its manifest path'
     obligations = {v for h in measured['hunks'] for v in h['obligations']}
+    bounds = bounds or {}
     operational = coverage.get('operational') or {}
     if not isinstance(operational, dict):
         return 'DIFF-UNPROVEN: operational measurements must be an object'
     if 'latency' in obligations:
         row = operational.get('latency')
+        if not finite(bounds.get('deadlineMs'), True) or not isinstance(row, dict) or row.get('deadlineMs') != bounds['deadlineMs']:
+            return 'DIFF-UNPROVEN: latency deadline must equal the pinned operationalBounds.deadlineMs'
         if (not observation(row) or not finite(row.get('deadlineMs'), True) or not finite(row.get('observedMs'))
                 or row['observedMs'] > row['deadlineMs']):
             return 'DIFF-UNPROVEN: latency must be measured within a declared deadline'
+        outbound = any('outbound-calls' in h['surfaces'] and h['added'] for h in measured['hunks'])
+        pools = bounds.get('providerPools')
+        if outbound and not isinstance(pools, list):
+            return 'DIFF-UNPROVEN: outbound calls need pinned operationalBounds.providerPools (use [] for none)'
+        if outbound and pools and (row.get('pool') not in pools or any(not any(isinstance(r, dict) and r.get('resource') == pool for r in resources) for pool in pools)):
+            return 'DIFF-UNPROVEN: every pinned rate-limited pool must remain in sharedResources'
         if 'provider-pool' in obligations and (not text(row.get('pool')) or not any(isinstance(r, dict) and r.get('resource') == row['pool'] for r in resources)):
             return 'DIFF-UNPROVEN: rate-limited provider pool must be declared in sharedResources'
     if 'alarm-rate' in obligations:
         row = operational.get('alarmRate')
+        if not finite(bounds.get('maxPerDay')) or not isinstance(row, dict) or row.get('maxPerDay') != bounds['maxPerDay']:
+            return 'DIFF-UNPROVEN: alarm acceptance must equal pinned operationalBounds.maxPerDay'
         if (not observation(row) or not text(row.get('seriesPath')) or not Path(row['seriesPath']).is_absolute()
                 or not isinstance(row.get('seriesSha256'), str) or not re.fullmatch('[0-9a-f]{64}', row['seriesSha256'])
                 or not finite(row.get('durationSeconds'), True) or type(row.get('falsePositives')) is not int or row['falsePositives'] < 0
@@ -149,14 +201,19 @@ def coverage_issue(coverage, measured, resources=(), live_series=False):
             return 'DIFF-UNPROVEN: alarm rate needs a recorded production series and measured acceptable false-positive rate'
         if live_series:
             try:
-                if hashlib.sha256(Path(row['seriesPath']).read_bytes()).hexdigest() != row['seriesSha256']:
+                data = Path(row['seriesPath']).read_bytes()
+                if hashlib.sha256(data).hexdigest() != row['seriesSha256']:
                     return 'DIFF-UNPROVEN: production series digest differs from the recorded measurement'
-            except OSError:
+                from repair_metrics import series_metrics
+                metrics = series_metrics(data)
+                if any(row.get(k) != metrics[k] for k in ('durationSeconds', 'falsePositives')):
+                    return 'DIFF-UNPROVEN: alarm counts differ from the retained production series'
+            except (OSError, ValueError):
                 return 'DIFF-UNPROVEN: recorded production series cannot be read'
     return None
 
 
-def diff_receipt_issue(receipt, context, measured):
+def diff_receipt_issue(receipt, context, measured, rulings=()):
     def executed(rows):
         return (isinstance(rows, list) and bool(rows)
                 and all(isinstance(o, dict) and o.get('base') == context['base']
@@ -174,10 +231,27 @@ def diff_receipt_issue(receipt, context, measured):
             or not any(isinstance(a, dict) and a.get('lens') == 'composition' for a in attackers)
             or not all(isinstance(a, dict) and text(a.get('spawnId')) and a.get('completed') is True
                        and a.get('patchSha256') == measured['patchSha256'] and a.get('base') == context['base']
+                       and isinstance(a.get('evidence'), list) and a['evidence'] and all(text(e) for e in a['evidence'])
                        and executed(a.get('observations')) for a in attackers)
             or len({a['spawnId'] for a in attackers}) != len(attackers)
             or not isinstance(refuters, list) or not isinstance(findings, list)):
         return 'DIFF-ATTACK-UNPROVEN: complete independent attacker identities are required'
+    from repair_policy import disposition, origin_issue
+    followups = receipt.get('followups', [])
+    if not isinstance(followups, list):
+        return 'DIFF-ATTACK-UNPROVEN: followups must be an array'
+    identifiers = {f.get('id') for f in findings if isinstance(f, dict)}
+    for finding in followups:
+        if not isinstance(finding, dict) or finding.get('id') in identifiers or not text(finding.get('id')):
+            return 'DIFF-ATTACK-UNPROVEN: followups need unique finding identities'
+        identifiers.add(finding['id'])
+        problem = origin_issue(finding, context)
+        if problem:
+            return 'RESIDUAL-UNPROVEN: ' + problem
+        expected = disposition(finding, context, measured['patchSha256'], rulings)
+        if (expected is None or finding.get('disposition') != expected['disposition'] or finding.get('ruling') != expected.get('ruling')
+                or finding.get('source') not in {a['spawnId'] for a in attackers}):
+            return 'RESIDUAL-UNPROVEN: followup is outside the pinned severity, scope or recorded operator ruling'
     surfaces = set(measured['changedSurfaces'])
     expected = {'state', 'composition'}
     prefix = 'repair-diff:' + context['item'] + ':r' + str(context['round'])
@@ -204,7 +278,7 @@ def diff_receipt_issue(receipt, context, measured):
             if observed['reproduces'] is not True:
                 continue
             represented = False
-            for finding in findings:
+            for finding in [*findings, *followups]:
                 if not isinstance(finding, dict) or finding.get('source') != attacker['spawnId']:
                     continue
                 evidence = finding.get('originEvidence')
@@ -293,9 +367,13 @@ def checker_evidence_issue(check, context, measured, node, integration, read_non
                    or o.get('reproduces') is not False or not observation(o.get('attack')) or not observation(o.get('control')) for o in observations)):
         return 'CHECKER-UNPROVEN: checker has no bound execution log'
     same = lambda a, b: observation(a) and observation(b) and a['command'] == b['command'] and a['result'] == b['result']
+    unused = set(range(len(observations)))
     for row in check['siblings'] + check['diffCoverage']['hunks']:
-        if not any(o.get('reproduces') is False and same(row['attack'], o['attack']) and same(row['control'], o['control']) for o in observations):
-            return 'CHECKER-UNPROVEN: sibling/hunk attack and control differ from actual checker executions'
+        index = next((i for i in sorted(unused) if observations[i].get('reproduces') is False
+            and same(row['attack'], observations[i]['attack']) and same(row['control'], observations[i]['control'])), None)
+        if index is None:
+            return 'CHECKER-UNPROVEN: each sibling/hunk row needs its own actual execution; reuse is refused'
+        unused.remove(index)
     op = check['diffCoverage'].get('operational') or {}
     if 'latency' in op:
         row = op['latency']
@@ -304,7 +382,7 @@ def checker_evidence_issue(check, context, measured, node, integration, read_non
     if 'alarmRate' in op:
         row = op['alarmRate']
         if not any(same(row, o['attack']) and row.get('seriesPath') == o.get('seriesPath') and row.get('seriesSha256') == o.get('seriesSha256')
-                   and isinstance(o.get('metrics'), dict) and all(row.get(k) == o['metrics'].get(k) for k in ('durationSeconds', 'falsePositives', 'maxPerDay')) for o in observations):
+                   and o.get('seriesFormat') == 'RepairAlarmSeriesV1' and isinstance(o.get('metrics'), dict) and all(row.get(k) == o['metrics'].get(k) for k in ('durationSeconds', 'falsePositives')) for o in observations):
             return 'CHECKER-UNPROVEN: alarm measurement differs from executed JSON and helper-read production series'
     return None
 

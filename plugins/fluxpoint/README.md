@@ -72,6 +72,8 @@ rows; own reruns name the claim under test. See
     `--scan`), `plutus-budget.py` (on-chain size and execution units),
     `blueprint-guard.py` (the off-chain encoder against the CIP-57 schema),
     `recurrence-guard.py` (a lesson learned twice demands a gate).
+    `bind-native.py` corroborates [fixed command readings](references/native-binding.md)
+    against completed native Workflow tool records.
     `metric-guard.py`, `loop-metric.py`, `slice-metric.py` and `aiken-metrics.py`
     measure deterministic metrics, plateaus, predicted gains and unit-test costs.
   - Graph: `compile-graph.py`, `record-run.py`, `ledger.py` (once-only
@@ -80,7 +82,7 @@ rows; own reruns name the claim under test. See
     effort/model sweep: variants, a held-out split, pass-rate intervals).
     `resume.py`, `replay_memo.py` and `run_artifacts.py` bind launch/resume and
     replay artifacts; `repair-proof.py`, `repair-replay.py`, `repair_diff.py`,
-    `repair_journal.py` and `unchecked-repairs.py` track fixes and their independent evidence.
+    `repair_journal.py`, `repair_metrics.py`, `repair_policy.py` and `unchecked-repairs.py` track fixes and native helper evidence, including safe legacy receipt migration.
   - Operations: `box-health.py` and `watchdog.py` (machine observations and
     inbox wakeups); `longrun.py`, `background.py` and `process_tree.py`
     (long commands, logs, waits, cancellation and descendant cleanup).
@@ -270,6 +272,9 @@ The graph IR supports named lanes and `after` dependencies with multiple
 parents. Independent branches can run concurrently and join before a later
 gate. Replay policies bind cached node results to declared inputs or source
 trees; fresh nodes rerun, and gate-only rejudging preserves the checked work.
+Declared pushes have before/after remote-head checks that halt on undeclared
+changes. Resume plans compare opt-ins with a serial render using recorded
+outputs and costs, and name unknown costs.
 The [graph-engineering reference](skills/graph-engineering/SKILL.md) defines
 these fields, the accepted shapes and their compile-time restrictions.
 
@@ -397,6 +402,13 @@ proved one.
   pinned. The source guards also cover imported tactic use, named Prop bodies
   and standalone solver commands. See [Blaster verification](references/blaster.md)
   for setup, supported types, proof assumptions and the real integration fixture.
+- **Native Compact checks** register circuit statements and source escape hatches,
+  bind compiler relations and generated code/key/state pins, and ratchet measured
+  proof/key bytes, `k` and transcript gas. A pinned native ledger must accept a
+  genuine proof and reject a corrupted proof for each circuit. Semantic bad-input
+  controls judge isolated assert/comparison/disclosure mutants through the existing
+  mutation score. See [Compact verification](references/compact.md) for the tested
+  ledger-8 profile, driver boundary, arming and real native smoke.
 - **`scripts/proof-guard.py` ratchets escape hatches.** `--baseline`
   records `todo`/`expect` (Aiken), `assume`/`{:axiom}` (Dafny), `sorry`
   (Lean/Isabelle), `Admitted` (Coq), `#[verifier::external_body]` (Verus),

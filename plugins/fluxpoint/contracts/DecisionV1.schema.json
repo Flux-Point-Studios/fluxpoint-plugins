@@ -6,6 +6,19 @@
     "overturned_prior", "frozen_by", "reversible", "evidence"
   ],
   "properties": {
+    "acceptedRepairClaims": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "description": "Explicit operator residual rulings for exact finding titles at one complete patch SHA-256. Record with decision.py and import the resulting dec_ record into the repair graph.",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["finding", "patchSha256", "reason"],
+        "properties": {
+          "finding": {"type": "string", "minLength": 1},
+          "patchSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "reason": {"type": "string", "minLength": 20}
+        }
+      }
+    },
     "acceptedCommits": {
       "type": "array", "minItems": 1, "uniqueItems": true,
       "items": { "type": "string", "pattern": "^[0-9a-fA-F]{7,40}$" },

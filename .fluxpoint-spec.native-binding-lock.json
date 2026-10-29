@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "sha256": "45a16cb740bdc03a5a64224cbe7a3e945399f7c1a13f747cdc536dac50dec289",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/contracts/NativeReadingsV1.schema.json": "51af9fc34578e4160b88d0b3d26c31e19266a56c154ca34f3aa8f1e79ca47d44",
+    "plugins/fluxpoint/scripts/bind-native.py": "ab7dbb866bed4eefbbf6042cde1ca689ba11f46ec68c30aaa57fc79420e9b784",
+    "plugins/fluxpoint/scripts/native_binding.py": "7624b76a1d6367b8898544a1b33d698865ae3ba23b8fcebd7f4918a731d8625d",
+    "plugins/fluxpoint/tests/native-binding-test.py": "3c1459a6760cee45b5343f10a8a256387872a28eda99cdf507458b6612aa6424"
+  },
+  "lockFormat": 2
+}

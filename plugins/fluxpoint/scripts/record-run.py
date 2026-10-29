@@ -747,10 +747,21 @@ def main():
         replay_problems.append(str(exc))
         outcome = "REFUSED-REPLAY"
         print("record-run: REPLAY-PROVENANCE — " + str(exc), file=sys.stderr)
+    native_bindings, native_binding_problems = [], []
+    try:
+        import native_binding as _native_binding
+        native_bindings = _native_binding.verify_fixed(summary, args.run_id)
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        native_binding_problems.append(str(exc))
+        if outcome in ('COMPLETE', 'UNKNOWN'):
+            outcome = 'INCOMPLETE'
+        print('record-run: NATIVE-COMMAND-UNBOUND — ' + str(exc), file=sys.stderr)
     repair_checkers, checked, repair_problems = repair_receipts(summary, args.graph, root=args.root)
     repair_journal = None
     if checked:
         try:
+            if type(summary.get('repairAssuranceVersion')) is not int or summary.get('repairAssuranceVersion') != 2:
+                raise ValueError('repair summary lacks current native assurance version 2')
             import repair_journal as _repair_journal
             repair_journal = _repair_journal.corroborate(summary, args.run_id)
         except (ValueError, OSError, TypeError, KeyError) as exc:
@@ -770,6 +781,9 @@ def main():
         outcome = "INCOMPLETE"
     os.makedirs(args.state_dir, exist_ok=True)
     art = os.path.join(args.state_dir, f"{args.run_id}.json")
+    repair_followups = [dict(finding, item=review.get('item'), round=review.get('round'), patchSha256=review.get('patchSha256'))
+                        for review in summary.get('repairDiffReviews') or [] if isinstance(review, dict)
+                        for finding in review.get('followups') or [] if isinstance(finding, dict)]
     artifact_data = {
                 "runId": args.run_id,
                 "when": ts,
@@ -782,9 +796,13 @@ def main():
                 "graph": os.path.relpath(os.path.realpath(args.graph), args.root).replace(os.sep, "/"),
                 "checked": checked,
                 "repairCheckers": repair_checkers,
+                "repairAssuranceVersion": 2,
                 "repairCheckProblems": repair_problems,
+                "nativeCommandBindings": native_bindings,
+                "nativeCommandBindingProblems": native_binding_problems,
                 "repairJournal": repair_journal,
                 "repairEvidence": repair_evidence,
+                "repairFollowups": repair_followups,
                 "replayChecked": replay_checked,
                 "rejudges": rejudges,
                 "replayProblems": replay_problems,
@@ -903,6 +921,10 @@ def main():
             parts.append(f"recall: {recall_stats['provider']}")
         claim += "; memory: " + ", ".join(parts)
     imported = summary.get("decisionsImported") or {}
+    if native_bindings:
+        claim += '; NATIVE-COMMAND-BOUND ' + ', '.join(row['node'] for row in native_bindings)
+    if native_binding_problems:
+        claim += '; NATIVE-COMMAND-UNBOUND'
     if replay_checked:
         claim += "; REPLAYED-MEMO " + ", ".join(r["node"] for r in replay_checked)
     for rejudge in rejudges:
@@ -943,6 +965,8 @@ def main():
              f"executor {args.executor}")
     if specification_coverage and specification_coverage['references'] == 'uncovered-legacy':
         proof += '; LEGACY reference files not covered: ' + ', '.join(cell(p, 500) for p in specification_coverage['paths'])
+    if repair_followups:
+        proof += f'; repair followups {len(repair_followups)} (retained in artifact)'
     if harness_identity:
         proof += f"; harness sha256 {harness_identity['sha256']}"
         if harness_identity['changedPaths']:

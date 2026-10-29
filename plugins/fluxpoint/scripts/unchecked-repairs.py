@@ -114,6 +114,7 @@ def inspect(root, ir):
     git(root, 'merge-base', '--is-ancestor', head, 'HEAD')
     window = git(root, 'rev-list', '--reverse', head + '..HEAD').splitlines()
     checked = set()
+    warnings = []
 
     def discharge(value):
         if not isinstance(value, str) or not SHA.fullmatch(value):
@@ -131,6 +132,14 @@ def inspect(root, ir):
                 for name in claimed):
             continue  # Old receipts outside this BLOCK window cannot discharge it.
         try:
+            assurance = repair_checks.assurance(art, root, path)
+            if assurance.startswith('legacy-unchecked'):
+                warnings.append(dict(record=path.name, runId=art['runId'], commits=art['checked'],
+                    code='LEGACY-REPAIR-UNCHECKED', message='Historical repair receipt lacks native helper-output assurance; '
+                    'artifact and commits retained, checked credit revoked. '
+                    + ('No immutable history snapshot exists for these legacy bytes. ' if assurance.endswith('-no-history') else '')
+                    + 'Run a repair graph or record explicit operator acceptance.'))
+                continue
             values = repair_checks.corroborated(art, root=root)
         except (ValueError, TypeError, AttributeError) as e:
             raise ValueError(str(path) + ': ' + str(e))
@@ -163,7 +172,7 @@ def inspect(root, ir):
         unchecked.append({'commit': commit, 'executor': trailers or 'unlabelled',
                           'subject': git(root, 'show', '-s', '--format=%s', commit)})
     return {'blockHead': head, 'blockRecord': source, 'unchecked': unchecked,
-            'guarded': guarded, 'blocked': guarded and bool(unchecked)}
+            'guarded': guarded, 'blocked': guarded and bool(unchecked), 'warnings': warnings}
 
 
 def main():
@@ -192,6 +201,8 @@ def main():
         if result['blocked']:
             print('Launch stopped: run a repair graph whose FixCheckV1 PASS names these commits, '
                   'or record explicit DecisionV1.acceptedCommits with decision.py.', file=sys.stderr)
+    for warning in result.get('warnings', []):
+        print('unchecked-repairs: ' + warning['code'] + ' ' + warning['record'] + ': ' + warning['message'], file=sys.stderr)
     return 1 if result['blocked'] else 0
 
 

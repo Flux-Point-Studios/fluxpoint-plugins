@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "goal": "Bind fixed command readings and graph-audit probe receipts to completed local Workflow transcripts",
+  "asset": "Native Workflow journals, per-agent transcripts and source-backed execution evidence",
+  "scope": [
+    "Bounded source selection from a configured Claude projects store",
+    "Exact ordered Bash tool ids, fixed output normalization and worktree metadata",
+    "Artifact digest readback and graph-audit probe postprocessing"
+  ],
+  "outOfScope": [
+    "A cryptographic trust boundary against writers with access to all local runtime files",
+    "Claiming a live native Workflow observation when the current executor exposes no Workflow tool",
+    "Binding arbitrary tools or silently accepting unknown transcript shapes"
+  ],
+  "decisions": [
+    {
+      "id": "native-transcript-binding",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "Which evidence can corroborate a worker transcription without trusting the transcription itself?",
+        "options": [
+          {
+            "option": "completed-native-capture",
+            "argued_by": "model",
+            "strongest_objection": "Native source formats are internal and may require future adapters"
+          },
+          {
+            "option": "worker-report-only",
+            "argued_by": "model",
+            "strongest_objection": "Long output may be condensed or commands retyped"
+          }
+        ],
+        "chosen": "completed-native-capture",
+        "rationale": "Read the runtime journal, agent transcript and meta together, then compare exact tool commands, cwd and output under fixed documented normalization.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue197 supplies native duplicate tool-event and raw-result shapes",
+          "Existing replay_memo locates completed native Workflow source captures"
+        ]
+      },
+      "costs": [
+        {
+          "option": "completed-native-capture",
+          "cost": "One bounded read of each selected runtime source plus artifact readback",
+          "basis": "estimate",
+          "evidence": [
+            "Runtime JSONL already stores tool use ids and raw results"
+          ]
+        },
+        {
+          "option": "worker-report-only",
+          "cost": "False certification of condensed or fabricated output",
+          "basis": "estimate",
+          "evidence": [
+            "Issue197 measured25714 characters reduced to2251"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "native-exact-command-binding",
+      "statement": "A binding requires one completed native source agent, exact ordered Bash calls, matching worktree cwd, one StructuredOutput, and equal readings after only fixed normalization; conflicting duplicates and unlisted tools refuse.",
+      "decisions": [
+        "native-transcript-binding"
+      ],
+      "checks": [
+        "native-binding-tests"
+      ],
+      "counterexample": "A transport copy erases cwd or a worker condenses output and binding still passes"
+    },
+    {
+      "id": "native-artifact-and-audit-binding",
+      "statement": "Long output artifacts are read back against digests echoed in native output; graph-audit command receipts stay pending until a source binding verifies each probe.",
+      "decisions": [
+        "native-transcript-binding"
+      ],
+      "checks": [
+        "native-binding-tests"
+      ],
+      "counterexample": "A model-provided audit receipt or arbitrary artifact path alone establishes bound command evidence"
+    }
+  ],
+  "checks": [
+    {
+      "id": "native-binding-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/native-binding-test.py"
+      ],
+      "scope": "Actual on-disk native-shaped journal/meta/transcript fixtures and CLI postprocessing",
+      "assumptions": [
+        "Local capture files are runtime-owned in the normal host workflow but are not signed by the service",
+        "Native Workflow execution is unavailable in this executor; fixture evidence does not establish a live runtime observation"
+      ],
+      "timeoutSeconds": 120
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Can a model return a certificate that the Workflow itself cannot read from disk?",
+      "resolution": "No. The primitive reads native sources after completion; graph-audit surfaces pending binding and its command runs the postprocessor before accepting SOUND."
+    }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/scripts/native_binding.py",
+    "plugins/fluxpoint/scripts/bind-native.py",
+    "plugins/fluxpoint/contracts/NativeReadingsV1.schema.json"
+  ]
+}

@@ -22,6 +22,7 @@ import time
 
 from process_tree import remove_tree
 from repair_diff import compact_manifest, manifest_digest
+from repair_metrics import series_metrics
 
 
 def git(root, *args):
@@ -63,7 +64,10 @@ def materialize(root, base, patch, digest, item, round_, manifest_sha256=None):
                     raise ValueError('unsafe base archive entry')
                 if (entry.issym() or entry.islnk()) and (target.is_absolute() or '..' in target.parts):
                     raise ValueError('escaping base archive link')
-            archive.extractall(snapshot)
+            if hasattr(tarfile, 'data_filter'):
+                archive.extractall(snapshot, filter='data')
+            else:
+                archive.extractall(snapshot)
         # Apply the bytes already read, not a mutable path observed twice.
         applied = subprocess.run(['git', 'apply', '--whitespace=nowarn', '-'], cwd=snapshot,
                                  input=data, capture_output=True)
@@ -147,9 +151,11 @@ def execute(snapshot, token, control, attack, timeout, series=None):
                 raise ValueError('production series changed during the experiment')
             result['seriesPath'] = str(series_path)
             result['seriesSha256'] = hashlib.sha256(series_data).hexdigest()
+            result['seriesFormat'] = 'RepairAlarmSeriesV1'
+            result['metrics'] = series_metrics(series_data)
         try:
             metrics = json.loads(attack_result.split(': ', 1)[1])
-            if isinstance(metrics, dict):
+            if isinstance(metrics, dict) and not series:
                 result['metrics'] = metrics
         except (ValueError, IndexError):
             pass

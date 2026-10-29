@@ -7,7 +7,12 @@
     "Attempt-scoped artifacts",
     "Executable snapshot packet checks",
     "Projected contract overlays",
-    "Bounded repair integration input"
+    "Bounded repair integration input",
+    "Pinned operational thresholds and data-derived alarm measurements",
+    "Pinned severity/scope policy and explicit named residual decisions",
+    "Native helper-output binding and distinct executions per sibling/hunk row",
+    "Explicit native assurance versions and immutable legacy receipt downgrade without losing repair access",
+    "Complete repair helper programs reach Node fixtures through UTF-8 stdin within Windows process argument limits"
   ],
   "outOfScope": [
     "Semantic proof that an arbitrary checker is complete",
@@ -70,9 +75,21 @@
       ],
       "checks": [
         "repair-regressions",
-        "projection-regressions"
+        "projection-regressions",
+        "repair-recording-regressions"
       ],
       "counterexample": "A 100 KB patch requires transcription, a stale attempt is reused, a red packet receives PASS, or an overlay edit is ignored"
+    },
+    {
+      "id": "repair-helper-fixture-portability",
+      "statement": "Executable repair helper parity fixtures preserve their assertions while streaming complete JavaScript source as UTF-8 input, including Unicode paths and exact byte vectors",
+      "decisions": [
+        "repair-evidence"
+      ],
+      "checks": [
+        "repair-regressions"
+      ],
+      "counterexample": "A helper grows past the Windows CreateProcess command-line limit and three otherwise valid parity checks fail before Node starts"
     }
   ],
   "checks": [
@@ -85,9 +102,9 @@
       ],
       "scope": "Execute fixed patch reads, archives, workflow PASS guards and recorder verification",
       "assumptions": [
-        "Models relay fixed helper results honestly; tests also validate recorder host checks"
+        "Native runtime tool results attest execution bytes; semantic adequacy remains an independent review obligation"
       ],
-      "timeoutSeconds": 600
+      "timeoutSeconds": 900
     },
     {
       "id": "projection-regressions",
@@ -101,6 +118,19 @@
         "Projected schemas remain subject to normal compiler validation"
       ],
       "timeoutSeconds": 120
+    },
+    {
+      "id": "repair-recording-regressions",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/unchecked-repairs-test.py"
+      ],
+      "scope": "Corroborate native helper outputs and immutable receipts; retain legacy artifacts while revoking old positive discharge credit",
+      "assumptions": [
+        "Local runtime transcripts and recorder-published immutable artifact snapshots are trusted storage; tool-output meaning remains independently reviewed"
+      ],
+      "timeoutSeconds": 120
     }
   ],
   "challenges": [
@@ -108,5 +138,20 @@
       "claim": "Does the manifest prove patch semantics?",
       "resolution": "No. It binds patch bytes to reviewer scope; checks and independent attacks remain required."
     }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/scripts/repair-proof.py",
+    "plugins/fluxpoint/scripts/repair-proof.js",
+    "plugins/fluxpoint/scripts/repair_diff.py",
+    "plugins/fluxpoint/scripts/repair_checks.py",
+    "plugins/fluxpoint/scripts/repair_journal.py",
+    "plugins/fluxpoint/scripts/repair_metrics.py",
+    "plugins/fluxpoint/scripts/compile-graph.py",
+    "plugins/fluxpoint/scripts/record-run.py",
+    "plugins/fluxpoint/scripts/unchecked-repairs.py",
+    "plugins/fluxpoint/scripts/repair_policy.py",
+    "plugins/fluxpoint/scripts/decision.py",
+    "plugins/fluxpoint/contracts/DecisionV1.schema.json",
+    "plugins/fluxpoint/scripts/native_binding.py"
   ]
 }

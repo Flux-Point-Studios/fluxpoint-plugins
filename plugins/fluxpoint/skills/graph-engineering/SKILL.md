@@ -92,12 +92,25 @@ and at campaign end. Guards after the first fork include the launcher's
 fresh `_replayLaunchNonce`, so the Workflow call-index cache cannot replay
 an old reading. In-flight calls reserve their token floors atomically.
 
+Each executed builder with `pushes` is bracketed by fixed-command
+`git ls-remote --heads origin` snapshots. Any undeclared head created,
+changed or deleted during that interval halts the campaign. An unchanged
+declared head leaves a visible `PUSH-NO-CHANGE` finding. A live builder
+requires fresh endpoints; missing or uncorroborated receipts cannot record
+a successful run. Verified prefix calls retain their original endpoint
+slots, and a builder that falls out of the prefix refreshes its before-read.
+These are conservative interval observations: an unrelated concurrent push
+also halts. They do not prove who pushed, observe tags, or detect a head
+changed and restored between the two snapshots.
+
 Replay is opt-in: `replay: "inputs"` on a scalar builder, and `replay:
 "tree"` on a scalar independent gate. The gate declares `repository` and
 `branch`; it receives a fresh fixed-command sentinel's exact tip, must check
 out that commit and return it as `sha`. A missing or different `sha` halts.
-A builder replays only when its branch's live reading equals the reading
-at its recorded verifying gate. No worker-reported head admits a replay.
+A builder replays only when its branch's live reading equals the last
+corroborated source reading on that branch. Its verifying gate retains its
+own exact judged tip, so that gate reruns when a later builder moved the
+branch. No worker-reported head admits a replay.
 Every `after` ancestor must itself have replayed in this launch. A live
 ancestor forces its descendants live, including joined consumers. Loops,
 fan-outs, councils, red-team and irreversible effects use their existing
@@ -124,6 +137,15 @@ with verified prior results, using Node.js and no agents or network reads.
 Each node is `prefix`, `memo if the live read matches`, or `live`, with its
 cause and recorded cost (unknown values are explicit). A conditional memo
 prediction is checked against a real fresh reading during the launch.
+For graphs with lane, push, replay or fresh declarations, the plan also
+renders a serial counterfactual with those opt-ins removed from the same
+current graph, once with recorded prior inputs and once with requested
+inputs. Recorded node outputs stay fixed in both renders. Each row shows
+its serial prefix/live status; the comparison warns when the opt-in render
+executes more reached nodes or more known recorded-node minutes. Costs are
+estimates from the source run, with unknown costs explicit. They do not
+predict new model outputs, changed graph history, actual remote tips or
+future elapsed time; an unreached node contributes no executed cost.
 Graphs without these declarations or rejudge args keep their existing
 serial script and runtime keys.
 

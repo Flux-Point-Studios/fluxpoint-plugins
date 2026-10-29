@@ -91,6 +91,7 @@ import re
 import subprocess
 import sys
 from python_hatches import CATEGORIES as PY_CATEGORIES, scan as scan_python
+from compact_native import CATEGORIES as COMPACT_CATEGORIES, hatches as compact_hatches
 
 BASELINE = ".fluxpoint-proof-baseline.json"
 
@@ -163,7 +164,7 @@ PATTERNS = [
 # Line-comment prefixes, so prose like "we assume the oracle is honest" in a
 # comment does not register as an assumption in the proof.
 COMMENT = {
-    ".ak": "//", ".rs": "//", ".dfy": "//", ".lean": "--", ".tla": r"\\\*",
+    ".ak": "//", ".rs": "//", ".dfy": "//", ".compact": "//", ".lean": "--", ".tla": r"\\\*",
     ".thy": None, ".v": None, ".sh": "#", ".yml": "#", ".yaml": "#",
     ".toml": "#", ".just": "#", ".mk": "#", "Makefile": "#", ".json": None,
     **{s: "//" for s in TSJS},
@@ -212,7 +213,7 @@ def strip_source(line, suffix):
 
 # Categories that need structure rather than a line match, so they are
 # counted by a small parser instead of a regex.
-STRUCTURAL = ["aiken.vacuous_test", "aiken.constant_predicate", *PY_CATEGORIES]
+STRUCTURAL = ["aiken.vacuous_test", "aiken.constant_predicate", *PY_CATEGORIES, *COMPACT_CATEGORIES]
 
 TEST_START = re.compile(r"^\s*test\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 # A body that proves nothing: a bare boolean, or a value compared to itself.
@@ -340,7 +341,7 @@ def scan(root):
             continue
         applicable = [(c, rx) for c, sfx, rx in compiled if suffix in sfx]
         python_input = suffix in ('.py', '.pyi') or base in ('mypy.ini', '.mypy.ini', 'setup.cfg', 'pyproject.toml', 'pyrightconfig.json')
-        if not applicable and not python_input:
+        if not applicable and not python_input and suffix != '.compact':
             continue
         path = os.path.join(root, rel)
         try:
@@ -348,6 +349,16 @@ def scan(root):
                 lines = fh.readlines()
         except OSError:
             continue
+        if suffix == '.compact':
+            disclosure_path = os.path.join(root, '.fluxpoint-compact-disclosures.json')
+            disclosures = {}
+            if os.path.isfile(disclosure_path):
+                with open(disclosure_path, encoding='utf-8') as source:
+                    disclosures = json.load(source)
+                if not isinstance(disclosures, dict): raise ValueError('Compact disclosures must map file:line to reasons')
+            for cat, n, raw in compact_hatches(rel, ''.join(lines), disclosures):
+                counts[cat] += 1
+                if len(hits[cat]) < 20: hits[cat].append(f"{rel}:{n}: {raw.strip()[:100]}")
         if python_input:
             for cat, n, raw in scan_python(rel, ''.join(lines)):
                 counts[cat] += 1
@@ -389,6 +400,7 @@ def applicable(counts, root):
     """True when this repo has anything worth ratcheting."""
     suffixes = {os.path.splitext(f)[1] for f in tracked_files(root)}
     proof_suffixes = {s for _, sfx, _ in PATTERNS for s in sfx if s.startswith(".")}
+    proof_suffixes.add('.compact')
     return bool(suffixes & (proof_suffixes - NOT_ARMING))
 
 

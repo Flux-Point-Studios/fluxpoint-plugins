@@ -128,6 +128,14 @@ def validate(rec, schema, choice_among_options=True):
                    for c in accepted)
             or len({str(c).lower() for c in accepted}) != len(accepted)):
         f.append("acceptedCommits must be a nonempty unique array of 7-40 digit Git commit IDs")
+    residuals = rec.get('acceptedRepairClaims')
+    if residuals is not None and (not isinstance(residuals, list) or not residuals
+            or any(not isinstance(r, dict) or set(r) != {'finding', 'patchSha256', 'reason'}
+                   or not isinstance(r.get('finding'), str) or not r['finding'].strip()
+                   or not isinstance(r.get('patchSha256'), str) or not re.fullmatch('[0-9a-f]{64}', r['patchSha256'])
+                   or not isinstance(r.get('reason'), str) or len(r['reason'].strip()) < 20 for r in residuals)
+            or len({(r.get('finding'), r.get('patchSha256')) for r in residuals if isinstance(r, dict)}) != len(residuals)):
+        f.append('acceptedRepairClaims must name unique finding/patchSha256 pairs with an explicit residual reason')
     if isinstance(opts, list):
         ospec = (props.get("options", {}).get("items", {}))
         oprops = ospec.get("properties", {})

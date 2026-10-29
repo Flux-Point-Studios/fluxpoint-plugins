@@ -15,7 +15,7 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 | Understand Claude Code and Codex support | [Runtimes](runtimes.md) |
 | Specify implementation work | [Spec-first contract](spec-first.md), [packet format](../plugins/fluxpoint/references/spec-format.md), [grill-me](../plugins/fluxpoint/commands/grill-me.md) |
 | Drive and finish a loop | [Loop engineering](../plugins/fluxpoint/skills/loop-engineering/SKILL.md) |
-| Design a graph, lanes, joins and replay policies | [Graph engineering](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
+| Design a graph, lanes, joins, checked pushes and replay cost comparisons | [Graph engineering](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
 | Launch or resume with pinned artifacts | [Structured resume](../plugins/fluxpoint/references/structured-resume.md), [graph-run](../plugins/fluxpoint/commands/graph-run.md) |
 | Diagnose a busy or unhealthy machine | [Machine health and watchdog](box-health.md) |
 | Run long commands and manage cancellation | [Long-command lifecycle](../plugins/fluxpoint/references/longrun.md) |
@@ -28,11 +28,14 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 |---|---|
 | Audit proof strength and assumptions | [Verified work](../plugins/fluxpoint/README.md#verified-work), [proof-audit](../plugins/fluxpoint/commands/proof-audit.md) |
 | Configure pinned Lean/Z3 checks | [Blaster setup, trust and replay](../plugins/fluxpoint/references/blaster.md) |
+| Verify Compact circuits natively | [Compact profile, artifacts, costs and mutations](../plugins/fluxpoint/references/compact.md) |
 | Recover an interrupted guard mutation | [Guard recovery](guard-recovery.md) |
 | Check builder/validator relations | [Relations](../plugins/fluxpoint/README.md#relations-between-artifacts), [Cardano review](../plugins/fluxpoint/references/red-team-cardano.md) |
-| Require independent repair evidence | [Repair campaign](../plugins/fluxpoint/templates/WORK.repair.md), [graph repair rules](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
+| Require native repair evidence and migrate historical receipts | [Repair campaign](../plugins/fluxpoint/templates/WORK.repair.md), [graph repair rules](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
 | Check production dependency pins | [Deployed gates](../plugins/fluxpoint/references/deployed-gates.md) |
+| Bind worker readings to native tool records | [Native command bindings](../plugins/fluxpoint/references/native-binding.md) |
 | Bind CI results to commits and attempts | [Forge evidence, source pins and CI identities](../plugins/fluxpoint/references/forge-evidence.md), [fault reruns](../plugins/fluxpoint/references/fault-reruns.md) |
+| Bind worker readings to native tool records | [Native command bindings](../plugins/fluxpoint/references/native-binding.md) |
 | Bind CI results to commits and attempts | [Forge evidence](../plugins/fluxpoint/references/forge-evidence.md), [content-bound red retention and fault reruns](../plugins/fluxpoint/references/fault-reruns.md) |
 | Check captured provider shapes and counters | [Recordings](../plugins/fluxpoint/references/recordings.md) |
 | Measure and tighten deterministic limits | [Metrics, Aiken costs and plateau detection](deterministic-metrics.md), [slice calibration](../plugins/fluxpoint/README.md#calibrating-predicted-gains) |

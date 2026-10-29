@@ -212,6 +212,16 @@ step; do not stop at copying files.
    scoped waiver. Example-only tests remain red for this taxonomy. Static
    declarations do not establish that the test runs; execute the project
    harness and inspect generator reachability too.
+   For Compact sources, also configure the pinned native adapter described in
+   `references/compact.md`: `.fluxpoint-compact.json`, its committed native
+   baseline, genuine/corrupted native proof controls and semantic bad-input
+   cases. Arm the Compact hatch and circuit-statement ratchets, native mutation
+   score and measured artifact/cost ceilings. Include relation identity,
+   reproducible key/code/initial-state pins, disclosure review and a maintenance
+   authority test. A JavaScript ledger's success is not native proof execution.
+   Use `compact-guard.py --check --require-armed` for declared native proof
+   checks. Tracked `ledger`/`witness` sources refuse without a manifest or when
+   omitted from its projects; pure helper modules remain dormant by default.
    `spec-guard.py --check` is red for each unspecified class until the
    test exists or the taxonomy's own `waived` object gives it a reason of
    at least twenty characters. A waiver is scoped to its taxonomy, so an

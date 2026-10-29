@@ -108,4 +108,19 @@ New irreversible ledger keys use SHA-256 of the rendered prompt. The compiler re
 
 A targeted tree sentinel before the first lane fork can retain its exact recorded prompt and nonce only when both prompt and option fingerprints match the next verified prefix slot. If its gate leaves that prefix, the compiler takes a fresh nonce reading before consulting any memo. Builders compare a fresh branch tip with the source run’s last corroborated tip for that branch; gates still bind to the exact tip they judged, so an intermediate gate can legitimately run again after later builders have pushed. The plan uses the last source branch reading, and shared-branch graphs print the possible extra cost. Different concurrent lanes do not trigger a serial-adjacency warning. SSH aliases are resolved through local `ssh -G` configuration; the known forges’ `www` aliases use the same identity as their bare host.
 
-The `pushes` declaration does not establish which process changed every remote ref. Another actor can push during a builder, and a fixed-command read cannot attribute that change to one writer. The remaining actual-ref attribution work from #174 is still open; the compiler does not treat an unrelated branch movement as proof of that builder’s behavior.
+Every executed declared builder now has fixed-command before/after
+`git ls-remote --heads origin` receipts. Net creation, deletion or movement of
+any undeclared head halts, including movement by an unrelated concurrent
+actor. An unchanged declared head remains a `PUSH-NO-CHANGE` finding. A live
+builder cannot reuse a cached before-read, and a successful record requires
+corroborated endpoints and execution receipts. These interval observations
+do not prove causal attribution, inspect tags or detect a push reverted
+before the after-read.
+
+The plan also removes lane, push, replay, fresh and branch-target opt-ins
+from the same current graph and renders it with prior and requested inputs.
+This serial counterfactual keeps recorded node outputs fixed. Rows name the
+serial prefix/live status; totals count reached live nodes and known source
+recorded-node minutes, with unknown costs explicit. A warning names extra
+opt-in work. This is a conditional cost estimate, unavailable as a forecast
+of new outputs, remote state, changed prior graph source or future wall time.

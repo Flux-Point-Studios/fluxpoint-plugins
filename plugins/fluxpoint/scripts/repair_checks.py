@@ -69,7 +69,9 @@ def descriptors(ir):
             result[loop['id']] = {'contract': 'FixCheckV1', 'independent': True,
                 'verifies': fixer['id'], 'after': fixer['id'],
                 'fixer': {'id': fixer['id'], 'mutates': True}, 'loop': loop['id'],
-                'maxRounds': limit, 'items': keys, 'targetClasses': targets, 'integration': False}
+                'maxRounds': limit, 'items': keys, 'targetClasses': targets, 'integration': False,
+                'operationalBounds': {item['key']: item.get('operationalBounds') for item in items},
+                'severityFloor': repeat.get('severityFloor', 'MEDIUM'), 'residualImports': dict(ir.get('imports') or {})}
         integration = repeat.get('integrate')
         if not isinstance(integration, list) or len(integration) != 2 or not all(isinstance(k, str) for k in integration):
             continue
@@ -83,7 +85,9 @@ def descriptors(ir):
                 'verifies': merge['id'], 'after': merge['id'],
                 'fixer': {'id': merge['id'], 'mutates': True}, 'loop': loop['id'],
                 'integrationNodes': integration, 'maxRounds': limit,
-                'items': keys, 'targetClasses': targets, 'integration': True}
+                'items': keys, 'targetClasses': targets, 'integration': True,
+                'operationalBounds': {item['key']: item.get('operationalBounds') for item in items},
+                'severityFloor': repeat.get('severityFloor', 'MEDIUM'), 'residualImports': dict(ir.get('imports') or {})}
     return result
 
 
@@ -106,6 +110,12 @@ def from_graph(path, root=None):
 
 def descriptor_valid(node, value):
     if not isinstance(value, dict):
+        return False
+    from repair_metrics import bounds_issue
+    bounds = value.get('operationalBounds')
+    if value.get('severityFloor', 'MEDIUM') not in ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL'):
+        return False
+    if bounds is not None and (not isinstance(bounds, dict) or any(bounds_issue(v) for v in bounds.values())):
         return False
     fixer = value.get('fixer') or {}
     keys = value.get('items')
@@ -241,6 +251,18 @@ def receipt_issue(row, descriptor, summary, retained=None, root=None):
         return 'receipt does not identify unique actual round patches'
     target_items = {p['item'] for p in patches} if integration else {item}
     expected_targets = {v for key in target_items for v in descriptor['targetClasses'][key]}
+    from repair_metrics import combine_bounds
+    bounds_map = descriptor.get('operationalBounds') or {}
+    expected_bounds = combine_bounds([bounds_map.get(key) for key in target_items]) if integration else bounds_map.get(item)
+    if context.get('severityFloor', 'MEDIUM') != descriptor.get('severityFloor', 'MEDIUM'):
+        return 'DIFF-UNPROVEN: severity floor differs from the frozen repair policy'
+    from repair_policy import verified_rulings
+    try:
+        rulings = verified_rulings(root or launch['root'], descriptor.get('residualImports') or {}, summary.get('repairResidualRulings') or [])
+    except (ValueError, OSError, SystemExit) as exc:
+        return 'RESIDUAL-UNPROVEN: ' + str(exc)
+    if context.get('operationalBounds') != expected_bounds:
+        return 'DIFF-UNPROVEN: operational bounds differ from the frozen repair inputs'
     if not classes(context.get('targetClasses')) or set(context['targetClasses']) != expected_targets:
         return 'receipt target classes differ from the frozen repair inputs'
     current = context.get('integrated' if integration else 'current')
@@ -282,9 +304,9 @@ def receipt_issue(row, descriptor, summary, retained=None, root=None):
             except (OSError, ValueError) as exc:
                 return 'DIFF-UNPROVEN: retained alarm series unavailable: ' + str(exc)
     issue = (sibling_issue(check.get('siblings'), sorted(expected_targets), row.get('fixerSiblings') or [])
-             or coverage_issue(coverage, measured, row.get('sharedResources') or [], live_series=True)
+             or coverage_issue(coverage, measured, row.get('sharedResources') or [], live_series=True, bounds=expected_bounds)
              or checker_evidence_issue(check, context, measured, row['node'], integration, summary['repairReadNonce'])
-             or diff_receipt_issue(proof, context, measured)
+             or diff_receipt_issue(proof, context, measured, rulings=rulings)
              or checked_commits_issue(root or launch['root'], context['base'], data, check.get('commits') or []))
     if issue:
         return issue
@@ -329,3 +351,72 @@ def corroborated(artifact, root=None):
     if problems or sorted(c.lower() for c in names) != observed:
         raise ValueError('checked is not corroborated by coherent independent PASS receipts: ' + '; '.join(problems))
     return observed
+
+
+def assurance(artifact, root, path):
+    """Classify immutable historical claims without granting legacy credit.
+
+    Old positive records remain available for review and repair. Only a current,
+    structurally valid native certificate can discharge a BLOCK window.
+    """
+    names = artifact.get('checked', [])
+    if not isinstance(names, list):
+        raise ValueError('checked must be an array')
+    if not names:
+        return 'none'
+    if not commit_list(names) or not text(artifact.get('runId')) or not text(artifact.get('graph')):
+        raise ValueError('checked is not a recorder-produced repair claim')
+    import run_artifacts
+    stored, digest = run_artifacts.read(root, artifact['runId'])
+    history = run_artifacts._path(root, artifact['runId'], digest)
+    if (Path(path).resolve() != run_artifacts._path(root, artifact['runId']).resolve()
+            or stored != artifact or history.exists() and (not history.is_file()
+                or history.read_bytes() != Path(path).read_bytes())):
+        raise ValueError('checked repair artifact differs from its immutable history snapshot')
+    summary = artifact.get('summary')
+    frozen = artifact.get('repairCheckers')
+    if not isinstance(summary, dict) or not isinstance(frozen, dict) or not frozen:
+        raise ValueError('checked has no frozen independent repair checker descriptors')
+    journal = artifact.get('repairJournal')
+    markers = (artifact.get('repairAssuranceVersion'), summary.get('repairAssuranceVersion'))
+    modern = (any(value is not None and (type(value) is not int or value != 1) for value in markers)
+              or isinstance(journal, dict) and (journal.get('version') != 1 or 'assurance' in journal
+                  or any(isinstance(seat, dict) and 'native' in seat for seat in journal.get('seats', []))))
+    if modern:
+        if not history.is_file():
+            raise ValueError('native checked repair artifact lacks its matching immutable history snapshot')
+        if any(type(value) is not int or value != 2 for value in markers):
+            raise ValueError('native repair assurance versions are missing or inconsistent')
+        from repair_journal import certificate_issue
+        issue = certificate_issue(summary, artifact['runId'], journal, retained=artifact.get('repairEvidence'), root=root)
+        if issue:
+            raise ValueError(issue)
+        return 'native'
+    # The old record must still be a coherent recorder receipt. Do not rerun
+    # newer semantic obligations against an old schema or disposable snapshots.
+    observed = set()
+    rows = summary.get('fixOrigins')
+    if not isinstance(rows, list):
+        raise ValueError('legacy checked artifact has no repair receipts')
+    for row in rows:
+        if not isinstance(row, dict) or row.get('verdict') != 'PASS':
+            continue
+        check = row.get('check')
+        if (not descriptor_valid(row.get('node'), frozen.get(row.get('node')))
+                or not isinstance(check, dict) or check.get('verdict') != 'PASS'
+                or not commit_list(row.get('commits')) or row['commits'] != check.get('commits')
+                or row.get('blockers') or check.get('blockers') or row.get('findings') or check.get('findings')):
+            raise ValueError('legacy checked artifact has incoherent independent PASS receipts')
+        observed.update(name.lower() for name in row['commits'])
+    if sorted(name.lower() for name in names) != sorted(observed):
+        raise ValueError('legacy checked commits differ from its independent PASS receipts')
+    if journal is not None and (not isinstance(journal, dict) or type(journal.get('version')) is not int or journal.get('version') != 1
+            or journal.get('runId') != artifact['runId'] or not isinstance(journal.get('seats'), list)):
+        raise ValueError('legacy repair journal certificate is malformed')
+    archive = artifact.get('repairEvidence')
+    if archive is not None:
+        if not isinstance(archive, dict) or not isinstance(archive.get('files'), dict):
+            raise ValueError('legacy retained repair evidence map is malformed')
+        for original in archive['files']:
+            _evidence_file(root, original, archive)
+    return 'legacy-unchecked' if history.is_file() else 'legacy-unchecked-no-history'

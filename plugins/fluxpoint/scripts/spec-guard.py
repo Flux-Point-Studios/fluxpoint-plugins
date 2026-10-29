@@ -103,7 +103,7 @@ MIN_REASON = 20
 # Tools whose obligations this script can actually read, by file suffix.
 COVERED = {
     ".ak": "aiken", ".dfy": "dafny", ".lean": "lean", ".v": "coq",
-    ".thy": "isabelle", ".tla": "tla", ".cfg": "tla", ".rs": "kani",
+    ".thy": "isabelle", ".tla": "tla", ".cfg": "tla", ".rs": "kani", ".compact": "compact",
 }
 # Proof languages this script recognises and does NOT parse. Reported by
 # name rather than passed over.
@@ -195,7 +195,7 @@ RUST_FN = re.compile(
 # A checked Definition-of-Done line whose proof tail names an obligation.
 DOD_LINE = re.compile(
     r"^\s*-\s*\[(?P<box>[ xX])\]\s*(?P<claim>.*?)\s*(?:—|--|-)\s*proof:\s*(?P<tail>.+?)\s*$")
-OBLIGATION_ID = re.compile(r"\b(?:aiken|dafny|lean|coq|isabelle|tla|kani):[^\s,;]+")
+OBLIGATION_ID = re.compile(r"\b(?:aiken|dafny|lean|coq|isabelle|tla|kani|compact):[^\s,;]+")
 
 # A finding row from `dafny audit --report-format txt` (Dafny 4.9.1):
 #   src/vault.dfy(10,17):Helper: Declaration has explicit `{:axiom}` attribute. …
@@ -527,9 +527,14 @@ def scan_kani(rel, text, _ctx):
     return out
 
 
+def scan_compact(rel, text, _ctx):
+    from compact_native import circuit_statements
+    return [obligation('compact', rel, name, statement) for name, statement in circuit_statements(text).items()]
+
+
 SCANNERS = {
     "aiken": scan_aiken, "dafny": scan_dafny, "lean": scan_lean, "coq": scan_coq,
-    "isabelle": scan_isabelle, "kani": scan_kani,
+    "isabelle": scan_isabelle, "kani": scan_kani, "compact": scan_compact,
 }
 
 

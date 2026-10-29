@@ -58,10 +58,11 @@ function repairUTF8(bytes) {
 }
 function repairManifest(bytes) {
   const lines = repairUTF8(bytes).split('\n'), hunks = []
-  let path = null
+  let path = null, oldPath = null
   lines.forEach((line, i) => {
     if (line.startsWith('diff --git ')) path = line.slice(11)
-    else if (line.startsWith('+++ ')) path = line.slice(4)
+    else if (line.startsWith('--- ')) oldPath = line.slice(4)
+    else if (line.startsWith('+++ ')) path = line.slice(4) === '/dev/null' ? oldPath : line.slice(4)
     else if (line.startsWith('@@ ')) {
       const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line)
       if (!m || path === null) throw new Error('malformed patch hunk')
@@ -74,6 +75,7 @@ function repairManifest(bytes) {
       if (surfaces.some(s => ['outbound-calls', 'timers'].includes(s))) obligations.push('latency')
       if (surfaces.includes('alarms')) obligations.push('alarm-rate')
       if (/rate.?limit|token.?bucket|burst/i.test(content)) obligations.push('provider-pool')
+      if (/(?:^|\/)(?:tests?|__tests__)(?:\/|$)|(?:^|\/)(?:test_[^/]*|[^/]*[._](?:test|spec)\.[^/]+)$/i.test(path)) obligations.length = 0
       hunks.push({ id:'h'+i, path, newStart:Number(m[1]), newLines:m[2] === undefined ? 1 : Number(m[2]), added, surfaces, obligations })
     } else if (line === 'GIT binary patch' || line.startsWith('Binary files ')) {
       if (path === null) throw new Error('binary patch lacks file identity')
@@ -89,6 +91,14 @@ function repairCanonical(value) {
 }
 function repairManifestDigest(measured) { return repairSHA256([...repairCanonical(measured)].map(c => c.charCodeAt(0))) }
 
+function repairCombineBounds(values) {
+  values = values.filter(v => v && typeof v === 'object')
+  const result = {}
+  for (const key of ['deadlineMs','maxPerDay']) { const found=values.filter(v => v[key] !== undefined).map(v => v[key]); if(found.length)result[key]=Math.min(...found) }
+  if(values.some(v=>v.providerPools!==undefined))result.providerPools=[...new Set(values.flatMap(v=>v.providerPools||[]))].sort()
+  return Object.keys(result).length ? result : null
+}
+
 function repairFeedback(check) {
   if (!check || typeof check !== 'object') return check
   return Object.fromEntries(['verdict','findings','blockers','evidence','reframe','exit','command','tail'].filter(k => check[k] !== undefined).map(k => [k,check[k]]))
@@ -103,6 +113,28 @@ function repairContextIssue(...values) {
   return null
 }
 
+function repairManifestPath(raw) {
+  if (raw.startsWith('a/') && raw.includes(' b/')) raw = 'b/' + raw.slice(raw.lastIndexOf(' b/') + 3)
+  if (raw.startsWith('"')) {
+    const bytes = [], escapes = {a:7,b:8,t:9,n:10,v:11,f:12,r:13,'"':34,'\\':92}
+    for (let i=1;i<raw.length;i++) {
+      const c=raw[i]
+      if(c==='"'){const rest=raw.slice(i+1).trim();return rest.startsWith('"b/')?repairManifestPath(rest):repairUTF8(bytes).replace(/^[ab]\//,'')}
+      if(c==='\\'){
+        const m=/^[0-7]{1,3}/.exec(raw.slice(++i))
+        if(m){bytes.push(parseInt(m[0],8));i+=m[0].length-1;continue}
+        if(escapes[raw[i]]===undefined)throw Error('unsupported Git path escape')
+        bytes.push(escapes[raw[i]])
+      }else{
+        const n=raw.codePointAt(i);if(n>65535)i++
+        if(n<=127)bytes.push(n);else if(n<=2047)bytes.push(192|n>>6,128|n&63);else if(n<=65535)bytes.push(224|n>>12,128|n>>6&63,128|n&63);else bytes.push(240|n>>18,128|n>>12&63,128|n>>6&63,128|n&63)
+      }
+    }
+    throw Error('unterminated Git quoted path')
+  }
+  return raw.replace(/^[ab]\//,'')
+}
+
 function repairSiblingIssue(check, context, fixed) {
   if (!repairTargets(check.targetClasses) || JSON.stringify([...check.targetClasses].sort()) !== JSON.stringify([...context.targetClasses].sort())) return 'SIBLINGS-UNPROVEN: checker targetClasses differ from pinned slice'
   const rows = check.siblings, claims = fixed.siblings === undefined ? [] : fixed.siblings
@@ -115,24 +147,32 @@ function repairSiblingIssue(check, context, fixed) {
   if (context.targetClasses.some(finding => REPAIR_AXES.some(axis => !rows.some(r => r.finding === finding && r.axis === axis && !listed.has(key(r)))))) return 'SIBLINGS-UNPROVEN: each class needs an unlisted sibling on every axis'
   return null
 }
-function repairCoverageIssue(check, measured, fixed) {
+function repairCoverageIssue(check, measured, fixed, context = {}) {
   const c = check.diffCoverage, rows = c?.hunks
   if (!c || c.patchSha256 !== measured.patchSha256) return 'DIFF-UNPROVEN: coverage names another patch SHA-256'
   if (!Array.isArray(rows) || rows.length !== measured.hunks.length || rows.some(r => !r) || new Set(rows.map(r => r.id)).size !== rows.length || measured.hunks.some(h => !rows.some(r => r.id === h.id))) return 'DIFF-UNPROVEN: every harness-listed hunk needs exactly one row'
   if (rows.some(r => !REPAIR_SURFACES.includes(r.surface) || !repairObservation(r.attack) || !repairObservation(r.control))) return 'DIFF-UNPROVEN: each hunk needs a surface, attack and control'
-  const obligations = measured.hunks.flatMap(h => h.obligations), operational = c.operational || {}
+  try {
+    if (measured.hunks.some(h => !rows.find(r => r.id === h.id).attack.command.includes(repairManifestPath(h.path)))) return 'DIFF-UNPROVEN: every hunk attack command must name its manifest path'
+  } catch (_) { return 'DIFF-UNPROVEN: hunk has an unsupported Git path spelling' }
+  const obligations = measured.hunks.flatMap(h => h.obligations), operational = c.operational || {}, bounds = context.operationalBounds || {}
   if (obligations.includes('latency')) {
     const r = operational.latency
+    if (!repairFinite(bounds.deadlineMs,true) || r?.deadlineMs !== bounds.deadlineMs) return 'DIFF-UNPROVEN: latency deadline must equal pinned operationalBounds.deadlineMs'
     if (!repairObservation(r) || !repairFinite(r.deadlineMs,true) || !repairFinite(r.observedMs) || r.observedMs > r.deadlineMs) return 'DIFF-UNPROVEN: latency must meet a declared measured deadline'
+    const outbound = measured.hunks.some(h => h.added && h.surfaces.includes('outbound-calls')), pools = bounds.providerPools
+    if (outbound && !Array.isArray(pools)) return 'DIFF-UNPROVEN: outbound calls need pinned operationalBounds.providerPools (use [] for none)'
+    if (outbound && pools.length && (!pools.includes(r.pool) || pools.some(pool => !(fixed.sharedResources || []).some(p => p?.resource === pool)))) return 'DIFF-UNPROVEN: every pinned rate-limited pool must remain in sharedResources'
     if (obligations.includes('provider-pool') && (!repairText(r.pool) || !(Array.isArray(fixed.sharedResources)?fixed.sharedResources:[]).some(p => p?.resource === r.pool))) return 'DIFF-UNPROVEN: rate-limited provider needs a declared shared pool'
   }
   if (obligations.includes('alarm-rate')) {
     const r = operational.alarmRate
+    if (!repairFinite(bounds.maxPerDay) || r?.maxPerDay !== bounds.maxPerDay) return 'DIFF-UNPROVEN: alarm acceptance must equal pinned operationalBounds.maxPerDay'
     if (!repairObservation(r) || !repairText(r.seriesPath) || !/^(?:[A-Za-z]:[\\/]|[\\/])/.test(r.seriesPath) || typeof r.seriesSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(r.seriesSha256) || !repairFinite(r.durationSeconds,true) || !Number.isSafeInteger(r.falsePositives) || r.falsePositives < 0 || !repairFinite(r.maxPerDay) || r.falsePositives*86400/r.durationSeconds > r.maxPerDay) return 'DIFF-UNPROVEN: alarm rate needs recorded series provenance and an acceptable measured rate'
   }
   return null
 }
-const REPAIR_SENTINEL_SCHEMA = {type:'object',required:['status'],properties:{status:{type:'string'},manifest:{type:'object'},manifestSha256:{type:'string'},kind:{type:'string'},spec:{type:'string'},exit:{type:'integer'},argv:{type:'array',items:{type:'string'}},elapsedMs:{type:'number'},output:{type:'string'},base:{type:'string'},patch:{type:'string'},item:{type:'string'},round:{type:'integer'},snapshot:{type:'string'},token:{type:'string'},patchSha256:{type:'string'},observations:{type:'array',items:{type:'object'}},issue:{type:'string'}}}
+const REPAIR_SENTINEL_SCHEMA = {type:'object',required:['status'],properties:{status:{type:'string'},manifest:{type:'object'},manifestSha256:{type:'string'},kind:{type:'string'},spec:{type:'string'},exit:{type:'integer'},argv:{type:'array',items:{type:'string'}},elapsedMs:{type:'number'},output:{type:'string'},base:{type:'string'},patch:{type:'string'},item:{type:'string'},round:{type:'integer'},snapshot:{type:'string'},snapshotTree:{type:'string'},token:{type:'string'},patchSha256:{type:'string'},observations:{type:'array',items:{type:'object'}},issue:{type:'string'}}}
 const repairQuote = s => "'" + String(s).replace(/'/g, "'\\''") + "'"
 const repairHelperCommand = mode => REPAIR_PROOF_ARGV.map(repairQuote).join(' ') + ' ' + mode
 function repairSamePath(expected, actual) {
@@ -146,6 +186,9 @@ function repairSamePath(expected, actual) {
   return key(expected) === key(actual)
 }
 function repairIdentity(context) { const p = context.integrated || context.current; return {base:context.base,item:context.item,round:context.round,patch:p.patch} }
+function repairReplayBrief() {
+  return '\nNATIVE ORIGIN REPLAY: save the exact ORIGIN REPLAY CONTEXT as JSON; invoke '+REPAIR_REPLAY_ARGV.map(repairQuote).join(' ')+' --root '+repairQuote(REPAIR_LAUNCH.root)+' --context <saved-json> --defect-class <class> --control <valid-command> --command <reproduction>. Preserve its actual JSON; do not substitute an interpreter or helper.\n'
+}
 async function repairSentinel(mode, context, extra = {}, id = '') {
   const identity = repairIdentity(context)
   const args = ['cleanup','check'].includes(mode) ? extra : {...identity,root:REPAIR_LAUNCH.root,...extra}
@@ -179,21 +222,26 @@ function repairCheckerEvidenceIssue(check, context, measured) {
   if (!witness || witness.status !== 'CLEANED' || witness.base !== context.base || witness.patchSha256 !== measured.patchSha256 || witness.readNonce !== A._replayLaunchNonce || !Array.isArray(observations) || !observations.length || observations.some(o => !o || o.base !== context.base || o.patchSha256 !== measured.patchSha256 || o.reproduces !== false)) return 'CHECKER-UNPROVEN: independent checker witness is missing or records an undefeated harm'
   const same = (a,b) => repairObservation(a) && repairObservation(b) && a.command === b.command && a.result === b.result
   const pairs = [...(check.siblings || []), ...(check.diffCoverage?.hunks || [])]
-  if (pairs.some(r => !observations.some(o => o.reproduces === false && same(r.attack,o.attack) && same(r.control,o.control)))) return 'CHECKER-UNPROVEN: every defended sibling and hunk row must match an actually defended checker execution'
+  const unused = new Set(observations.map((_,i) => i))
+  for (const row of pairs) {
+    const index = [...unused].find(i => observations[i].reproduces === false && same(row.attack,observations[i].attack) && same(row.control,observations[i].control))
+    if (index === undefined) return 'CHECKER-UNPROVEN: each sibling/hunk row needs its own actual execution; reuse is refused'
+    unused.delete(index)
+  }
   const operational = check.diffCoverage?.operational || {}, latency = operational.latency, alarm = operational.alarmRate
   if (latency && !observations.some(o => same(latency,o.attack) && repairFinite(o.attack.elapsedMs) && latency.observedMs === o.attack.elapsedMs)) return 'CHECKER-UNPROVEN: latency must use the helper-measured elapsed time'
-  if (alarm && !observations.some(o => same(alarm,o.attack) && alarm.seriesPath === o.seriesPath && alarm.seriesSha256 === o.seriesSha256 && o.metrics && ['durationSeconds','falsePositives','maxPerDay'].every(k => alarm[k] === o.metrics[k]))) return 'CHECKER-UNPROVEN: alarm measurements must match executed JSON output and the helper-read production series'
+  if (alarm && !observations.some(o => same(alarm,o.attack) && alarm.seriesPath === o.seriesPath && alarm.seriesSha256 === o.seriesSha256 && o.seriesFormat === 'RepairAlarmSeriesV1' && o.metrics && ['durationSeconds','falsePositives'].every(k => alarm[k] === o.metrics[k]))) return 'CHECKER-UNPROVEN: alarm measurements must match executed JSON output and the helper-read production series'
   return null
 }
 function repairSnapshotBrief(snapshot) {
-  return 'SNAPSHOT IDENTITY: '+JSON.stringify(snapshot)+'\nThe harness already applied the complete current patch to this fresh archive of the exact launch base. Work only there; no second snapshot or second patch application. Run ALL attack/control cases through '+repairHelperCommand('execute')+' --snapshot '+repairQuote(snapshot.snapshot)+' --token '+repairQuote(snapshot.token)+' --control <valid-command> --attack <case-command>. Copy the actual command/result observations into each sibling and hunk row. Latency observedMs must copy attack.elapsedMs; for alarms pass --series <absolute-production-series>, read its frozen copy from FPL_PRODUCTION_SERIES, and have the command print JSON {durationSeconds,falsePositives,maxPerDay}, then copy its measured output and helper-read series digest. These actual executions, not descriptions, are independently logged outside the snapshot and collected by the cleanup sentinel.\n'
+  return 'SNAPSHOT IDENTITY: '+JSON.stringify(snapshot)+'\nThe harness already applied the complete current patch to this fresh archive of the exact launch base. Work only there; no second snapshot or second patch application. Run ALL attack/control cases through '+repairHelperCommand('execute')+' --snapshot '+repairQuote(snapshot.snapshot)+' --token '+repairQuote(snapshot.token)+' --control <valid-command> --attack <case-command>. Copy the actual command/result observations into each sibling and hunk row. Latency observedMs must copy attack.elapsedMs; for alarms pass --series <absolute-production-series>, read its frozen copy from FPL_PRODUCTION_SERIES, provide RepairAlarmSeriesV1 {version:1,startedAt,endedAt,events:[{id,at,falsePositive}]} and copy the helper-computed duration/count and series digest. The helper derives alarm statistics from frozen event data, never from command stdout. Acceptance limits must equal the pinned slice operationalBounds. These actual executions, not descriptions, are independently logged outside the snapshot and collected by the cleanup sentinel.\n'
 }
 async function repairCheckedSpawn(context, measured, prompt, options) {
   const snapshot = await repairSentinel('materialize',context,{sha256:measured.patchSha256,'manifest-sha256':measured.manifestSha256},options.label)
   if (!snapshot || snapshot.status !== 'READY' || snapshot.base !== context.base || snapshot.patchSha256 !== measured.patchSha256 || !repairText(snapshot.snapshot) || typeof snapshot.token !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.token)) return {verdict:'INCOMPLETE',findings:[],blockers:['checker fresh base archive unavailable'],evidence:['harness could not materialize checker snapshot']}
   let result = null, cleanup = null, packetCheck = null
   try {
-    result = await spawn(repairSnapshotBrief(snapshot)+prompt,options)
+    result = await spawn(repairSnapshotBrief(snapshot)+repairReplayBrief()+prompt,options)
     if (REPAIR_PACKET !== null) packetCheck = await repairSentinel('check',context,{snapshot:snapshot.snapshot,token:snapshot.token,spec:REPAIR_PACKET},options.label)
   }
   finally { cleanup = await repairSentinel('cleanup',context,{snapshot:snapshot.snapshot,token:snapshot.token},options.label) }
@@ -205,12 +253,21 @@ function repairOriginalTitles() {
   const f = Array.isArray(A.findings?.findings) ? A.findings.findings : A.findings
   return Array.isArray(f) ? f.map(x => typeof x === 'string' ? x : x?.finding || x?.title).filter(repairText) : repairText(f) ? [f] : []
 }
+function repairDisposition(finding, context, digest) {
+  const ruling = REPAIR_RESIDUAL_RULINGS.find(r => r.finding === finding.finding && r.patchSha256 === digest)
+  if (ruling) return {disposition:'OPERATOR-RESIDUAL',ruling:{decisionId:ruling.decisionId,recordId:ruling.recordId}}
+  const ranks = ['LOW','MEDIUM','HIGH','CRITICAL']
+  if (ranks.indexOf(finding.severity) >= 0 && ranks.indexOf(finding.severity) < ranks.indexOf(context.severityFloor || 'MEDIUM')) return {disposition:'BELOW-SEVERITY-FLOOR'}
+  if (finding.origin === 'pre-existing' && !context.targetClasses.includes(finding.defectClass)) return {disposition:'OUTSIDE-TARGET-CLASSES'}
+  return null
+}
+
 async function repairDiffAttack(context, measured, phaseName) {
   const prefix = 'repair-diff:'+context.item+':r'+context.round
-  const receipt = {version:1,...repairIdentity(context),patchSha256:measured.patchSha256,manifestSha256:measured.manifestSha256,readNonce:A._replayLaunchNonce,settled:repairOriginalTitles(),attackers:[],refuters:[],findings:[],snapshots:[],blockers:[],clean:false}
+  const receipt = {version:1,...repairIdentity(context),patchSha256:measured.patchSha256,manifestSha256:measured.manifestSha256,readNonce:A._replayLaunchNonce,settled:repairOriginalTitles(),attackers:[],refuters:[],findings:[],followups:[],snapshots:[],blockers:[],clean:false}
   const attackSchema = {type:'object',required:['base','patchSha256','completed','evidence','blockers','findings'],properties:{base:{type:'string'},patchSha256:{type:'string'},completed:{type:'boolean'},evidence:{type:'array',minItems:1,items:{type:'string'}},blockers:{type:'array',items:{type:'string'}},findings:C.FixCheckV1.properties.findings}}
   const voteSchema = {type:'object',required:['resolution','attack','control','contradiction'],properties:{resolution:{enum:['REFUTED','CONFIRMED','UNRESOLVED']},attack:{type:'object'},control:{type:'object'},contradiction:{type:'string'}}}
-  const subject = 'PINNED PATCH SUBJECT: '+JSON.stringify(measured)+'\nORIGIN REPLAY CONTEXT: '+JSON.stringify(context)+'\nORIGINAL FINDINGS: '+JSON.stringify(A.findings || [])+'\nSETTLED ORIGINAL FINDINGS (context, never evidence): '+JSON.stringify(repairOriginalTitles())
+  const subject = 'PINNED PATCH SUBJECT: '+JSON.stringify(measured)+'\nORIGIN REPLAY CONTEXT: '+JSON.stringify(context)+'\nORIGINAL FINDINGS: '+JSON.stringify(A.findings || [])+'\nSETTLED ORIGINAL FINDINGS (context, never evidence): '+JSON.stringify(repairOriginalTitles())+repairReplayBrief()
   const snapshotPrompt = s => 'SNAPSHOT IDENTITY: '+JSON.stringify(s)+'\nFresh base-archive snapshot: '+s.snapshot+'; ownership token: '+s.token+'. Run all controls/attacks through '+repairHelperCommand('execute')+' --snapshot '+repairQuote(s.snapshot)+' --token '+repairQuote(s.token)+' --control <valid-command> --attack <case-command>. Copy its actual attack/control observations into refutation votes. That helper drains owned subprocesses and writes an independent execution log before returning. An evidence string without a logged execution cannot complete this seat. Do not run detached commands or mutate shared files. Missing tools/controls are blockers. '
   const observed = r => Array.isArray(r?._executed) && r._executed.length > 0 && r._executed.every(o => o && o.base === context.base && o.patchSha256 === measured.patchSha256 && repairObservation(o.attack) && repairObservation(o.control) && typeof o.reproduces === 'boolean')
   async function runSeat(id, prompt, schema) {
@@ -254,8 +311,10 @@ async function repairDiffAttack(context, measured, phaseName) {
     }
   }
   await parallel(lenses.map(lens => () => attack(lens)))
-  if (!raw.length && !receipt.blockers.length) await attack({id:'coverage-skeptic',focus:'Independently sample representative defended sibling and added-hunk cases for false negatives. Inspect all six sibling axes and new operational behavior; report concrete claims through findings or incomplete coverage through blockers.'})
+  if (!raw.some(f => !repairDisposition(f,context,measured.patchSha256)) && !receipt.blockers.length) await attack({id:'coverage-skeptic',focus:'Independently sample representative defended sibling and added-hunk cases for false negatives. Inspect all six sibling axes and new operational behavior; report concrete claims through findings or incomplete coverage through blockers.'})
   await parallel(raw.map(f => async () => {
+    const residual = repairDisposition(f,context,measured.patchSha256)
+    if (residual) { receipt.followups.push({...f,...residual}); return }
     const votes = await parallel(REPAIR_REVIEW_REFUTERS.map(lens => async () => {
       const spawnId = prefix+':refute:'+f.id+':'+lens.id
       const r = await runSeat(spawnId,'Read '+REPAIR_REVIEW_AGENT+'. Independently test this claim, never the fixer/checker reasoning: '+JSON.stringify(f)+'\nREFUTER '+lens.id+': '+lens.focus+'\nReturn the supplied refutation schema. REFUTED requires contradictory EXECUTED attack and valid-control command/results plus the specific contradiction. The reproduce seat must rerun the exact claim originEvidence command and controlCommand on the current patch; an unrelated defended command cannot refute it. Missing/null/uncertain observations are UNRESOLVED. Never refute from a settled title or inference.',voteSchema)
@@ -271,6 +330,7 @@ async function repairDiffAttack(context, measured, phaseName) {
   const open = receipt.findings.filter(f => f.votes.some(v => v.resolution !== 'REFUTED'))
   const reread = await repairReadPatch(context,'after-review')
   if (reread.issue || reread.patchSha256 !== measured.patchSha256) receipt.blockers.push('patch changed or fresh post-review read unavailable')
+  for (const finding of receipt.followups) note(prefix,'FOLLOWUP',finding.finding,{severity:finding.severity,origin:finding.origin,disposition:finding.disposition,patchSha256:measured.patchSha256,...(finding.ruling?{ruling:finding.ruling}:{})})
   receipt.clean = !receipt.blockers.length && !open.length
   REPAIR_DIFF_REVIEWS.push(receipt)
   return {receipt,findings:open,issue:receipt.blockers.length ? receipt.blockers.join('; ') : null}

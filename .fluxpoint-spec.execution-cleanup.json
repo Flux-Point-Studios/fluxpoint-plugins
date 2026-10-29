@@ -11,7 +11,9 @@
     "Structured resume default reconciliation, explicit removals, immutable inputs, persisted rerun plans and UTF-8 child diagnostics",
     "Attestation classifies exact harness STATUS and inserted Evidence/Decisions edits without exempting content changes",
     "Replay provenance frames, compact compiled replay authority, live irreversible guards, defined Unicode hashing and SHA-256 ledger migration",
-    "Safe targeted-prefix reuse, source-final branch readings, lane warnings and effective SSH/forge identities"
+    "Safe targeted-prefix reuse, source-final branch readings, lane warnings and effective SSH/forge identities",
+    "Fixed-command before/after remote-head snapshots for declared builders and same-resume serial cost comparison",
+    "Compiler syntax remains compatible with the supported Python 3.9 runtime"
   ],
   "outOfScope": [
     "External workflow runtime cache redesign",
@@ -133,6 +135,30 @@
         "execution-cleanup-tests"
       ],
       "counterexample": "A stamped launch tells its cite seat to invoke --cancel --root ROOT TOKEN and cannot stop the local lane"
+    },
+    {
+      "id": "declared-push-observations",
+      "statement": "Each executed declared builder has corroborated before/after remote-head snapshots; undeclared ref additions, changes or deletions halt, unchanged declared refs remain findings, and --plan compares live nodes and known recorded minutes with the same resume stripped of lane/replay/push/fresh opt-ins",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "graph-replay-tests",
+        "replay-followup-tests"
+      ],
+      "counterexample": "A builder moves an undeclared branch without halting, a cached before snapshot fences live work, or the plan claims opt-ins save work without rendering its serial counterfactual"
+    },
+    {
+      "id": "compiler-python-portability",
+      "statement": "The compiler imports under every supported Python runtime, including Python 3.9, while emitting the same repair-origin severity context",
+      "decisions": [
+        "execution-cleanup"
+      ],
+      "checks": [
+        "graph-replay-tests",
+        "execution-cleanup-tests"
+      ],
+      "counterexample": "A nested f-string quote is accepted locally on Python 3.12 but prevents every compiler consumer from importing on the Windows Python 3.9 gate"
     }
   ],
   "checks": [
@@ -206,6 +232,10 @@
     {
       "claim": "Could a failed attempt with no agent have a real result to replay?",
       "resolution": "Only empty-agent failed pre-start events are skipped; result or started events still refuse malformed identity."
+    },
+    {
+      "claim": "Can interval snapshots prove which concurrent actor pushed a branch?",
+      "resolution": "No. Unexpected interval changes conservatively halt, including external concurrent changes; unchanged endpoints do not prove causal attribution and a change reverted between snapshots is outside this observation boundary."
     }
   ]
 }

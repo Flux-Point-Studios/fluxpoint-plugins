@@ -240,8 +240,8 @@ scaffolded harness runs the prover in `--full` and four ratchets hold the
 proof surface: escape hatches, theorem statements, the assumptions each
 headline theorem depends on, and the on-chain budget for Cardano validators.
 Statements are parsed for Aiken, Dafny, Lean, Coq, Isabelle, TLA+ (with the
-invariants a TLC config names) and Kani. Escape hatches are counted in those
-languages and in TypeScript, where `as any` is the off-chain `sorry`: it
+invariants a TLC config names), Kani and Compact. Escape hatches are counted in
+those languages and in TypeScript, where `as any` is the off-chain `sorry`: it
 discharges an obligation the type checker had, `tsc` exits 0 either way, and
 that layer is the one an autonomous caller actually reaches.
 The assumption sets come from the

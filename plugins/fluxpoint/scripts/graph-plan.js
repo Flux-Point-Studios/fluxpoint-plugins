@@ -13,6 +13,12 @@ function schemaValue(schema) {
 }
 async function agent(prompt, opts) {
   calls.push({ prompt, opts })
+  if (opts.label.startsWith('push-check:')) {
+    const repository = JSON.parse(/git -C ("(?:[^"\\]|\\.)*") ls-remote --heads origin/.exec(prompt)[1])
+    const latest = {}
+    for (const r of input.readings) if (r.repository === repository && r.branch) latest['refs/heads/' + r.branch] = r.tip
+    return { repository, heads: Object.entries(latest).map(([ref, tip]) => tip + '\t' + ref).join('\n') }
+  }
   if (opts.label.startsWith('tree-check:')) {
     const reading = { root: baseline.root, head: baseline.sha, porcelain: baseline.porcelain }
     const m = /git -C ("(?:[^"\\]|\\.)*") ls-remote origin ("(?:[^"\\]|\\.)*")/.exec(prompt)

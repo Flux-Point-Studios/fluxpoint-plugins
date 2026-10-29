@@ -135,7 +135,7 @@ const PROBE_RESULT = {
     completed: { type: 'boolean' }, findings: FINDINGS.properties.findings,
     blockers: { type: 'array', items: { type: 'string' } }, noCommandsReason: { type: 'string' },
     commands: { type: 'array', items: { type: 'object', required: ['original', 'safe', 'outcome', 'evidence'], properties: {
-      original: { type: 'string' }, safe: { type: 'string' }, outcome: { enum: ['ACCEPTED', 'REFUSED', 'UNRESOLVED'] }, evidence: { type: 'string' },
+      original: { type: 'string' }, safe: { type: 'string' }, exit: { type: ['integer', 'null'] }, outcome: { enum: ['ACCEPTED', 'REFUSED', 'UNRESOLVED'] }, evidence: { type: 'string' },
     } } },
   },
 }
@@ -902,6 +902,7 @@ function summarize(raw, judged, dead, verifiers, deadVerifiers) {
   log(`counts: ${counts.lensesReturned}/${counts.lenses} lens(es), ${counts.raw} raw -> ${counts.distinct} distinct ` +
     `(${counts.settledMatched} settled) -> ${counts.confirmed} confirmed, ${counts.refuted} refuted, ` +
     `${counts.unverified} unverified; ${verifiers} verifier(s), ${deadVerifiers} returned nothing`)
+  if (PROBES.length) log('native command output binding PENDING: run bind-native.py after this Workflow completes before accepting SOUND')
   log(`verdict: ${verdict}${why.length ? ` (${why.join('; ')})` : ''}${shapeNote}`)
   return {
     mode: MODE,
@@ -910,6 +911,8 @@ function summarize(raw, judged, dead, verifiers, deadVerifiers) {
     lenses: RUN_LENSES.map(l => l.id),
     deadLenses: dead,
     probes: PROBE_REPORTS, deadProbes: DEAD_PROBES,
+    nativeCommandBinding: { version: 1, bound: !PROBES.length, status: PROBES.length ? 'PENDING' : 'NOT-REQUIRED', labels: PROBES.map(n => `probe:${n.id}`) },
+    ready: sound && MODE === 'multi' && !PROBES.length,
     probeEvidence: { readOnly, shapeOnly,
       semantic: 'none: the audit runs no command for its effect, so semantic and runtime proof stays with the attested gates' },
     settled: SETTLED,
@@ -994,10 +997,11 @@ function probePrompt(n) {
   const prompt = resolveBindings(n.prompt, probeArgs)
   const coverage = COVERAGE.get(n.id)
   return [
+    `Fluxpoint-Native-Seat: probe:${n.id}`,
     repositoryContext(),
-    `Probe isolated node ${n.id} from ${A.graph}. Read its actual prompt in that file and ${A.pluginRoot}/agents/graph-auditor.md. Compare it with the resolved prompt below; a stale or mismatched plan is incomplete coverage. This agent has isolation: worktree, matching the node's runtime boundary.`,
+    `Probe isolated node ${n.id} from ${A.graph} using the resolved prompt and reviewed plan below. This fixed-command seat has isolation: worktree. Use ONLY Bash for the prescribed safe commands, exactly once each in listed order, then one StructuredOutput. Do not use Read, extra inspection tools, background calls or additional commands; the plan and lenses handle file inspection separately. The native transcript binder checks this complete tool inventory.`,
     'Run each command the prompt prescribes ONLY in a non-mutating safe read form. Preserve its shell shape: the same git -C target, cd target, $(...) substitution, &&, ; and | chaining. Replace mutating subcommands such as fetch, worktree add, checkout or writes with safe reads such as the deterministic status forms in DECLARED FORMS. Never fetch, change refs, add worktrees, deploy, delete, write shared files or execute an unreviewed program. If a safe equivalent cannot preserve the shape, mark it UNRESOLVED and incomplete; do not execute the mutation.',
-    'Record original command, safe command actually sent to the tool, ACCEPTED / REFUSED / UNRESOLVED, and the exact runtime hook response or measured output. An ordinary Git syntax error, a failed prerequisite or an earlier && short-circuit is UNRESOLVED, not evidence that the runtime accepted the unexecuted shape. Resolve foreach item operands from the graph lists. Missing tools or unresolved command operands leave coverage incomplete; data-only context placeholders do not require executing future nodes. If no command is prescribed, return commands:[] and a concrete noCommandsReason.',
+    'Record original command, safe command actually sent to the tool, ACCEPTED / REFUSED / UNRESOLVED, exit (the actual integer status, or null for a hook refusal without a status), and the exact complete runtime hook response or measured output in evidence. Never summarize output. For empty output use the literal (Bash completed with no output). An ordinary Git syntax error, a failed prerequisite or an earlier && short-circuit is UNRESOLVED, not evidence that the runtime accepted the unexecuted shape. Resolve foreach item operands from the graph lists. Missing tools or unresolved command operands leave coverage incomplete; data-only context placeholders do not require executing future nodes. If no command is prescribed, return commands:[] and a concrete noCommandsReason.',
     'For every hook refusal, return a finding with the command and hook text as evidence, a concrete failurePath, severity, title, rewire, defectClass and classRewire. Empty findings do not discharge incomplete command coverage. Return completed only after every prescribed safe command shape was reached. These results certify prescribed commands only: agents may later invent compound commands outside this probe.',
     'Return exactly one command receipt for each PRESCRIBED COMMANDS entry, copying original verbatim. Preserve all compound operators, command substitutions and global Git operands in safe. Unsupported syntax or programs cannot receive complete coverage. If the inventory misses a prescribed command, report a blocker rather than claiming completion.',
     "DECLARED FORMS maps a prescribed command to the node's reviewed probe declaration in the IR. Send exactly its run text as safe, and nothing else for that command: read-only runs the exact command; shape runs a reviewed --help prefix or a generated same-frame git read. A typed future git operand may also use a declared same-frame git read. These forms probe the isolation boundary without running the original effect. Never put a value of your own in place of a <placeholder>. An illustrative template in the prompt is covered by its declared instances, which PRESCRIBED COMMANDS already lists.",

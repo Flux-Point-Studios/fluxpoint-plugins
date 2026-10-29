@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "sha256": "79efb01478f0cf681b6b001c3f8311c45cfd349086178b863b85b2ccc6633f27",
+  "proofBaselineSha256": null,
+  "harness": {
+    ".github/workflows/windows-specification.yml": "cce19848cf5a4715e18517625cbd9a3e37d5e13c856ad9027f5fd5db162a9de0",
+    "plugins/fluxpoint/scripts/spec-guard.py": "08544bb3e892ff4b535bac5b3ec7a1380ee1ea5a97106b5d5fb7c0b98267c7f2",
+    "plugins/fluxpoint/scripts/specification.py": "18a75078bdf5e81a30f3a47a4eec32ce293822d38fbe088b653c5bf92d1887d4",
+    "plugins/fluxpoint/templates/harness.sh": "f1173c4a04d0e012299dcc8264e83335f5634f1bbb414d728deaa9df2d72a9d3",
+    "plugins/fluxpoint/tests/compact-native-test.py": "7a43645d9db4392b9148f75ecce6c9cc7fbacd04abb9de59d5ac420512026d1f"
+  },
+  "lockFormat": 2
+}

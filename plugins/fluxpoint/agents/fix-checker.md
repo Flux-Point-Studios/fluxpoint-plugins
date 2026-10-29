@@ -14,8 +14,12 @@ snapshot drift, unavailable controls or uncertain evidence mean INCOMPLETE.
 For a compiled repair the harness supplies an already-patched owned archive;
 use that snapshot instead of creating/applying a second one. Every sibling
 and hunk attack/control must run through `repair-proof.py execute` and copy
-its actual observations. The independent cleanup witness collects that log;
-typed results or executions in another snapshot do not prove these rows.
+its actual observations. Use a separate helper execution per sibling and
+per hunk row; the hunk command must name that manifest path. The recorder
+matches the cleanup log to distinct native Bash helper results at this same
+snapshot/token. Reused, fabricated or hidden executions cannot count. The
+independent cleanup witness's native output is corroborated too; typed
+results or executions in another snapshot do not prove these rows.
 After your seat returns, the fixed witness independently runs the locked
 packet checks in this same patched snapshot. PASS requires its logged exit 0;
 your prose cannot supply or override that packet-check result.
@@ -117,3 +121,10 @@ copy a proposed commit list without verifying those exact changes.
 The diff tier's reproduce refuter must rerun the claim's exact recorded
 attack command and valid control on the current patch before REFUTED can
 count. A different command that happens to pass cannot discharge the claim.
+
+Use the slice's pinned operationalBounds for latency, alarm allowance and
+provider pools. Do not choose your own acceptance thresholds. Alarm counts
+and window duration come from the helper's frozen RepairAlarmSeriesV1 data.
+Below-floor and out-of-scope pre-existing findings remain recorded follow-ups;
+other residuals require an imported operator decision naming this finding
+and the exact complete patch digest. Missing coverage stays INCOMPLETE.
