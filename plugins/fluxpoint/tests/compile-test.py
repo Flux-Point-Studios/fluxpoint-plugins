@@ -1174,10 +1174,10 @@ def prove_ci_and_launch_case():
     ir = {"version": 1, "campaign": "ship it", "treeGuard": False,
           "budget": {"maxNodes": 6}, "requiredArgs": ["confirm"],
           "nodes": [{"id": "push", "prompt": "push the tip", "contract": "HarnessCheckV1"},
-                    {"id": "ci-gate", "prompt": "cite CI's verdict on the tip",
+                    {"id": "ci-gate", "prompt": "cite CI's verdict on the tip {{prev}}", "after": "push",
                      "contract": "ExecutionV1", "verify": "prove:ci",
                      "independent": True, "verifies": "push", "haltWhen": "exit != 0"},
-                    {"id": "merge", "prompt": "merge the tip",
+                    {"id": "merge", "prompt": "merge the tip {{prev}}", "after": "ci-gate",
                      "contract": "HarnessCheckV1", "irreversible": True}]}
     with_ci = cg.validate(ir, CONTRACTS, gates={"harness", "ci"})
     without = cg.validate(ir, CONTRACTS, gates={"harness"})
@@ -1197,13 +1197,14 @@ def prove_ci_and_launch_case():
     js = cg.emit(ir, CONTRACTS, {})
 
     def run(args):
+        args = dict(args, _replayLaunchNonce="compile-ci-current-attempt")
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "o.json")
             w = os.path.join(d, "w.mjs")
             with open(w, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write("\n".join([
                     "import {writeFileSync} from 'node:fs';",
-                    "const agent=async(p,o)=>{",
+                    "let agent=async(p,o)=>{",
                     "  if(String(o.label||'').includes('ci-gate')) return {gate:'ci', exit:0, attestId:'att_x'};",
                     "  return {exit:0, command:'git', tail:''}};",
                     "const parallel=async(t)=>Promise.all(t.map(f=>f()));",
