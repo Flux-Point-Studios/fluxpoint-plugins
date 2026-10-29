@@ -172,29 +172,60 @@ class NativeBinding(unittest.TestCase):
             native_binding.tool_receipts(self.run,self.agent,self.projects)
 
     def test_compiler_and_record_run_require_native_fixed_preflight_evidence(self):
+        self.compiled_fixed_preflight_recording()
+
+    def test_modern_fixed_preflight_records_only_with_current_native_capture(self):
+        summary = self.compiled_fixed_preflight_recording(modern=True)
+        import native_binding
+        # A copied report or certificate cannot replace this attempt's worker.
+        # Captured-prefix replay therefore keeps fixed preflights live.
+        other = self.directory.with_name('wf_missing_current')
+        other.mkdir()
+        (other / 'journal.jsonl').write_text('', encoding='utf-8')
+        with self.assertRaisesRegex(native_binding.BindingError, 'scalar completed native call'):
+            native_binding.verify_fixed(summary, other.name, self.projects)
+        recorded = subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'), '--root', str(self.worktree),
+                                   '--graph', str(self.worktree / 'WORK.md'), '--run-id', other.name],
+                                  input=json.dumps(summary), capture_output=True, text=True, encoding='utf-8',
+                                  env=dict(os.environ, CLAUDE_CONFIG_DIR=str(self.root), FPL_MEMORY_INDEX='0'), timeout=30)
+        self.assertEqual(recorded.returncode, 2, recorded.stdout + recorded.stderr)
+        artifact = json.loads((self.worktree / '.claude/fluxpoint/runs' / (other.name + '.json')).read_text())
+        self.assertNotEqual(artifact['outcome'], 'COMPLETE')
+        self.assertEqual(artifact['nativeCommandBindings'], [])
+        self.assertTrue(any('scalar completed native call' in error for error in artifact['nativeCommandBindingProblems']))
+
+    def compiled_fixed_preflight_recording(self, modern=False):
         import importlib.util
         spec=importlib.util.spec_from_file_location('native_compiler',SCRIPTS/'compile-graph.py')
         compiler=importlib.util.module_from_spec(spec);spec.loader.exec_module(compiler)
         contracts=compiler.load_contracts(str(SCRIPTS.parent/'contracts'))
         ir=dict(version=1,campaign='fixed',treeGuard=False,budget={'maxNodes':4},nodes=[dict(id='fixed-check',isolation='worktree',contract='NativeReadingsV1',prompt='Run the fixed status command.')])
+        if modern: ir['nodes'][0]['fresh'] = False
         self.assertEqual(compiler.validate(ir,contracts),[])
         self.assertIn('FIXED NATIVE READINGS',compiler.emit(ir,contracts))
         ir['nodes'][0]['isolation']=False
         self.assertTrue(any('NativeReadingsV1' in value for value in compiler.validate(ir,contracts)))
         graph=self.worktree/'WORK.md'
-        graph.write_text('## Evidence\n\n| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n')
         self.report['baseSeen'] = 'a' * 40
         self.save()
         ir['nodes'][0]['isolation'] = 'worktree'
+        graph.write_text('```json graph-ir\n' + json.dumps(ir) + '\n```\n\n## Evidence\n\n| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n', encoding='utf-8')
         compiled = compiler.emit(ir, contracts)
         runner = self.root / 'compiled-native.mjs'
-        runner.write_text('const args=' + json.dumps({'_base': {'sha':'a' * 40, 'root':str(self.root), 'porcelain':'', 'branch':'main'}}) + ';\n'
-                          + 'const agent=async(p,o)=>(' + json.dumps(self.report) + ');\n'
+        args = {'_base': {'sha':'a' * 40, 'root':str(self.root), 'porcelain':'', 'branch':'main'}}
+        if modern: args.update(_launch={'nonce':'fixed-launch','root':str(self.worktree)}, _replayLaunchNonce='current-native')
+        runner.write_text('const args=' + json.dumps(args) + ';\n'
+                          + 'const calls=[];let agent=async(p,o)=>{calls.push({prompt:p,opts:o});return ' + json.dumps(self.report) + '};\n'
                           + 'const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};\n'
-                          + 'const result=await(async()=>{\n' + compiled.replace('export const meta =','const meta =') + '\n})();\nconsole.log(JSON.stringify(result));\n', encoding='utf-8')
+                          + 'const result=await(async()=>{\n' + compiled.replace('export const meta =','const meta =') + '\n})();\nconsole.log(JSON.stringify({summary:result,calls}));\n', encoding='utf-8')
         executed = subprocess.run(['node',str(runner)],capture_output=True,text=True,encoding='utf-8',timeout=30)
         self.assertEqual(executed.returncode,0,executed.stderr)
-        summary=json.loads(executed.stdout)
+        execution=json.loads(executed.stdout); summary=execution['summary']
+        self.assertEqual(len(execution['calls']), 1)
+        current = execution['calls'][0]
+        self.events[0]['opts'] = current['opts']
+        self.rows.insert(0, dict(type='user',message={'role':'user','content':current['prompt']}))
+        self.save()
         self.assertEqual(summary['outcome'],'COMPLETE')
         self.assertEqual(summary['results']['fixed-check']['baseSeen'],'a' * 40)
         command=[sys.executable,str(SCRIPTS/'record-run.py'),'--root',str(self.worktree),'--graph',str(graph),'--run-id',self.run]
@@ -205,6 +236,10 @@ class NativeBinding(unittest.TestCase):
         self.assertEqual(artifact['outcome'],'COMPLETE')
         self.assertTrue(artifact['nativeCommandBindings'][0]['bound'])
         self.assertIn('NATIVE-COMMAND-BOUND',(self.worktree/'WORK.md').read_text())
+        if modern:
+            self.assertEqual([row['mode'] for row in summary['callRecords']], ['live'])
+            self.assertEqual(artifact['replayProblems'], [])
+        return summary
 
     def test_completion_order_and_boolean_integer_aliases_refuse(self):
         import native_binding

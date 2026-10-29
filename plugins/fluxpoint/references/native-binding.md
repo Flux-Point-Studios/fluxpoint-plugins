@@ -57,6 +57,11 @@ repeat, panel, reducer and parked forms are refused for this contract. The
 binding proves the listed tool observations; completeness of the intended
 command inventory remains the graph/specification's separate obligation.
 
+Fixed-reading nodes run live on every structured resume and close the captured
+prefix at that point. Their reports and binding certificates are never reused
+as this attempt's command observations. The recorder requires the current
+native run's completed worker and command captures.
+
 Graph audits expose `nativeCommandBinding: PENDING` and `ready: false` whenever
 they run probes. Their probe seats use only the prescribed safe Bash commands
 and StructuredOutput, and include the actual exit and complete output. After
