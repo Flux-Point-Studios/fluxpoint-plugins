@@ -33,8 +33,13 @@ const agent=async(p,o)=>{
  if(r?.verdict==='PASS'&&p.includes('HARNESS PATCH MANIFEST')){
   const m=JSON.parse(p.split('HARNESS PATCH MANIFEST (derived from raw patch bytes, never your own inventory): ')[1].split('\n')[0]);
   const c=JSON.parse(p.split('ORIGIN REPLAY CONTEXT: ')[1].split('\n')[0]);
-  const observation={command:'test fixture command',result:'executed and defended'};
-  return {...r,targetClasses:c.targetClasses,siblings:c.targetClasses.flatMap(finding=>['field','encoding','caller','network','role','path'].map(axis=>({finding,invariant:'test invariant',axis,surface:'unlisted-'+axis,attack:observation,control:observation,outcome:'DEFENDED',reason:'independently executed fixture case'}))),diffCoverage:{patchSha256:m.patchSha256,hunks:m.hunks.map(h=>({id:h.id,surface:'other',attack:observation,control:observation}))}};
+  const snapshot=JSON.parse(p.split('SNAPSHOT IDENTITY: ')[1].split('\n')[0]);
+  const executions=[];
+  const run=command=>{const observation={command,result:'executed and defended'};executions.push({base:c.base,patchSha256:m.patchSha256,attack:observation,control:observation,reproduces:false});return observation};
+  const siblings=c.targetClasses.flatMap(finding=>['field','encoding','caller','network','role','path'].map(axis=>{const observation=run('test fixture sibling '+finding+' '+axis);return {finding,invariant:'test invariant',axis,surface:'unlisted-'+axis,attack:observation,control:observation,outcome:'DEFENDED',reason:'independently executed fixture case'}}));
+  const hunks=m.hunks.map(h=>{const observation=run('test fixture hunk '+h.path);return {id:h.id,surface:'other',attack:observation,control:observation}});
+  proofFixtureSnapshots[snapshot.snapshot]=executions;
+  return {...r,targetClasses:c.targetClasses,siblings,diffCoverage:{patchSha256:m.patchSha256,hunks}};
  }
  return r;
 };

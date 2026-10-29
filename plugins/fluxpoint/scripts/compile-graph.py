@@ -3451,7 +3451,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     elif repair_loops(ir):
         extra += ", launch: REPAIR_LAUNCH"
     if repair_loops(ir):
-        extra += ", fixOrigins: FIX_ORIGINS, repairDiffReviews: REPAIR_DIFF_REVIEWS, repairReadNonce: A._replayLaunchNonce, repairResidualRulings: REPAIR_RESIDUAL_RULINGS, repairFollowups: REPAIR_DIFF_REVIEWS.flatMap(r => r.followups || [])"
+        extra += ", repairAssuranceVersion: 2, fixOrigins: FIX_ORIGINS, repairDiffReviews: REPAIR_DIFF_REVIEWS, repairReadNonce: A._replayLaunchNonce, repairResidualRulings: REPAIR_RESIDUAL_RULINGS, repairFollowups: REPAIR_DIFF_REVIEWS.flatMap(r => r.followups || [])"
     if tree_guard:
         extra += ", tree: TREE"
     if modern:

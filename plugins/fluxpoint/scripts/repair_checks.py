@@ -351,3 +351,72 @@ def corroborated(artifact, root=None):
     if problems or sorted(c.lower() for c in names) != observed:
         raise ValueError('checked is not corroborated by coherent independent PASS receipts: ' + '; '.join(problems))
     return observed
+
+
+def assurance(artifact, root, path):
+    """Classify immutable historical claims without granting legacy credit.
+
+    Old positive records remain available for review and repair. Only a current,
+    structurally valid native certificate can discharge a BLOCK window.
+    """
+    names = artifact.get('checked', [])
+    if not isinstance(names, list):
+        raise ValueError('checked must be an array')
+    if not names:
+        return 'none'
+    if not commit_list(names) or not text(artifact.get('runId')) or not text(artifact.get('graph')):
+        raise ValueError('checked is not a recorder-produced repair claim')
+    import run_artifacts
+    stored, digest = run_artifacts.read(root, artifact['runId'])
+    history = run_artifacts._path(root, artifact['runId'], digest)
+    if (Path(path).resolve() != run_artifacts._path(root, artifact['runId']).resolve()
+            or stored != artifact or history.exists() and (not history.is_file()
+                or history.read_bytes() != Path(path).read_bytes())):
+        raise ValueError('checked repair artifact differs from its immutable history snapshot')
+    summary = artifact.get('summary')
+    frozen = artifact.get('repairCheckers')
+    if not isinstance(summary, dict) or not isinstance(frozen, dict) or not frozen:
+        raise ValueError('checked has no frozen independent repair checker descriptors')
+    journal = artifact.get('repairJournal')
+    markers = (artifact.get('repairAssuranceVersion'), summary.get('repairAssuranceVersion'))
+    modern = (any(value is not None and (type(value) is not int or value != 1) for value in markers)
+              or isinstance(journal, dict) and (journal.get('version') != 1 or 'assurance' in journal
+                  or any(isinstance(seat, dict) and 'native' in seat for seat in journal.get('seats', []))))
+    if modern:
+        if not history.is_file():
+            raise ValueError('native checked repair artifact lacks its matching immutable history snapshot')
+        if any(type(value) is not int or value != 2 for value in markers):
+            raise ValueError('native repair assurance versions are missing or inconsistent')
+        from repair_journal import certificate_issue
+        issue = certificate_issue(summary, artifact['runId'], journal, retained=artifact.get('repairEvidence'), root=root)
+        if issue:
+            raise ValueError(issue)
+        return 'native'
+    # The old record must still be a coherent recorder receipt. Do not rerun
+    # newer semantic obligations against an old schema or disposable snapshots.
+    observed = set()
+    rows = summary.get('fixOrigins')
+    if not isinstance(rows, list):
+        raise ValueError('legacy checked artifact has no repair receipts')
+    for row in rows:
+        if not isinstance(row, dict) or row.get('verdict') != 'PASS':
+            continue
+        check = row.get('check')
+        if (not descriptor_valid(row.get('node'), frozen.get(row.get('node')))
+                or not isinstance(check, dict) or check.get('verdict') != 'PASS'
+                or not commit_list(row.get('commits')) or row['commits'] != check.get('commits')
+                or row.get('blockers') or check.get('blockers') or row.get('findings') or check.get('findings')):
+            raise ValueError('legacy checked artifact has incoherent independent PASS receipts')
+        observed.update(name.lower() for name in row['commits'])
+    if sorted(name.lower() for name in names) != sorted(observed):
+        raise ValueError('legacy checked commits differ from its independent PASS receipts')
+    if journal is not None and (not isinstance(journal, dict) or type(journal.get('version')) is not int or journal.get('version') != 1
+            or journal.get('runId') != artifact['runId'] or not isinstance(journal.get('seats'), list)):
+        raise ValueError('legacy repair journal certificate is malformed')
+    archive = artifact.get('repairEvidence')
+    if archive is not None:
+        if not isinstance(archive, dict) or not isinstance(archive.get('files'), dict):
+            raise ValueError('legacy retained repair evidence map is malformed')
+        for original in archive['files']:
+            _evidence_file(root, original, archive)
+    return 'legacy-unchecked' if history.is_file() else 'legacy-unchecked-no-history'

@@ -1,23 +1,24 @@
 {
   "version": 1,
-  "sha256": "6071c85a1170bf8c8365c99fa2bc36bf7db31d9cac1987f118e3ac9d731436c9",
+  "sha256": "b34b10a4739b2fa3660bb07ffefa89eff703fa4add67d843d43721afb77b9514",
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/contracts/DecisionV1.schema.json": "0bb4ce05a8919b3d6bd949e22f10b155a4580f74f26a4cfd510b5cdd0daaaaac",
-    "plugins/fluxpoint/scripts/compile-graph.py": "ff113c1998a6eaa7022b0d642325d79ca5f53b93ef96db4743b4c627383c679b",
+    "plugins/fluxpoint/scripts/compile-graph.py": "c94806b92304cda30cfbde4d40b8d0dd9f3e66b279f0a3de62a0035361f3bf43",
     "plugins/fluxpoint/scripts/decision.py": "396a1048fc8e34c03182ee674a0645b55f828d5a07ae8d8ce59523ab484adebd",
-    "plugins/fluxpoint/scripts/record-run.py": "2173f532d4d9eaa9fcd9bfd0983311cff29598825c6d9daea781859fdb6aff43",
-    "plugins/fluxpoint/scripts/repair-proof.js": "374b3a0b0430c411d45d41ecd53bdb25665a33f0ea4e5056510e99c352fba5a0",
-    "plugins/fluxpoint/scripts/repair-proof.py": "4915a07d3c8d533cc82265c883078f7702d8a1511dce0c2f17737b4df465a9fc",
-    "plugins/fluxpoint/scripts/repair_checks.py": "90e60b025fa1a7ddedab73fd7497a8bc22d1bb484aa0db5c87972708882a7f2a",
-    "plugins/fluxpoint/scripts/repair_diff.py": "5b6efc1c322a8f4471841ac1a3717c2bb062a796e8a42369811893fe918881ea",
-    "plugins/fluxpoint/scripts/repair_journal.py": "05ce2cfbffc91c79e91ea92adec510c4c2c8905796d638ed9efd46a73a43c2b2",
+    "plugins/fluxpoint/scripts/native_binding.py": "7624b76a1d6367b8898544a1b33d698865ae3ba23b8fcebd7f4918a731d8625d",
+    "plugins/fluxpoint/scripts/record-run.py": "587c833d311ae7dd1b02a8a8f5a443c34d10bdc8f478411ca51ceba01b7af739",
+    "plugins/fluxpoint/scripts/repair-proof.js": "db1824f5c767228f372d27af5ba66cbe243d5c7d7d00639c25804ec415a7f52b",
+    "plugins/fluxpoint/scripts/repair-proof.py": "e553e9b911eb14e3941933c07a08cfe90ff8439a810364b01296681ea694a921",
+    "plugins/fluxpoint/scripts/repair_checks.py": "8eb848a640e05c661dbf311c94bc6c03654dce585ff891b4ad9711e23d26288b",
+    "plugins/fluxpoint/scripts/repair_diff.py": "0cf25523a1bbcf91bfc0b9ea07d83c92c1f5b15d14e1b360976d867cefcdcf53",
+    "plugins/fluxpoint/scripts/repair_journal.py": "8a29481b94922784501ef61c313d8479a83b3aae5bea4af76140daddd200c1ba",
     "plugins/fluxpoint/scripts/repair_metrics.py": "ccf2160974e63049fdd637910ddfe6b4475bad3318c94ae7e235de4916354ae9",
     "plugins/fluxpoint/scripts/repair_policy.py": "7b66db99bd21f22311ab79ba2c64ecca60e8fbc62e5100598ac9f38b1739d5b6",
-    "plugins/fluxpoint/scripts/unchecked-repairs.py": "6bac120e1732d220ba89e811189638bce23ef36882d95031c9c016259d5bc7c3",
+    "plugins/fluxpoint/scripts/unchecked-repairs.py": "a9160e109935c5c65cf6fbc8d1b5a6c6f73384cd99af81f7b37003ab6ddc83c6",
     "plugins/fluxpoint/tests/packet-projection-test.py": "5437bf2cb4d66d0bb6df4b1f4f56658de90f6faaa585f04e7f8daec377d081c2",
-    "plugins/fluxpoint/tests/repair-proof-test.py": "625174823b42772e4b67a78af06e5b0a39fa62ae272364b36c1fcf79c65e50de",
-    "plugins/fluxpoint/tests/unchecked-repairs-test.py": "9ed29e77a191b7711f499c1693d4ae9295a76caee173eedf6fda6fa7001268f8"
+    "plugins/fluxpoint/tests/repair-proof-test.py": "686dfde4f42ae060ff78f791119f29fab1964243f52dff7d19af31b88a7cdacd",
+    "plugins/fluxpoint/tests/unchecked-repairs-test.py": "abf7b4877758e70df5ead35220508f03b489f447826ed823dcd0b5946749c072"
   },
   "lockFormat": 2
 }

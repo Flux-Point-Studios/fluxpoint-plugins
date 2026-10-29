@@ -31,7 +31,7 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 | Verify Compact circuits natively | [Compact profile, artifacts, costs and mutations](../plugins/fluxpoint/references/compact.md) |
 | Recover an interrupted guard mutation | [Guard recovery](guard-recovery.md) |
 | Check builder/validator relations | [Relations](../plugins/fluxpoint/README.md#relations-between-artifacts), [Cardano review](../plugins/fluxpoint/references/red-team-cardano.md) |
-| Require independent repair evidence | [Repair campaign](../plugins/fluxpoint/templates/WORK.repair.md), [graph repair rules](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
+| Require native repair evidence and migrate historical receipts | [Repair campaign](../plugins/fluxpoint/templates/WORK.repair.md), [graph repair rules](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
 | Check production dependency pins | [Deployed gates](../plugins/fluxpoint/references/deployed-gates.md) |
 | Bind worker readings to native tool records | [Native command bindings](../plugins/fluxpoint/references/native-binding.md) |
 | Bind CI results to commits and attempts | [Forge evidence, source pins and CI identities](../plugins/fluxpoint/references/forge-evidence.md), [fault reruns](../plugins/fluxpoint/references/fault-reruns.md) |

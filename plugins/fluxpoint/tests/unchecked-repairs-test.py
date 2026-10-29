@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -79,7 +80,7 @@ class UncheckedRepairsTests(unittest.TestCase):
                'evidence': check['evidence'], 'commits': commits, 'check': check,
                'context': {'base': self.base, 'item': 'slice', 'round': 1,
                            'patches': [patch], 'current': patch, 'targetClasses': ['legacy-defect']}}
-        summary = {'outcome': 'COMPLETE', 'contracts': {'check': 'FixCheckV1'},
+        summary = {'outcome': 'COMPLETE', 'repairAssuranceVersion': 2, 'contracts': {'check': 'FixCheckV1'},
                 'launch': {'root': str(self.root), 'nonce': 'launch'},
                 'tree': {'baseline': {'head': self.base}}, 'fixOrigins': [row]}
         # A positive fixture includes the new complete diff proof; negative
@@ -96,20 +97,21 @@ class UncheckedRepairsTests(unittest.TestCase):
         observed = {'command': 'pytest regression.py', 'result': 'executed attack and valid control passed'}
         check['targetClasses'] = ['legacy-defect']
         check['siblings'] = [dict(finding='legacy-defect', invariant='all sibling paths preserve the invariant',
-                                 axis=axis, surface='independent-' + axis, attack=observed, control=observed,
-                                 outcome='DEFENDED', reason='independently executed sibling case') for axis in AXES]
+            axis=axis, surface='independent-' + axis,
+            attack=dict(observed, command='pytest regression.py # sibling-' + axis), control=observed,
+            outcome='DEFENDED', reason='independently executed sibling case') for axis in AXES]
         check['diffCoverage'] = {'patchSha256': measured['patchSha256'], 'hunks': [
-            dict(id=h['id'], surface='other', attack=observed, control=observed) for h in measured['hunks']]}
+            dict(id=h['id'], surface='other', attack=dict(observed, command='pytest regression.py # hunk-' + h['path']), control=observed) for h in measured['hunks']]}
         nonce = '1' * 64
         check['checkerWitness'] = dict(status='CLEANED', spawnId='check:slice:r1', base=self.base,
                                        patchSha256=measured['patchSha256'], readNonce=nonce,
                                        snapshot='/snapshot/checker', token='f' * 64,
-                                       observations=[dict(base=self.base, patchSha256=measured['patchSha256'], attack=observed, control=observed, reproduces=False)])
+                                       observations=[dict(base=self.base, patchSha256=measured['patchSha256'], attack=row['attack'], control=row['control'], reproduces=False) for row in check['siblings'] + check['diffCoverage']['hunks']])
         proof = dict(version=1, base=self.base, item='slice', round=1, patch=patch['patch'],
                      patchSha256=measured['patchSha256'], manifestSha256=manifest_digest(compact_manifest(data)), readNonce=nonce, clean=True, blockers=[], refuters=[], findings=[])
         lenses = ['authority', 'value', 'state', 'input', 'operations', 'composition', 'coverage-skeptic']
         proof['attackers'] = [dict(spawnId='repair-diff:slice:r1:attack:' + lens, lens=lens, completed=True,
-                                   base=self.base, patchSha256=measured['patchSha256'], observations=[
+                                   base=self.base, patchSha256=measured['patchSha256'], evidence=['executed independent fixture attacks and valid controls'], observations=[
                                        dict(base=self.base, patchSha256=measured['patchSha256'], attack=observed, control=observed, reproduces=False)]) for lens in lenses]
         proof['snapshots'] = [dict(status='CLEANED', token=format(i + 1, '064x'), snapshot='/snapshot/' + str(i),
                                   spawnId=a['spawnId'], observations=a['observations']) for i, a in enumerate(proof['attackers'])]
@@ -122,11 +124,37 @@ class UncheckedRepairsTests(unittest.TestCase):
         import repair_journal
         directory = self.root / 'runtime/projects/project/session/subagents/workflows/repair'
         directory.mkdir(parents=True, exist_ok=True)
+        requirements = repair_journal.native_requirements(summary)
         events = []
         for i, (label, result) in enumerate(repair_journal.expected_calls(summary)):
             agent = 'repair' + str(i)
             events += [dict(type='started', agentId=agent, label=label), dict(type='result', agentId=agent, result=result)]
-            (directory / ('agent-' + agent + '.jsonl')).write_text(json.dumps(dict(type='user', message=dict(role='user', content='Fixed repair seat ' + label))) + '\n')
+            requirement = requirements[label]
+            rows = [dict(type='user', message=dict(role='user', content='Fixed repair seat ' + label))]
+            outputs = requirement.get('observations') if requirement['mode'] == 'execute' else [result]
+            for number, output in enumerate(outputs):
+                argv = [sys.executable, str(SCRIPTS / 'repair-proof.py'), requirement['mode']]
+                if requirement['mode'] == 'execute':
+                    flags = dict(snapshot=requirement['snapshot'], token=requirement['token'], control=output['control']['command'], attack=output['attack']['command'])
+                    if output.get('seriesPath'):
+                        flags['series'] = output['seriesPath']
+                else:
+                    flags = requirement['flags']
+                for key, value in flags.items():
+                    argv += ['--' + key, str(value)]
+                ident = 'native' + str(number)
+                rows += [dict(type='assistant', cwd=str(self.root), message=dict(role='assistant', content=[dict(type='tool_use', id=ident, name='Bash', input=dict(command=shlex.join(argv)))])),
+                    dict(type='user', message=dict(role='user', content=[dict(type='tool_result', tool_use_id=ident, content=json.dumps(output) + '\n', is_error=False)]))]
+            for number, finding in enumerate(requirement.get('origins', [])):
+                evidence = finding['originEvidence']['base']
+                argv = [sys.executable, str(SCRIPTS / 'repair-replay.py'), '--root', str(self.root), '--context', 'origin-context.json',
+                    '--defect-class', finding['defectClass'], '--control', evidence['controlCommand'], '--command', evidence['command']]
+                output = {k: finding[k] for k in ('origin', 'originEvidence')}
+                ident = 'origin' + str(number)
+                rows += [dict(type='assistant', cwd=str(self.root), message=dict(role='assistant', content=[dict(type='tool_use', id=ident, name='Bash', input=dict(command=shlex.join(argv)))])),
+                    dict(type='user', message=dict(role='user', content=[dict(type='tool_result', tool_use_id=ident, content=json.dumps(output) + '\n', is_error=False)]))]
+            (directory / ('agent-' + agent + '.jsonl')).write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            (directory / ('agent-' + agent + '.meta.json')).write_text(json.dumps(dict(worktreePath=str(self.root))))
         (directory / 'journal.jsonl').write_text(''.join(json.dumps(e) + '\n' for e in events))
 
     def record_repair(self, commits):
@@ -156,6 +184,189 @@ class UncheckedRepairsTests(unittest.TestCase):
                 row['result']['verdict'] = 'FAIL'
         journal.write_text(''.join(json.dumps(row) + '\n' for row in rows))
         with self.assertRaisesRegex(ValueError, 'differs from journal'):
+            repair_journal.corroborate(summary, 'repair', projects=projects)
+
+    def test_native_certificate_preserves_full_helper_result_and_required_projection(self):
+        import repair_journal
+        summary = self.pass_summary([self.first])
+        self.journal(summary)
+        directory = self.root / 'runtime/projects/project/session/subagents/workflows/repair'
+        events = [json.loads(line) for line in (directory / 'journal.jsonl').read_text().splitlines()]
+        agents = {event['agentId'] for event in events if event.get('label', '').startswith('repair-witness:materialize:')}
+        for event in events:
+            if event['type'] == 'result' and event['agentId'] in agents:
+                event['result']['snapshotTree'] = '2' * 64
+                event['result']['round'] = 1
+        (directory / 'journal.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
+        for agent in agents:
+            path = directory / ('agent-' + agent + '.jsonl')
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            output = rows[2]['message']['content'][0]
+            actual = json.loads(output['content'])
+            actual['snapshotTree'] = '2' * 64
+            actual['round'] = 1.0  # Native JSON and JS report serialize equal numbers differently.
+            output['content'] = json.dumps(actual)
+            path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        certificate = repair_journal.corroborate(summary, 'repair', projects=self.root / 'runtime/projects')
+        self.assertIsNone(repair_journal.certificate_issue(summary, 'repair', certificate))
+        materialize = next(seat for seat in certificate['seats'] if seat['agentId'] in agents)
+        self.assertNotEqual(materialize['resultSha256'], materialize['requiredSha256'])
+
+    def test_cleanup_log_cannot_add_an_observation_the_checker_never_ran(self):
+        import repair_journal
+        summary = self.pass_summary([self.first])
+        self.journal(summary)
+        observations = summary['fixOrigins'][0]['check']['checkerWitness']['observations']
+        forged = copy.deepcopy(observations[0])
+        forged['attack']['command'] = 'never executed this command'
+        observations.append(forged)
+        with self.assertRaisesRegex(ValueError, 'no distinct native Bash'):
+            repair_journal.corroborate(summary, 'repair', projects=self.root / 'runtime/projects')
+
+    def test_missing_checker_native_tool_output_cannot_be_replaced_by_a_claim(self):
+        import repair_journal
+        summary = self.pass_summary([self.first])
+        self.journal(summary)
+        directory = self.root / 'runtime/projects/project/session/subagents/workflows/repair'
+        events = [json.loads(line) for line in (directory / 'journal.jsonl').read_text().splitlines()]
+        agent = next(e['agentId'] for e in events if e.get('label') == 'check:slice:r1')
+        transcript = directory / ('agent-' + agent + '.jsonl')
+        rows = [json.loads(line) for line in transcript.read_text().splitlines()]
+        rows = [row for row in rows if not any(item.get('type') == 'tool_result' and item.get('tool_use_id') == 'native0' for item in row.get('message', {}).get('content', []) if isinstance(item, dict))]
+        transcript.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        with self.assertRaisesRegex(ValueError, 'incomplete'):
+            repair_journal.corroborate(summary, 'repair', projects=self.root / 'runtime/projects')
+
+    def test_native_helpers_cannot_be_echoed_retargeted_or_hidden(self):
+        import repair_journal
+        for mutation in ('echo', 'token', 'hidden', 'shape', 'interpreter', 'plugin'):
+            with self.subTest(mutation=mutation):
+                summary = self.pass_summary([self.first])
+                self.journal(summary)
+                directory = self.root / 'runtime/projects/project/session/subagents/workflows/repair'
+                events = [json.loads(line) for line in (directory / 'journal.jsonl').read_text().splitlines()]
+                agent = next(e['agentId'] for e in events if e.get('label') == 'check:slice:r1')
+                transcript = directory / ('agent-' + agent + '.jsonl')
+                rows = [json.loads(line) for line in transcript.read_text().splitlines()]
+                use = rows[1]['message']['content'][0]
+                if mutation == 'echo':
+                    use['input']['command'] = 'printf fabricated-json'
+                elif mutation == 'interpreter':
+                    use['input']['command'] = use['input']['command'].replace(shlex.quote(sys.executable), '/tmp/checker-owned/python', 1)
+                elif mutation == 'plugin':
+                    summary['plugin'] = {'root': '/tmp/checker-owned/plugin'}
+                elif mutation == 'token':
+                    use['input']['command'] = use['input']['command'].replace('f' * 64, 'e' * 64)
+                elif mutation == 'shape':
+                    value = json.loads(rows[2]['message']['content'][0]['content'])
+                    value['attack'] = None
+                    rows[2]['message']['content'][0]['content'] = json.dumps(value)
+                else:
+                    tool, result = copy.deepcopy(rows[1:3])
+                    tool['message']['content'][0]['id'] = 'hidden'
+                    result['message']['content'][0]['tool_use_id'] = 'hidden'
+                    value = json.loads(result['message']['content'][0]['content'])
+                    value['reproduces'] = True
+                    result['message']['content'][0]['content'] = json.dumps(value)
+                    rows += [tool, result]
+                transcript.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+                with self.assertRaisesRegex(ValueError, 'native Bash|disappeared|output differs|installation differs'):
+                    repair_journal.corroborate(summary, 'repair', projects=self.root / 'runtime/projects')
+
+    def test_immutable_legacy_positive_loses_credit_but_remains_repairable(self):
+        import run_artifacts
+        record = self.record_repair([self.first, self.second])
+        record.pop('repairAssuranceVersion')
+        record['summary'].pop('repairAssuranceVersion')
+        record['repairJournal']['version'] = 1
+        record['repairJournal'].pop('assurance')
+        for seat in record['repairJournal']['seats']:
+            seat.pop('native')
+            seat.pop('requiredSha256')
+        path, digest = run_artifacts.write(self.root, 'repair', record)
+        original = Path(path).read_bytes()
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        status = json.loads(result.stdout)
+        self.assertEqual([row['commit'] for row in status['unchecked']], [self.first, self.second])
+        self.assertEqual(status['warnings'][0]['code'], 'LEGACY-REPAIR-UNCHECKED')
+        self.assertIn('LEGACY-REPAIR-UNCHECKED', result.stderr)
+        self.repair_graph()
+        repaired = self.run_check()
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertEqual(len(json.loads(repaired.stdout)['unchecked']), 2)
+        self.assertEqual(Path(path).read_bytes(), original)
+        self.assertEqual(run_artifacts.read(self.root, 'repair', digest)[0], record)
+
+    def test_legacy_receipts_need_coherent_immutable_history(self):
+        import run_artifacts
+        record = self.record_repair([self.first])
+        record.pop('repairAssuranceVersion')
+        record['summary'].pop('repairAssuranceVersion')
+        record['repairJournal'] = None
+        run_artifacts.write(self.root, 'repair', record)
+        self.assertEqual(self.run_check().returncode, 1)
+        record['repairCheckers']['check']['fixer']['id'] = 'check'
+        run_artifacts.write(self.root, 'repair', record)
+        self.assertEqual(self.run_check().returncode, 2)
+        record['repairCheckers']['check']['fixer']['id'] = 'fix'
+        record['recordedAt'] = '2026-10-15 16:00:00'
+        self.artifact('repair', record)  # Coherent legacy bytes predate immutable history.
+        old = self.run_check()
+        self.assertEqual(old.returncode, 1, old.stderr)
+        self.assertIn('No immutable history snapshot', old.stderr)
+        self.repair_graph()
+        self.assertEqual(self.run_check().returncode, 0)
+
+    def test_new_native_assurance_cannot_be_downgraded_or_malformed(self):
+        import run_artifacts
+        record = self.record_repair([self.first])
+        self.assertEqual(record['repairAssuranceVersion'], 2)
+        self.assertEqual(record['repairJournal']['version'], 2)
+        for mutation in ('marker', 'marker-float', 'journal', 'journal-float', 'digest', 'duplicate', 'source', 'unpublished'):
+            with self.subTest(mutation=mutation):
+                bad = copy.deepcopy(record)
+                if mutation == 'marker': bad.pop('repairAssuranceVersion')
+                if mutation == 'marker-float': bad['repairAssuranceVersion'] = 2.0
+                if mutation == 'journal': bad['repairJournal'] = None
+                if mutation == 'journal-float': bad['repairJournal']['version'] = 2.0
+                if mutation == 'digest': bad['repairJournal']['seats'][0]['requiredSha256'] = '0' * 64
+                if mutation == 'duplicate': bad['repairJournal']['seats'].append(bad['repairJournal']['seats'][0])
+                if mutation == 'source': bad['repairJournal']['seats'][0]['native']['sources'][0]['sha256'] = 'broken'
+                if mutation == 'unpublished':
+                    bad['repairJournal']['seats'][0]['native']['calls'][0]['nativeSha256'] = '0' * 64
+                    self.artifact('repair', bad)
+                else:
+                    run_artifacts.write(self.root, 'repair', bad)
+                self.assertEqual(self.run_check().returncode, 2)
+
+    def test_outside_scope_residual_requires_native_base_replay(self):
+        import repair_journal
+        summary = self.pass_summary([self.first])
+        row = summary['fixOrigins'][0]
+        context = row['context']
+        observed = dict(command='pytest existing_case.py', result='exit 1: existing harm', controlCommand='pytest valid.py', controlResult='exit 0: valid', controlPassed=True, reproduces=True)
+        finding = dict(id='P1', source='repair-diff:slice:r1:attack:authority', finding='Existing separate defect', severity='HIGH',
+            defectClass='outside-class', invariant='existing invariant', classRewire='separate repair needed', measurement='replayed base and current',
+            origin='pre-existing', disposition='OUTSIDE-TARGET-CLASSES',
+            originEvidence=dict(base=dict(snapshot=self.base, **observed), targetClasses=context['targetClasses'], rounds=[dict(context['current'], **observed)]))
+        row['diffAttack']['followups'] = [finding]
+        self.journal(summary)
+        projects = self.root / 'runtime/projects'
+        self.assertTrue(repair_journal.corroborate(summary, 'repair', projects=projects)['seats'])
+        directory = projects / 'project/session/subagents/workflows/repair'
+        events = [json.loads(line) for line in (directory / 'journal.jsonl').read_text().splitlines()]
+        agent = next(e['agentId'] for e in events if e.get('label') == finding['source'])
+        transcript = directory / ('agent-' + agent + '.jsonl')
+        rows = [json.loads(line) for line in transcript.read_text().splitlines()]
+        for event in rows:
+            content = event.get('message', {}).get('content')
+            if isinstance(content, list):
+                for item in content:
+                    if item.get('type') == 'tool_use' and item.get('id') == 'origin0':
+                        item['input']['command'] = 'printf fabricated-origin'
+        transcript.write_text(''.join(json.dumps(event) + '\n' for event in rows))
+        with self.assertRaisesRegex(ValueError, 'no native origin replay'):
             repair_journal.corroborate(summary, 'repair', projects=projects)
 
     def test_handwritten_pass_without_runtime_seats_cannot_discharge_commit(self):
@@ -298,7 +509,8 @@ class UncheckedRepairsTests(unittest.TestCase):
                 if mutation == 'contradictory-pass': bad['summary']['fixOrigins'][0]['check']['blockers'] = ['no check ran']
                 self.artifact('repair', bad)
                 self.assertEqual(self.run_check().returncode, 2)
-        self.artifact('repair', record)
+        import run_artifacts
+        run_artifacts.write(self.root, 'repair', record)
         self.assertEqual(self.run_check().returncode, 1)  # Graph changed after recording; descriptor stays valid.
 
     def test_foreign_review_does_not_borrow_local_tree_head(self):

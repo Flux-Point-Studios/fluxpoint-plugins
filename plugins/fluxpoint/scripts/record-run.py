@@ -760,6 +760,8 @@ def main():
     repair_journal = None
     if checked:
         try:
+            if type(summary.get('repairAssuranceVersion')) is not int or summary.get('repairAssuranceVersion') != 2:
+                raise ValueError('repair summary lacks current native assurance version 2')
             import repair_journal as _repair_journal
             repair_journal = _repair_journal.corroborate(summary, args.run_id)
         except (ValueError, OSError, TypeError, KeyError) as exc:
@@ -794,6 +796,7 @@ def main():
                 "graph": os.path.relpath(os.path.realpath(args.graph), args.root).replace(os.sep, "/"),
                 "checked": checked,
                 "repairCheckers": repair_checkers,
+                "repairAssuranceVersion": 2,
                 "repairCheckProblems": repair_problems,
                 "nativeCommandBindings": native_bindings,
                 "nativeCommandBindingProblems": native_binding_problems,

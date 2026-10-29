@@ -40,12 +40,14 @@ def manifest(data):
     """Hash exact bytes and inventory every added text/binary hunk ourselves."""
     digest = hashlib.sha256(data).hexdigest()
     lines = data.decode('utf-8').split('\n')
-    hunks, path = [], None
+    hunks, path, old_path = [], None, None
     for i, line in enumerate(lines):
         if line.startswith('diff --git '):
             path = line[len('diff --git '):]
+        elif line.startswith('--- '):
+            old_path = line[4:]
         elif line.startswith('+++ '):
-            path = line[4:]
+            path = old_path if line[4:] == '/dev/null' else line[4:]
         elif line.startswith('@@ '):
             match = re.match(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', line)
             if not match or path is None:
@@ -93,6 +95,34 @@ def manifest_digest(measured):
     return hashlib.sha256(canonical.encode('ascii')).hexdigest()
 
 
+def manifest_path(raw):
+    """Decode Git's C-quoted UTF-8 path spelling for command coverage."""
+    if raw.startswith('a/') and ' b/' in raw:
+        raw = raw.rsplit(' b/', 1)[1]
+        raw = 'b/' + raw
+    if raw.startswith('"'):
+        data, index = bytearray(), 1
+        escapes = {'a': 7, 'b': 8, 't': 9, 'n': 10, 'v': 11, 'f': 12, 'r': 13, '"': 34, '\\': 92}
+        while index < len(raw):
+            char = raw[index]
+            if char == '"':
+                rest = raw[index + 1:].strip()
+                return manifest_path(rest) if rest.startswith('"b/') else re.sub(r'^[ab]/', '', data.decode('utf-8'))
+            if char == '\\':
+                index += 1
+                match = re.match(r'[0-7]{1,3}', raw[index:])
+                if match:
+                    data.append(int(match[0], 8)); index += len(match[0]); continue
+                if index >= len(raw) or raw[index] not in escapes:
+                    raise ValueError('unsupported Git path escape')
+                data.append(escapes[raw[index]])
+            else:
+                data.extend(char.encode('utf-8'))
+            index += 1
+        raise ValueError('unterminated Git quoted path')
+    return re.sub(r'^[ab]/', '', raw)
+
+
 def sibling_issue(rows, targets, fixer_rows=()):
     if not isinstance(rows, list) or targets and not rows:
         return 'SIBLINGS-UNPROVEN: PASS requires checker sibling observations'
@@ -132,6 +162,14 @@ def coverage_issue(coverage, measured, resources=(), live_series=False, bounds=N
         return 'DIFF-UNPROVEN: every harness-listed added hunk needs exactly one coverage row'
     if any(r.get('surface') not in SURFACES or not observation(r.get('attack')) or not observation(r.get('control')) for r in rows):
         return 'DIFF-UNPROVEN: hunk surface, attack and control observations are required'
+    for hunk in measured['hunks']:
+        row = next(r for r in rows if r['id'] == hunk['id'])
+        try:
+            path = manifest_path(hunk['path'])
+        except (ValueError, UnicodeError):
+            return 'DIFF-UNPROVEN: hunk has an unsupported Git path spelling'
+        if path not in row['attack']['command']:
+            return 'DIFF-UNPROVEN: each hunk attack command must name its manifest path'
     obligations = {v for h in measured['hunks'] for v in h['obligations']}
     bounds = bounds or {}
     operational = coverage.get('operational') or {}
@@ -193,6 +231,7 @@ def diff_receipt_issue(receipt, context, measured, rulings=()):
             or not any(isinstance(a, dict) and a.get('lens') == 'composition' for a in attackers)
             or not all(isinstance(a, dict) and text(a.get('spawnId')) and a.get('completed') is True
                        and a.get('patchSha256') == measured['patchSha256'] and a.get('base') == context['base']
+                       and isinstance(a.get('evidence'), list) and a['evidence'] and all(text(e) for e in a['evidence'])
                        and executed(a.get('observations')) for a in attackers)
             or len({a['spawnId'] for a in attackers}) != len(attackers)
             or not isinstance(refuters, list) or not isinstance(findings, list)):
@@ -328,9 +367,13 @@ def checker_evidence_issue(check, context, measured, node, integration, read_non
                    or o.get('reproduces') is not False or not observation(o.get('attack')) or not observation(o.get('control')) for o in observations)):
         return 'CHECKER-UNPROVEN: checker has no bound execution log'
     same = lambda a, b: observation(a) and observation(b) and a['command'] == b['command'] and a['result'] == b['result']
+    unused = set(range(len(observations)))
     for row in check['siblings'] + check['diffCoverage']['hunks']:
-        if not any(o.get('reproduces') is False and same(row['attack'], o['attack']) and same(row['control'], o['control']) for o in observations):
-            return 'CHECKER-UNPROVEN: sibling/hunk attack and control differ from actual checker executions'
+        index = next((i for i in sorted(unused) if observations[i].get('reproduces') is False
+            and same(row['attack'], observations[i]['attack']) and same(row['control'], observations[i]['control'])), None)
+        if index is None:
+            return 'CHECKER-UNPROVEN: each sibling/hunk row needs its own actual execution; reuse is refused'
+        unused.remove(index)
     op = check['diffCoverage'].get('operational') or {}
     if 'latency' in op:
         row = op['latency']

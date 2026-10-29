@@ -152,9 +152,16 @@ retains verified patch and production-series bytes under
 `.claude/fluxpoint/runs/evidence/<sha256>`, separate from disposable round
 directories and rotating source logs. Preflight validates these retained
 bytes and ignores receipts outside the current BLOCK commit window. Keep
-the run evidence directory with the run artifacts. Command output
-inside a seat still crosses the model relay; this certificate does not
-establish that an arbitrary narrated command actually ran.
+the run evidence directory with the run artifacts. The recorder also binds
+helper commands to native Bash tool-use ids and complete tool-result bytes.
+Every cleanup observation must match a distinct actual `execute` call at the
+same snapshot and token; fabricated, repeated or omitted executions refuse
+checked status. Fixed read/materialize/check/cleanup outputs must equal their
+native helper result, and an out-of-scope pre-existing residual also needs its
+native base/patch replay. These captures retain their source hashes and
+normalization notes. Each sibling/hunk row needs its own execution, and a
+hunk command must name the manifest path. The meaning and adequacy of an
+experiment remain review obligations; execution binding does not prove them.
 `graph-run` supplies a stamped launch identity and the graph retains it in
 the run summary. Tree sentinels, the runtime node ceiling and run recording
 apply just as they do to every compiled campaign. Use `/fluxpoint:graph-run`
@@ -227,7 +234,7 @@ Repair notes supply structured JSON `{"touches":["repo-relative paths"],
 contradicts a repair requires an operator ruling before dispatch resumes.
 
 Every FixCheckV1 PASS now has three independent obligations. It proves the
-repaired invariant's siblings, covers the harness's actual added hunks, and
+repaired invariant's siblings, covers the harness's changed hunks, and
 survives the compiled diff-scoped attacker/refuter tier. A missing sibling
 axis, unmapped hunk, different digest, dead attacker or unresolved refutation
 cannot complete the item. Surviving findings enter `lastCheck` with origin
@@ -236,22 +243,34 @@ has its own tier over the complete integrated patch. The normal full-range
 red-team before an irreversible node still applies.
 
 The Workflow sandbox has no filesystem API. A separate fixed-command sentinel
-runs `scripts/py.sh repair-proof.py read` and returns the patch's raw base64
-bytes and pinned base/item/round/path. Compiled code computes SHA-256 and the
-hunk list itself, independently of fixer/checker summaries. This sentinel is
-the same trusted read boundary as the tree sentinel; it is not a cryptographic
-proof of a model's tool use. The recorder re-reads the live patch and recorded
-alarm series, checks the complete diff receipt, and binds any named commits
-to the exact reviewed tree. A changed or missing artifact cannot mint checked
-commits. Historical PASS receipts without this tier no longer discharge them.
+runs `scripts/py.sh repair-proof.py read` and returns a compact manifest with
+the patch digest and pinned base/item/round/path. The recorder re-reads patch
+bytes and recorded alarm data, checks the complete diff receipt, and binds
+named commits to the exact reviewed tree. It also checks native Bash results
+for the fixed helper invocation, owned snapshot/token and exact returned
+observations. A typed result, helper at another installation, or interpreter
+shim cannot supply that evidence. Every sibling and hunk row needs its own
+execution; hunk commands name the manifest path. The semantic adequacy of an
+experiment remains an independent review obligation.
+
+New summaries, recorder artifacts and native certificates carry repair
+assurance version 2. Historical receipts with no native assurance retain
+their artifacts and commits but lose checked credit, with a visible warning.
+Legacy records without immutable history receive an additional warning.
+Their relevant BLOCK window stays unchecked: repair graphs may run, while
+ordinary shipping remains blocked until checked or explicitly accepted.
+Malformed current certificates, mismatched available history, and tampered
+current artifacts stop preflight. New positive receipts require their exact
+immutable history snapshot.
 
 The checker also receives its own fresh, already-patched archive. Every
 DEFENDED/NOT-APPLICABLE sibling and every hunk attack/control row must match
-the execution helper's actual command/result log in that archive. Its owned
+a distinct execution helper command/result in that archive and its native
+Bash result. Its owned
 cleanup witness, distinct from every attacker/refuter snapshot, is required
 for PASS and commit corroboration. Deadline rows copy the helper's elapsed
-time. Alarm commands read the frozen `FPL_PRODUCTION_SERIES` copy and emit
-JSON metrics; a checker cannot substitute typed counts for measured output.
+time. Alarm counts and window duration come from the helper's frozen
+`FPL_PRODUCTION_SERIES` data; typed counts cannot substitute for that data.
 
 Each launch/resume supplies a fresh `_replayLaunchNonce`, separate from the
 stable repair `_launch.nonce`. It changes sentinel prompts so replay cannot

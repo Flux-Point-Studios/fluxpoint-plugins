@@ -58,10 +58,11 @@ function repairUTF8(bytes) {
 }
 function repairManifest(bytes) {
   const lines = repairUTF8(bytes).split('\n'), hunks = []
-  let path = null
+  let path = null, oldPath = null
   lines.forEach((line, i) => {
     if (line.startsWith('diff --git ')) path = line.slice(11)
-    else if (line.startsWith('+++ ')) path = line.slice(4)
+    else if (line.startsWith('--- ')) oldPath = line.slice(4)
+    else if (line.startsWith('+++ ')) path = line.slice(4) === '/dev/null' ? oldPath : line.slice(4)
     else if (line.startsWith('@@ ')) {
       const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line)
       if (!m || path === null) throw new Error('malformed patch hunk')
@@ -112,6 +113,28 @@ function repairContextIssue(...values) {
   return null
 }
 
+function repairManifestPath(raw) {
+  if (raw.startsWith('a/') && raw.includes(' b/')) raw = 'b/' + raw.slice(raw.lastIndexOf(' b/') + 3)
+  if (raw.startsWith('"')) {
+    const bytes = [], escapes = {a:7,b:8,t:9,n:10,v:11,f:12,r:13,'"':34,'\\':92}
+    for (let i=1;i<raw.length;i++) {
+      const c=raw[i]
+      if(c==='"'){const rest=raw.slice(i+1).trim();return rest.startsWith('"b/')?repairManifestPath(rest):repairUTF8(bytes).replace(/^[ab]\//,'')}
+      if(c==='\\'){
+        const m=/^[0-7]{1,3}/.exec(raw.slice(++i))
+        if(m){bytes.push(parseInt(m[0],8));i+=m[0].length-1;continue}
+        if(escapes[raw[i]]===undefined)throw Error('unsupported Git path escape')
+        bytes.push(escapes[raw[i]])
+      }else{
+        const n=raw.codePointAt(i);if(n>65535)i++
+        if(n<=127)bytes.push(n);else if(n<=2047)bytes.push(192|n>>6,128|n&63);else if(n<=65535)bytes.push(224|n>>12,128|n>>6&63,128|n&63);else bytes.push(240|n>>18,128|n>>12&63,128|n>>6&63,128|n&63)
+      }
+    }
+    throw Error('unterminated Git quoted path')
+  }
+  return raw.replace(/^[ab]\//,'')
+}
+
 function repairSiblingIssue(check, context, fixed) {
   if (!repairTargets(check.targetClasses) || JSON.stringify([...check.targetClasses].sort()) !== JSON.stringify([...context.targetClasses].sort())) return 'SIBLINGS-UNPROVEN: checker targetClasses differ from pinned slice'
   const rows = check.siblings, claims = fixed.siblings === undefined ? [] : fixed.siblings
@@ -129,6 +152,9 @@ function repairCoverageIssue(check, measured, fixed, context = {}) {
   if (!c || c.patchSha256 !== measured.patchSha256) return 'DIFF-UNPROVEN: coverage names another patch SHA-256'
   if (!Array.isArray(rows) || rows.length !== measured.hunks.length || rows.some(r => !r) || new Set(rows.map(r => r.id)).size !== rows.length || measured.hunks.some(h => !rows.some(r => r.id === h.id))) return 'DIFF-UNPROVEN: every harness-listed hunk needs exactly one row'
   if (rows.some(r => !REPAIR_SURFACES.includes(r.surface) || !repairObservation(r.attack) || !repairObservation(r.control))) return 'DIFF-UNPROVEN: each hunk needs a surface, attack and control'
+  try {
+    if (measured.hunks.some(h => !rows.find(r => r.id === h.id).attack.command.includes(repairManifestPath(h.path)))) return 'DIFF-UNPROVEN: every hunk attack command must name its manifest path'
+  } catch (_) { return 'DIFF-UNPROVEN: hunk has an unsupported Git path spelling' }
   const obligations = measured.hunks.flatMap(h => h.obligations), operational = c.operational || {}, bounds = context.operationalBounds || {}
   if (obligations.includes('latency')) {
     const r = operational.latency
@@ -146,7 +172,7 @@ function repairCoverageIssue(check, measured, fixed, context = {}) {
   }
   return null
 }
-const REPAIR_SENTINEL_SCHEMA = {type:'object',required:['status'],properties:{status:{type:'string'},manifest:{type:'object'},manifestSha256:{type:'string'},kind:{type:'string'},spec:{type:'string'},exit:{type:'integer'},argv:{type:'array',items:{type:'string'}},elapsedMs:{type:'number'},output:{type:'string'},base:{type:'string'},patch:{type:'string'},item:{type:'string'},round:{type:'integer'},snapshot:{type:'string'},token:{type:'string'},patchSha256:{type:'string'},observations:{type:'array',items:{type:'object'}},issue:{type:'string'}}}
+const REPAIR_SENTINEL_SCHEMA = {type:'object',required:['status'],properties:{status:{type:'string'},manifest:{type:'object'},manifestSha256:{type:'string'},kind:{type:'string'},spec:{type:'string'},exit:{type:'integer'},argv:{type:'array',items:{type:'string'}},elapsedMs:{type:'number'},output:{type:'string'},base:{type:'string'},patch:{type:'string'},item:{type:'string'},round:{type:'integer'},snapshot:{type:'string'},snapshotTree:{type:'string'},token:{type:'string'},patchSha256:{type:'string'},observations:{type:'array',items:{type:'object'}},issue:{type:'string'}}}
 const repairQuote = s => "'" + String(s).replace(/'/g, "'\\''") + "'"
 const repairHelperCommand = mode => REPAIR_PROOF_ARGV.map(repairQuote).join(' ') + ' ' + mode
 function repairSamePath(expected, actual) {
@@ -193,7 +219,12 @@ function repairCheckerEvidenceIssue(check, context, measured) {
   if (!witness || witness.status !== 'CLEANED' || witness.base !== context.base || witness.patchSha256 !== measured.patchSha256 || witness.readNonce !== A._replayLaunchNonce || !Array.isArray(observations) || !observations.length || observations.some(o => !o || o.base !== context.base || o.patchSha256 !== measured.patchSha256 || o.reproduces !== false)) return 'CHECKER-UNPROVEN: independent checker witness is missing or records an undefeated harm'
   const same = (a,b) => repairObservation(a) && repairObservation(b) && a.command === b.command && a.result === b.result
   const pairs = [...(check.siblings || []), ...(check.diffCoverage?.hunks || [])]
-  if (pairs.some(r => !observations.some(o => o.reproduces === false && same(r.attack,o.attack) && same(r.control,o.control)))) return 'CHECKER-UNPROVEN: every defended sibling and hunk row must match an actually defended checker execution'
+  const unused = new Set(observations.map((_,i) => i))
+  for (const row of pairs) {
+    const index = [...unused].find(i => observations[i].reproduces === false && same(row.attack,observations[i].attack) && same(row.control,observations[i].control))
+    if (index === undefined) return 'CHECKER-UNPROVEN: each sibling/hunk row needs its own actual execution; reuse is refused'
+    unused.delete(index)
+  }
   const operational = check.diffCoverage?.operational || {}, latency = operational.latency, alarm = operational.alarmRate
   if (latency && !observations.some(o => same(latency,o.attack) && repairFinite(o.attack.elapsedMs) && latency.observedMs === o.attack.elapsedMs)) return 'CHECKER-UNPROVEN: latency must use the helper-measured elapsed time'
   if (alarm && !observations.some(o => same(alarm,o.attack) && alarm.seriesPath === o.seriesPath && alarm.seriesSha256 === o.seriesSha256 && o.seriesFormat === 'RepairAlarmSeriesV1' && o.metrics && ['durationSeconds','falsePositives'].every(k => alarm[k] === o.metrics[k]))) return 'CHECKER-UNPROVEN: alarm measurements must match executed JSON output and the helper-read production series'

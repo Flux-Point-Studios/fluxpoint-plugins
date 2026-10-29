@@ -115,9 +115,9 @@ const obs={command:'python attack.py',result:'exit 0: defended'},ctl={command:'p
 const slice={patchSha256:PATCH_SHA,branch:'repair',diffSummary:'complete patch against pinned launch base',testsAdded:['test_attack'],harnessCommand:'pytest',harnessExit:0,evidence:['checked original attack and valid control'],sharedResources:[{resource:'provider-pool',writers:['caller'],readers:['checker']}],siblings:[]};
 const axes=['field','encoding','caller','network','role','path'];
 const sibling=(finding,axis,surface='checker-'+axis)=>({finding,invariant:'authoritative invariant',axis,surface,attack:obs,control:ctl,outcome:'DEFENDED',reason:'independent attack and valid control executed'});
-const executeProof=(p,harm=false)=>{
+const executeProof=(p,harm=false,tag='')=>{
  const s=JSON.parse(p.split('SNAPSHOT IDENTITY: ')[1].split('\n')[0]);
- return JSON.parse(execFileSync(PYTHON_EXEC,[HELPER_SCRIPT,'execute','--snapshot',s.snapshot,'--token',s.token,'--control',CONTROL_COMMAND,'--attack',harm?HARM_COMMAND:ATTACK_COMMAND,'--series',SERIES],{encoding:'utf8'}));
+ return JSON.parse(execFileSync(PYTHON_EXEC,[HELPER_SCRIPT,'execute','--snapshot',s.snapshot,'--token',s.token,'--control',CONTROL_COMMAND,'--attack',(harm?HARM_COMMAND:ATTACK_COMMAND)+(tag?' # '+tag:''),'--series',SERIES],{encoding:'utf8'}));
 };
 const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
  if(label.startsWith('repair-witness:')){
@@ -140,10 +140,17 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
   const c=JSON.parse(p.split('ORIGIN REPLAY CONTEXT: ')[1].split('\n')[0]);
   const m=JSON.parse(p.split('HARNESS PATCH MANIFEST (derived from raw patch bytes, never your own inventory): ')[1].split('\n')[0]);
   if(mode==='checker-extra-harm')executeProof(p,true);
-  const execution=mode==='no-checker-execution'?{attack:obs,control:ctl,metrics:{durationSeconds:86400,falsePositives:0,maxPerDay:1},seriesPath:SERIES,seriesSha256:SERIES_SHA}:executeProof(p,mode==='checker-reproduces');
-  const r={verdict:'PASS',findings:[],blockers:[],evidence:['independent checker executed original case, control and full suite'],commits:[HEAD],targetClasses:c.targetClasses,
-   siblings:c.targetClasses.flatMap(finding=>axes.map(axis=>({...sibling(finding,axis),attack:execution.attack,control:execution.control}))),
-   diffCoverage:{patchSha256:m.patchSha256,hunks:m.hunks.map(h=>({id:h.id,surface:h.surfaces[0],attack:execution.attack,control:execution.control})),operational:{latency:{...execution.attack,deadlineMs:10000,observedMs:execution.attack.elapsedMs,pool:'provider-pool'},alarmRate:{...execution.attack,seriesPath:execution.seriesPath,seriesSha256:execution.seriesSha256,maxPerDay:1,...execution.metrics}}}};
+  const executed=[];
+  const runCase=tag=>{
+   if(mode==='no-checker-execution')return {attack:{...obs,command:'python attack.py # state.py'},control:ctl,metrics:{durationSeconds:86400,falsePositives:0},seriesPath:SERIES,seriesSha256:SERIES_SHA};
+   if(mode==='checker-reused-execution'&&executed.length)return executed[0];
+   const result=executeProof(p,mode==='checker-reproduces',mode==='checker-reused-execution'?'shared state.py':tag);executed.push(result);return result;
+  };
+  const siblings=c.targetClasses.flatMap(finding=>axes.map(axis=>{const e=runCase('sibling:'+finding+':'+axis);return {...sibling(finding,axis),attack:e.attack,control:e.control}}));
+  const hunks=m.hunks.map(h=>{const e=runCase('hunk:'+h.path);return {id:h.id,surface:h.surfaces[0],attack:e.attack,control:e.control}});
+  const execution=executed[executed.length-1]||runCase('operational');
+  const r={verdict:'PASS',findings:[],blockers:[],evidence:['independent checker executed original case, control and full suite'],commits:[HEAD],targetClasses:c.targetClasses,siblings,
+   diffCoverage:{patchSha256:m.patchSha256,hunks,operational:{latency:{...execution.attack,deadlineMs:10000,observedMs:execution.attack.elapsedMs,pool:'provider-pool'},alarmRate:{...execution.attack,seriesPath:execution.seriesPath,seriesSha256:execution.seriesSha256,maxPerDay:1,...execution.metrics}}}};
   if(mode==='missing-siblings')delete r.siblings;
   if(mode==='empty-siblings')r.siblings=[];
   if(mode==='missing-axis')r.siblings.pop();
@@ -420,6 +427,12 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         with self.assertRaisesRegex(ValueError, 'record id'):
             verified_rulings(self.root, imports, advertised)
 
+    def test_one_checker_execution_cannot_cover_multiple_rows(self):
+        result = self.run_graph('checker-reused-execution')
+        self.assertEqual(result['r']['outcome'], 'INCOMPLETE')
+        self.assertTrue(any(p['status'] == 'CHECKER-UNPROVEN' for p in result['r']['provenance']))
+        self.assertFalse(any(':attack:' in c['label'] for c in result['calls']))
+
     def test_terminal_partial_round_skips_integration_spend(self):
         result = self.run_graph('partial', integration=True)
         self.assertEqual(result['r']['outcome'], 'INCOMPLETE')
@@ -564,6 +577,15 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         measured = manifest(b'diff --git a/tests/test_page.py b/tests/test_page.py\n--- a/tests/test_page.py\n+++ b/tests/test_page.py\n@@ -0,0 +1 @@\n+assert page == 2\n')
         self.assertEqual(measured['hunks'][0]['obligations'], [])
 
+    def test_command_path_floor_decodes_git_quoted_unicode_and_deleted_paths(self):
+        from repair_diff import manifest_path
+        vectors = ['b/state.py', 'a/state.py', 'a/x b/x', r'"b/\303\251.py"', r'"a/\303\251.py" "b/\303\251.py"', r'"b/tab\tfile.py"']
+        expected = ['state.py', 'state.py', 'x', 'é.py', 'é.py', 'tab\tfile.py']
+        self.assertEqual([manifest_path(v) for v in vectors], expected)
+        script = (SCRIPTS / 'repair-proof.js').read_text() + '\nconsole.log(JSON.stringify(' + json.dumps(vectors) + '.map(repairManifestPath)));'
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), expected)
+
     def test_surface_classification_matches_ascii_javascript_boundaries(self):
         from repair_diff import surfaces
         values = ['jsonñ = 1', 'ſleep(1)', 'Kif', 'json = 1']
@@ -659,9 +681,9 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
     def test_alarm_series_is_reread_and_provider_pool_cannot_be_omitted(self):
         measured = manifest(b'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+provider rate-limit alarm timer\n')
         digest = __import__('hashlib').sha256(self.series.read_bytes()).hexdigest()
-        c = {'patchSha256': measured['patchSha256'], 'hunks': [{'id': measured['hunks'][0]['id'], 'surface': 'outbound-calls', 'attack': {'command': 'a', 'result': 'r'}, 'control': {'command': 'c', 'result': 'r'}}],
-             'operational': {'latency': {'command': 'a', 'result': 'r', 'deadlineMs': 10, 'observedMs': 1, 'pool': 'provider-pool'},
-                             'alarmRate': {'command': 'a', 'result': 'r', 'seriesPath': str(self.series), 'seriesSha256': digest, 'durationSeconds': 86400, 'falsePositives': 0, 'maxPerDay': 1}}}
+        c = {'patchSha256': measured['patchSha256'], 'hunks': [{'id': measured['hunks'][0]['id'], 'surface': 'outbound-calls', 'attack': {'command': 'a x', 'result': 'r'}, 'control': {'command': 'c', 'result': 'r'}}],
+             'operational': {'latency': {'command': 'a x', 'result': 'r', 'deadlineMs': 10, 'observedMs': 1, 'pool': 'provider-pool'},
+                             'alarmRate': {'command': 'a x', 'result': 'r', 'seriesPath': str(self.series), 'seriesSha256': digest, 'durationSeconds': 86400, 'falsePositives': 0, 'maxPerDay': 1}}}
         self.assertIn('sharedResources', coverage_issue(c, measured, [], True, bounds={'deadlineMs': 10, 'maxPerDay': 1, 'providerPools': ['provider-pool']}))
         resources = [{'resource': 'provider-pool'}]
         self.assertIsNone(coverage_issue(c, measured, resources, True, bounds={'deadlineMs': 10, 'maxPerDay': 1, 'providerPools': ['provider-pool']}))
