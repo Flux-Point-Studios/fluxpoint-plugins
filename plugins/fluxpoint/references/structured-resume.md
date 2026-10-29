@@ -110,7 +110,8 @@ plugin receipts describe local reuse. Recording recursively verifies both.
 A once-only ledger hit never calls its effect agent. It consumes the next
 captured slot only when the node, original prompt, full options and result match,
 retaining a logical call receipt for subsequent resumes. Otherwise the prefix
-closes. Old ledger-only sources can restore a recorded effect while the suffix
+closes. Old ledger-only sources, or effects whose native prompts carry fresh
+nonce or gate decorations, can restore the recorded effect while the suffix
 runs live; summaries explicitly mark their missing replay proof. A known effect
 whose ledger receipt is lost, whose result differs or whose current prompt key
 changes halts `LEDGER-CONFLICT`, even with carried confirmation. Use a reviewed

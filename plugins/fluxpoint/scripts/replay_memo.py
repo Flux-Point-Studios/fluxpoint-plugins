@@ -869,6 +869,11 @@ def build_memo(root, run_id, launch, compiler_version, projects=None, artifact_s
             del entry['result']
     if not calls:
         capture['stopReason'] = 'legacy source has no corroborated compiler call receipts; live suffix only'
+    histories = list(summary.get('ledger') or [])
+    for row in summary.get('ledgerReplays', []):
+        index = row.get('callIndex')
+        if type(index) is int and 0 <= index < len(summary.get('callRecords', [])):
+            histories.append(dict(key=row.get('key'),node=row.get('node'),result=summary['callRecords'][index].get('result')))
     effects = {}
     for record in summary.get('memoRecords', []):
         if not isinstance(record, dict) or not record.get('irreversible'):
@@ -881,6 +886,14 @@ def build_memo(root, run_id, launch, compiler_version, projects=None, artifact_s
             continue
         prompt = ledger_prompt(call['prompt'], call['opts'])
         key = ledger_key(summary['campaign'], record['node'], prompt)
+        # nodePrompt can add a fresh nonce or pinned gate reading after the
+        # stable once-only key is computed. Those decorated native calls do
+        # not prove the original intent key. Retain their actual ledger
+        # history below, without inventing a second effect identity or
+        # granting captured-call authority to a guessed prompt transform.
+        if not any(row.get('key') == key and row.get('node') == record['node']
+                   and memo_key(row.get('result')) == memo_key(call['result']) for row in histories):
+            continue
         effects[key] = dict(node=record['node'], promptSha256=hashlib.sha256(utf8_bytes(call['prompt'])).hexdigest(),
                             optsSha256=memo_key(call['opts']), resultSha256=memo_key(call['result']),
                             source=dict(runId=run_id, artifactSha256=digest, agentId=call['agentId'], callIndex=index))
@@ -889,11 +902,6 @@ def build_memo(root, run_id, launch, compiler_version, projects=None, artifact_s
             effects[key]['resultRef'] = result_ref
     # Even legacy/unpropagatable results are evidence to REFUSE another
     # effect. Such history never authorizes a captured return or cursor move.
-    histories = list(summary.get('ledger') or [])
-    for row in summary.get('ledgerReplays', []):
-        index = row.get('callIndex')
-        if type(index) is int and 0 <= index < len(summary.get('callRecords', [])):
-            histories.append(dict(key=row.get('key'),node=row.get('node'),result=summary['callRecords'][index].get('result')))
     for row in histories:
         key, node = row.get('key'), row.get('node')
         if isinstance(key, str) and isinstance(node, str) and key not in effects:

@@ -166,6 +166,26 @@ class CapturedPrefix(unittest.TestCase):
         self.assertEqual(out['result']['outcome'],'LEDGER-CONFLICT')
         self.assertNotIn('ceremony',[row['opts']['label'] for row in out['rawCalls']])
 
+    def test_fresh_effect_decoration_retains_ledger_history_without_false_conflict(self):
+        self.ir['nodes'][2]['fresh']=True;self.write_graph()
+        first=self.initial();original=self.execute(first)
+        self.assertEqual(original['result']['outcome'],'COMPLETE')
+        _,digest=self.seal('wf_first',original)
+        state=replay.build_memo(self.root,'wf_first',first['args']['_launch'],compiler.compiler_version(),self.projects,digest)
+        key=original['result']['ledger'][0]['key']
+        self.assertEqual(list(state['_ledgerCalls']),[key])
+        self.assertTrue(state['_ledgerCalls'][key]['historyOnly'])
+        second,_=self.assemble('wf_first');out=self.execute(second)
+        self.assertEqual(out['result']['outcome'],'COMPLETE')
+        self.assertNotIn('ceremony',[row['opts']['label'] for row in out['rawCalls']])
+        self.assertIn('repair',[row['opts']['label'] for row in out['rawCalls']])
+        self.assertFalse(out['result']['ledgerReplays'][0]['verified'])
+        self.seal('wf_second',out)
+        third,_=self.assemble('wf_second');out3=self.execute(third)
+        self.assertEqual(out3['result']['outcome'],'COMPLETE')
+        self.assertNotIn('ceremony',[row['opts']['label'] for row in out3['rawCalls']])
+        self.seal('wf_third',out3)
+
     def test_conflicting_ledger_result_refuses_without_rearming(self):
         original=self.execute(self.initial());self.seal('wf_first',original)
         path=self.root/'.claude/fluxpoint/irreversible.jsonl'
