@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "goal": "Remove MSYS launch and inherited hook-pipe races from native Python hooks (#124)",
+  "asset": "Fail-closed secret decisions and advisory gate attestations on both runtimes",
+  "scope": [
+    "Claude exec-form hook routing and explicit Codex legacy routing",
+    "Native Node interpreter resolution, bounded private pipes, input and deadlines",
+    "Equivalent Python attestation jurisdiction and warning-once behavior",
+    "Real runtime no-model Windows startup/timeout/orphan smoke and content pins"
+  ],
+  "outOfScope": [
+    "Universal cleanup of arbitrary descendants after hard launcher termination",
+    "Changing secret policy or gate exit interpretation"
+  ],
+  "decisions": [
+    {
+      "id": "native-hook-entry",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should Python hooks avoid MSYS startup while preserving decisions and runtime compatibility?",
+        "options": [
+          {
+            "option": "native-node-exec",
+            "argued_by": "model",
+            "strongest_objection": "Requires Node18 and tested modern Claude exec-form support"
+          },
+          {
+            "option": "bash-mitigation",
+            "argued_by": "model",
+            "strongest_objection": "Cached Python still starts through MSYS and can inherit hook pipes"
+          }
+        ],
+        "chosen": "native-node-exec",
+        "rationale": "Use Claude command+args to start Node directly, spawn Python shell-free with private pipes and bounded lifecycle, and retain explicit legacy Codex routing until its exec schema is verified.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Installed Claude Code2.1.312 schema and successful --init-only exec-form plugin smoke",
+          "Official Claude changelog2.1.139 adds hook args; issue124 native2.1.304 evidence bounds the upstream pipe wait"
+        ]
+      },
+      "costs": [
+        {
+          "option": "native-node-exec",
+          "cost": "Native launcher, bounded adapter and platform tests",
+          "basis": "estimate",
+          "evidence": [
+            "Existing Python guard and attest.record remain authoritative"
+          ]
+        },
+        {
+          "option": "bash-mitigation",
+          "cost": "No complete removal of MSYS launch path",
+          "basis": "measured",
+          "evidence": [
+            "Issue124 cause; current py.sh still execs native Python from Bash"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "native-hooks",
+      "statement": "Claude affected hooks execute without a shell, enforce Node and tested Claude prerequisites, bound stdin/output/deadlines, keep descendant stdio private, fail closed on secret errors, preserve attest advisory warning-once, retain Codex routing and hash MJS witnesses.",
+      "decisions": [
+        "native-hook-entry"
+      ],
+      "checks": [
+        "native-hook-tests"
+      ],
+      "counterexample": "Forced launcher timeout leaves a descendant holding Claude stdout, missing interpreter permits a secret command, or Codex loses its guard"
+    }
+  ],
+  "checks": [
+    {
+      "id": "native-hook-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/native-hook-test.py"
+      ],
+      "scope": "Native launcher lifecycle, policy parity, advisory attest and runtime-neutral manifest tests; --live additionally exercises real Claude without model calls",
+      "assumptions": [
+        "PATH and explicit FPL_PY/FPL_CLAUDE_BINARY selectors are operator-owned; Windows CI observes native runtime behavior"
+      ],
+      "timeoutSeconds": 120
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Does no MSYS layer establish that every orphan is cleaned up?",
+      "resolution": "No. Private child pipes and deadline settlement prevent descendant handles from retaining hook output; forced runtime tests report cleanup independently without claiming universal descendant termination."
+    }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/scripts/native-hook.mjs",
+    "plugins/fluxpoint/scripts/native-hook.py",
+    "plugins/fluxpoint/scripts/secret-guard.py",
+    "plugins/fluxpoint/scripts/attest.py",
+    "plugins/fluxpoint/scripts/plugin_identity.py",
+    "plugins/fluxpoint/hooks/hooks.json",
+    "plugins/fluxpoint/hooks/codex-hooks.json",
+    "plugins/fluxpoint/plugin.json"
+  ]
+}

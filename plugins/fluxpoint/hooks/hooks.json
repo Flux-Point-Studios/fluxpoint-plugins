@@ -28,8 +28,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/py.sh\" secret-guard.py --hook",
-            "timeout": 60
+            "command": "node",
+            "timeout": 60,
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/native-hook.mjs",
+              "guard"
+            ],
+            "onFailure": "block"
           }
         ]
       }
@@ -50,8 +55,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/exec-attest.sh\"",
-            "timeout": 20
+            "command": "node",
+            "timeout": 20,
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/native-hook.mjs",
+              "attest"
+            ]
           }
         ]
       }
@@ -84,8 +93,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/exec-attest.sh\"",
-            "timeout": 20
+            "command": "node",
+            "timeout": 20,
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/native-hook.mjs",
+              "attest"
+            ]
           }
         ]
       }

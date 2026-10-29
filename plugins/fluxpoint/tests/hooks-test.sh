@@ -51,13 +51,13 @@ check(){ [ "$2" = "$3" ] && ok "$1" "$3" || bad "$1" "$3 (wanted $2)"; }
 # older cases reading as they did.
 hook_cmd() {
   "$FPL_PY" - "$PLUGIN/hooks/hooks.json" "$1" "${2:-0}" <<'PY'
-import json, sys
+import json, sys, shlex, os
 d = json.load(open(sys.argv[1]))
 groups = d["hooks"].get(sys.argv[2], [])
 i = int(sys.argv[3])
 if i < len(groups):
     for h in groups[i]["hooks"]:
-        print(h["command"])
+        print(shlex.join([v.replace("${CLAUDE_PLUGIN_ROOT}", os.environ["CLAUDE_PLUGIN_ROOT"]) for v in [h["command"], *h["args"]]]) if "args" in h else h["command"])
         break
 PY
 }
@@ -94,7 +94,12 @@ for spec in "SessionStart 0" "PostToolUse 0" "PostToolUse 1" "PreCompact 0" "Sto
   [ -n "$cmd" ] || { bad "$ev[$idx]: command present in hooks.json" "missing"; continue; }
   # Expand ${CLAUDE_PLUGIN_ROOT} exactly as the runtime does, then check the
   # target exists before running it.
-  target="$(eval "printf '%s' \"$(printf '%s' "$cmd" | sed 's/^bash //')\"")"
+  target="$("$FPL_PY" - "$PLUGIN/hooks/hooks.json" "$ev" "$idx" "$PLUGIN" <<'PYINNER'
+import json, shlex, sys
+h=json.load(open(sys.argv[1]))['hooks'][sys.argv[2]][int(sys.argv[3])]['hooks'][0]
+print((h['args'][0] if 'args' in h else shlex.split(h['command'])[1]).replace('${CLAUDE_PLUGIN_ROOT}',sys.argv[4]))
+PYINNER
+  )"
   if [ -f "$target" ]; then ok "$ev[$idx]: script exists at plugin root" "$(basename "$target")"
   else bad "$ev[$idx]: script exists at plugin root" "missing $target"; fi
 done

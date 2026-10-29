@@ -78,7 +78,7 @@ report("a fresh clone's ledger reads as a first run", empty,
 
 # ==================== attestation states its runtime boundary =============
 HOOKS = json.loads(read('hooks', 'hooks.json'))['hooks']
-failure_hook = any('exec-attest.sh' in hook.get('command', '')
+failure_hook = any('exec-attest.sh' in hook.get('command', '') or hook.get('args') == ['${CLAUDE_PLUGIN_ROOT}/scripts/native-hook.mjs', 'attest']
                    for group in HOOKS.get('PostToolUseFailure', []) for hook in group.get('hooks', []))
 report("attestation documents and registers the runtime failure event",
        'PostToolUseFailure' in ATTEST and failure_hook, "failure event routed")

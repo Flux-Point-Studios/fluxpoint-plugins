@@ -244,6 +244,8 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
       "$PLUGIN"/scripts/inject-state.sh | "$PLUGIN"/scripts/prompt-recall.sh)
         step "hybrid recall pipeline" "$FPL_PY" "$PLUGIN/tests/recall-test.py"
         step "warm prompt recall" "$FPL_PY" "$PLUGIN/tests/prompt-recall-daemon-test.py" ;;
+      "$PLUGIN"/scripts/native-hook.mjs | "$PLUGIN"/scripts/native-hook.py)
+        step "native hook lifecycle" "$FPL_PY" "$PLUGIN/tests/native-hook-test.py" ;;
       "$PLUGIN"/scripts/prompt-recall-daemon.py | "$PLUGIN"/scripts/prompt-recall-client.mjs)
         step "warm prompt recall" "$FPL_PY" "$PLUGIN/tests/prompt-recall-daemon-test.py" ;;
       "$PLUGIN"/scripts/memory.py | "$PLUGIN"/scripts/recurrence-guard.py)
@@ -270,7 +272,7 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     echo "fluxpoint harness --full"
     for f in .claude-plugin/marketplace.json .agents/plugins/marketplace.json \
              "$PLUGIN"/.claude-plugin/plugin.json "$PLUGIN"/plugin.json \
-             "$PLUGIN"/contracts/*.json "$PLUGIN"/hooks/hooks.json \
+             "$PLUGIN"/contracts/*.json "$PLUGIN"/hooks/*.json \
              "$PLUGIN"/templates/settings.snippet.json \
              "$SUB"/.claude-plugin/plugin.json "$SUB"/plugin.json "$SUB"/hooks/hooks.json; do
       [ -f "$f" ] && step "json: ${f#"$PLUGIN"/}" check_json "$f"
@@ -318,6 +320,7 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     step "gate regression scenarios" "$FPL_PY" "$PLUGIN/tests/gate-regression-test.py"
     step "hygiene scope (executed)" bash "$PLUGIN/tests/hygiene-scope-test.sh"
     step "gate-authored evidence" bash "$PLUGIN/tests/evidence-test.sh"
+    step "native hook lifecycle" "$FPL_PY" "$PLUGIN/tests/native-hook-test.py"
     step "hook wiring + PostToolUse" bash "$PLUGIN/tests/hooks-test.sh"
     step "decisions that outlive context" bash "$PLUGIN/tests/decision-test.sh"
     step "compaction gate" bash "$PLUGIN/tests/precompact-test.sh"

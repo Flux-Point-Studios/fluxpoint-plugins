@@ -22,7 +22,7 @@
   ],
   "extensions": {
     "com.openai": {
-      "hooks": "./hooks/hooks.json",
+      "hooks": "./hooks/codex-hooks.json",
       "interface": {
         "displayName": "fluxpoint",
         "shortDescription": "Definition-of-Done gate, per-edit verification, attestation and ratchets for one agent's loop; compiled multi-agent campaigns on Claude Code."

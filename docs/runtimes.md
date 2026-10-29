@@ -13,7 +13,7 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) to check a live installation.
 |---|---|---|
 | Plugin manifest | `.claude-plugin/plugin.json` | `plugin.json` at the plugin root, on the Agent Plugins schema |
 | Marketplace | `.claude-plugin/marketplace.json` | `.agents/plugins/marketplace.json` |
-| Hooks | `hooks/hooks.json` | the same file, same schema |
+| Hooks | `hooks/hooks.json` (Claude exec-form entries) | `hooks/codex-hooks.json` (portable shell entries) |
 | Skills | `skills/<name>/SKILL.md` | the same directories |
 | Plugin root in hook commands | `CLAUDE_PLUGIN_ROOT` | `PLUGIN_ROOT`, and `CLAUDE_PLUGIN_ROOT` for compatibility |
 | Hook payload | JSON on stdin with `session_id`, `cwd`, `hook_event_name`, `tool_name`, `tool_input`, `tool_response` | the same fields |
@@ -132,20 +132,44 @@ runs those suites. Native Blaster and the selected Windows jobs are separate;
 see [development setup](development-setup.md#ci-and-cloud-environments).
 
 
-### Windows hook startup under load
+### Native Python hooks on Claude Code
 
-Python launchers cache a probed absolute interpreter against `PATH` in the
-user's cache (`$XDG_CACHE_HOME/fluxpoint/python`, or
-`$HOME/.cache/fluxpoint/python`). WindowsApps execution aliases are skipped.
-A cache hit starts only the target Python process; the secret guard avoids
-`dirname` and `cygpath` subprocesses and has a 60-second startup allowance.
-Setting `FPL_PY` explicitly bypasses auto-detection. Remove the cache file to
-force a new probe if an interpreter installation changes at the same path.
+Claude Code **2.1.312 or newer**, Node.js **18 or newer**, and Python **3.9 or
+newer** are required for the secret guard and gate-attestation hooks. Their
+`command: "node"` plus `args` descriptors launch the native entry directly,
+without Bash, PowerShell or a command-string parser. The guard's
+`onFailure: "block"` refuses tool execution when Node cannot start. The
+launcher checks Node and Claude versions, and refuses a missing Python
+interpreter. Install the native `claude` executable on PATH, or set
+`FPL_CLAUDE_BINARY` to its absolute path (`claude.exe` on Windows); a `.cmd`
+shim is not a native executable. `FPL_PY` selects an explicit interpreter.
 
-These changes reduce exposure to the MSYS2 suspended-child startup race
-reported in #124. They do not guarantee that a runtime killing Bash also
-terminates every native child. That guarantee requires Windows runtime
-process-tree termination. The Windows CI job exercises selected cleanup
-paths and an actual health observation. Sustained Git Bash load and runtime
-forced-timeout behavior still require native verification; Linux regression
-tests establish cache and launch-count behavior only.
+Python selection and the checked Claude binary are cached under the private
+`$XDG_CACHE_HOME/fluxpoint/native-hooks` directory (normally
+`$HOME/.cache/fluxpoint/native-hooks`). PATH and executable file identity
+invalidate the cache. WindowsApps interpreter aliases are skipped. Version
+checks and probes use native private pipes; a cache hit starts only Python.
+The older `py.sh` command launcher retains its separate interpreter cache.
+
+The native entry bounds stdin to 4 MiB and three seconds, output to 1 MiB
+per stream, and secret-guard execution to forty seconds inside a fifty-second
+total budget. Attestation gets eight seconds inside a fifteen-second budget.
+These settle before the configured runtime hook limits. A process exit has a
+bounded 250 ms pipe drain; incomplete output fails the secret guard closed.
+Python descendants receive private pipes. Only the Node entry holds Claude's
+hook handles, so a hard-killed entry cannot leave a Python descendant holding
+those handles open. Attestation remains advisory and warns once per session;
+normal policy findings use repo state and launcher failures use private cache
+markers. Payload parsing and gate exit interpretation remain in Python.
+
+This removes the MSYS launch path implicated in #124 for these Claude hooks.
+It does not promise that an arbitrary hard kill cleans up every descendant.
+The Windows suite proves pipe ownership with running and `CREATE_SUSPENDED`
+orphans, a deliberately leaking inherited-pipe control, and a real
+`claude --init-only` exec-hook timeout. That runtime smoke makes no model calls
+and needs no account credentials. It does not claim a CPU-saturation benchmark.
+
+Codex explicitly selects `hooks/codex-hooks.json`, preserving its existing
+Bash launchers and payload support. Its native exec-hook schema is not assumed.
+Other shell-based hooks and manual Python commands keep their existing launch
+behavior. The native test suite also checks both runtime descriptors.

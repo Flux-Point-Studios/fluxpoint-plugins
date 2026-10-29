@@ -19,9 +19,11 @@ and explained in [docs/runtimes.md](docs/runtimes.md).
 ## Requirements
 
 - Bash, `git`, and Python 3.9 or newer reachable as `python3` or `python`.
-- Node 18 or newer for substrate.
+- Node 18 or newer for substrate and native Claude hooks.
 - `jq` when available; the hooks fall back to Python without it.
-- Claude Code with plugin support, or Codex with plugin support.
+- Native Claude Code 2.1.312 or newer for Claude hooks, or Codex with plugin support.
+  See [native hook requirements](docs/runtimes.md#native-python-hooks-on-claude-code)
+  for `FPL_CLAUDE_BINARY`, interpreter selection and Windows verification.
 - Native graph execution (`/fluxpoint:graph-run`) needs Claude Code's Workflow
   tool; the command also documents a subagent fallback with explicit provenance.
 
