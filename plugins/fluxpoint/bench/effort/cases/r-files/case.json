@@ -1,0 +1,5 @@
+{
+  "role": "red-team",
+  "summary": "static file server: path traversal via prefix check and symlink; normpath decoy",
+  "prompt": "Red-team review the file download handler in this repository (serve.py). Assets: files outside the public directory, including /etc and the app's secrets."
+}

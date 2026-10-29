@@ -1,0 +1,40 @@
+{
+  "role": "architect",
+  "summary": "add currency to invoices: model, codec, totals, stored-data migration; email and CLI are distractors",
+  "prompt": "Plan this change: invoices must carry a currency (ISO 4217 code) instead of assuming USD. Existing stored invoices are USD. Totals must never add amounts in different currencies.",
+  "truth": {
+    "files": [
+      "billing/cli.py",
+      "billing/codec.py",
+      "billing/models.py",
+      "billing/totals.py"
+    ],
+    "risks": [
+      {
+        "id": "legacy-default",
+        "any": [
+          "(legacy|existing|stored|old).{0,60}(usd|default)",
+          "(missing|absent|no) currency.{0,40}usd",
+          "default.{0,30}usd"
+        ]
+      },
+      {
+        "id": "mixed-sum",
+        "any": [
+          "mix",
+          "different currenc",
+          "cross-currency",
+          "heterogeneous"
+        ]
+      },
+      {
+        "id": "code-validation",
+        "any": [
+          "iso",
+          "invalid (currency|code)",
+          "validat"
+        ]
+      }
+    ]
+  }
+}

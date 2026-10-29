@@ -1,0 +1,5 @@
+{
+  "role": "red-team",
+  "summary": "admin API: tenant from the body instead of the token and an allow-list matched by substring; parameterised SQL is a decoy",
+  "prompt": "Red-team review the tenant admin endpoint in this repository (admin.py). Every request carries a verified token; tokens hold the caller's tenant and roles. Assets: tenant isolation and user deletion."
+}

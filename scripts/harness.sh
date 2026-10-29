@@ -256,6 +256,8 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
         step "relation gate: differential + bite + scan" bash "$PLUGIN/tests/pair-verify-test.sh" ;;
       "$PLUGIN"/scripts/cex.py)
         step "counterexample ledger" bash "$PLUGIN/tests/cex-test.sh" ;;
+      "$PLUGIN"/bench/effort/*)
+        step "role effort bench: graders, split, report" "$FPL_PY" "$PLUGIN/tests/effort-bench-test.py" ;;
       "$PLUGIN"/scripts/blueprint-guard.py)
         step "blueprint conformance" bash "$PLUGIN/tests/blueprint-test.sh" ;;
       "$PLUGIN"/contracts/RedTeamV1.schema.json)
@@ -376,6 +378,7 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     step "repair origin replay + resources + live tallies (executed)" "$FPL_PY" "$PLUGIN/tests/repair-origin-test.py"
     step "slice gain calibration" "$FPL_PY" "$PLUGIN/tests/slice-calibration-test.py"
     step "effort sweep: plan, split, score (executed)" "$FPL_PY" "$PLUGIN/tests/sweep-test.py"
+    step "role effort bench: graders, split, report" "$FPL_PY" "$PLUGIN/tests/effort-bench-test.py"
     step "relation gate" bash "$PLUGIN/tests/pair-test.sh"
     step "relation gate: differential + bite + scan (executed)" bash "$PLUGIN/tests/pair-verify-test.sh"
     step "gate presence + resolver (executed)" bash "$PLUGIN/tests/gate-presence-test.sh"

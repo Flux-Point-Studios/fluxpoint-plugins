@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "multi-file: add currency to invoices across model, codec, totals and CLI, legacy rows default to USD",
+  "prompt": "Implement the change described in TASK.md in this repository."
+}

@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "semver range matching with caret, tilde, x-ranges, unions and prerelease gating",
+  "prompt": "Implement `satisfies(version, range_)` in semver.py exactly as SPEC.md describes."
+}

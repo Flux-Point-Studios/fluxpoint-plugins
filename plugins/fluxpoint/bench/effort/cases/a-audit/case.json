@@ -1,0 +1,42 @@
+{
+  "role": "architect",
+  "summary": "role-change audit log: same transaction as the update, both write paths (API and bulk import); notification module is a distractor",
+  "prompt": "Plan this change: every change to a user's role must write an audit record (who, whom, old role, new role, when) that cannot be lost if the role change commits, and must not be written if it does not.",
+  "truth": {
+    "files": [
+      "users/bulk.py",
+      "users/schema.sql",
+      "users/service.py",
+      "users/store.py"
+    ],
+    "risks": [
+      {
+        "id": "same-transaction",
+        "any": [
+          "same transaction",
+          "atomic",
+          "transaction",
+          "rollback"
+        ]
+      },
+      {
+        "id": "bulk-path",
+        "any": [
+          "bulk",
+          "import"
+        ]
+      },
+      {
+        "id": "old-role-race",
+        "any": [
+          "old role",
+          "previous role",
+          "race",
+          "concurrent",
+          "select .{0,20}for update",
+          "read.{0,30}before"
+        ]
+      }
+    ]
+  }
+}

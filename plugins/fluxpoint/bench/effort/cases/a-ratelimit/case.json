@@ -1,0 +1,38 @@
+{
+  "role": "architect",
+  "summary": "login rate limit: middleware, config, app wiring, shared store; proxy IP and multi-process are the risks",
+  "prompt": "Plan this change: the /login route must be limited to 5 attempts per minute per client IP, returning 429 with a Retry-After header. The app runs as 4 worker processes behind a reverse proxy.",
+  "truth": {
+    "files": [
+      "app/middleware.py",
+      "app/server.py"
+    ],
+    "risks": [
+      {
+        "id": "shared-store",
+        "any": [
+          "redis",
+          "shared (store|state|counter)",
+          "per[- ]process",
+          "across (workers|processes)",
+          "4 workers"
+        ]
+      },
+      {
+        "id": "client-ip",
+        "any": [
+          "x-forwarded-for",
+          "forwarded",
+          "trusted.?prox",
+          "spoof"
+        ]
+      },
+      {
+        "id": "retry-after",
+        "any": [
+          "retry-after"
+        ]
+      }
+    ]
+  }
+}

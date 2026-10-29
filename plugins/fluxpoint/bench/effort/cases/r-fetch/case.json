@@ -1,0 +1,5 @@
+{
+  "role": "red-team",
+  "summary": "webhook preview fetcher: SSRF through redirects and a hostname check done before DNS; scheme allow-list is a decoy",
+  "prompt": "Red-team review the link preview fetcher in this repository (preview.py). Any user can submit a URL. Assets: internal services on 10.0.0.0/8 and the cloud metadata endpoint at 169.254.169.254."
+}

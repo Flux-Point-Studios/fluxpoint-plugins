@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "multi-file: transactional audit records for role changes on both the API and the bulk-import path",
+  "prompt": "Implement the change described in TASK.md in this repository."
+}

@@ -1,0 +1,52 @@
+{
+  "role": "architect",
+  "summary": "cursor pagination: query, handler, response shape behind a version switch, the mobile client compatibility; admin report is a distractor",
+  "prompt": "Plan this change: GET /orders currently returns every order for the account. Replace it with cursor pagination (limit up to 100, opaque next cursor), stable under concurrent inserts. The mobile client in clients/mobile.py must keep working until its next release, which still expects a bare list.",
+  "truth": {
+    "files": [
+      "api/handlers.py",
+      "api/orders.py",
+      "api/schema.sql"
+    ],
+    "risks": [
+      {
+        "id": "stable-order",
+        "any": [
+          "tie",
+          "same created_at",
+          "\\(created_at, ?id\\)",
+          "created_at.{0,20}id",
+          "unique.{0,20}(order|sort|key)",
+          "deterministic"
+        ]
+      },
+      {
+        "id": "compat",
+        "any": [
+          "backward",
+          "compat",
+          "version",
+          "mobile",
+          "bare list"
+        ]
+      },
+      {
+        "id": "cursor-tamper",
+        "any": [
+          "tamper",
+          "sign",
+          "opaque",
+          "validat",
+          "malformed cursor",
+          "invalid cursor"
+        ]
+      },
+      {
+        "id": "index",
+        "any": [
+          "index"
+        ]
+      }
+    ]
+  }
+}
