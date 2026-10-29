@@ -111,6 +111,8 @@ trust-base warning paths. Initialization must also arm source/statement ratchets
 The scaffold also detects state/witness tokens when the plugin is missing, so
 that missing installation refuses unless the existing explicit
 `FPL_ALLOW_MISSING_GATES=1` opt-out is chosen.
+Legacy directories outside Git have no tracked inputs and remain dormant;
+inventory errors inside a repository still refuse.
 
 ## Native mutation score
 

@@ -17,6 +17,16 @@ sys.path.insert(0, str(SCRIPTS))
 
 
 class Compact(unittest.TestCase):
+    def consumer_command(self, root):
+        from process_tree import bash_path
+        template = (SCRIPTS.parent / 'templates/harness.sh').read_text(encoding='utf-8')
+        gate = template[template.index('need_gate() {'):template.index('\nchanged() {')]
+        compact = template[template.index("  # Compact's native adapter"):template.index('  # Statement ratchet.')]
+        script = root / 'consumer-harness.sh'
+        script.write_bytes(('set -euo pipefail\nplugin_script() { return 0; }\n' + gate + compact).encode('utf-8'))
+        env = {**os.environ, 'FPL_PY': Path(sys.executable).as_posix(), 'FPL_ALLOW_MISSING_GATES': '0'}
+        return [bash_path(), script.as_posix()], env
+
     def fixture(self):
         from compact_native import load
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
@@ -110,23 +120,31 @@ print(json.dumps({'version':1,'complete':True,'registry':'registry.json','witnes
         subprocess.run(['git', '-C', str(root), 'add', 'omitted.compact'], check=True)
         with self.assertRaisesRegex(ValueError, 'lack native project coverage'): load(root)
 
+    def test_non_git_directories_are_dormant_but_broken_git_refuses(self):
+        from compact_native import tracked_native_sources
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(tracked_native_sources(root), set())
+            (root / '.git').write_text('gitdir: /missing/fluxpoint-native-test-gitdir\n')
+            with self.assertRaisesRegex(ValueError, 'cannot inventory'): tracked_native_sources(root)
+
     @unittest.skipUnless(shutil.which('bash'), 'consumer harness requires Bash')
     def test_consumer_template_detects_missing_plugin_from_real_source_tokens(self):
         root, _ = self.fixture()
         (root / '.fluxpoint-compact.json').unlink()
-        template = (SCRIPTS.parent / 'templates/harness.sh').read_text()
-        gate = template[template.index('need_gate() {'):template.index('\nchanged() {')]
-        compact = template[template.index("  # Compact's native adapter"):template.index('  # Statement ratchet.')]
-        script = 'set -euo pipefail\nplugin_script() { return 0; }\n' + gate + compact
-        from process_tree import bash_path
-        env = {**os.environ, 'FPL_PY': Path(sys.executable).as_posix(), 'FPL_ALLOW_MISSING_GATES': '0'}
+        command, env = self.consumer_command(root)
         for text, expected in [('// ledger witness\nconst prose = "ledger witness";', 0), ('witness secret(): Uint<8>;', 1)]:
             with self.subTest(text=text):
                 (root / 'c.compact').write_text(text)
                 subprocess.run(['git', '-C', str(root), 'add', 'c.compact'], check=True)
-                result = subprocess.run([bash_path(), '-c', script], cwd=root, env=env, capture_output=True, text=True)
+                result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 if expected: self.assertIn('compact-guard.py is not installed', result.stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            command, env = self.consumer_command(root)
+            result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_empty_or_malformed_proof_controls_refuse_before_execution(self):
         from compact_native import load

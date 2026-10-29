@@ -6,7 +6,8 @@
     "Compact source escape hatches and circuit obligation identities",
     "Pinned compactc/runtime/ledger compilation and generated relation/artifact freshness",
     "Real native verifier positive/negative controls and per-circuit measured ceilings",
-    "Isolated circuit assert/comparison/disclosure mutants through the real proof-test adapter"
+    "Isolated circuit assert/comparison/disclosure mutants through the real proof-test adapter",
+    "Portable file-based consumer harness fixtures and dormant legacy directories outside Git"
   ],
   "outOfScope": [
     "Automatic toolchain installation in consumer projects",
@@ -46,7 +47,8 @@
         "evidence": [
           "Issue #185 names immutable ledger-8 deployment obligations",
           "Official compactc0.31.1 release SHA256 verified and native compiler executed",
-          "Orynq SDK pins native ledger8.1.3 proof-verifying and real proof fixture controls"
+          "Orynq SDK pins native ledger8.1.3 proof-verifying and real proof fixture controls",
+          "PR225 Windows CI reproduced quote damage in a Bash -c test payload and a non-Git legacy-directory inventory failure"
         ]
       },
       "costs": [

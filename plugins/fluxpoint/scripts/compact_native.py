@@ -39,6 +39,9 @@ def tracked_native_sources(root):
     """State or witness declarations require native coverage; quoted prose does not."""
     tracked = subprocess.run(['git', '-C', str(root), 'ls-files', '-z', '*.compact'], capture_output=True, check=False)
     if tracked.returncode:
+        directory = Path(root).resolve()
+        if not any((parent / '.git').exists() for parent in (directory, *directory.parents)):
+            return set()  # A legacy directory outside Git has no tracked inputs.
         raise ValueError('cannot inventory tracked Compact sources: ' + tracked.stderr.decode('utf-8', errors='replace').strip())
     return {name for name in filter(None, tracked.stdout.decode('utf-8').split('\0'))
             if re.search(r'\b(?:ledger|witness)\b', source_code(local(root, name).read_text(encoding='utf-8')))}

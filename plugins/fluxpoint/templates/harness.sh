@@ -392,7 +392,11 @@ full() {
 from pathlib import Path
 import re
 import subprocess
-tracked = subprocess.check_output(['git', 'ls-files', '-z', '*.compact']).decode('utf-8')
+inventory = subprocess.run(['git', 'ls-files', '-z', '*.compact'], capture_output=True)
+directory = Path.cwd()
+if inventory.returncode and any((parent / '.git').exists() for parent in (directory, *directory.parents)):
+    raise RuntimeError('cannot inventory tracked Compact sources: ' + inventory.stderr.decode('utf-8', errors='replace'))
+tracked = inventory.stdout.decode('utf-8') if inventory.returncode == 0 else ''
 tokens = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 for name in filter(None, tracked.split('\0')):
     if re.search(r'\b(?:ledger|witness)\b', tokens.sub(' ', Path(name).read_text(encoding='utf-8'))):
