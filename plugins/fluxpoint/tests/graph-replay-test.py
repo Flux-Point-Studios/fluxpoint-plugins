@@ -33,12 +33,20 @@ def node(nid, **extra):
 
 def execute(ir, args=None, setup='', body='', compiled_source=None):
     args = dict(args or {})
-    state = {key: args.pop(key) for key in ('_memo', '_prefix') if key in args}
+    state = {key: args.pop(key) for key in ('_memo', '_prefix', '_capture', '_ledgerCalls') if key in args}
+    if '_capture' not in state and any('capturedResult' in row for row in state.get('_prefix', [])):
+        pool = {}
+        for row in state['_prefix']:
+            if 'capturedResult' in row:
+                encoded = json.dumps(row.pop('capturedResult'), ensure_ascii=True, separators=(',', ':'))
+                row['resultRef'] = hashlib.sha256(encoded.encode()).hexdigest()
+                pool[row['resultRef']] = encoded
+        state['_capture'] = {'version':1,'launch':args.get('_launch',BASE['_launch']),'source':{'runId':'source-run','artifactSha256':'f'*64},'results':pool}
     source = (compiled_source if compiled_source is not None else c.emit(ir, CONTRACTS, replay_state=state)).replace('export const meta =', 'const meta =')
     harness = r'''
 const fs = require('fs'); const input = JSON.parse(fs.readFileSync(0,'utf8'));
 const events = []; const rawCalls = []; let active=0, maximum=0;
-const root='/repo', head='a'.repeat(40); let tips = {'repo-a':'b'.repeat(40),'repo-b':'c'.repeat(40)}, remainingTokens=1000000;
+const root=input.args._base.root, head=input.args._base.sha; let tips = {'repo-a':'b'.repeat(40),'repo-b':'c'.repeat(40)}, remainingTokens=1000000;
 let snapshotHeads = repository => (tips[repository] || 'b'.repeat(40))+'\trefs/heads/main';
 SETUP
 const agent = async (prompt,opts) => {
@@ -364,6 +372,7 @@ class ReplayFollowup(unittest.TestCase):
         first = execute(ir, args={'_ledger': {}, 'confirm': 'effect'})
         written = first['result']['ledger'][0]
         prompt = next(call['prompt'] for call in first['rawCalls'] if call['opts']['label'] == 'effect')
+        prompt = prompt.split('\n',1)[1]  # The audit header is not part of the stable once-only intent key.
         self.assertEqual(written['key'], ir['campaign'] + '|effect|sha256:' + hashlib.sha256(prompt.encode('utf-8')).hexdigest())
         old = 2166136261
         units = prompt.encode('utf-16-le')
@@ -390,7 +399,7 @@ class BranchReplayFollowup(unittest.TestCase):
         digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
         for call in result['callRecords']:
             nonce = re.search(r'\nLIVE (?:TREE READING|REF SNAPSHOT) NONCE: ([A-Za-z0-9_-]+) point ', call['prompt'])
-            row = dict(promptSha256=hashlib.sha256(call['prompt'].encode()).hexdigest(), optsSha256=digest(call['opts']), resultSha256=digest(call['result']), label=call['opts']['label'], runId='source-run', artifactSha256='f'*64, agentId='p'+str(len(rows)))
+            row = dict(promptSha256=hashlib.sha256(call['prompt'].encode()).hexdigest(), optsSha256=digest(call['opts']), resultSha256=digest(call['result']), capturedResult=call['result'], label=call['opts']['label'], runId='source-run', artifactSha256='f'*64, agentId='p'+str(len(rows)))
             if nonce: row['readingNonce'] = nonce.group(1)
             rows.append(row)
         return rows

@@ -625,7 +625,7 @@ def ancestors(n, by_id):
 
 
 def replay_features(ir, embedded_args=None):
-    return (any(any(key in n for key in ("lane", "replay", "fresh", "pushes", "repository", "branch")) or isinstance(n.get('after'), list) for n in ir.get("nodes", []))
+    return (any(n.get('irreversible') or any(key in n for key in ("lane", "replay", "fresh", "pushes", "repository", "branch")) or isinstance(n.get('after'), list) for n in ir.get("nodes", []))
             or bool((embedded_args or {}).get("rejudge")))
 
 
@@ -3005,9 +3005,9 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     if modern or replay_state is not None:
         import hashlib
         packed_state = json.dumps(replay_state or {}, ensure_ascii=True, sort_keys=True, separators=(',', ':'), allow_nan=False)
-        a('const REPLAY_STATE = ' + packed_state + ';')
+        a('const REPLAY_STATE = JSON.parse(' + js_str(packed_state) + ');')
         a('const REPLAY_STATE_SHA256 = ' + json.dumps(hashlib.sha256(packed_state.encode('utf-8')).hexdigest()) + ';')
-        a("for (const key of ['_memo', '_prefix']) if (Object.prototype.hasOwnProperty.call(A, key)) throw new Error('compiled replay state cannot be overridden inline: ' + key)")
+        a("for (const key of ['_memo', '_prefix', '_capture', '_ledgerCalls']) if (Object.prototype.hasOwnProperty.call(A, key)) throw new Error('compiled replay state cannot be overridden inline: ' + key)")
         a("Object.assign(A, REPLAY_STATE)")
     if embedded_args is not None:
         a("for (const key of Object.keys(A)) if (!key.startsWith('_')) throw new Error('embedded launch argument cannot be overridden inline: ' + key)")
@@ -3479,7 +3479,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     if tree_guard:
         extra += ", tree: TREE"
     if modern:
-        extra += ", memoRecords: MEMO_RECORDS, callRecords: CALL_RECORDS, rejudges: REJUDGES"
+        extra += ", replayProtocolVersion: 1, resumeMode: CAPTURE ? 'captured-prefix' : 'native', resumeSource: CAPTURE ? CAPTURE.source : null, ledgerReplays: LEDGER_REPLAYS, memoRecords: MEMO_RECORDS, callRecords: CALL_RECORDS, rejudges: REJUDGES"
         if any(n.get('pushes') for n in nodes):
             extra += ", pushAssuranceVersion: 1, pushReadNonce: A._replayLaunchNonce, pushChecks: PUSH_CHECKS"
         if not prove_nodes and not repair_loops(ir):
@@ -4271,16 +4271,23 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
             # the whole failure this is here to prevent.
             a(f"const old_{key} = legacyLedgerKey({js_str(nid)}, {prompt})")
             a(f"const hit_{key} = {key} in LEDGER ? {key} : old_{key} in LEDGER ? old_{key} : null")
+            a(f"const conflict_{key} = Object.entries(LEDGER).some(([savedKey, row]) => savedKey !== {key} && savedKey !== old_{key} && (savedKey.startsWith(campaign + '|' + {js_str(nid)} + '|') || row && row.campaign === campaign && row.node === {js_str(nid)}))")
+            a(f"if (conflict_{key}) {{ note({js_str(nid)}, 'LEDGER-CONFLICT', 'prior effect for this campaign/node has a different prompt key; use a new campaign/node identity for new intent'); return summary('LEDGER-CONFLICT') }}")
+            if replay_runtime:
+                a(f"const sources_{key} = A._ledgerCalls || {{}}")
+                a(f"const source_{key} = sources_{key}[{key}] || sources_{key}[old_{key}]")
+                a(f"if (Object.entries(sources_{key}).some(([savedKey, row]) => row.node === {js_str(nid)} && savedKey !== {key} && savedKey !== old_{key}) || source_{key} && (!hit_{key} || source_{key}.resultSha256 !== sha256(canonical(LEDGER[hit_{key}].result)))) {{ note({js_str(nid)}, 'LEDGER-CONFLICT', 'known effect history is missing, changed or has a different prompt key'); return summary('LEDGER-CONFLICT') }}")
             a(f"const replayed_{var} = hit_{key} !== null")
             a(f"let {raw}")
             a(f"if (replayed_{var}) {{")
             a(f"  log(`REPLAYED-FROM-LEDGER at {nid}: already recorded against this "
               f"campaign — the effect is not performed again`)")
             a(f"  note({js_str(nid)}, 'REPLAYED', 'once-only ledger hit; effect not repeated')")
-            stored = f"LEDGER[hit_{key}].result"
+            a(f"  {raw} = LEDGER[hit_{key}].result")
+            if replay_runtime:
+                a(f"  {raw} = ledgerReplay({js_str(nid)}, {prompt}, {opts(n, ir, phase, label)}, {raw}, hit_{key})")
             if worktree_base_node(n):
-                stored = f"checkedBase({stored}, {opts(n, ir, phase, label)})"
-            a(f"  {raw} = {stored}")
+                a(f"  {raw} = checkedBase({raw}, {opts(n, ir, phase, label)})")
             a("} else {")
             a(f"  if (!confirmed({js_str(nid)})) {{")
             a(f"    note({js_str(nid)}, 'REFUSED', 'irreversible node not named in confirm')")
@@ -5000,12 +5007,14 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
                         _resumeFromRunId=run_id, _resumeArtifactSha256=source_sha, _priorResults=source.get('results') or {}, _ledger={}, _releases={})
     if source.get('ledger'):
         runtime_args['_ledger'] = {r['key']: r for r in source['ledger'] if isinstance(r, dict) and 'key' in r}
+    if any(n.get('irreversible') for n in ir['nodes']):
+        runtime_args['_ledger'] = {r['key']: r for r in _sibling('ledger').read(root) if r.get('campaign') == ir['campaign'] and r.get('key')}
     readings = [r.get('verifiedReading') for r in replay.get('_memo', {}).values()]
     readings += [r.get('tree', (r.get('payload') or {}).get('tree')) for r in replay.get('_memo', {}).values()]
     readings += [r for r in (source.get('tree') or {}).get('checks', []) if isinstance(r, dict) and r.get('tip')]
     readings = [r for r in readings if isinstance(r, dict)]
-    runtime_args.pop('_memo', None)
-    runtime_args.pop('_prefix', None)
+    for key in ('_memo', '_prefix', '_capture', '_ledgerCalls'):
+        runtime_args.pop(key, None)
     def render(shape, inputs, state):
         compiled = emit(shape, contracts, imports_resolved, specification=specification, embedded_args=inputs, replay_state=state)
         try:
@@ -5064,6 +5073,8 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
             status, cause = 'prefix', 'unchanged runtime call prefix'
         elif record and record['mode'] == 'memo':
             status, cause = 'memo if the live read matches', 'same inputs and replayed ancestors; branch reading still required'
+        elif record and record['mode'] == 'ledger':
+            status, cause = 'ledger', 'once-only result restored; effect will not execute'
         else:
             status = 'live'
             if nid in (public_args.get('rejudge') or {}):
@@ -5176,8 +5187,9 @@ def main():
         if args.replay_state:
             with open(args.replay_state, encoding='utf-8') as fh:
                 replay_state = json.load(fh, object_pairs_hook=spec_mod.unique_keys)
-            if not isinstance(replay_state, dict) or set(replay_state) - {'_memo', '_prefix'}:
-                raise ValueError('--replay-state must contain only harness _memo and _prefix fields')
+            if not isinstance(replay_state, dict) or set(replay_state) - {'_memo', '_prefix', '_capture', '_ledgerCalls'}:
+                raise ValueError('--replay-state must contain only harness replay fields')
+            _sibling('replay_memo').verify_capture_state(args.gates_root, replay_state, compiler_version(), args.projects)
         if args.args and args.args != "none":
             with open(args.args, encoding="utf-8") as fh:
                 embedded_args = json.load(fh, object_pairs_hook=spec_mod.unique_keys)

@@ -926,7 +926,12 @@ def main():
     if native_binding_problems:
         claim += '; NATIVE-COMMAND-UNBOUND'
     if replay_checked:
-        claim += "; REPLAYED-MEMO " + ", ".join(r["node"] for r in replay_checked)
+        memo_nodes = [r['node'] for r in replay_checked if r.get('kind') != 'ledger']
+        ledger_nodes = [r['node'] for r in replay_checked if r.get('kind') == 'ledger']
+        if memo_nodes:
+            claim += '; REPLAYED-MEMO ' + ', '.join(memo_nodes)
+        if ledger_nodes:
+            claim += '; LEDGER-RESTORED ' + ', '.join(ledger_nodes)
     for rejudge in rejudges:
         detail = json.dumps({k: rejudge.get(k, "") for k in ("gate", "nonce", "reason", "note")}, ensure_ascii=False)
         claim += "; REJUDGED " + detail.replace("|", "&#124;")

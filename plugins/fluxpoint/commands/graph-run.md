@@ -91,14 +91,16 @@ Workflow tool requires.
    Both checks enforce the Workflow limit of 524,288 UTF-8 bytes and print
    headroom; below 16 KiB is a warning. `--max-script-bytes` overrides the
    limit only when the selected launcher supports the new limit.
-   For a campaign carrying repair notes or other non-underscore args, write
-   those values to a JSON object and assemble the first launch with:
+   For an irreversible campaign, or one carrying repair notes or other public
+   args, write the initial values to a JSON object (`{}` when empty) and
+   assemble the first launch with:
    ```
    bash "$ROOT/scripts/py.sh" resume.py --root <project-root> --graph <graph> --args initial-args.json
    ```
    This prints a Workflow object on stdout, embeds the complete note text in
    the script, checks pinned evidence, loads launch state and verifies the
-   exact compiled file. Diagnostics go to stderr. The compiler archives the
+   exact compiled file. This also retains the source and input authority needed
+   for captured-prefix resumes across ledger hits. Diagnostics go to stderr. The compiler archives the
    source under `.claude/fluxpoint/compiled/`; retain it with the run artifacts.
    Direct `compile-graph.py --args <file>` also embeds args, refuses underscore
    fields and inline overrides, and counts every byte toward the script limit.
@@ -293,6 +295,15 @@ Workflow tool requires.
    endings; `--set-json` supplies structured values such as `rejudge`.
    It prints the compiler's deterministic per-node rerun plan to stderr before
    returning the Workflow object on stdout. Read that plan before dispatch.
+   Use that object unchanged. Receipt-enabled graphs start a fresh native
+   Workflow run and restore their verified unchanged prefix locally. Their
+   internal source run/artifact IDs retain provenance. An irreversible
+   ledger hit consumes only a matching verified logical source slot, and
+   never calls its effect agent to preserve a native cache position. A
+   changed prompt key, changed source-known result or missing source-known
+   ledger receipt refuses as `LEDGER-CONFLICT`; carried confirmation does
+   not authorize repeating it. New effect intent requires a distinct node
+   or campaign identity and its explicit confirmation.
    It retains the original `_launch`, refreshes `_base`, `_ledger` and
    `_releases`, and loads replay receipts from the original journal and
    transcripts. `_resumeArtifactSha256` pins the exact source attempt, including

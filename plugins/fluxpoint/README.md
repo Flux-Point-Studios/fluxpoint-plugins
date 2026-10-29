@@ -280,6 +280,9 @@ trees; fresh nodes rerun, and gate-only rejudging preserves the checked work.
 Declared pushes have before/after remote-head checks that halt on undeclared
 changes. Resume plans compare opt-ins with a serial render using recorded
 outputs and costs, and name unknown costs.
+Receipt-enabled resumes restore verified prefix results locally in a fresh
+native run. Once-only ledger hits retain their logical slots; conflicting
+effect history refuses before a repeated dispatch.
 The [graph-engineering reference](skills/graph-engineering/SKILL.md) defines
 these fields, the accepted shapes and their compile-time restrictions.
 

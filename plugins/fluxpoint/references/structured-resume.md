@@ -13,8 +13,11 @@ bash "$ROOT/scripts/py.sh" resume.py --root /checkout --graph WORK.md --run wf_p
 
 Set `ROOT` to the installed plugin directory. Its `scripts/py.sh` wrapper
 selects a supported interpreter on the current platform.
-stdout contains only the Workflow JSON object, including `scriptPath`, launch
-`args` and, on resume, `resumeFromRunId`. The deterministic compiler plan,
+stdout contains only the Workflow JSON object, including `scriptPath` and launch
+`args`. Receipt-enabled graphs start a fresh native Workflow on resume;
+source run and immutable attempt identity remain internal provenance fields.
+Historical ordinary serial graphs without that protocol retain native
+`resumeFromRunId`. The deterministic compiler plan,
 compile result and exact-file size check go to stderr. Read the plan before
 launching. `--out` selects another generated script path. `--projects` selects
 the runtime projects directory when its journals live outside the default
@@ -84,8 +87,41 @@ Windows path cannot be resolved by a Linux launcher.
 
 Resume keeps the recorded `_launch` stamp intact. `_base` is read fresh from
 Git; required irreversible ledgers and actor release maps are freshly loaded.
-Every invocation gets a fresh `_replayLaunchNonce`. The harness rereads completed journal calls and transcripts to build `_memo` and `_prefix`, then embeds that compact replay state in the compiled source behind `REPLAY_STATE_SHA256`. The Workflow object carries neither map; compiled scripts refuse an inline replacement. Memo transport carries prompt/payload hashes, results and source identities, without repeating the resolved prompts. A local compiler input file supplies state through `--replay-state`; it is a harness input, outside public arguments. The compiler's `--plan` owns replay decisions and rejects
-unknown or unreached rejudge gates. For ordinary serial graphs, the plan compares the actual rendered call prompts and options with the recorded prefix, marks calls before the first change as `prefix`, and marks later calls `live`. The plan is retained under `.claude/fluxpoint/plans/`; the launch and run summary carry its path and SHA-256, and recording verifies both the retained bytes and their argument digest. A tree-moving repair still halts
+Every invocation gets a fresh `_replayLaunchNonce`. The harness rereads completed
+journal calls and transcripts to build a versioned captured prefix, per-node
+memos and ledger history. The compiled `REPLAY_STATE` holds exact JSON result
+values in a deduplicated pool, prompt/options fingerprints and immutable source
+identities. Ordered result encoding preserves downstream `JSON.stringify`
+prompts, including object property order. The whole capsule is limited to
+128 KiB; a result is never partly copied. The compiler also checks the full
+generated script size. Missing legacy receipts, incomplete calls, null results,
+foreign-artifact content or a capacity boundary end the available prefix.
+
+The Workflow object carries no replay maps, and compiled scripts refuse inline
+replacements. A local compiler input file supplies state through
+`--replay-state`; compilation rebuilds and verifies it from its source before
+embedding it behind `REPLAY_STATE_SHA256`. Unchanged prefix calls return locally
+from these verified values. The first changed, fresh, rejudged or forked call
+closes the prefix and runs through the normal native agent API. A new outer
+Workflow invocation prevents that live suffix from consulting an old native
+cache position. Native agent counts and tools describe newly executed work;
+plugin receipts describe local reuse. Recording recursively verifies both.
+
+A once-only ledger hit never calls its effect agent. It consumes the next
+captured slot only when the node, original prompt, full options and result match,
+retaining a logical call receipt for subsequent resumes. Otherwise the prefix
+closes. Old ledger-only sources can restore a recorded effect while the suffix
+runs live; summaries explicitly mark their missing replay proof. A known effect
+whose ledger receipt is lost, whose result differs or whose current prompt key
+changes halts `LEDGER-CONFLICT`, even with carried confirmation. Use a reviewed
+new campaign or node identity for different intent.
+
+The compiler's `--plan` owns replay decisions and rejects unknown or unreached
+rejudge gates. It compares rendered prompts and options with the verified
+prefix, marks calls before the first change as `prefix`, and marks later calls
+`live`. The plan is retained under `.claude/fluxpoint/plans/`; the launch and run
+summary carry its path and SHA-256, and recording verifies both the retained
+bytes and their argument digest. A tree-moving repair still halts
 `TREE-MOVED`; start a fresh run after reviewing the changed tree.
 
 Embedded context has the same authority as inline context. It does not extend

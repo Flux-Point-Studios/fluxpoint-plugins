@@ -1,6 +1,7 @@
 """Canonical latest run records with immutable, full-hash attempt snapshots."""
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -53,7 +54,19 @@ def read(root, run_id, artifact_sha256=None):
     digest = hashlib.sha256(data).hexdigest()
     if artifact_sha256 is not None and digest != artifact_sha256:
         raise ValueError('run artifact SHA-256 mismatch: ' + run_id)
-    row = json.loads(data.decode('utf-8'))
+    def pairs(items):
+        out = {}
+        for key, value in items:
+            if key in out:
+                raise ValueError('duplicate JSON key in source artifact: ' + key)
+            out[key] = value
+        return out
+    def finite(text):
+        number = float(text)
+        if not math.isfinite(number):
+            raise ValueError('non-finite JSON number in source artifact')
+        return number
+    row = json.loads(data.decode('utf-8'), object_pairs_hook=pairs, parse_float=finite, parse_constant=finite)
     if not isinstance(row, dict) or row.get('runId') != run_id or not isinstance(row.get('summary'), dict):
         raise ValueError('source artifact has no matching run id and summary')
     return row, digest
