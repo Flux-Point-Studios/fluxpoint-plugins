@@ -119,7 +119,7 @@ rows.append(dict(rows[0], rep=9, score=0.0, error="rate limited"))
 with open(os.path.join(out, "results.jsonl"), "w") as f:
     f.writelines(json.dumps(r) + "\n" for r in rows)
 proc = subprocess.run([sys.executable, RUN, "--report", out, "--json"], capture_output=True, text=True)
-rep = json.loads(proc.stdout)
+rep = json.loads(proc.stdout)["configs"]
 check("report: errored runs excluded, mean over graded runs",
       len(rep) == 1 and rep[0]["test"]["n"] == 2 and abs(rep[0]["test"]["score"] - 0.75) < 1e-9, rep)
 

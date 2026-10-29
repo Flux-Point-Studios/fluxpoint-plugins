@@ -122,5 +122,8 @@
       "claim": "Were fixtures changed after seeing model output?",
       "resolution": "Yes, before the recorded sweep: pilot runs exposed unseeded real defects in some red-team fixtures and a ceiling in the builder cases. Fixtures were corrected and harder builder cases added before any recorded run; no fixture changed during or after it."
     }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/bench/effort"
   ]
 }
