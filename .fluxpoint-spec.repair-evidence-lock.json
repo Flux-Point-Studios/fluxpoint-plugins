@@ -4,7 +4,7 @@
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/contracts/DecisionV1.schema.json": "0bb4ce05a8919b3d6bd949e22f10b155a4580f74f26a4cfd510b5cdd0daaaaac",
-    "plugins/fluxpoint/scripts/compile-graph.py": "7012d38d1c7313362f4f270b2cb1b7a774e93e078c36c7d275ca77a1ff1a2a29",
+    "plugins/fluxpoint/scripts/compile-graph.py": "900a0452199e53ca8bb28344b82529bbc8582c4abd58a7d21bc6a3d98b7bb3c7",
     "plugins/fluxpoint/scripts/decision.py": "396a1048fc8e34c03182ee674a0645b55f828d5a07ae8d8ce59523ab484adebd",
     "plugins/fluxpoint/scripts/native_binding.py": "7624b76a1d6367b8898544a1b33d698865ae3ba23b8fcebd7f4918a731d8625d",
     "plugins/fluxpoint/scripts/record-run.py": "587c833d311ae7dd1b02a8a8f5a443c34d10bdc8f478411ca51ceba01b7af739",

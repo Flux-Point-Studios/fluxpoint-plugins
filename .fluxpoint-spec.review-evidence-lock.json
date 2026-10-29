@@ -18,7 +18,7 @@
     "plugins/fluxpoint/contracts/SliceV1.schema.json": "3471ce068c825f6684cd64f8469e282b097b33da6487a95ff88b0ca000a88cef",
     "plugins/fluxpoint/contracts/TreeCheckV1.schema.json": "fce67697c572aa1df0320e64a4eb4963c03dccac5f7538d65875c247e5e87fbc",
     "plugins/fluxpoint/contracts/VerdictV1.schema.json": "ce1d11d9db6b45a3786f25963ad8ca5d2f979fef63cd6dfcc374bde8ac7853f3",
-    "plugins/fluxpoint/scripts/compile-graph.py": "7012d38d1c7313362f4f270b2cb1b7a774e93e078c36c7d275ca77a1ff1a2a29",
+    "plugins/fluxpoint/scripts/compile-graph.py": "900a0452199e53ca8bb28344b82529bbc8582c4abd58a7d21bc6a3d98b7bb3c7",
     "plugins/fluxpoint/scripts/record-run.py": "587c833d311ae7dd1b02a8a8f5a443c34d10bdc8f478411ca51ceba01b7af739",
     "plugins/fluxpoint/tests/review-gate-evidence-test.py": "91171f78c6f49700c2799b53d5dc7ec536ee5be403e525ca008587f9e7856893"
   },
