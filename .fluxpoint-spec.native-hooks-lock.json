@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "sha256": "35c24b0b9ccd6a290842d4888034e1063128e87e780c90c3164b7a5f23d60d13",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/hooks/codex-hooks.json": "d8a5d2e3442f245856df18bcef0e49d8137030f1ec74119d4525375774708fb1",
+    "plugins/fluxpoint/hooks/hooks.json": "0eb2bbba7c070f5b7a100e994817bb26fc117958507e65e6529823f11248fe1f",
+    "plugins/fluxpoint/plugin.json": "36f17f07aa362d068284deaf2dbf1b86e6d4a5b27b87db083591d73e14e372bf",
+    "plugins/fluxpoint/scripts/attest.py": "b179a0e292df9952c2377f62bbdc19b5f65f9e1c325fb00c4899f197aa14ee77",
+    "plugins/fluxpoint/scripts/native-hook.mjs": "7a317224f26312425cc5329a036d3db80a973656204796fe6bbb61c6bb9f92d8",
+    "plugins/fluxpoint/scripts/native-hook.py": "5e910937d3023840ca614cde0c5ed85f129b07aa4d581072e2567adfeabae165",
+    "plugins/fluxpoint/scripts/plugin_identity.py": "df1496a927c14abcf314c08d0c839cdcac31b834b5842d329a84cc46ea743895",
+    "plugins/fluxpoint/scripts/secret-guard.py": "3872bcdebabeab2c5ad8bfe88db96a0033325f76bef7da1204e443becd09b6dc",
+    "plugins/fluxpoint/tests/native-hook-test.py": "3243d8b65ff0468e3500e953bb1c027082fc9393854cdad1853f7e95049fecfa"
+  },
+  "lockFormat": 2
+}

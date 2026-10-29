@@ -54,8 +54,9 @@ the terms in section 5 of [LICENSE](LICENSE).
   against the CLI and CI, and label historical APIs in design records. Use
   [the audit map](docs/documentation-audit.md) to find the implementation and
   regression suite behind a documented claim.
-- **Executable bits.** Hooks are invoked through `bash`, so a stripped bit
-  cannot disarm them, but keep the bits correct for direct runs:
+- **Executable bits.** Shell hooks are invoked through `bash`; Claude native
+  hooks use a Node executable plus explicit arguments. Keep shell bits correct
+  for direct runs:
   `git update-index --chmod=+x $(git ls-files '*.sh')`. CI checks this.
 - **Line endings.** `.gitattributes` pins LF for everything the plugins
   execute or parse.

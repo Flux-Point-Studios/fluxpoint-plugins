@@ -12,7 +12,7 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 |---|---|
 | Set up and test this checkout | [Development setup](development-setup.md), [contributing](../CONTRIBUTING.md) |
 | Install and initialize a consuming repo | [Install](../README.md#install), [init command](../plugins/fluxpoint/commands/init.md) |
-| Understand Claude Code and Codex support | [Runtimes](runtimes.md) |
+| Understand Claude Code, Codex and native hook prerequisites | [Runtimes](runtimes.md) |
 | Specify implementation work | [Spec-first contract](spec-first.md), [packet format](../plugins/fluxpoint/references/spec-format.md), [grill-me](../plugins/fluxpoint/commands/grill-me.md) |
 | Drive and finish a loop | [Loop engineering](../plugins/fluxpoint/skills/loop-engineering/SKILL.md) |
 | Design a graph, lanes, joins, checked pushes and replay cost comparisons | [Graph engineering](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |

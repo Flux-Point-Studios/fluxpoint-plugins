@@ -44,7 +44,7 @@ class Identity(unittest.TestCase):
 
     def test_preflight_refuses_entrypoint_helper_and_missing_installation(self):
         plugin = self.installation(); pin = plugin_identity.current(plugin)
-        for relative in ('scripts/attest.py', 'scripts/py.sh', 'scripts/process_tree.py'):
+        for relative in ('scripts/attest.py', 'scripts/py.sh', 'scripts/process_tree.py', 'scripts/native-hook.mjs'):
             target = plugin / relative; original = target.read_bytes()
             target.write_bytes(original + b'\n# drift\n')
             with self.assertRaisesRegex(ValueError, 'PLUGIN-PIN.*changed'): plugin_identity.verify(pin)

@@ -27,6 +27,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install pinned native Claude for hook integration
+        run: |
+          npm install --global --ignore-scripts @anthropic-ai/claude-code-win32-x64@2.1.312
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path (npm root -g) '@anthropic-ai/claude-code-win32-x64/claude.exe'
+          if (!(Test-Path $binary)) { throw "Native Claude executable was not installed" }
+          & $binary --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "FPL_CLAUDE_BINARY=$binary" >> $env:GITHUB_ENV
+      - name: Exercise native hook pipes and real runtime timeouts (no model calls)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python plugins/fluxpoint/tests/native-hook-test.py --live
       - name: Exercise specification and process cleanup
         env:
           PYTHONIOENCODING: utf-8

@@ -19,7 +19,7 @@ def current(root=None):
     digest = hashlib.sha256()
     # Bind the transitive witness helpers as well as the two entry points.
     for path in sorted(scripts.iterdir()):
-        if path.is_file() and path.suffix in ('.py', '.sh'):
+        if path.is_file() and path.suffix in ('.py', '.sh', '.mjs'):
             digest.update(path.name.encode('utf-8') + b'\0' + path.read_bytes() + b'\0')
     return {'root': str(root), 'version': version, 'attestSha256': _hash(scripts / 'attest.py'),
             'launcherSha256': _hash(scripts / 'py.sh'), 'scriptsSha256': digest.hexdigest()}

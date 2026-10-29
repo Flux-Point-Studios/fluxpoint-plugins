@@ -8,9 +8,9 @@ another project, use [the installation instructions](../README.md#install) and
 
 - Bash, Git and Python 3.9 or newer (`python3` or `python`). On Windows,
   Bash scripts need Git Bash; native Python suites also run in PowerShell CI.
-- Node.js 18 or newer for Substrate and generated JavaScript checks. Linux
+- Node.js 18 or newer for native Claude hooks, Substrate and generated JavaScript checks. Linux
   CI uses Python 3.11 and Node.js 22; Windows CI uses Python 3.9 and Node.js 22.
-- Claude Code on `PATH`: the full harness calls `claude plugin validate .`
+- Native Claude Code 2.1.312 or newer on `PATH` (or `FPL_CLAUDE_BINARY`): the full harness calls `claude plugin validate .`
   even when development takes place in Codex. Install it using the
   [official instructions](https://code.claude.com/docs/en/setup).
 - `jq` is optional locally; hook scripts have a Python fallback. Linux CI
@@ -85,7 +85,10 @@ requires glibc 2.39. Other Lean/Z3 versions are not covered by this smoke test.
 [Woodpecker](../.woodpecker.yaml) runs the full Linux harness, executable-bit
 checks and native Blaster smoke independently. [Windows CI](../.github/workflows/windows-specification.yml)
 runs selected specification, cleanup, health, replay, resume and repair suites
-plus a read-only real machine sample. A passing local Linux harness does not
+plus a read-only real machine sample and native hook pipe/forced-timeout tests.
+The hook suite installs pinned Claude2.1.312 and uses `--init-only`; it makes no
+model calls and needs no model credentials. Locally run
+`python plugins/fluxpoint/tests/native-hook-test.py --live` for that integration. A passing local Linux harness does not
 establish that the remote jobs or Windows load scenarios passed.
 
 Cloud environment install/start configuration is saved in the environment's

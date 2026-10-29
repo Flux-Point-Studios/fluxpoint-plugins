@@ -271,6 +271,8 @@ report("every plugin path the skill cites resolves", not missing,
 # skill discusses as a hook must either BE wired, or say that it is not.
 with open(HOOKS, encoding="utf-8") as fh:
     wiring = fh.read()
+with open(os.path.join(PLUGIN, "scripts", "native-hook.mjs"), encoding="utf-8") as fh:
+    wiring += fh.read()
 overclaimed = []
 for para in re.split(r"\n\s*\n|\n(?=- )", src):
     if "hook" not in para:

@@ -544,6 +544,10 @@ at start to include a slice in the corresponding `metrics.py --campaign` view.
 moves local state under `.claude/fluxpoint/`, and rewires settings. Until
 then the hooks still honor `LOOP.md`, so nothing breaks mid-migration.
 
+Claude hooks require native Claude Code 2.1.312+ and Node.js 18+; they launch
+the secret guard and attestation without a shell, with bounded private pipes.
+Codex retains its explicit portable hook descriptor. See [runtime requirements](../../docs/runtimes.md#native-python-hooks-on-claude-code).
+
 Requires Bash, `git` and Python 3.9 or newer, reached as either `python3` or `python` — the
 latter is what a standard Windows install provides. Scripts are invoked
 through `scripts/py.sh`, which resolves the name and pins UTF-8 stdio. `jq`
