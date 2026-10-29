@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "RFC 4180-style CSV parser with quoting, CRLF, embedded newlines and strict errors",
+  "prompt": "Implement `parse(text)` in csvlite.py exactly as SPEC.md describes. Do not import the csv module."
+}

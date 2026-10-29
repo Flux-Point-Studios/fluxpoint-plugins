@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "largest-remainder split of an integer amount with conservation and deterministic ties",
+  "prompt": "Implement `split(amount, weights)` in ledger.py exactly as SPEC.md describes."
+}

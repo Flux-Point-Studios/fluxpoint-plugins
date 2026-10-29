@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "deterministic topological order with cycle reporting",
+  "prompt": "Implement `order(deps)` and the `CycleError` exception in topo.py exactly as SPEC.md describes."
+}

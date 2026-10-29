@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "goal": "Measure per-role effort and model choice on graded held-out cases with metered usage, and record the resulting curve in DESIGN-NOTES",
+  "asset": "Feature-template role settings (architect, builder, red-team), the sweep.py split, and the effort record in DESIGN-NOTES",
+  "scope": [
+    "Role-shaped graded cases for builder, red-team and architect with reference answers",
+    "A runner that calls authenticated headless Claude Code per (model, effort, case, rep) and records metered usage",
+    "A case-clustered paired comparison against each role's shipped setting, with the cheaper pick chosen on train only",
+    "A recorded sweep, its reading in DESIGN-NOTES, and the shipped role defaults the held-out results support"
+  ],
+  "outOfScope": [
+    "Whole-campaign sweeps through /fluxpoint:graph-run (council, judges, repair rounds and harness gates)",
+    "Changing the cost model's assumed multipliers in compile-graph.py",
+    "Choosing a model per role in shipped templates"
+  ],
+  "decisions": [
+    {
+      "id": "role-level-measurement",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should #67 measure per-role effort and model choice with real usage?",
+        "options": [
+          {
+            "option": "role-shaped-calls",
+            "argued_by": "model",
+            "strongest_objection": "One role call in isolation can be easier than the same role inside a campaign, so a flat curve may not transfer"
+          },
+          {
+            "option": "full-campaign-sweep",
+            "argued_by": "model",
+            "strongest_objection": "A binary harness score needs about 93 held-out runs per variant to see a 20-point difference, at tens of millions of tokens per variant"
+          }
+        ],
+        "chosen": "role-shaped-calls",
+        "rationale": "Graded scores per role resolve far smaller differences per run than a pass/fail campaign, the meter reports real cost per call, and the existing sweep.py split keeps the selection honest.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "plugins/fluxpoint/DESIGN-NOTES.md, the sample-size arithmetic for a binary campaign score",
+          "Issue #67 asks for a per-role effort and model grid recorded in DESIGN-NOTES"
+        ]
+      },
+      "costs": [
+        {
+          "option": "role-shaped-calls",
+          "cost": "About 700 metered headless calls for a 3 x 3 grid over 26 cases at 3 repetitions",
+          "basis": "measured",
+          "evidence": [
+            "Pilot runs reported total_cost_usd between 0.003 and 0.15 per call"
+          ]
+        },
+        {
+          "option": "full-campaign-sweep",
+          "cost": "About 32.6M estimated tokens for a four-variant plan that resolves only a 40-point difference",
+          "basis": "estimate",
+          "evidence": [
+            "sweep.py --plan over the feature template, recorded in DESIGN-NOTES"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "graders-separate",
+      "statement": "Every case's grader scores its reference answer 1.0 and a stub below 1.0, and seed or decoy markers never reach the fixture the model reads",
+      "decisions": [
+        "role-level-measurement"
+      ],
+      "checks": [
+        "effort-bench-tests"
+      ],
+      "counterexample": "A red-team grader that scores a decoy finding as a hit, or a builder case whose hidden tests the reference fails"
+    },
+    {
+      "id": "honest-selection",
+      "statement": "The split is stratified by role and holds out cases of every role, and the cheaper pick is chosen from train-split differences only",
+      "decisions": [
+        "role-level-measurement"
+      ],
+      "checks": [
+        "effort-bench-tests"
+      ],
+      "counterexample": "A pick that reads test-split scores, or a role with no held-out case"
+    },
+    {
+      "id": "metered-record",
+      "statement": "Every graded run in the recorded sweep names the model that served it and carries the meter's cost, and the report excludes errored runs",
+      "decisions": [
+        "role-level-measurement"
+      ],
+      "checks": [
+        "effort-bench-tests"
+      ],
+      "counterexample": "A recorded run served by a fallback model counted under the requested model, or an errored run graded as a zero"
+    }
+  ],
+  "checks": [
+    {
+      "id": "effort-bench-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/effort-bench-test.py"
+      ],
+      "scope": "Every bench case's grader against its reference and a stub, grading rules, split, report, and the integrity of the recorded sweep file",
+      "assumptions": [
+        "Graded role calls in isolation stand in for the same role inside a campaign only as far as DESIGN-NOTES states",
+        "The recorded results file is the output of run.py --run against an authenticated Claude Code; the check verifies its internal consistency, not that the calls happened"
+      ],
+      "timeoutSeconds": 600
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Do isolated role calls show what a campaign needs?",
+      "resolution": "No. They bound what one call of each role needs on cases of this size. DESIGN-NOTES states that limit beside the curve, and shipped defaults change only where the held-out cases support it."
+    },
+    {
+      "claim": "Were fixtures changed after seeing model output?",
+      "resolution": "Yes, before the recorded sweep: pilot runs exposed unseeded real defects in some red-team fixtures and a ceiling in the builder cases. Fixtures were corrected and harder builder cases added before any recorded run; no fixture changed during or after it."
+    }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/bench/effort"
+  ]
+}

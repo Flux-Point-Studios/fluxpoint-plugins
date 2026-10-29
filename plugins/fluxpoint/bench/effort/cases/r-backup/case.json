@@ -1,0 +1,5 @@
+{
+  "role": "red-team",
+  "summary": "backup job runner: shell injection through a branch name and archive extraction escaping the target; shlex-quoted path is a decoy",
+  "prompt": "Red-team review the backup and restore helpers in this repository (backup.py). Inputs arrive from a web form any logged-in user can submit. Assets: the host running the job."
+}

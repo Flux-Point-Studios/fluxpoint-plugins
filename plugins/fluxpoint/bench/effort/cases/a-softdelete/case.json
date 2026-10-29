@@ -1,0 +1,41 @@
+{
+  "role": "architect",
+  "summary": "soft delete: schema, repository read paths incl. search and export, purge job; analytics counts are a trap",
+  "prompt": "Plan this change: deleting a document must become a soft delete (recoverable for 30 days), and every existing read path must stop returning soft-deleted documents. A nightly job purges documents deleted more than 30 days ago.",
+  "truth": {
+    "files": [
+      "docs/export.py",
+      "docs/jobs.py",
+      "docs/repo.py",
+      "docs/schema.sql",
+      "docs/search.py"
+    ],
+    "risks": [
+      {
+        "id": "missed-read-path",
+        "any": [
+          "search",
+          "export"
+        ]
+      },
+      {
+        "id": "existing-rows-migration",
+        "any": [
+          "migrat",
+          "alter table",
+          "existing (rows|data|documents)"
+        ]
+      },
+      {
+        "id": "purge-boundary",
+        "any": [
+          "30 days",
+          "time ?zone",
+          "utc",
+          "clock",
+          "boundary"
+        ]
+      }
+    ]
+  }
+}

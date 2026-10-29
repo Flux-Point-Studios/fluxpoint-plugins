@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "multi-file: cursor pagination with tie-safe ordering, signed cursors and a versioned response for an old client",
+  "prompt": "Implement the change described in TASK.md in this repository."
+}

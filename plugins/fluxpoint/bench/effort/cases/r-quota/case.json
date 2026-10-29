@@ -1,0 +1,5 @@
+{
+  "role": "red-team",
+  "summary": "storage quota: negative size lets a user grow quota and the check reads usage before a concurrent write; Decimal conversion is a decoy",
+  "prompt": "Red-team review the upload quota accounting in this repository (quota.py). Assets: each tenant's storage quota and the shared disk."
+}

@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "multi-file: soft delete with restore and purge, every read path filtered, in-place migration",
+  "prompt": "Implement the change described in TASK.md in this repository."
+}

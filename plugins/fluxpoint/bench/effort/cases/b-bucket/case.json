@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "per-key token bucket with an injected clock, exact refill and bounded memory",
+  "prompt": "Implement the `Limiter` class in bucket.py exactly as SPEC.md describes."
+}

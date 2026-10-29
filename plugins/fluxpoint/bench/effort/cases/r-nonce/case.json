@@ -1,0 +1,5 @@
+{
+  "role": "red-team",
+  "summary": "signed command relay: chain id missing from the signed digest, used nonces lost on restart; int nonce parse is a decoy",
+  "prompt": "Red-team review the signed command relay in this repository (relay.py). Assets: treasury transfers authorised by the operator key."
+}

@@ -48,7 +48,7 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
       "effort": "medium"
     },
     "builder": {
-      "effort": "high"
+      "effort": "medium"
     },
     "proof": {
       "agentType": "proof-auditor",
@@ -56,7 +56,7 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
     },
     "red-team": {
       "agentType": "red-team-reviewer",
-      "effort": "high"
+      "effort": "medium"
     }
   },
   "lists": {

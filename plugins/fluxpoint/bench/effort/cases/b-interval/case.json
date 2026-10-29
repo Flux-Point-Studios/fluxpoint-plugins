@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "half-open integer interval set with merge, subtract, membership and gaps",
+  "prompt": "Implement the `IntervalSet` class in intervals.py exactly as SPEC.md describes."
+}

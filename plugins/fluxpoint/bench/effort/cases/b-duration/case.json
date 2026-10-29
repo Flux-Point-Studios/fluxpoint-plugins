@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "strict duration parser and formatter with exact millisecond arithmetic",
+  "prompt": "Implement `parse(text)` and `format_ms(ms)` in duration.py exactly as SPEC.md describes."
+}

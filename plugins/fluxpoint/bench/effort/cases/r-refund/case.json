@@ -1,0 +1,5 @@
+{
+  "role": "red-team",
+  "summary": "refund service: double refund via retry and unit mismatch; constant-time compare and lock order are decoys",
+  "prompt": "Red-team review the refund service in this repository (refunds.py). Assets: merchant balances and customer refunds."
+}

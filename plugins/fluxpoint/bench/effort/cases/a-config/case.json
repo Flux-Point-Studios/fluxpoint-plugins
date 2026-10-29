@@ -1,0 +1,42 @@
+{
+  "role": "architect",
+  "summary": "config hot reload: loader validation, signal wiring, atomic swap, rejecting immutable keys; logging setup is a distractor",
+  "prompt": "Plan this change: the worker must reload config.toml on SIGHUP without restarting. A reload that fails validation must keep the old config running. Database connection settings cannot change at runtime and must be rejected in a reload.",
+  "truth": {
+    "files": [
+      "worker/config.py",
+      "worker/main.py"
+    ],
+    "risks": [
+      {
+        "id": "signal-safety",
+        "any": [
+          "signal handler",
+          "async-signal",
+          "flag",
+          "main loop",
+          "reentran",
+          "thread"
+        ]
+      },
+      {
+        "id": "keep-old",
+        "any": [
+          "keep.{0,30}old",
+          "previous config",
+          "old config",
+          "fall ?back",
+          "atomic"
+        ]
+      },
+      {
+        "id": "immutable-db",
+        "any": [
+          "db.{0,30}(immutable|cannot change|reject)",
+          "reject.{0,40}(db|database)",
+          "(database|db) (url|settings).{0,40}(differ|chang)"
+        ]
+      }
+    ]
+  }
+}

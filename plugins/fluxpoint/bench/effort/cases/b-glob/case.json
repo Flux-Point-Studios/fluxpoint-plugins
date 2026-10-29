@@ -1,0 +1,5 @@
+{
+  "role": "builder",
+  "summary": "path glob matcher with *, **, ?, classes and escapes, linear time",
+  "prompt": "Implement `match(pattern, path)` in globmatch.py exactly as SPEC.md describes. Do not use fnmatch, glob, pathlib matching or re."
+}
