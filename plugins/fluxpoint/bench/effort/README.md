@@ -17,10 +17,10 @@ role, never by score. A cheaper setting is picked on the train split only,
 then read once on the test split.
 
 ```
-python3 plugins/fluxpoint/bench/effort/run.py --selfcheck
-python3 plugins/fluxpoint/bench/effort/run.py --split
-python3 plugins/fluxpoint/bench/effort/run.py --run OUT --reps 3 --jobs 10 --max-usd 80
-python3 plugins/fluxpoint/bench/effort/run.py --report OUT
+plugins/fluxpoint/scripts/py.sh ../bench/effort/run.py --selfcheck
+plugins/fluxpoint/scripts/py.sh ../bench/effort/run.py --split
+plugins/fluxpoint/scripts/py.sh ../bench/effort/run.py --run OUT --reps 3 --jobs 10 --max-usd 80
+plugins/fluxpoint/scripts/py.sh ../bench/effort/run.py --report OUT
 ```
 
 `--selfcheck` spends nothing. It confirms that every grader gives the
