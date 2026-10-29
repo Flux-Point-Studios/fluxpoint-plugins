@@ -81,8 +81,8 @@ class LaunchRequirements(unittest.TestCase):
         ir = copy.deepcopy(BASE)
         ir['treeGuard'] = False
         ir['nodes'][0]['isolation'] = True
-        valid = {'sha': 'base', 'branch': '', 'porcelain': '', 'root': '/repo'}
-        for field, values in [('sha', [123, True, '', '  ']), ('branch', [123, False]),
+        valid = {'sha': 'a' * 40, 'branch': '', 'porcelain': '', 'root': '/repo'}
+        for field, values in [('sha', [123, True, '', '  ', 'base', '--help', 'main; touch injected']), ('branch', [123, False]),
                               ('root', [123, False, '', '  ']), ('porcelain', [False, None])]:
             for value in values:
                 with self.subTest(field=field, value=value):

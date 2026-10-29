@@ -216,9 +216,11 @@ def assemble(args):
         memo = _module("replay_memo").build_memo(root, args.run, launch,
                       compiler.compiler_version(), projects=args.projects,
                       artifact_sha256=source_sha)
-        if not isinstance(memo, dict) or set(memo) - {"_memo", "_prefix"}:
+        if not isinstance(memo, dict) or set(memo) - {"_memo", "_prefix", "_capture", "_ledgerCalls"}:
             raise ValueError("RESUME-MEMO: loader returned unsupported launch fields")
         replay_state = memo
+        if (memo.get('_capture') or {}).get('stopReason'):
+            print('resume: captured-prefix limit: ' + memo['_capture']['stopReason'], file=sys.stderr)
     else:
         launch_args["_launch"] = _module("attest").stamp(root)
     for name, script in (("_ledger", "ledger"), ("_releases", "release")):
@@ -272,7 +274,7 @@ def assemble(args):
         os.unlink(staged)
         os.unlink(staged_state)
     workflow = {"scriptPath": output, "args": launch_args}
-    if resuming:
+    if resuming and not compiler.replay_features(ir, assembled):
         workflow["resumeFromRunId"] = args.run
     return workflow
 

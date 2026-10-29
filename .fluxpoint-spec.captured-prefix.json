@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "goal": "Preserve verified downstream replay across once-only ledger hits without executing an irreversible prompt again",
+  "asset": "Compiler replay capsules, immutable source attempts, ledger receipts and structured Workflow launches",
+  "scope": [
+    "Versioned exact captured results with deduplicated bounded storage",
+    "Plugin prefix replay and strict irreversible slot/result binding",
+    "Fresh native Workflow invocations retaining internal source provenance",
+    "Recursive source corroboration, legacy degradation and unchanged fresh-guard policy"
+  ],
+  "outOfScope": [
+    "Paid or remote provider execution, model quality claims or claims of native cache conformance",
+    "Rewriting the external Workflow runtime",
+    "Repairing the existing crash-before-ledger-persistence window"
+  ],
+  "decisions": [
+    {
+      "id": "captured-prefix",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How can a ledger skip preserve downstream replay without risking a repeated effect on a native cache miss?",
+        "options": [
+          {
+            "option": "verified-local-prefix",
+            "argued_by": "model",
+            "strongest_objection": "Requires versioned result capture, source verification and new-run provenance rather than native slot reuse"
+          },
+          {
+            "option": "native-placeholder",
+            "argued_by": "model",
+            "strongest_objection": "Changed prompts break the native chained key; original effect prompts may run live on misses"
+          }
+        ],
+        "chosen": "verified-local-prefix",
+        "rationale": "Serve only independently corroborated exact results and dispatch live work in a fresh native invocation; a ledger hit never submits its original effect prompt. Installed Claude 2.1.312 hashes prompt/options plus prior key and exposes no atomic cache-only primitive.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Installed Claude 2.1.312 bundled Workflow API and implementation read without invoking a provider",
+          "GitHub issue156 and current compiler ledger branch omit an agent call"
+        ]
+      },
+      "costs": [
+        {
+          "option": "verified-local-prefix",
+          "cost": "Bounded captured result bytes, explicit provenance and focused integration regressions",
+          "basis": "estimate",
+          "evidence": [
+            "Current source validator already resolves immutable journal/transcript-backed attempts"
+          ]
+        },
+        {
+          "option": "native-placeholder",
+          "cost": "Either repeated downstream execution or the possibility of repeating an irreversible effect",
+          "basis": "estimate",
+          "evidence": [
+            "Runtime chained cache keys include prompt and permission clamp options"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "exact-capture",
+      "statement": "Only exact finite JSON source results with immutable artifact and native call corroboration may be captured; strings retain type, foreign-content results fence replay and complete results are deduplicated within an explicit byte bound",
+      "decisions": [
+        "captured-prefix"
+      ],
+      "checks": [
+        "captured-prefix-regressions"
+      ],
+      "counterexample": "A string is coerced to JSON, an oversized result is partially copied, foreign content loses its native taint or a capsule is fabricated"
+    },
+    {
+      "id": "ledger-slot",
+      "statement": "A ledger hit never calls its effect agent; a captured slot is consumed only when node, original prompt, options and exact result bind to the once-only key, retaining a verifiable logical receipt across repeated resumes",
+      "decisions": [
+        "captured-prefix"
+      ],
+      "checks": [
+        "captured-prefix-regressions"
+      ],
+      "counterexample": "A mismatched ledger result advances the prefix or an effect is called to keep a native slot"
+    },
+    {
+      "id": "fresh-launch",
+      "statement": "Captured resumes omit outer native resumeFromRunId while retaining internal source run/artifact and launch identity; required fresh, rejudge, fork and remote-ref reads still execute live",
+      "decisions": [
+        "captured-prefix"
+      ],
+      "checks": [
+        "captured-prefix-regressions"
+      ],
+      "counterexample": "A live suffix consults native cached slots or a fresh guard is served locally"
+    },
+    {
+      "id": "verification",
+      "statement": "Recording recursively corroborates every virtual result and ledger origin, rejects missing/mismatched/incomplete source receipts and permits explicit safe legacy live suffixes without repeating a recorded effect",
+      "decisions": [
+        "captured-prefix"
+      ],
+      "checks": [
+        "captured-prefix-regressions"
+      ],
+      "counterexample": "A forged virtual green result or omitted ledger receipt is accepted as verified replay"
+    },
+    {
+      "id": "ledger-history-conflict",
+      "statement": "A prior effect for the same campaign/node with a different current prompt key, or a ledger result conflicting with a verified source, refuses before any effect agent runs; carried confirmation cannot rearm an upgraded preamble; a source-known effect with a missing current ledger receipt also refuses, and mandatory history guards are never dropped to fit the capture cap",
+      "decisions": [
+        "captured-prefix"
+      ],
+      "checks": [
+        "captured-prefix-regressions"
+      ],
+      "counterexample": "A compiler isolation preamble changes a prompt-derived key and a carried confirm silently repeats a recorded effect"
+    },
+    {
+      "id": "native-fixed-current",
+      "statement": "NativeReadingsV1 fixed-command reports opt into fresh native invocations, always run a current worker instead of prefix or memo replay, and cannot declare an irreversible once-only effect",
+      "decisions": [
+        "captured-prefix"
+      ],
+      "checks": [
+        "native-fixed-regressions"
+      ],
+      "counterexample": "A restored fixed report claims current native command evidence, or a once-only effect repeats merely to obtain a new command transcript"
+    }
+  ],
+  "checks": [
+    {
+      "id": "captured-prefix-regressions",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/captured-prefix-test.py"
+      ],
+      "scope": "Execute actual compiler programs and structured launch assembly with on-disk native journal/transcript fixtures; verify ledger slots, recursive sources, cap behavior, Unicode/strings and tamper refusal",
+      "assumptions": [
+        "Local fixtures validate plugin behavior; they do not establish a live provider runtime result"
+      ],
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "native-fixed-regressions",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/graph-replay-test.py",
+        "-k",
+        "native_fixed"
+      ],
+      "scope": "Validate accepted fixed preflight plus guarded once-only graph; execute two captured resumes and require a current fixed worker without repeating the effect; refuse fixed readings declared irreversible",
+      "assumptions": [
+        "Scripted Node workers test compiler dispatch and do not establish native command transcript binding"
+      ],
+      "timeoutSeconds": 60
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Could a cheap original-prompt placeholder preserve the runtime slot safely?",
+      "resolution": "No cache-only API is exposed; a cache miss may execute the effect. Fresh native invocation plus local captured replay removes that dependency."
+    }
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/scripts/compile-graph.py",
+    "plugins/fluxpoint/scripts/graph-replay.js",
+    "plugins/fluxpoint/scripts/replay_memo.py",
+    "plugins/fluxpoint/scripts/resume.py",
+    "plugins/fluxpoint/scripts/record-run.py",
+    "plugins/fluxpoint/scripts/run_artifacts.py",
+    "plugins/fluxpoint/tests/graph-replay-test.py",
+    "plugins/fluxpoint/tests/specification-test.py"
+  ]
+}

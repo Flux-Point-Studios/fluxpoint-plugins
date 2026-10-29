@@ -124,6 +124,23 @@ options, immutable launch stamp, gate reading and ordered ancestor keys;
 record-run independently corroborates replay provenance before appending
 Evidence. `REPLAYED-MEMO runId/agentId` names the original execution.
 
+Receipt-enabled graphs, including ordinary serial irreversible graphs,
+use captured-prefix replay on structured resume. The compiler embeds a
+versioned pool of exact verified results; equal encoded results share one
+entry. Native object key order and string types are retained because they
+affect later rendered prompts. The complete replay state is capped at
+128 KiB, and the launcher still enforces the total compiled-script limit.
+A source with incomplete receipts, a foreign-content result or a capture
+limit ends the available prefix. Required fresh, rejudge and fork readings
+execute in the live suffix.
+
+The assembled Workflow object starts a fresh native run. `_resumeFromRunId`
+and its immutable artifact hash identify the source internally. Matching
+prefix calls return their captured result locally and carry source-backed
+logical call receipts; they create no current native worker. Recording
+recursively checks those receipts against the original native evidence.
+The native Workflow UI and token meter describe current live work.
+
 For an explicit gate-only rerun, supply public args
 `rejudge: {"gate-engine": {"nonce": "review-2", "reason": "why the prior judgment needs review", "note": "optional gate-specific context"}}`.
 Only that gate and its preceding sentinel receive the nonce and note.
@@ -322,9 +339,11 @@ had yet; build it when one does, not before.
 are worth knowing before you depend on it, because each has cost a real
 campaign a wrong answer rather than an error:
 
-- **You do not choose the base — so every isolated node is told it and
-  asserts it.** The compiler emits the literal string and the runtime cuts
-  the worktree; nothing in this plugin selects the commit. A node given
+- **Every isolated node establishes the exact campaign base.** The runtime
+  cuts the worktree. Its `worktree.baseRef` setting accepts `"head"` to start
+  at the launching HEAD, or `"fresh"` (the default) for its fresh branch base.
+  Set `{"worktree":{"baseRef":"head"}}` in `.claude/settings.local.json`
+  when launching from campaign commits. A node given
   isolation has been observed reading a tree cut from the default branch
   rather than the campaign's, which makes a file an earlier node committed
   simply ABSENT — and nothing inside says so: `git status` is clean and a
@@ -332,9 +351,16 @@ campaign a wrong answer rather than an error:
   well-evidenced, wrong report. The graph therefore refuses to start
   without `args._base` (graph-run loads `git rev-parse HEAD` at launch),
   and the compiler injects a preamble ahead of every worktree-isolated
-  node's own prompt: run `git rev-parse HEAD` first, check the campaign
-  base is an ancestor, and on a mismatch make the mismatch the result
-  rather than reporting absent files as findings. A downstream node that
+  node's own prompt: read HEAD and root, refuse the shared checkout, dirt
+  and detached HEAD, and fast-forward a clean behind worktree with plain
+  `git merge --ff-only <base>`. The final HEAD must equal the base exactly;
+  ahead, divergent and missing-object states stop without reset or detach.
+  Schemas require the full `baseSeen` observed before the requested work,
+  retained even when that work creates later commits; the script files a missing or
+  different hash as `WRONG-BASE` and drops those findings, including restored
+  results. Preflight's project/local `head`, `fresh/absent` or `unknown`
+  setting report is advisory because managed/user settings and CLI overrides
+  can differ. A downstream node that
   must read what an upstream node committed should still fetch or check
   out that branch by name rather than assuming it is there.
 
@@ -405,6 +431,14 @@ the one that matters:
    is filed `REPLAYED`, never `OK` — a ceremony that did not happen must not
    read like one that did.
 
+   A verified ledger hit occupies its original logical prefix slot without
+   submitting the effect prompt to an agent. A source-known effect with a
+   missing or changed ledger receipt refuses as `LEDGER-CONFLICT`. A prior
+   key for the same campaign/node also refuses, including when a compiler
+   upgrade changes a preamble. Carried `confirm` cannot rearm that identity.
+   Give a genuinely new effect a new node or campaign identity and confirm
+   it explicitly, while retaining the previous ledger history.
+
    **The ledger is local, not committed, and that bounds what it can
    promise.** It lives at `.claude/fluxpoint/irreversible.jsonl`, inside the
    directory `init` and `migrate` add to `.gitignore`, so a fresh clone
@@ -430,13 +464,14 @@ the one that matters:
    stops every HIGH and CRITICAL; halt on `worstSeverityRank >= 2` to stop
    on a MEDIUM as well.
 
-Two limits, stated rather than papered over. The sandbox running the
+The sandbox running the
 compiled graph has no filesystem, so the ledger row is written from the run
 summary afterwards — a crash between the effect landing and the run ending
 leaves no record, and the confirm gate is what stands in that window.
-And editing a ceremony's prompt changes its key, which re-arms it; that is
-deliberate (a different effect deserves a different record) and is the
-second reason a human has to name the node every time.
+Editing a ceremony's prompt changes its key and triggers the history
+conflict guard for that campaign/node. A different effect needs a distinct
+identity and an explicit confirmation. A human must name the node for each
+authorized effect.
 
 ## Choosing a verification tier
 

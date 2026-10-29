@@ -97,7 +97,7 @@ report("and records it in the durable tally",
        "unattested_claiming_pass" in RR, "recorded")
 
 # ==================== isolation hazards are written down ================
-for label, needle in (("the worktree base is not chosen here", "You do not choose the base"),
+for label, needle in (("isolated nodes establish the exact campaign base", "Every isolated node establishes the exact campaign base"),
                       ("measuring nodes need isolation", "measurement*"),
                       ("a dirtied shared tree invalidates a gate", "no longer exists"),
                       ("the harness must be proven in a worktree", "tracked files only")):

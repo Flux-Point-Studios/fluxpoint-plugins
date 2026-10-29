@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "sha256": "0396a783f5a565c8190026101d2c8bb1ff1ddbdd514f50c13c022dda71ddaa88",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/scripts/compile-graph.py": "f7838a1e8b7161e7607cae8629adeaab6745dcc1bbbacf5a8614519a3f033856",
+    "plugins/fluxpoint/scripts/graph-replay.js": "0ef2550f4ce5adc122a2a3e9358e87b39fc1edf8a50327c919807ed6949d98e3",
+    "plugins/fluxpoint/scripts/native_binding.py": "dca2f4df3239faa742e2b3865e40c4d66923b33a4ffb141a0e0d0b123c2b01f1",
+    "plugins/fluxpoint/scripts/worktree_settings.py": "9b1fa417406e2cf1a5dadc1aaa397e996ee7143a7515ba8e3518bfddf242fe0b",
+    "plugins/fluxpoint/tests/claude_local.py": "19f9e8d4fb893d1fa25ffd31a57054800dde909dec7877cd39a322038ba59b0a",
+    "plugins/fluxpoint/tests/native-binding-test.py": "e7ca627f37e33396719e76a8a345837d6d79187377e717be9371c33ebf1dcd65",
+    "plugins/fluxpoint/tests/worktree-base-live.py": "4ec979c9eeca6938ed1221d9adedfd3b89c1128e5853e7ab1dff24b8d8039f2d",
+    "plugins/fluxpoint/tests/worktree-base-test.py": "bd0a7844d2517c6f9f8e8cea82c9446b618be0243ec9b5cf7afb7f190af513bd",
+    "plugins/fluxpoint/tests/worktree_base_fixture.py": "4bb281c033da25f7ddbb9334133961f371348974d478aec1fbd50dd97d242d80"
+  },
+  "lockFormat": 2
+}

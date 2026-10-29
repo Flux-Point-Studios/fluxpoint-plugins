@@ -112,7 +112,7 @@ const args=ARGS, mode=MODE, calls=[];
 const log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async xs=>Promise.all(xs.map(f=>f()));
 const obs={command:'python attack.py',result:'exit 0: defended'},ctl={command:'python valid.py',result:'exit 0: valid control'};
-const slice={patchSha256:PATCH_SHA,branch:'repair',diffSummary:'complete patch against pinned launch base',testsAdded:['test_attack'],harnessCommand:'pytest',harnessExit:0,evidence:['checked original attack and valid control'],sharedResources:[{resource:'provider-pool',writers:['caller'],readers:['checker']}],siblings:[]};
+const slice={baseSeen:args._base.sha,patchSha256:PATCH_SHA,branch:'repair',diffSummary:'complete patch against pinned launch base',testsAdded:['test_attack'],harnessCommand:'pytest',harnessExit:0,evidence:['checked original attack and valid control'],sharedResources:[{resource:'provider-pool',writers:['caller'],readers:['checker']}],siblings:[]};
 const axes=['field','encoding','caller','network','role','path'];
 const sibling=(finding,axis,surface='checker-'+axis)=>({finding,invariant:'authoritative invariant',axis,surface,attack:obs,control:ctl,outcome:'DEFENDED',reason:'independent attack and valid control executed'});
 const executeProof=(p,harm=false,tag='')=>{
@@ -197,7 +197,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
  throw Error('unexpected call '+label);
 };
 '''
-        args = {'_base': {'sha': self.base, 'porcelain': ''}, '_launch': {'root': str(self.root), 'nonce': 'launch'},
+        args = {'_base': {'sha': self.base, 'porcelain': '', 'root': str(self.root)}, '_launch': {'root': str(self.root), 'nonce': 'launch'},
                 '_replayLaunchNonce': nonce, 'findings': ['Original targeted finding']}
         values = {'ARGS': args, 'MODE': mode, 'PATCH_SHA': manifest(self.data)['patchSha256'], 'PATCH_PATH': str(self.patches[0]), 'HEAD': self.head,
                   'BASH_EXEC': os.environ.get('FPL_BASH') or ('C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else 'bash'),

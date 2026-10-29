@@ -40,6 +40,20 @@ function sha256(text) {
   return h.map(v => (v >>> 0).toString(16).padStart(8,'0')).join('')
 }
 const CALL_RECORDS = [], MEMO_RECORDS = [], REJUDGES = []
+const LEDGER_REPLAYS = []
+const CAPTURE = A._capture || null
+if (CAPTURE && (CAPTURE.version !== 1 || canonical(CAPTURE.launch) !== canonical(A._launch))) throw new Error('captured prefix protocol or launch identity mismatch')
+function capturedResult(entry) {
+  const encoded = CAPTURE && CAPTURE.results && CAPTURE.results[entry.resultRef]
+  if (typeof encoded !== 'string' || sha256(encoded) !== entry.resultRef) throw new Error('captured result missing or digest mismatched')
+  const value = JSON.parse(encoded)
+  if (sha256(canonical(value)) !== entry.resultSha256) throw new Error('captured result semantic digest mismatched')
+  return value
+}
+function replaySource(entry) {
+  return { runId: entry.runId, artifactSha256: entry.artifactSha256, agentId: entry.agentId,
+    ...(entry.callIndex === undefined ? {} : { callIndex: entry.callIndex }) }
+}
 const PUSH_CHECKS = []
 const NODE_STATE = {}, LIVE_READINGS = {}, LIVE_READING_CALLS = {}, LIVE_READING_FRESH = {}, CALL_STATE = {}
 const REJUDGE_REACHED = new Set()
@@ -75,7 +89,7 @@ function auditedPrompt(prompt, options) {
 }
 function prefixTreePrompt(prompt, options) {
   const previous = (A._prefix || [])[PREFIX_INDEX]
-  if (FORKED || !PREFIX_OPEN || !previous || !previous.readingNonce) return prompt
+  if (!CAPTURE || FORKED || !PREFIX_OPEN || !previous || !previous.readingNonce) return prompt
   const candidate = prompt.replace('\nLIVE TREE READING NONCE: ' + A._replayLaunchNonce + ' point ', '\nLIVE TREE READING NONCE: ' + previous.readingNonce + ' point ')
   return previous.promptSha256 === sha256(auditedPrompt(candidate, options)) && previous.optsSha256 === sha256(canonical(options)) ? candidate : prompt
 }
@@ -142,23 +156,48 @@ async function guardedInvoke(n, prompt, options, invoke, before = null) {
 }
 function prefixMatches(prompt, options) {
   const previous = (A._prefix || [])[PREFIX_INDEX]
-  return !FORKED && PREFIX_OPEN && previous && previous.promptSha256 === sha256(prompt) && previous.optsSha256 === sha256(canonical(options))
+  return !!CAPTURE && !FORKED && PREFIX_OPEN && previous && previous.promptSha256 === sha256(prompt) && previous.optsSha256 === sha256(canonical(options))
 }
 agent = async function(prompt, options) {
   if (HALT) return null
   prompt = auditedPrompt(prompt, options)
   const previous = (A._prefix || [])[PREFIX_INDEX++]
-  const prefix = !FORKED && PREFIX_OPEN && previous && previous.promptSha256 === sha256(prompt) && previous.optsSha256 === sha256(canonical(options))
+  const prefix = !!CAPTURE && !FORKED && PREFIX_OPEN && previous && previous.promptSha256 === sha256(prompt) && previous.optsSha256 === sha256(canonical(options))
   if (!prefix) PREFIX_OPEN = false
   const rec = { prompt, opts: options, result: null, mode: prefix ? 'prefix' : 'live' }
-  if (prefix) rec.source = { runId: previous.runId, artifactSha256: previous.artifactSha256, agentId: previous.agentId }
+  if (prefix) rec.source = replaySource(previous)
   CALL_RECORDS.push(rec)
-  const result = await runtimeAgent(prompt, options)
+  const result = prefix && CAPTURE ? capturedResult(previous) : await runtimeAgent(prompt, options)
+  if (prefix && CAPTURE) rec.execution = 'captured'
   rec.result = result === undefined ? null : result
   if (prefix && previous.resultSha256 !== sha256(canonical(rec.result))) {
     rec.mode = 'live'; delete rec.source; PREFIX_OPEN = false
   }
   CALL_STATE[options.label] = rec
+  return result
+}
+function ledgerReplay(id, originalPrompt, options, result, ledgerKey) {
+  const prompt = auditedPrompt(originalPrompt, options), n = REPLAY_NODES[id]
+  const previous = (A._prefix || [])[PREFIX_INDEX]
+  const matches = !!CAPTURE && prefixMatches(prompt, options) && previous.resultSha256 === sha256(canonical(result))
+  const key = campaign + '|' + id + '|sha256:' + sha256(originalPrompt)
+  const effect = (A._ledgerCalls || {})[key]
+  const verified = matches || !!(CAPTURE && effect && effect.node === id && effect.promptSha256 === sha256(prompt)
+    && effect.optsSha256 === sha256(canonical(options)) && effect.resultSha256 === sha256(canonical(result)))
+  if (matches) { capturedResult(previous); PREFIX_INDEX++ }
+  else PREFIX_OPEN = false
+  const source = matches ? replaySource(previous) : verified ? effect.source : null
+  result = matches ? capturedResult(previous) : verified && effect.resultRef ? capturedResult(effect) : result
+  const call = { prompt, opts: options, result, mode: matches ? 'prefix' : 'ledger', execution: 'ledger', ledgerKey,
+    ...(source ? { source } : {}) }
+  CALL_RECORDS.push(call); CALL_STATE[options.label] = call
+  const payload = { campaign, compiler: REPLAY_COMPILER, launch: A._launch, id, prompt, opts: options, tree: null, ancestors: replayAncestorKeys(n) }
+  const memoKey = sha256(canonical(payload))
+  NODE_STATE[id] = { key: memoKey, replayed: matches }
+  MEMO_RECORDS.push({ node: id, key: memoKey, payload, prompt, result, mode: 'ledger', callIndex: CALL_RECORDS.indexOf(call),
+    irreversible: true, replay: null, fresh: n.fresh, contract: n.contract, ledgerKey, ...(source ? { source } : {}) })
+  LEDGER_REPLAYS.push({ node: id, key: ledgerKey, callIndex: CALL_RECORDS.indexOf(call), verified, source })
+  if (!verified) note('ledger', 'LEGACY-LEDGER', id + ': once-only result retained without captured native-call proof; downstream calls run live')
   return result
 }
 function readingValue(reading) {
@@ -194,6 +233,10 @@ async function replaySpawn(prompt, options, invoke) {
     const before = await pushPrefix(owner, options)
     return reservedSpawn(prompt, options, (p, o) => guardedInvoke(owner, p, o, invoke, before))
   }
+  // Fixed-command preflight evidence belongs to this native invocation.
+  // A captured result has no current worker transcript to bind its commands.
+  const fixedReading = n.contract === 'NativeReadingsV1'
+  if (fixedReading) PREFIX_OPEN = false
   let reading = LIVE_READINGS[n.id] || null
   const rejudge = (A.rejudge || {})[n.id]
   let rejudgeRecord = null
@@ -217,8 +260,8 @@ async function replaySpawn(prompt, options, invoke) {
   const key = sha256(canonical(payload))
   const entry = (A._memo || {})[key]
   const prefixEntry = (A._prefix || [])[PREFIX_INDEX]
-  const nativePrefix = !FORKED && PREFIX_OPEN && prefixEntry && prefixEntry.promptSha256 === sha256(prompt) && prefixEntry.optsSha256 === sha256(canonical(options))
-  let eligible = !nativePrefix && n.replay && !n.fresh && !n.irreversible && !n.redTeam && !rejudge && allAncestorsReplayed(n)
+  const nativePrefix = prefixMatches(prompt, options)
+  let eligible = !fixedReading && !nativePrefix && n.replay && !n.fresh && !n.irreversible && !n.redTeam && !rejudge && allAncestorsReplayed(n)
   if (eligible && n.mutates) {
     eligible = n.verifiedBy.length > 0 && entry && entry.verifiedReading && n.target
     if (eligible) {
@@ -227,11 +270,12 @@ async function replaySpawn(prompt, options, invoke) {
       eligible = sameReading(reading, entry.sourceFinalReading || entry.verifiedReading)
     }
   }
-  if (eligible && entry && (entry.promptSha256 || sha256(entry.prompt)) === sha256(prompt) && (entry.payloadSha256 || sha256(canonical(entry.payload))) === key && entry.result !== null && entry.result !== undefined) {
+  if (eligible && entry && (entry.promptSha256 || sha256(entry.prompt)) === sha256(prompt) && (entry.payloadSha256 || sha256(canonical(entry.payload))) === key && (entry.resultSha256 || entry.result !== null && entry.result !== undefined)) {
+    const cached = CAPTURE && entry.resultSha256 ? capturedResult(entry) : entry.result
     NODE_STATE[n.id] = { key, replayed: true }
-    MEMO_RECORDS.push({ node: n.id, key, payload, prompt, result: entry.result, mode: 'memo', source: { runId: entry.runId, artifactSha256: entry.artifactSha256, agentId: entry.agentId }, verifies: n.verifies, verifiedBy: n.verifiedBy, reading: readingValue(reading), readingCallIndex: LIVE_READING_CALLS[n.id], replay: n.replay, fresh: n.fresh, irreversible: n.irreversible, contract: n.contract, ...(n.mutates ? { verifiedReading: entry.verifiedReading, verifiedByNode: entry.verifiedByNode, sourceFinalReading: entry.sourceFinalReading || entry.verifiedReading } : {}) })
+    MEMO_RECORDS.push({ node: n.id, key, payload, prompt, result: cached, mode: 'memo', source: { runId: entry.runId, artifactSha256: entry.artifactSha256, agentId: entry.agentId }, verifies: n.verifies, verifiedBy: n.verifiedBy, reading: readingValue(reading), readingCallIndex: LIVE_READING_CALLS[n.id], replay: n.replay, fresh: n.fresh, irreversible: n.irreversible, contract: n.contract, ...(n.mutates ? { verifiedReading: entry.verifiedReading, verifiedByNode: entry.verifiedByNode, sourceFinalReading: entry.sourceFinalReading || entry.verifiedReading } : {}) })
     note(n.id, 'REPLAYED-MEMO', entry.runId + '/' + entry.agentId, { key, head: entry.verifiedReading ? entry.verifiedReading.tip : reading && reading.tip })
-    return entry.result
+    return cached
   }
   const result = await reservedSpawn(prompt, options, (p, o) => guardedInvoke(n, p, o, invoke, pushBefore))
   const call = CALL_STATE[options.label]

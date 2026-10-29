@@ -40,6 +40,24 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: python plugins/fluxpoint/tests/native-hook-test.py --live
+      - name: Exercise native Workflow isolation and captured replay (local scripted provider)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python plugins/fluxpoint/tests/worktree-base-live.py --binary "$env:FPL_CLAUDE_BINARY" --output "$env:RUNNER_TEMP/fluxpoint-worktree-base-native"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/fluxpoint/tests/captured-prefix-live.py --binary "$env:FPL_CLAUDE_BINARY" --output "$env:RUNNER_TEMP/fluxpoint-captured-prefix-native"
+          exit $LASTEXITCODE
+      - name: Preserve native Workflow probe evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-workflow-probes
+          path: |
+            ${{ runner.temp }}/fluxpoint-worktree-base-native
+            ${{ runner.temp }}/fluxpoint-captured-prefix-native
+          include-hidden-files: true
+          if-no-files-found: ignore
       - name: Exercise specification and process cleanup
         env:
           PYTHONIOENCODING: utf-8
@@ -75,6 +93,7 @@ jobs:
           $failed = $false
           foreach ($suite in @(
             'graph-replay-test.py', 'replay-memo-test.py', 'resume-test.py',
+            'worktree-base-test.py', 'captured-prefix-test.py',
             'packet-inputs-test.py', 'prompt-recall-daemon-test.py', 'fault-attempts-test.py',
             'native-binding-test.py', 'compact-native-test.py',
             'forge-evidence-test.py', 'forge-fault-race-test.py', 'repair-proof-test.py'

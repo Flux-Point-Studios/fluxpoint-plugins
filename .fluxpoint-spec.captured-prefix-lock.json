@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "sha256": "b2c626959bdea707de9aaa5c8b06c4da718413314a1292d57c38e47fa5f9b8b3",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/scripts/compile-graph.py": "63bc47a5b9ab2a67b8fae8d0cfbad4ccc5f1c0b94f5ae3a71974a9c57fe85947",
+    "plugins/fluxpoint/scripts/graph-replay.js": "5830c9ea8f67c6d1eee4dbb1f5a2981ac1f61dea8ac4e81dd42c50b775fcb4de",
+    "plugins/fluxpoint/scripts/record-run.py": "548bcf3adf699533b91e4ce87e601c098ea54b3e828d425c28e58df8d1930266",
+    "plugins/fluxpoint/scripts/replay_memo.py": "b47d0f348b8cc68476c23b531c13f42ae5a74340b2d433f2c2a567e448bb901f",
+    "plugins/fluxpoint/scripts/resume.py": "e960dfef998ec6636602a0eb8dc809c30faf95428e4457eeb24290206cb77372",
+    "plugins/fluxpoint/scripts/run_artifacts.py": "9d50df63db9fe2b1e59aef32151c037f8504575b46be5eb2ba6b0d0b6ebb2b34",
+    "plugins/fluxpoint/tests/captured-prefix-test.py": "51cc7d8f50cfb579df71e582faa3f6d5222403557253b0af19b4ba157993b0e2",
+    "plugins/fluxpoint/tests/graph-replay-test.py": "4e5c64122c32c4d9154e43ee37b764b5a02cce14e04814ef35cf780cd8a3354b",
+    "plugins/fluxpoint/tests/specification-test.py": "ae5db429cc5ac39b4ba92f85286d9fb37a1ca928868e720402f5fd32cc8c6ab7"
+  },
+  "lockFormat": 2
+}

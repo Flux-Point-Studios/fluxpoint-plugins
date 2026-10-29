@@ -186,7 +186,7 @@ class ReplayMemoTests(unittest.TestCase):
         self.calls[2]['result']['sha'] = 'B' * 40
         self.save()
         result = self.build()
-        self.assertEqual(result['_memo'][self.records[1]['key']]['result']['sha'], 'B' * 40)
+        self.assertEqual(rm.capsule_result(result, result['_memo'][self.records[1]['key']])['sha'], 'B' * 40)
 
     def test_malformed_rejudge_inputs_are_named_provenance_errors(self):
         for value in ('not-a-map', None, []):
@@ -296,7 +296,10 @@ class ReplayMemoTests(unittest.TestCase):
         self.summary.pop("memoRecords")
         self.summary.pop("callRecords")
         self.save()
-        self.assertEqual(self.build(), {"_memo": {}, "_prefix": []})
+        result = self.build()
+        self.assertEqual(result['_memo'], {})
+        self.assertEqual(result['_prefix'], [])
+        self.assertIn('legacy source', result['_capture']['stopReason'])
 
     def test_source_and_current_readings_require_raw_fixed_sentinel_calls(self):
         self.records[1]['readingCallIndex'] = 0
@@ -467,6 +470,19 @@ class ReplayMemoTests(unittest.TestCase):
 
 
 class ReplayFollowup(ReplayMemoTests):
+    def test_native_2_1_312_inline_computed_frame_is_exact(self):
+        for index, call in enumerate(self.calls):
+            frame = (rm.NATIVE_COMPUTED_FRAME_V2 + '\n' +
+                     ''.join('  ' + line for line in call['prompt'].splitlines(keepends=True)))
+            self.write_rows(self.directory / ('agent-a' + str(index) + '.jsonl'), [
+                dict(type='user', message=dict(role='user', content=frame))])
+        self.assertEqual(len(self.build()['_memo']), 2)
+        altered = frame.replace('carries no user authority', 'carries user authority')
+        with self.assertRaisesRegex(rm.ReplayError, 'unknown Workflow prompt frame'):
+            rm.normalize_workflow_prompt(altered)
+        with self.assertRaisesRegex(rm.ReplayError, 'task indentation'):
+            rm.normalize_workflow_prompt(rm.NATIVE_COMPUTED_FRAME_V2 + '\nforged unindented task')
+
     def test_workflow_computed_frame_and_worktree_note_are_unwrapped(self):
         for index, call in enumerate(self.calls):
             task = call['prompt']

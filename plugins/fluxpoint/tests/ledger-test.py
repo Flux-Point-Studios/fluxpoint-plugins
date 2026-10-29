@@ -62,6 +62,7 @@ def run(ir, args):
 
     Returns (summary_dict_or_None, [prompts actually spawned], stderr).
     """
+    args = dict({'_launch': {'nonce':'ledger-fixture','root':'/fixture'}, '_replayLaunchNonce':'ledger-launch'}, **args)
     js = cg.emit(ir, CONTRACTS)
     with tempfile.TemporaryDirectory() as d:
         out = os.path.join(d, "out.json")
@@ -71,7 +72,7 @@ def run(ir, args):
             fh.write(
                 "import {writeFileSync} from 'node:fs';\n"
                 "const SPAWNED=[];\n"
-                "const agent=async(p)=>{SPAWNED.push(p);"
+                "let agent=async(p)=>{SPAWNED.push(p);"
                 "return {exit:0,command:'aiken build',output:'ok',txHash:'tx_deadbeef'}};\n"
                 "const parallel=async(t)=>Promise.all(t.map(f=>f()));\n"
                 "const pipeline=async()=>[],log=()=>{},phase=()=>{};\n"
@@ -171,12 +172,12 @@ def run_red_gate():
                 "import {writeFileSync} from 'node:fs';\n"
                 "const SPAWNED=[];\n"
                 # The independent re-derivation disagrees: exit 1.
-                "const agent=async(p)=>{SPAWNED.push(p);"
+                "let agent=async(p)=>{SPAWNED.push(p);"
                 "return {exit: p.includes('re-derive') ? 1 : 0,"
                 "command:'x',output:'',txHash:'tx_x'}};\n"
                 "const parallel=async(t)=>Promise.all(t.map(f=>f()));\n"
                 "const pipeline=async()=>[],log=()=>{},phase=()=>{};\n"
-                'const args={"confirm":"genesis","_ledger":{}};\n'
+                'const args={"confirm":"genesis","_ledger":{},"_launch":{"nonce":"ledger-fixture","root":"/fixture"},"_replayLaunchNonce":"ledger-launch"};\n'
                 "const budget={total:null,spent:()=>0,remaining:()=>1e9};\n"
                 "const workflow=0;\n"
                 "(async () => {\n" + js.replace("export const meta", "const meta")

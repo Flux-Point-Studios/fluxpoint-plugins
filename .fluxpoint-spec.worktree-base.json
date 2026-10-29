@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "goal": "Make isolated Workflow nodes establish the exact campaign base before judging it",
+  "asset": "Compiled graph base checks, result provenance and native isolation controls",
+  "scope": ["Clean linked worktree fast-forward and exact-base equality", "Required launch root and schema-bound baseSeen", "Wrong-base result refusal across live and replay paths", "Advisory worktree setting preflight", "Portable actual CLI localhost runtime controls", "Generated Workflow source starts with public pure-literal metadata"],
+  "outOfScope": ["Changing measurement snapshot isolation", "Resetting, detaching or moving the shared checkout", "Model-quality calibration or provider spending"],
+  "harnessInputs": ["plugins/fluxpoint/scripts/compile-graph.py", "plugins/fluxpoint/scripts/graph-replay.js", "plugins/fluxpoint/scripts/native_binding.py", "plugins/fluxpoint/scripts/worktree_settings.py", "plugins/fluxpoint/tests/worktree_base_fixture.py", "plugins/fluxpoint/tests/claude_local.py", "plugins/fluxpoint/tests/worktree-base-live.py"],
+  "decisions": [{
+    "id": "exact-worktree-base", "status": "defaulted", "dependsOn": [],
+    "record": {
+      "question": "How can an isolated worker reach and prove the campaign base without moving unrelated commits or the shared checkout?",
+      "options": [
+        {"option": "clean-fast-forward-and-equality", "argued_by": "model", "strongest_objection": "Requires a real-runtime isolation acceptance probe and schema migration"},
+        {"option": "ancestry-only-stop", "argued_by": "model", "strongest_objection": "Refuses safe behind worktrees and accepts ahead worktrees the campaign never judged"}
+      ],
+      "chosen": "clean-fast-forward-and-equality",
+      "rationale": "Only a clean worker-owned tree may fast-forward; equality and a required typed observation bind every accepted result to the campaign base. Runtime settings are advisory because overrides exist.",
+      "overturned_prior": true, "frozen_by": "none", "reversible": true,
+      "evidence": ["Issue #188 measured the behind/ahead ancestry asymmetry", "CLI2.1.312 native Workflow wf_caab2783-42b refused an outside shared-ref write and allowed own-worktree ff-only to exact base with unchanged branch", "Independent raw native journal/meta/API capture review passed on Linux", "Actual CLI refused generated source because const PLUGIN preceded the required first-statement metadata export"]
+    },
+    "costs": [
+      {"option": "clean-fast-forward-and-equality", "cost": "Explicit base observation schemas, a small setting preflight and native fixture", "basis": "estimate", "evidence": ["Compiler already wraps node schemas and all spawns centrally"]},
+      {"option": "ancestry-only-stop", "cost": "Wasted workers behind the base and unjudged ahead commits", "basis": "measured", "evidence": ["Issue #188 and actual fresh worktree native probe"]}
+    ]
+  }],
+  "requirements": [
+    {"id": "exact-base", "statement": "Extract and run emitted plain-command preamble controls: clean behind linked worktrees reach the exact base on their own branch; shared, dirty, ahead, divergent and missing-object trees stop without moving HEAD", "decisions": ["exact-worktree-base"], "checks": ["worktree-base-tests"], "counterexample": "An ancestry-only check accepts ahead or stops a safe behind worker, or moves the shared checkout"},
+    {"id": "bound-results", "statement": "Require launch root for worktree nodes and full-hex baseSeen on every schema carrying the base preamble; missing, malformed and mismatched observations file WRONG-BASE and contribute no findings across node forms and replay", "decisions": ["exact-worktree-base"], "checks": ["worktree-base-tests", "native-binding-tests"], "counterexample": "A fan-out, repair checker or restored result contributes findings from a different commit"},
+    {"id": "advisory-settings", "statement": "Report head, fresh/absent or unknown worktree base settings with scope and override caveats, without passing or refusing launches from that reading", "decisions": ["exact-worktree-base"], "checks": ["worktree-base-tests"], "counterexample": "A local setting is represented as effective managed runtime policy"},
+    {"id": "native-acceptance", "statement": "A separately invoked portable localhost-only actual CLI fixture requires real Workflow worktree metadata, an outside-write isolation refusal and own-branch exact-base fast-forward under normal permissions; no model-quality or provider-cost claim", "decisions": ["exact-worktree-base"], "checks": ["worktree-base-tests"], "counterexample": "A simulated executor, generic permission denial or bypass mode is presented as native isolation acceptance"}
+  ],
+  "checks": [{"id": "worktree-base-tests", "kind": "test", "argv": ["{python}", "plugins/fluxpoint/tests/worktree-base-test.py"], "scope": "Executed compiler, Git state, result and advisory preflight regressions; actual CLI native acceptance runs separately on installed runtimes", "assumptions": ["Native runtime controls use scripted local model replies and prove permission/isolation behavior, not model quality"], "timeoutSeconds": 120}, {"id": "native-binding-tests", "kind": "test", "argv": ["{python}", "plugins/fluxpoint/tests/native-binding-test.py"], "scope": "Closed baseSeen extension and actual compiled Node-to-recorder roundtrip against native capture fixtures", "assumptions": ["Fixture captures exercise binding enforcement; the separate actual CLI control establishes live runtime behavior"], "timeoutSeconds": 60}],
+  "challenges": [{"claim": "Does a successful simulated Git command establish the runtime isolation guard permits it?", "resolution": "No. Actual installed CLI Workflow worker captures must show both an outside-write guard refusal and the own-directory fast-forward; Windows requires the same native fixture before closure."}]
+}

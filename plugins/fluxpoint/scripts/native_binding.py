@@ -261,15 +261,21 @@ def _compare(source, commands, readings):
     return bound
 
 
-def bind(run_id, agent_id, projects=None, report=None):
+def bind(run_id, agent_id, projects=None, report=None, expected_base=None):
     source = _source(run_id, agent_id, projects)
     native = source['report']
-    if not isinstance(native, dict) or set(native) != {'commands', 'readings'}:
+    if not isinstance(native, dict) or set(native) not in ({'commands', 'readings'}, {'commands', 'readings', 'baseSeen'}):
         raise BindingError('native completion is not a closed fixed-reading report')
+    if expected_base is not None or 'baseSeen' in native:
+        if (not isinstance(expected_base, str) or not re.fullmatch('[0-9a-f]{40}', expected_base)
+                or native.get('baseSeen') != expected_base):
+            raise BindingError('native fixed-reading baseSeen differs from the exact expected campaign base')
     if report is not None and replay_memo.canonical(report) != replay_memo.canonical(native):
         raise BindingError('caller report differs from the native completed report')
     commands = _compare(source, native['commands'], native['readings'])
-    return _certificate(source, run_id, agent_id, commands)
+    certificate = _certificate(source, run_id, agent_id, commands)
+    if expected_base is not None: certificate['baseSeen'] = expected_base
+    return certificate
 
 
 def _certificate(source, run_id, agent_id, commands):
@@ -394,7 +400,11 @@ def verify_fixed(summary, run_id, projects=None):
     for node in fixed:
         if len(labels.get(node, [])) != 1 or not isinstance(results.get(node), dict):
             raise BindingError('fixed reading node needs one scalar completed native call: ' + node)
-        certificates.append(dict(node=node, **bind(run_id, labels[node][0], projects, results[node])))
+        base = summary.get('worktreeBase')
+        if base is not None and not isinstance(base, dict): raise BindingError('invalid compiled worktree base metadata')
+        expected = base.get('sha') if isinstance(base, dict) else None
+        if base is not None and expected is None: raise BindingError('compiled worktree base metadata omits the expected SHA')
+        certificates.append(dict(node=node, **bind(run_id, labels[node][0], projects, results[node], expected_base=expected)))
     if _read(directory / 'journal.jsonl', store) != journal:
         raise BindingError('native fixed-reading journal changed during binding')
     return certificates

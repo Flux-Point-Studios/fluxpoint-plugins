@@ -80,6 +80,23 @@ Ubuntu 24.04 download URLs, SHA-256 checksums and exact commands. Use an artifac
 appropriate for your OS and verify it before extraction; the CI Z3 archive
 requires glibc 2.39. Other Lean/Z3 versions are not covered by this smoke test.
 
+## Optional native captured-prefix acceptance
+
+With Claude Code **2.1.312** installed, run:
+
+```bash
+python3 plugins/fluxpoint/tests/captured-prefix-live.py --binary /path/to/claude --output /tmp/captured-prefix-acceptance
+```
+
+This runs the unmodified compiled script through the actual Workflow tool with
+a scripted localhost provider and a dummy key. It checks three distinct native
+runs: the initial workers, one changed suffix worker, then no workers on an
+unchanged resume. The harmless once-only node must be dispatched exactly once.
+Native journals and recursively verified run artifacts remain in the output
+directory. The check uses normal permission checks, makes no remote provider
+request and establishes no model quality or native cache claim. Other CLI
+versions require a reviewed acceptance profile.
+
 ## CI and cloud environments
 
 [Woodpecker](../.woodpecker.yaml) runs the full Linux harness, executable-bit

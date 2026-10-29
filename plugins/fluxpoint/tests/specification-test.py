@@ -805,12 +805,12 @@ time.sleep(float(sys.argv[1]))
         self.assertEqual(r.returncode, 0, r.stderr)
         prelude = '''
 const prompts = [];
-const args = {_base: {sha: 'abc', branch: 'main', porcelain: ''}};
+const args = {_base: {sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', branch: 'main', porcelain: '', root: '/campaign'}};
 const log = () => {}, phase = () => {};
 const budget = {remaining: () => 1000000};
 const workflow = {};
 const parallel = tasks => Promise.all(tasks.map(task => task()));
-const agent = async (prompt) => {prompts.push(prompt); return {exit: 0, branch: 'main', findings: [{claim: 'review'}], refuted: false};};
+const agent = async (prompt, opts) => {prompts.push(prompt); return {exit: 0, branch: 'main', findings: [{claim: 'review'}], refuted: false, ...(opts.schema.required?.includes('baseSeen') ? {baseSeen: args._base.sha} : {})};};
 '''
         script = prelude + '(async () => {\n' + r.stdout.replace('export const meta', 'const meta') + '''
 })().then(result => {console.log(JSON.stringify({result, prompts}));});

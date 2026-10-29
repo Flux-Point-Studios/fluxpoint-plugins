@@ -30,6 +30,11 @@ Campaign lessons survive worktree deletion in a clone-wide store. See
 
 Compiled graphs pin the plugin witness by root, version and code hashes. Gate
 rows record their producer; launch, resume and recording detect witness drift.
+
+Isolated nodes establish the [exact campaign base](references/worktree-base.md):
+clean behind worktrees fast-forward their own branch, and typed `baseSeen`
+observations reject findings from other commits. Runtime base settings remain
+advisory; actual CLI controls exercise both refusal and success.
 See [witness identity](../../docs/witness-identity.md).
 
 Shipped graph templates pass locked packets by reference with an exact identity
@@ -275,6 +280,9 @@ trees; fresh nodes rerun, and gate-only rejudging preserves the checked work.
 Declared pushes have before/after remote-head checks that halt on undeclared
 changes. Resume plans compare opt-ins with a serial render using recorded
 outputs and costs, and name unknown costs.
+Receipt-enabled resumes restore verified prefix results locally in a fresh
+native run. Once-only ledger hits retain their logical slots; conflicting
+effect history refuses before a repeated dispatch.
 The [graph-engineering reference](skills/graph-engineering/SKILL.md) defines
 these fields, the accepted shapes and their compile-time restrictions.
 

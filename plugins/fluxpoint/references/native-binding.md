@@ -18,6 +18,13 @@ The fixed worker returns the closed `NativeReadingsV1` shape:
 {"commands":["git status --porcelain"],"readings":[{"exit":0,"output":""}]}
 ```
 
+New compiled worktree nodes also return the required full-hex `baseSeen`.
+Bind that closed three-field report with `--base <full-campaign-SHA>`;
+`record-run.py` supplies the expected base from compiled summary metadata
+automatically. Legacy closed two-field reports still bind without `--base`.
+The binder keeps exact native StructuredOutput equality, rejects other added
+keys, and refuses a missing or different base observation.
+
 There must be exactly one foreground Bash call for each command in that order,
 from the metadata's `worktreePath`, followed by one `StructuredOutput` matching
 the native completed result. Other tools, extra commands, mismatched cwd,
@@ -50,6 +57,11 @@ repeat, panel, reducer and parked forms are refused for this contract. The
 binding proves the listed tool observations; completeness of the intended
 command inventory remains the graph/specification's separate obligation.
 
+Fixed-reading nodes run live on every structured resume and close the captured
+prefix at that point. Their reports and binding certificates are never reused
+as this attempt's command observations. The recorder requires the current
+native run's completed worker and command captures.
+
 Graph audits expose `nativeCommandBinding: PENDING` and `ready: false` whenever
 they run probes. Their probe seats use only the prescribed safe Bash commands
 and StructuredOutput, and include the actual exit and complete output. After
@@ -78,6 +90,8 @@ These sources are runtime-owned during ordinary host execution, and are local
 files rather than service signatures. An actor able to rewrite all native
 source files can forge this boundary. The current implementation is tested
 against native-shaped capture fixtures and actual CLI/recording subprocesses.
-This development environment exposes no Workflow execution or transcript
-connector; it supplies no live native service attestation. Configurations
-without accessible native captures remain unbound.
+The explicit `worktree-base-live.py` fixture executes unmodified compiled
+Workflow source through an installed CLI and a scripted localhost-only model
+provider. It checks actual isolation refusal, fast-forward behavior and native
+capture binding; it is no remote-service attestation or model-quality result.
+Configurations without accessible native captures remain unbound.

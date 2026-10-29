@@ -16,7 +16,8 @@ discovery, manifests, delivered surfaces, memory lint and prose checks.
 | Specify implementation work | [Spec-first contract](spec-first.md), [packet format](../plugins/fluxpoint/references/spec-format.md), [grill-me](../plugins/fluxpoint/commands/grill-me.md) |
 | Drive and finish a loop | [Loop engineering](../plugins/fluxpoint/skills/loop-engineering/SKILL.md) |
 | Design a graph, lanes, joins, checked pushes and replay cost comparisons | [Graph engineering](../plugins/fluxpoint/skills/graph-engineering/SKILL.md) |
-| Launch or resume with pinned artifacts | [Structured resume](../plugins/fluxpoint/references/structured-resume.md), [graph-run](../plugins/fluxpoint/commands/graph-run.md) |
+| Launch or resume with pinned artifacts and captured-prefix replay | [Structured resume](../plugins/fluxpoint/references/structured-resume.md), [graph-run](../plugins/fluxpoint/commands/graph-run.md) |
+| Establish the exact base in isolated nodes | [Worktree base checks](../plugins/fluxpoint/references/worktree-base.md) |
 | Diagnose a busy or unhealthy machine | [Machine health and watchdog](box-health.md) |
 | Run long commands and manage cancellation | [Long-command lifecycle](../plugins/fluxpoint/references/longrun.md) |
 | Keep armed per-prompt recall warm | [Warm prompt recall](warm-prompt-recall.md) |
