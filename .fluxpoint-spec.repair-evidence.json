@@ -11,7 +11,8 @@
     "Pinned operational thresholds and data-derived alarm measurements",
     "Pinned severity/scope policy and explicit named residual decisions",
     "Native helper-output binding and distinct executions per sibling/hunk row",
-    "Explicit native assurance versions and immutable legacy receipt downgrade without losing repair access"
+    "Explicit native assurance versions and immutable legacy receipt downgrade without losing repair access",
+    "Complete repair helper programs reach Node fixtures through UTF-8 stdin within Windows process argument limits"
   ],
   "outOfScope": [
     "Semantic proof that an arbitrary checker is complete",
@@ -78,6 +79,17 @@
         "repair-recording-regressions"
       ],
       "counterexample": "A 100 KB patch requires transcription, a stale attempt is reused, a red packet receives PASS, or an overlay edit is ignored"
+    },
+    {
+      "id": "repair-helper-fixture-portability",
+      "statement": "Executable repair helper parity fixtures preserve their assertions while streaming complete JavaScript source as UTF-8 input, including Unicode paths and exact byte vectors",
+      "decisions": [
+        "repair-evidence"
+      ],
+      "checks": [
+        "repair-regressions"
+      ],
+      "counterexample": "A helper grows past the Windows CreateProcess command-line limit and three otherwise valid parity checks fail before Node starts"
     }
   ],
   "checks": [

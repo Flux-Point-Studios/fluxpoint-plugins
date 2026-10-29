@@ -589,15 +589,15 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         vectors = ['b/state.py', 'a/state.py', 'a/x b/x', r'"b/\303\251.py"', r'"a/\303\251.py" "b/\303\251.py"', r'"b/tab\tfile.py"']
         expected = ['state.py', 'state.py', 'x', 'é.py', 'é.py', 'tab\tfile.py']
         self.assertEqual([manifest_path(v) for v in vectors], expected)
-        script = (SCRIPTS / 'repair-proof.js').read_text() + '\nconsole.log(JSON.stringify(' + json.dumps(vectors) + '.map(repairManifestPath)));'
-        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=True)
+        script = (SCRIPTS / 'repair-proof.js').read_text(encoding='utf-8') + '\nconsole.log(JSON.stringify(' + json.dumps(vectors) + '.map(repairManifestPath)));'
+        result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True, encoding='utf-8', check=True)
         self.assertEqual(json.loads(result.stdout), expected)
 
     def test_surface_classification_matches_ascii_javascript_boundaries(self):
         from repair_diff import surfaces
         values = ['jsonñ = 1', 'ſleep(1)', 'Kif', 'json = 1']
-        script = (SCRIPTS / 'repair-proof.js').read_text() + '\nconsole.log(JSON.stringify(' + json.dumps(values) + '.map(repairSurfaces)));'
-        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=True)
+        script = (SCRIPTS / 'repair-proof.js').read_text(encoding='utf-8') + '\nconsole.log(JSON.stringify(' + json.dumps(values) + '.map(repairSurfaces)));'
+        result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True, encoding='utf-8', check=True)
         self.assertEqual(json.loads(result.stdout), [surfaces(v) for v in values])
 
     def test_js_hash_and_manifest_match_exact_host_bytes(self):
@@ -606,10 +606,10 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
         vectors = [b'', b'abc', bytes(range(256)), self.data,
                    'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+é guard\n'.encode()]
         script = (SCRIPTS / 'repair-proof.js').read_text(encoding='utf-8') + '\n' + 'const vectors=' + json.dumps([base64.b64encode(v).decode() for v in vectors]) + ';\nconsole.log(JSON.stringify(vectors.map(v=>repairSHA256(repairBytes(v)))));'
-        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', check=True)
+        result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True, encoding='utf-8', check=True)
         self.assertEqual(json.loads(result.stdout), [hashlib.sha256(v).hexdigest() for v in vectors])
         script = (SCRIPTS / 'repair-proof.js').read_text(encoding='utf-8') + '\nconsole.log(JSON.stringify(repairManifest(repairBytes(' + json.dumps(base64.b64encode(vectors[-1]).decode()) + '))));'
-        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', check=True)
+        result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True, encoding='utf-8', check=True)
         self.assertEqual(json.loads(result.stdout), manifest(vectors[-1]))
         # Execute the real witness guard with native pathlib-style Windows
         # responses. Different roots and POSIX literal backslashes stay distinct.
@@ -631,7 +631,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push({label,p});
  reply={status:'READ',base:context.base,item:context.item,round:1,patch:actual,manifest,manifestSha256:repairManifestDigest(manifest)};
  const result=await repairReadPatch(context);results.push([name,!result.issue]);
 }console.log(JSON.stringify(results));})();'''
-        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, encoding='utf-8', check=True)
+        result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True, encoding='utf-8', check=True)
         self.assertEqual(json.loads(result.stdout), [[name, expected] for name, _, _, expected in cases])
 
     def test_helper_materializes_exact_bytes_and_confirms_owned_cleanup(self):

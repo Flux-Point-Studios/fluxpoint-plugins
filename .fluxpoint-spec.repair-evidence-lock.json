@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "sha256": "b34b10a4739b2fa3660bb07ffefa89eff703fa4add67d843d43721afb77b9514",
+  "sha256": "a0ffb92edfbe869867151a269c91c3e853fee4cb5169e1fbefd8487050a7c96c",
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/contracts/DecisionV1.schema.json": "0bb4ce05a8919b3d6bd949e22f10b155a4580f74f26a4cfd510b5cdd0daaaaac",
@@ -17,7 +17,7 @@
     "plugins/fluxpoint/scripts/repair_policy.py": "7b66db99bd21f22311ab79ba2c64ecca60e8fbc62e5100598ac9f38b1739d5b6",
     "plugins/fluxpoint/scripts/unchecked-repairs.py": "a9160e109935c5c65cf6fbc8d1b5a6c6f73384cd99af81f7b37003ab6ddc83c6",
     "plugins/fluxpoint/tests/packet-projection-test.py": "5437bf2cb4d66d0bb6df4b1f4f56658de90f6faaa585f04e7f8daec377d081c2",
-    "plugins/fluxpoint/tests/repair-proof-test.py": "98b7e755a888df9c8e36668eaaae58e772eca1a5fb596bf3d00bb82bded0dd18",
+    "plugins/fluxpoint/tests/repair-proof-test.py": "a6774662ee1f37e8356856b03469ec8df0dcf790a248ff283bb2b5679623a0cd",
     "plugins/fluxpoint/tests/unchecked-repairs-test.py": "abf7b4877758e70df5ead35220508f03b489f447826ed823dcd0b5946749c072"
   },
   "lockFormat": 2
