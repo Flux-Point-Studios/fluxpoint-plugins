@@ -65,6 +65,47 @@ const PATH_TOKEN = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs
 const CD_PREFIX = /(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
 const PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))/gm;
 
+// Tools that print, search, hash, compare or list a file and cannot run it. A command made only of these is never
+// judged: the operator must be able to read and hash the very files this gate protects. sed (its `e` command) and
+// awk (system()) can run code, so they are not here.
+const READ_ONLY = new Set(["cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep", "rg", "ugrep",
+  "sha256sum", "sha1sum", "sha512sum", "md5sum", "b2sum", "cksum", "diff", "cmp", "comm", "file", "stat", "ls",
+  "readlink", "realpath", "basename", "dirname", "du", "od", "xxd", "hexdump", "strings", "sort", "uniq", "cut",
+  "nl", "echo", "printf", "true"]);
+const GIT_READ_ONLY = new Set(["show", "diff", "log", "blame", "grep", "status", "cat-file", "ls-files", "rev-parse"]);
+// Words that run the command after them: skipped, with their own option values.
+const PREFIXES = { timeout: /^(?:-\S+|\d+(?:\.\d+)?[smhd]?)$/, nice: /^(?:-n|-?\d+)$/, env: /^-\S*$/ };
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const WORD = /"[^"]*"|'[^']*'|\S+/g;
+
+function readOnlySimple(segment) {
+  // Redirections are not commands, and a substitution split inside quotes leaves the quote marks behind.
+  const words = (segment.match(WORD) || []).filter((w) => !/^\d*[<>]/.test(w) && !/^["']+$/.test(w))
+    .map((w) => w.replace(/^["']+|["']+$/g, ""));
+  let i = 0;
+  for (;;) {
+    while (i < words.length && ASSIGNMENT.test(words[i])) i += 1;
+    const skip = PREFIXES[words[i]];
+    if (!skip) break;
+    i += 1;
+    while (i < words.length && skip.test(words[i])) i += 1;
+  }
+  if (i >= words.length) return true;
+  const name = path.basename(words[i]);
+  if (name === "git") {
+    let j = i + 1;
+    while (j < words.length && words[j].startsWith("-")) j += words[j] === "-C" ? 2 : 1;
+    return GIT_READ_ONLY.has(words[j]);
+  }
+  return READ_ONLY.has(name);
+}
+
+/** Every simple command in the line is a read-only tool. Pipes, lists, newlines and command substitutions all split
+ *  the line, so `cat s.py | python3` and `python3 -c "$(cat s.py)"` are not read-only. */
+export function readOnlyCommand(command) {
+  return command.split(/\$\(|[;&|\n`()]+/).every(readOnlySimple);
+}
+
 /** The nearest `.send-chokepoint.json` at or above `from`, validated.
  *  Returns null when none exists, which means this hook does nothing. */
 export function loadConfig(from) {
@@ -197,6 +238,7 @@ function senderVerdict(fp, config, via) {
 
 export function judge(command, cwd, config) {
   if (!config || typeof command !== "string" || !command.trim()) return null;
+  if (readOnlyCommand(command)) return null;
   if (looksLikeSender(command, config)) {
     return { reason: "this command reaches a mail-send endpoint directly",
              where: "the command line" };

@@ -264,3 +264,57 @@ test("the config is found from the command's directory, not only the session's",
   assert.equal(hook(`cd "${inner}" && python blast.py`, parent).status, 2,
                "the cd target's config must govern the command");
 });
+
+// ------------------------------------------------- reading a sender is not sending
+// A command made only of read-only tools (print, search, hash, compare, list, git
+// read subcommands) cannot run the file it names, so it is never judged; the
+// operator must be able to read, grep and hash the very files the gate protects.
+// Anything that can run a file keeps the full judgment.
+for (const command of [
+  "sha256sum blast.py",
+  "cat blast.py",
+  "head -n 40 blast.py | grep -n send",
+  "grep -n sendMail blast.py",
+  "wc -l blast.py && sha256sum blast.py",
+  "timeout 60 sha256sum blast.py",
+  "LC_ALL=C grep -c graph blast.py",
+  "diff blast.py other.py",
+  "git show HEAD:blast.py",
+  "git diff -- blast.py",
+  'grep -rn "graph.microsoft.com/v1.0/me/sendMail" .',
+  'echo "$(sha256sum blast.py)"',
+  "wc -l blast.py;",
+]) {
+  test(`a read-only command on a sender is allowed: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    file(dir, "other.py", READER_BODY);
+    assert.equal(hook(command, dir).status, 0, "reading or hashing a file is not a send");
+  });
+}
+
+for (const command of [
+  "cat blast.py | python3",
+  'python3 -c "$(cat blast.py)"',
+  "cat blast.py && python blast.py",
+  "sha256sum blast.py; python3 blast.py",
+  "timeout 60 python3 blast.py",
+  "LC_ALL=C python3 blast.py",
+  "sed -n 1p blast.py",
+  "awk 1 blast.py",
+  "echo $(python3 blast.py)",
+  "echo `python3 blast.py`",
+  "git submodule foreach python3 blast.py",
+]) {
+  test(`a command that can run the sender keeps the full judgment: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
+test("an inline send is still BLOCKED when it rides with a read-only command", () => {
+  const dir = repo();
+  const r = hook("cat notes.txt; curl -X POST https://graph.microsoft.com/v1.0/me/sendMail", dir);
+  assert.equal(r.status, 2);
+});
