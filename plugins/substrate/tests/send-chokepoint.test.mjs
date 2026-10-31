@@ -284,6 +284,12 @@ for (const command of [
   'grep -rn "graph.microsoft.com/v1.0/me/sendMail" .',
   'echo "$(sha256sum blast.py)"',
   "wc -l blast.py;",
+  "git show HEAD:blast.py > copy.py",
+  "git show HEAD:blast.py > copy.py 2>&1",
+  "sha256sum blast.py 2>&1 | sort",
+  "cat blast.py &>/dev/null",
+  "cat blast.py &>> log.txt",
+  "grep -n send blast.py >&2",
 ]) {
   test(`a read-only command on a sender is allowed: ${command}`, () => {
     const dir = repo();
@@ -305,6 +311,11 @@ for (const command of [
   "echo $(python3 blast.py)",
   "echo `python3 blast.py`",
   "git submodule foreach python3 blast.py",
+  "python3 blast.py 2>&1",
+  "cat blast.py 2>&1 & python3 blast.py",
+  "sha256sum blast.py >&2 && python3 blast.py",
+  "cat blast.py &>/dev/null; python3 blast.py",
+  "&>cat python3 blast.py",
 ]) {
   test(`a command that can run the sender keeps the full judgment: ${command}`, () => {
     const dir = repo();

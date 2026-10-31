@@ -103,7 +103,9 @@ function readOnlySimple(segment) {
 /** Every simple command in the line is a read-only tool. Pipes, lists, newlines and command substitutions all split
  *  the line, so `cat s.py | python3` and `python3 -c "$(cat s.py)"` are not read-only. */
 export function readOnlyCommand(command) {
-  return command.split(/\$\(|[;&|\n`()]+/).every(readOnlySimple);
+  // The & of `2>&1`, `>&2` and `&>` is part of a redirection, not a list separator.
+  return command.replace(/\d*[<>]&(?:\d+|-)|&>>?/g, (m) => (m[0] === "&" ? ">" : " "))
+    .split(/\$\(|[;&|\n`()]+/).every(readOnlySimple);
 }
 
 /** The nearest `.send-chokepoint.json` at or above `from`, validated.
