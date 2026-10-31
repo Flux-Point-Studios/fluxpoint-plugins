@@ -42,7 +42,9 @@ function repo(config = { sender: "outbound_mail.py" }) {
 
 function hook(command, cwd, toolName = "Bash") {
   const payload = JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd });
-  return spawnSync("node", [SCRIPT, "--hook"], { input: payload, encoding: "utf8" });
+  // Claude Code runs the hook in the session's directory, so the hook here runs in the test's own repo, never in
+  // whatever tree the suite was started from.
+  return spawnSync("node", [SCRIPT, "--hook"], { input: payload, encoding: "utf8", cwd });
 }
 
 function file(dir, name, body) {
@@ -74,6 +76,16 @@ test("malformed config is reported and ignored, never obeyed", () => {
   const r = hook(`python "${p}"`, dir);
   assert.equal(r.status, 0);
   assert.match(r.stdout, /not valid JSON/);
+});
+
+test("the verdicts do not depend on the directory the suite is run from", () => {
+  // The laptop runs this suite inside a tree with a real .send-chokepoint.json above it.
+  const dir = repo();
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const r = spawnSync(process.execPath, ["--test", "--test-name-pattern=malformed config is reported",
+    fileURLToPath(import.meta.url)], { cwd: dir, env, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stdout);
 });
 
 test("an unknown config key is reported without disabling the rest", () => {
