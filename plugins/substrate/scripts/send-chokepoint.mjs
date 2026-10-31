@@ -108,6 +108,59 @@ export function readOnlyCommand(command) {
     .split(/\$\(|[;&|\n`()]+/).every(readOnlySimple);
 }
 
+const HEREDOC_OP = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_][A-Za-z0-9_.-]*))/;
+
+/** The heredocs a line opens, in order, as {word, tabs}, and the line with each operator blanked; null when the
+ *  line cannot be read for certain (an operator the pattern does not take, arithmetic, or a quote left open).
+ *  `<<<` is a here-string, and `<<` inside quotes or after a comment opens nothing. */
+function heredocsOn(line) {
+  if (line.includes("((")) return null;
+  const docs = [];
+  let bare = line;
+  let quote = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const c = line[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      else if (c === "\\" && quote === '"') i += 1;
+      continue;
+    }
+    if (c === "'" || c === '"') quote = c;
+    else if (c === "\\") {
+      // A continued line runs on into the next, so the body would start a line later than it seems.
+      if (i === line.length - 1) return null;
+      i += 1;
+    } else if (c === "#" && (i === 0 || /\s/.test(line[i - 1]))) break;
+    else if (line.startsWith("<<<", i)) i += 2;
+    else if (line.startsWith("<<", i)) {
+      const m = HEREDOC_OP.exec(line.slice(i));
+      if (!m) return null;
+      docs.push({ word: m[2] ?? m[3] ?? m[4], tabs: m[1] === "-" });
+      bare = bare.slice(0, i) + " ".repeat(m[0].length) + bare.slice(i + m[0].length);
+      i += m[0].length - 1;
+    }
+  }
+  return quote ? null : { docs, bare };
+}
+
+/** The command with every heredoc body taken out, or null when any heredoc cannot be delimited for certain. */
+function withoutHeredocBodies(command) {
+  const lines = command.split("\n");
+  const kept = [];
+  for (let i = 0; i < lines.length;) {
+    const read = lines[i].includes("<<") ? heredocsOn(lines[i]) : { docs: [], bare: lines[i] };
+    if (read === null) return null;
+    kept.push(read.bare);
+    i += 1;
+    for (const { word, tabs } of read.docs) {
+      while (i < lines.length && (tabs ? lines[i].replace(/^\t+/, "") : lines[i]) !== word) i += 1;
+      if (i >= lines.length) return null;
+      i += 1;
+    }
+  }
+  return kept.join("\n");
+}
+
 /** The nearest `.send-chokepoint.json` at or above `from`, validated.
  *  Returns null when none exists, which means this hook does nothing. */
 export function loadConfig(from) {
@@ -240,7 +293,9 @@ function senderVerdict(fp, config, via) {
 
 export function judge(command, cwd, config) {
   if (!config || typeof command !== "string" || !command.trim()) return null;
-  if (readOnlyCommand(command)) return null;
+  // A heredoc body is data: set aside, it only decides whether the line is read-only. Every other judgment
+  // reads the full text, so a body fed to an interpreter is still judged.
+  if (readOnlyCommand(withoutHeredocBodies(command) ?? command)) return null;
   if (looksLikeSender(command, config)) {
     return { reason: "this command reaches a mail-send endpoint directly",
              where: "the command line" };

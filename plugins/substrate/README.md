@@ -323,6 +323,14 @@ and command substitutions split the line, so `cat sender.py | python3` and
 `echo $(python3 sender.py)` are still judged. `sed` and `awk` can run code and
 are not on the list.
 
+A heredoc body is data. A line whose commands are all read-only once its
+heredoc bodies are set aside is not judged, so `cat > probe.py <<EOF` may write
+a script that names a sender. Any other line is judged on its full text,
+bodies included, so `python3 <<EOF` and a write-then-run in one command are
+still caught. A heredoc that cannot be delimited for certain (unterminated,
+inside quotes or a comment, a continued line, arithmetic) leaves the whole
+line judged.
+
 Omit `providers` to use the built-in Microsoft Graph, Gmail, SendGrid, Mailgun,
 Postmark and Resend hosts. This is a static routing check: it does not send
 mail, grant authorization, verify recipients or prove that the approved

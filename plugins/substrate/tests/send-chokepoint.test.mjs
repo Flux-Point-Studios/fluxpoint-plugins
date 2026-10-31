@@ -324,6 +324,55 @@ for (const command of [
   });
 }
 
+// ------------------------------------------------- a heredoc body is data
+// A line whose commands are all read-only once heredoc bodies are set aside is not
+// judged: writing a script that NAMES a sender is not running it. Any other line is
+// judged on its full text, bodies included, and a heredoc that cannot be delimited
+// for certain leaves the line judged.
+const INLINE_SEND = 'urllib.request.urlopen("https://graph.microsoft.com/v1.0/me/sendMail")';
+for (const command of [
+  "cat > probe.py <<EOF\n# provenance: thin.py\nimport other\nEOF",
+  "cat > probe.py <<EOF\n# copied from blast.py\nEOF",
+  "cat > probe.py <<'EOF'\n# copied from blast.py\nEOF",
+  'cat > probe.py <<"EOF"\n# copied from blast.py\nEOF',
+  "cat > probe.py <<-EOF\n\t# copied from blast.py\n\tEOF",
+  "cat > a.py <<A; cat > b.py <<B\n# blast.py\nA\n# thin.py\nB",
+  `cat > notes.md <<EOF\n${INLINE_SEND}\nEOF`,
+  "cat<<EOF > probe.py\n# copied from blast.py\nEOF",
+  "cat <<<x > a.txt; cat > probe.py <<EOF\n# copied from blast.py\nEOF",
+  'echo "say \\"hi\\"" > a.txt; cat > probe.py <<EOF\n# copied from blast.py\nEOF',
+  "echo 'c:\\' > a.txt; cat > probe.py <<EOF\n# copied from blast.py\nEOF",
+]) {
+  test(`a heredoc into a read-only command is not judged: ${JSON.stringify(command)}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    file(dir, "thin.py", "import blast\n");
+    assert.equal(hook(command, dir).status, 0, "a heredoc body is data until something runs it");
+  });
+}
+
+for (const command of [
+  `python3 <<EOF\n${INLINE_SEND}\nEOF`,
+  `cat <<EOF | python3\n${INLINE_SEND}\nEOF`,
+  `cat > p.py <<EOF\n${INLINE_SEND}\nEOF\npython3 p.py`,
+  'cat > p.py <<EOF\n"""blast.py"""',
+  'echo "<<EOF"\npython3 blast.py\nEOF',
+  "echo '<<EOF'\npython3 blast.py\nEOF",
+  "true # <<EOF\npython3 blast.py\nEOF",
+  "cat <<<EOF\npython3 blast.py\nEOF",
+  "echo $((true<<EOF))\npython3 blast.py\nEOF",
+  "cat > p.txt <<EOF\npython3 blast.py\n\tEOF",
+  "cat > p.txt <<-EOF\npython3 blast.py\n  EOF",
+  'echo "a\n<<EOF"\npython3 blast.py\nEOF',
+  "cat > p.txt <<EOF \\\n; python3 blast.py\nEOF",
+]) {
+  test(`a heredoc that runs, or cannot be delimited, keeps the full judgment: ${JSON.stringify(command)}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
 test("an inline send is still BLOCKED when it rides with a read-only command", () => {
   const dir = repo();
   const r = hook("cat notes.txt; curl -X POST https://graph.microsoft.com/v1.0/me/sendMail", dir);
