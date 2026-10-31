@@ -41,6 +41,12 @@ ok()  { printf 'PASS  %-54s -> %s\n' "$1" "$2"; pass=$((pass+1)); }
 bad() { printf 'FAIL  %-54s -> %s\n' "$1" "$2"; fail=$((fail+1)); }
 check(){ [ "$2" = "$3" ] && ok "$1" "$3" || bad "$1" "$3 (wanted $2)"; }
 
+# The interpreter as a `run` line spells it: guard-guard runs the line under a
+# POSIX shell, so it is single-quoted; the guards file is JSON, so that is then
+# JSON-escaped. A Windows interpreter path carries backslashes both would eat.
+SH_PY="'$(printf '%s' "$FPL_PY" | sed "s/'/'\\\\''/g")'"
+RUN_PY="$(printf '%s' "$SH_PY" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -59,7 +65,7 @@ mkrepo() {
   "proof": {"file": "test_fee.py", "test": "test_fee"},
   "mutation": {"find": "if amount > 100", "replace": "if False"},
   "expect": "guard gone",
-  "run": "$FPL_PY test_fee.py"
+  "run": "$RUN_PY test_fee.py"
 }]}
 JSON
 }
@@ -72,7 +78,15 @@ check "a guard held down by its proof verifies" 0 $?
 # `run` is a POSIX command line on every platform. On Windows shell=True would
 # hand it to cmd.exe, which has no `NAME=value cmd` prefix.
 mkrepo posix
-sed -i.bak "s#\"run\": .*#\"run\": \"PROOF=1 $FPL_PY test_fee.py\"#" "$WORK/posix/.fluxpoint-guards.json"
+"$FPL_PY" - "$WORK/posix/.fluxpoint-guards.json" "PROOF=1 $SH_PY test_fee.py" <<'PY'
+import json, sys
+path, run = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    doc = json.load(f)
+doc["guards"][0]["run"] = run
+with open(path, "w") as f:
+    json.dump(doc, f)
+PY
 "$FPL_PY" "$GG" --root "$WORK/posix" --verify >/dev/null 2>&1
 check "a proof run written as a POSIX command line verifies" 0 $?
 
@@ -193,7 +207,7 @@ cat >"$r/.fluxpoint-guards.json" <<JSON
   "proof": {"file": "test_pin.py", "test": "test_pin"},
   "mutation": {"find": "PINNED_VKH = \"abc123\"", "replace": "pass"},
   "expect": "unpinned key accepted",
-  "run": "$FPL_PY test_pin.py"
+  "run": "$RUN_PY test_pin.py"
 }]}
 JSON
 out="$("$FPL_PY" "$GG" --root "$r" --verify 2>&1)"; rc=$?
@@ -222,7 +236,7 @@ cat >"$r/.fluxpoint-guards.json" <<JSON
   "proof": {"file": "test_fee.py", "test": "test_fee"},
   "mutation": {"find": "if amount > 100", "replace": "if False"},
   "expect": "guard gone",
-  "run": "$FPL_PY test_fee.py"
+  "run": "$RUN_PY test_fee.py"
 }]}
 JSON
 out="$("$FPL_PY" "$GG" --root "$r" --verify 2>&1)"; rc=$?
@@ -245,7 +259,7 @@ cat >"$WORK/alias/.fluxpoint-guards.json" <<JSON
   "proof": {"file": "./server.py", "test": "fee_ok"},
   "mutation": {"find": "if amount > 100", "replace": "if False"},
   "expect": "guard gone",
-  "run": "$FPL_PY test_fee.py"
+  "run": "$RUN_PY test_fee.py"
 }]}
 JSON
 out="$("$FPL_PY" "$GG" --root "$WORK/alias" --check 2>&1)"; rc=$?
