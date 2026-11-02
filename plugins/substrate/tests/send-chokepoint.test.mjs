@@ -42,7 +42,9 @@ function repo(config = { sender: "outbound_mail.py" }) {
 
 function hook(command, cwd, toolName = "Bash") {
   const payload = JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd });
-  return spawnSync("node", [SCRIPT, "--hook"], { input: payload, encoding: "utf8" });
+  // Claude Code runs the hook in the session's directory, so the hook here runs in the test's own repo, never in
+  // whatever tree the suite was started from.
+  return spawnSync("node", [SCRIPT, "--hook"], { input: payload, encoding: "utf8", cwd });
 }
 
 function file(dir, name, body) {
@@ -74,6 +76,16 @@ test("malformed config is reported and ignored, never obeyed", () => {
   const r = hook(`python "${p}"`, dir);
   assert.equal(r.status, 0);
   assert.match(r.stdout, /not valid JSON/);
+});
+
+test("the verdicts do not depend on the directory the suite is run from", () => {
+  // The laptop runs this suite inside a tree with a real .send-chokepoint.json above it.
+  const dir = repo();
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const r = spawnSync(process.execPath, ["--test", "--test-name-pattern=malformed config is reported",
+    fileURLToPath(import.meta.url)], { cwd: dir, env, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stdout);
 });
 
 test("an unknown config key is reported without disabling the rest", () => {
@@ -263,4 +275,118 @@ test("the config is found from the command's directory, not only the session's",
   file(inner, "blast.py", SENDER_BODY);
   assert.equal(hook(`cd "${inner}" && python blast.py`, parent).status, 2,
                "the cd target's config must govern the command");
+});
+
+// ------------------------------------------------- reading a sender is not sending
+// A command made only of read-only tools (print, search, hash, compare, list, git
+// read subcommands) cannot run the file it names, so it is never judged; the
+// operator must be able to read, grep and hash the very files the gate protects.
+// Anything that can run a file keeps the full judgment.
+for (const command of [
+  "sha256sum blast.py",
+  "cat blast.py",
+  "head -n 40 blast.py | grep -n send",
+  "grep -n sendMail blast.py",
+  "wc -l blast.py && sha256sum blast.py",
+  "timeout 60 sha256sum blast.py",
+  "LC_ALL=C grep -c graph blast.py",
+  "diff blast.py other.py",
+  "git show HEAD:blast.py",
+  "git diff -- blast.py",
+  'grep -rn "graph.microsoft.com/v1.0/me/sendMail" .',
+  'echo "$(sha256sum blast.py)"',
+  "wc -l blast.py;",
+  "git show HEAD:blast.py > copy.py",
+  "git show HEAD:blast.py > copy.py 2>&1",
+  "sha256sum blast.py 2>&1 | sort",
+  "cat blast.py &>/dev/null",
+  "cat blast.py &>> log.txt",
+  "grep -n send blast.py >&2",
+]) {
+  test(`a read-only command on a sender is allowed: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    file(dir, "other.py", READER_BODY);
+    assert.equal(hook(command, dir).status, 0, "reading or hashing a file is not a send");
+  });
+}
+
+for (const command of [
+  "cat blast.py | python3",
+  'python3 -c "$(cat blast.py)"',
+  "cat blast.py && python blast.py",
+  "sha256sum blast.py; python3 blast.py",
+  "timeout 60 python3 blast.py",
+  "LC_ALL=C python3 blast.py",
+  "sed -n 1p blast.py",
+  "awk 1 blast.py",
+  "echo $(python3 blast.py)",
+  "echo `python3 blast.py`",
+  "git submodule foreach python3 blast.py",
+  "python3 blast.py 2>&1",
+  "cat blast.py 2>&1 & python3 blast.py",
+  "sha256sum blast.py >&2 && python3 blast.py",
+  "cat blast.py &>/dev/null; python3 blast.py",
+  "&>cat python3 blast.py",
+]) {
+  test(`a command that can run the sender keeps the full judgment: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
+// ------------------------------------------------- a heredoc body is data
+// A line whose commands are all read-only once heredoc bodies are set aside is not
+// judged: writing a script that NAMES a sender is not running it. Any other line is
+// judged on its full text, bodies included, and a heredoc that cannot be delimited
+// for certain leaves the line judged.
+const INLINE_SEND = 'urllib.request.urlopen("https://graph.microsoft.com/v1.0/me/sendMail")';
+for (const command of [
+  "cat > probe.py <<EOF\n# provenance: thin.py\nimport other\nEOF",
+  "cat > probe.py <<EOF\n# copied from blast.py\nEOF",
+  "cat > probe.py <<'EOF'\n# copied from blast.py\nEOF",
+  'cat > probe.py <<"EOF"\n# copied from blast.py\nEOF',
+  "cat > probe.py <<-EOF\n\t# copied from blast.py\n\tEOF",
+  "cat > a.py <<A; cat > b.py <<B\n# blast.py\nA\n# thin.py\nB",
+  `cat > notes.md <<EOF\n${INLINE_SEND}\nEOF`,
+  "cat<<EOF > probe.py\n# copied from blast.py\nEOF",
+  "cat <<<x > a.txt; cat > probe.py <<EOF\n# copied from blast.py\nEOF",
+  'echo "say \\"hi\\"" > a.txt; cat > probe.py <<EOF\n# copied from blast.py\nEOF',
+  "echo 'c:\\' > a.txt; cat > probe.py <<EOF\n# copied from blast.py\nEOF",
+]) {
+  test(`a heredoc into a read-only command is not judged: ${JSON.stringify(command)}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    file(dir, "thin.py", "import blast\n");
+    assert.equal(hook(command, dir).status, 0, "a heredoc body is data until something runs it");
+  });
+}
+
+for (const command of [
+  `python3 <<EOF\n${INLINE_SEND}\nEOF`,
+  `cat <<EOF | python3\n${INLINE_SEND}\nEOF`,
+  `cat > p.py <<EOF\n${INLINE_SEND}\nEOF\npython3 p.py`,
+  'cat > p.py <<EOF\n"""blast.py"""',
+  'echo "<<EOF"\npython3 blast.py\nEOF',
+  "echo '<<EOF'\npython3 blast.py\nEOF",
+  "true # <<EOF\npython3 blast.py\nEOF",
+  "cat <<<EOF\npython3 blast.py\nEOF",
+  "echo $((true<<EOF))\npython3 blast.py\nEOF",
+  "cat > p.txt <<EOF\npython3 blast.py\n\tEOF",
+  "cat > p.txt <<-EOF\npython3 blast.py\n  EOF",
+  'echo "a\n<<EOF"\npython3 blast.py\nEOF',
+  "cat > p.txt <<EOF \\\n; python3 blast.py\nEOF",
+]) {
+  test(`a heredoc that runs, or cannot be delimited, keeps the full judgment: ${JSON.stringify(command)}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
+test("an inline send is still BLOCKED when it rides with a read-only command", () => {
+  const dir = repo();
+  const r = hook("cat notes.txt; curl -X POST https://graph.microsoft.com/v1.0/me/sendMail", dir);
+  assert.equal(r.status, 2);
 });

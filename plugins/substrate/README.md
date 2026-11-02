@@ -313,6 +313,24 @@ its descendants. Paths resolve against the configuration's directory, so a
 same-named file elsewhere does not inherit permission. Leading `cd` commands
 and Windows paths are covered by regression fixtures.
 
+A command made only of read-only tools is not judged, so the files the gate
+protects can still be read, searched, hashed and compared: `cat`, `head`,
+`tail`, `grep`, `rg`, the `sha*sum`/`md5sum` family, `wc`, `diff`, `ls`,
+`stat` and similar, plus the git subcommands `show`, `diff`, `log`, `blame`,
+`grep`, `status`, `cat-file`, `ls-files` and `rev-parse`. Leading variable
+assignments and `timeout`, `nice` and `env` prefixes are skipped. Pipes, lists
+and command substitutions split the line, so `cat sender.py | python3` and
+`echo $(python3 sender.py)` are still judged. `sed` and `awk` can run code and
+are not on the list.
+
+A heredoc body is data. A line whose commands are all read-only once its
+heredoc bodies are set aside is not judged, so `cat > probe.py <<EOF` may write
+a script that names a sender. Any other line is judged on its full text,
+bodies included, so `python3 <<EOF` and a write-then-run in one command are
+still caught. A heredoc that cannot be delimited for certain (unterminated,
+inside quotes or a comment, a continued line, arithmetic) leaves the whole
+line judged.
+
 Omit `providers` to use the built-in Microsoft Graph, Gmail, SendGrid, Mailgun,
 Postmark and Resend hosts. This is a static routing check: it does not send
 mail, grant authorization, verify recipients or prove that the approved

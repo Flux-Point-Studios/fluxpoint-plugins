@@ -65,6 +65,102 @@ const PATH_TOKEN = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs
 const CD_PREFIX = /(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
 const PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))/gm;
 
+// Tools that print, search, hash, compare or list a file and cannot run it. A command made only of these is never
+// judged: the operator must be able to read and hash the very files this gate protects. sed (its `e` command) and
+// awk (system()) can run code, so they are not here.
+const READ_ONLY = new Set(["cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep", "rg", "ugrep",
+  "sha256sum", "sha1sum", "sha512sum", "md5sum", "b2sum", "cksum", "diff", "cmp", "comm", "file", "stat", "ls",
+  "readlink", "realpath", "basename", "dirname", "du", "od", "xxd", "hexdump", "strings", "sort", "uniq", "cut",
+  "nl", "echo", "printf", "true"]);
+const GIT_READ_ONLY = new Set(["show", "diff", "log", "blame", "grep", "status", "cat-file", "ls-files", "rev-parse"]);
+// Words that run the command after them: skipped, with their own option values.
+const PREFIXES = { timeout: /^(?:-\S+|\d+(?:\.\d+)?[smhd]?)$/, nice: /^(?:-n|-?\d+)$/, env: /^-\S*$/ };
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const WORD = /"[^"]*"|'[^']*'|\S+/g;
+
+function readOnlySimple(segment) {
+  // Redirections are not commands, and a substitution split inside quotes leaves the quote marks behind.
+  const words = (segment.match(WORD) || []).filter((w) => !/^\d*[<>]/.test(w) && !/^["']+$/.test(w))
+    .map((w) => w.replace(/^["']+|["']+$/g, ""));
+  let i = 0;
+  for (;;) {
+    while (i < words.length && ASSIGNMENT.test(words[i])) i += 1;
+    const skip = PREFIXES[words[i]];
+    if (!skip) break;
+    i += 1;
+    while (i < words.length && skip.test(words[i])) i += 1;
+  }
+  if (i >= words.length) return true;
+  const name = path.basename(words[i]);
+  if (name === "git") {
+    let j = i + 1;
+    while (j < words.length && words[j].startsWith("-")) j += words[j] === "-C" ? 2 : 1;
+    return GIT_READ_ONLY.has(words[j]);
+  }
+  return READ_ONLY.has(name);
+}
+
+/** Every simple command in the line is a read-only tool. Pipes, lists, newlines and command substitutions all split
+ *  the line, so `cat s.py | python3` and `python3 -c "$(cat s.py)"` are not read-only. */
+export function readOnlyCommand(command) {
+  // The & of `2>&1`, `>&2` and `&>` is part of a redirection, not a list separator.
+  return command.replace(/\d*[<>]&(?:\d+|-)|&>>?/g, (m) => (m[0] === "&" ? ">" : " "))
+    .split(/\$\(|[;&|\n`()]+/).every(readOnlySimple);
+}
+
+const HEREDOC_OP = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_][A-Za-z0-9_.-]*))/;
+
+/** The heredocs a line opens, in order, as {word, tabs}, and the line with each operator blanked; null when the
+ *  line cannot be read for certain (an operator the pattern does not take, arithmetic, or a quote left open).
+ *  `<<<` is a here-string, and `<<` inside quotes or after a comment opens nothing. */
+function heredocsOn(line) {
+  if (line.includes("((")) return null;
+  const docs = [];
+  let bare = line;
+  let quote = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const c = line[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      else if (c === "\\" && quote === '"') i += 1;
+      continue;
+    }
+    if (c === "'" || c === '"') quote = c;
+    else if (c === "\\") {
+      // A continued line runs on into the next, so the body would start a line later than it seems.
+      if (i === line.length - 1) return null;
+      i += 1;
+    } else if (c === "#" && (i === 0 || /\s/.test(line[i - 1]))) break;
+    else if (line.startsWith("<<<", i)) i += 2;
+    else if (line.startsWith("<<", i)) {
+      const m = HEREDOC_OP.exec(line.slice(i));
+      if (!m) return null;
+      docs.push({ word: m[2] ?? m[3] ?? m[4], tabs: m[1] === "-" });
+      bare = bare.slice(0, i) + " ".repeat(m[0].length) + bare.slice(i + m[0].length);
+      i += m[0].length - 1;
+    }
+  }
+  return quote ? null : { docs, bare };
+}
+
+/** The command with every heredoc body taken out, or null when any heredoc cannot be delimited for certain. */
+function withoutHeredocBodies(command) {
+  const lines = command.split("\n");
+  const kept = [];
+  for (let i = 0; i < lines.length;) {
+    const read = lines[i].includes("<<") ? heredocsOn(lines[i]) : { docs: [], bare: lines[i] };
+    if (read === null) return null;
+    kept.push(read.bare);
+    i += 1;
+    for (const { word, tabs } of read.docs) {
+      while (i < lines.length && (tabs ? lines[i].replace(/^\t+/, "") : lines[i]) !== word) i += 1;
+      if (i >= lines.length) return null;
+      i += 1;
+    }
+  }
+  return kept.join("\n");
+}
+
 /** The nearest `.send-chokepoint.json` at or above `from`, validated.
  *  Returns null when none exists, which means this hook does nothing. */
 export function loadConfig(from) {
@@ -197,6 +293,9 @@ function senderVerdict(fp, config, via) {
 
 export function judge(command, cwd, config) {
   if (!config || typeof command !== "string" || !command.trim()) return null;
+  // A heredoc body is data: set aside, it only decides whether the line is read-only. Every other judgment
+  // reads the full text, so a body fed to an interpreter is still judged.
+  if (readOnlyCommand(withoutHeredocBodies(command) ?? command)) return null;
   if (looksLikeSender(command, config)) {
     return { reason: "this command reaches a mail-send endpoint directly",
              where: "the command line" };
