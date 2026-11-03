@@ -67,12 +67,12 @@ const PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_
 
 // Tools that print, search, hash, compare or list a file and cannot run it. A command made only of these is never
 // judged: the operator must be able to read and hash the very files this gate protects. sed (its `e` command) and
-// awk (system()) can run code, so they are not here.
+// awk (system()) can run code, so they are not here, and neither is git: every subcommand honours repository
+// configuration an agent can write (core.fsmonitor, diff.external, textconv drivers, core.pager).
 const READ_ONLY = new Set(["cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep", "rg", "ugrep",
   "sha256sum", "sha1sum", "sha512sum", "md5sum", "b2sum", "cksum", "diff", "cmp", "comm", "file", "stat", "ls",
   "readlink", "realpath", "basename", "dirname", "du", "od", "xxd", "hexdump", "strings", "sort", "uniq", "cut",
   "nl", "echo", "printf", "true"]);
-const GIT_READ_ONLY = new Set(["show", "diff", "log", "blame", "grep", "status", "cat-file", "ls-files", "rev-parse"]);
 // Words that run the command after them: skipped, with their own option values.
 const PREFIXES = { timeout: /^(?:-\S+|\d+(?:\.\d+)?[smhd]?)$/, nice: /^(?:-n|-?\d+)$/, env: /^-\S*$/ };
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -91,13 +91,7 @@ function readOnlySimple(segment) {
     while (i < words.length && skip.test(words[i])) i += 1;
   }
   if (i >= words.length) return true;
-  const name = path.basename(words[i]);
-  if (name === "git") {
-    let j = i + 1;
-    while (j < words.length && words[j].startsWith("-")) j += words[j] === "-C" ? 2 : 1;
-    return GIT_READ_ONLY.has(words[j]);
-  }
-  return READ_ONLY.has(name);
+  return READ_ONLY.has(path.basename(words[i]));
 }
 
 /** Every simple command in the line is a read-only tool. Pipes, lists, newlines and command substitutions all split

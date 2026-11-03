@@ -291,13 +291,11 @@ for (const command of [
   "timeout 60 sha256sum blast.py",
   "LC_ALL=C grep -c graph blast.py",
   "diff blast.py other.py",
-  "git show HEAD:blast.py",
-  "git diff -- blast.py",
   'grep -rn "graph.microsoft.com/v1.0/me/sendMail" .',
   'echo "$(sha256sum blast.py)"',
   "wc -l blast.py;",
-  "git show HEAD:blast.py > copy.py",
-  "git show HEAD:blast.py > copy.py 2>&1",
+  "cat blast.py > copy.txt",
+  "cat blast.py > copy.txt 2>&1",
   "sha256sum blast.py 2>&1 | sort",
   "cat blast.py &>/dev/null",
   "cat blast.py &>> log.txt",
@@ -330,6 +328,24 @@ for (const command of [
   "&>cat python3 blast.py",
 ]) {
   test(`a command that can run the sender keeps the full judgment: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
+// ------------------------------------------------- the exemption trusts nothing that runs a program
+// Every git subcommand honours repository configuration an agent can write: core.fsmonitor runs on status,
+// diff.external and textconv drivers on diff, show and log -p, core.pager under --paginate.
+for (const command of [
+  "git status -- blast.py",
+  "git diff -- blast.py",
+  "git log -p -- blast.py",
+  "git --paginate show HEAD -- blast.py",
+  "git -C . diff -- blast.py",
+  "git grep --open-files-in-pager=python3 send -- blast.py",
+]) {
+  test(`git is never exempt: ${command}`, () => {
     const dir = repo();
     file(dir, "blast.py", SENDER_BODY);
     assert.equal(hook(command, dir).status, 2);
