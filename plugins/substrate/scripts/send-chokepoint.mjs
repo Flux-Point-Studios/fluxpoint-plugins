@@ -57,11 +57,12 @@ const DEFAULT_PROVIDERS = [
 const SEND_VERB = /\/sendMail\b|\/messages\/[^"'\s]*\/send\b|%s\/send\b|\{\}\/send\b|\/send["']|createReply|\/mail\.send\b|\/v3\/mail\/send\b|\/messages\.json\b/i;
 
 const MAX_READ_BYTES = 2_000_000;
-// Bare tokens, plus quoted runs that may contain spaces. Without the quoted
-// forms, `python "space dir/blast.py"` matches only the tail after the space,
-// which resolves to nothing and lets an unsanctioned sender run — and Windows
-// user directories contain spaces as a matter of course.
-const PATH_TOKEN = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))'|([A-Za-z0-9_.:\\/~-]+\.(?:py|mjs|js|ts|ps1|sh|rb))\b/g;
+// Quoted runs that may contain spaces, and bare tokens. Without the quoted forms, `python "space dir/blast.py"`
+// matches only the tail after the space, which resolves to nothing and lets an unsanctioned sender run — and Windows
+// user directories contain spaces as a matter of course. Bare tokens are searched for inside quoted runs too: a quoted
+// run can be a whole command line (`sh -c 'python3 blast.py'`), which names no file itself.
+const QUOTED_PATH = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))'/g;
+const BARE_PATH = /[A-Za-z0-9_.:\\/~-]+\.(?:py|mjs|js|ts|ps1|sh|rb)\b/g;
 // A leading `cd <dir> &&` sets the directory the rest of the command runs in.
 const CD_PREFIX = /(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
 const PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))/gm;
@@ -460,8 +461,9 @@ function searchDirs(command, cwd) {
 function referencedFiles(command, cwd) {
   const dirs = searchDirs(command, cwd);
   const out = [];
-  for (const m of command.matchAll(PATH_TOKEN)) {
-    const token = m[1] || m[2] || m[3] || "";
+  const tokens = [...command.matchAll(QUOTED_PATH)].map((m) => m[1] || m[2])
+    .concat([...command.matchAll(BARE_PATH)].map((m) => m[0]));
+  for (const token of tokens) {
     // bash reads `<&-sender.py` as a descriptor close and the word `sender.py`, so the path may start after the dashes.
     for (const name of new Set([token, token.replace(/^-+/, "")])) {
       if (!name) continue;

@@ -647,6 +647,16 @@ test("a line too deep for the reader is judged, not exempted", () => {
   assert.equal(hook(deep, dir).status, 2);
 });
 
+// ------------------------------------------------- a quoted argument can hold a command line
+// `sh -c 'python3 sender.py'` runs the sender. The quoted run as a whole names no file, and the path inside it must
+// still be read.
+expectEach(2, "a script named inside a quoted argument is judged", [
+  "sh -c 'python3 blast.py'",
+  'bash -c "python3 blast.py"',
+  "env -S'python3 blast.py'",
+  "dash -c 'cd . && python3 thin.py'",
+]);
+
 test("an inline send is still BLOCKED when it rides with a read-only command", () => {
   const dir = repo();
   const r = hook("cat notes.txt; curl -X POST https://graph.microsoft.com/v1.0/me/sendMail", dir);
