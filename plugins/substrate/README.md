@@ -334,6 +334,14 @@ judged. The whole line is judged when any of these holds:
   honours repository configuration an agent can write, and `rg`, `ugrep`,
   `sort`, `less`, `more`, `sed` and `awk`, which each have an option or
   command that runs a program.
+- A read-only tool carries an option that runs a program, in any
+  abbreviation: `grep`, `egrep` or `fgrep` with `--filter`, `--pager`,
+  `--view`, `--config` or `---FILE` (in the Claude Code shell `grep` runs
+  ugrep, where these name a command or load a file that can), `diff` with
+  `-l` or `--paginate` (it runs `pr`), or `file` with `-z`, `-Z` or
+  `--uncompress` (it runs decompressors found on `PATH`). One of these
+  tools' arguments being an expansion or a glob judges the line too, since
+  it could produce such an option.
 - It assigns a variable: `NAME=value`, `env NAME=value`, `printf -v NAME`, or
   a `{NAME}>` redirection.
 - `env` carries an option (`-S` splits its value into a new command line), or

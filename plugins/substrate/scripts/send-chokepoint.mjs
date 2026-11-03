@@ -66,14 +66,24 @@ const PATH_TOKEN = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs
 const CD_PREFIX = /(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
 const PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))/gm;
 
-// Tools that print, search, hash, compare or list a file and have no option that runs a program. A command made only
-// of these, named bare, is never judged: the operator must be able to read and hash the very files this gate
-// protects. Tools that can run code are not here: sed (its `e` command), awk (system()), rg (--pre), ugrep
-// (--filter), sort (--compress-program), less and more (LESSOPEN, shell escapes), and git, whose every subcommand
-// honours repository configuration an agent can write (core.fsmonitor, diff.external, textconv, core.pager).
+// Tools that print, search, hash, compare or list a file. A command made only of these, named bare, is never judged:
+// the operator must be able to read and hash the very files this gate protects. Tools that can run code are not
+// here: sed (its `e` command), awk (system()), rg (--pre), ugrep (--filter), sort (--compress-program), less and more
+// (LESSOPEN, shell escapes), and git, whose every subcommand honours repository configuration an agent can write
+// (core.fsmonitor, diff.external, textconv, core.pager).
 const READ_ONLY = new Set(["cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "sha1sum", "sha256sum",
   "sha512sum", "md5sum", "b2sum", "cksum", "diff", "cmp", "comm", "file", "stat", "ls", "readlink", "realpath",
   "basename", "dirname", "du", "od", "xxd", "hexdump", "strings", "uniq", "cut", "nl", "echo", "printf", "true"]);
+// The read-only tools with an option that runs a program, and those options' letters and long names. grep in the
+// Claude Code shell runs ugrep, whose --filter, --pager and --view name a command and whose --config or --- loads a
+// file that can; the host's wrapper hands those to the system grep, but the exemption does not lean on it. GNU diff
+// --paginate runs pr; file -z and -Z decompress through helpers found on PATH.
+const UGREP_RUNS = { letters: "", names: ["filter", "pager", "view", "config", "-"] };
+const RUNS_PROGRAM = new Map([
+  ["grep", UGREP_RUNS], ["egrep", UGREP_RUNS], ["fgrep", UGREP_RUNS],
+  ["diff", { letters: "l", names: ["paginate"] }],
+  ["file", { letters: "zZ", names: ["uncompress", "uncompress-noreport"] }],
+]);
 const TIMEOUT_FLAG = /^(?:-[sk]\S+|--signal=\S+|--kill-after=\S+|-v|--verbose|--foreground|--preserve-status|--)$/;
 const DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
 // Words that run the command after them. Each returns the index of that command, or -1 for an option this reader
@@ -132,8 +142,17 @@ function ordinaryTarget(target, cwd) {
   }
 }
 
+/** Whether `arg` sets one of `runs`' options: a letter anywhere in a short-option cluster, or a long name that
+ *  abbreviates one of its names (getopt takes any unambiguous abbreviation) or begins with one (`---FILE`). */
+function runsProgram(runs, arg) {
+  if (/^-[^-]/.test(arg)) return [...arg.slice(1)].some((c) => runs.letters.includes(c));
+  const name = arg.startsWith("--") ? arg.slice(2).split("=")[0] : "";
+  return name !== "" && runs.names.some((n) => n.startsWith(name) || name.startsWith(n));
+}
+
 /** The command's words up to its name are literal, assign nothing, pass only harmless prefix options, and name a
- *  read-only tool; printf's first argument is not an option (printf -v NAME assigns). */
+ *  read-only tool; printf's first argument is not an option (printf -v NAME assigns); a tool in RUNS_PROGRAM takes
+ *  only literal arguments, none of them an option that runs a program. */
 function requireReadOnlyCommand(words) {
   const texts = words.map((w) => (w.literal ? w.text : null));
   let i = 0;
@@ -148,6 +167,8 @@ function requireReadOnlyCommand(words) {
   if (words.slice(0, i + 1).some((w) => !w.literal) || !READ_ONLY.has(texts[i])) notExempt();
   const first = words[i + 1];
   if (texts[i] === "printf" && first && (!first.literal || /^-(?!-$)/.test(first.text))) notExempt();
+  const runs = RUNS_PROGRAM.get(texts[i]);
+  if (runs && words.slice(i + 1).some((w) => !w.literal || runsProgram(runs, w.text))) notExempt();
 }
 
 /** Reads `src` as bash would and throws NOT_EXEMPT unless every simple command in it, command substitutions

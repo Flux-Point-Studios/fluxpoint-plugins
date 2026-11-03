@@ -366,6 +366,35 @@ expectEach(2, "a tool that can run a program is never exempt", [
   "bin/sha256sum blast.py",
 ]);
 
+// grep in the Claude Code shell runs ugrep, whose --filter, --pager and --view name a command and whose --config or
+// --- loads a file that can; GNU diff --paginate runs pr, and file -z runs decompressors found on PATH. The exemption
+// refuses these options itself, in any abbreviation, rather than lean on the host's grep wrapper, and refuses an
+// expansion or a glob among these tools' arguments, which could produce one.
+expectEach(2, "an option that runs a program is judged", [
+  'grep --filter="py:python3 %" x blast.py',
+  "egrep --filt=py:python3 x blast.py",
+  "fgrep --pager=python3 x blast.py",
+  "grep --view=python3 x blast.py",
+  "grep --config x blast.py",
+  "grep ---cfg x blast.py",
+  "grep $(echo --filter=py:python3) x blast.py",
+  "grep -n send blast.py *",
+  "diff -l blast.py other.py",
+  "diff -ul blast.py other.py",
+  "diff --pag blast.py other.py",
+  "file -z blast.py",
+  "file -bZ blast.py",
+  "file --uncompress blast.py",
+]);
+
+expectEach(0, "grep, diff and file keep the exemption with their other options", [
+  "grep --color=never --count send blast.py",
+  "grep --file=patterns.txt blast.py",
+  "diff -u blast.py other.py",
+  "diff --unified=3 --label=a blast.py other.py",
+  "file -b --mime-type blast.py",
+]);
+
 // A redirection opens its target, and bash opens /dev/tcp/HOST/PORT and /dev/udp/HOST/PORT as sockets: data needs no
 // interpreter to leave. A target is exempt only when it is an ordinary file or /dev/null, /dev/stdin, /dev/stdout,
 // /dev/stderr, written out literally; an expansion could name anything.
