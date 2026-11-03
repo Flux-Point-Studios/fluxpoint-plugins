@@ -558,6 +558,50 @@ for (const command of [
   });
 }
 
+// bash expands an unquoted heredoc body, so a command substitution in it runs; a delimiter is the whole quote-removed
+// word; an unquoted body joins a line ending in a backslash to the next before it looks for the delimiter; and
+// a heredoc operator inside a quote opened on an earlier line is text.
+for (const command of [
+  "cat <<EOF\n$(python3 blast.py)\nEOF",
+  "cat <<EOF\n`python3 blast.py`\nEOF",
+  "cat > a.txt <<-EOF\n\t${x:-$(python3 blast.py)}\n\tEOF",
+  "cat <<E'OF'\nEOF\npython3 blast.py\nE",
+  "cat <<'E'OF\nEOF\npython3 blast.py\nE",
+  "cat <<EOF\nE\\\nOF\npython3 blast.py\nEOF",
+  'echo "\n<<EOF "cat"\n"; python3 blast.py; echo "\nEOF\n"',
+  "echo $(cat <<EOF\nx\nEOF\n); python3 blast.py",
+]) {
+  test(`a heredoc is read as bash reads it: ${JSON.stringify(command)}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
+for (const command of [
+  "cat > probe.sh <<'EOF'\n$(python3 blast.py)\n`python3 blast.py`\nEOF",
+  'cat > probe.sh <<"EOF"\n$(python3 blast.py)\nEOF',
+  "cat > probe.sh <<\\EOF\n$(python3 blast.py)\nEOF",
+  "cat > notes.txt <<EOF\nhome is ${HOME}, user $USER, sender blast.py\nEOF",
+  "cat > a.txt <<A; cat > b.txt <<'B'\n# blast.py $x\nA\n$(python3 blast.py)\nB",
+  "cat > notes.txt <<EOF \\\n  && wc -l notes.txt\n# blast.py\nEOF",
+  'cat > notes.txt <<EOF "$(sha256sum blast.py)"\n# blast.py\nEOF',
+]) {
+  test(`a quoted heredoc body, or an unquoted one without substitutions, is data: ${JSON.stringify(command)}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 0);
+  });
+}
+
+test("a line too deep for the reader is judged, not exempted", () => {
+  // The hook allows a command when its own code throws; the reader's failure must land on the judged side.
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  const deep = `echo ${'"$(echo '.repeat(20000)}true${')"'.repeat(20000)}; python3 blast.py`;
+  assert.equal(hook(deep, dir).status, 2);
+});
+
 test("an inline send is still BLOCKED when it rides with a read-only command", () => {
   const dir = repo();
   const r = hook("cat notes.txt; curl -X POST https://graph.microsoft.com/v1.0/me/sendMail", dir);
