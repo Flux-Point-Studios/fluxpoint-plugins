@@ -663,7 +663,43 @@ for (const [shape, line] of Object.entries(LARGE)) {
     file(dir, "blast.py", SENDER_BODY);
     assert.equal(hook(`${line}; python3 blast.py`, dir).status, 2);
   });
+  test(`a large quoted string that names no sender is allowed: ${shape}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(`${line}; python3 other.py`, dir).status, 0);
+  });
 }
+
+// bash expands only the braces it reads unquoted, so a quoted brace is text and makes no words: JSON bodies, jq and
+// node programs and commit messages are ordinary commands, however many brace pairs they hold.
+const objects = (n) => `[${Array.from({ length: n }, (_, k) => `{"id":${k},"name":"n${k}"}`).join(",")}]`;
+const pairs = (n) => Array.from({ length: n }, (_, k) => `{a${k}:1,b${k}:2}`).join(" + ");
+const QUOTED_BRACES = {
+  "curl with a JSON body": `curl -sS -X POST -H 'Content-Type: application/json' -d '${objects(13)}' https://api.example.com/v1/items`,
+  "curl with a larger JSON body": `curl -sS -d '${objects(40)}' https://api.example.com/v1/items`,
+  "gh api from a quoted heredoc": `gh api repos/o/r/labels --input - <<'EOF'\n${objects(20)}\nEOF`,
+  "jq": `jq -n '${pairs(13)}'`,
+  "node -e": `node -e 'const m=${pairs(13).replaceAll(" + ", ";const n=")};console.log(m)'`,
+  "docker run -e": `docker run --rm -e CFG='${objects(15)}' alpine true`,
+  "python3 from a quoted heredoc": `python3 - <<'EOF'\nimport json\nprint(json.dumps(${objects(20)}))\nEOF`,
+  "tee from a quoted heredoc": `tee data.json <<'EOF' >/dev/null\n${objects(30)}\nEOF`,
+  "git commit -m": `git commit -m 'refactor: ${"{a,b} ".repeat(13)}'`,
+  "double quotes": `tee out.txt <<< "${"{a,b}".repeat(13)}"`,
+};
+for (const [shape, line] of Object.entries(QUOTED_BRACES)) {
+  test(`a quoted brace makes no words: ${shape}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(line, dir).status, 0);
+  });
+}
+
+// bash expands braces before variables, in the word as written: `$x{a,b}.py` is `$xa.py` and `$xb.py`.
+expectEach(2, "braces expand in the word as written, before its variables", [
+  "xa=blast; python3 $x{a,b}.py",
+  'python3 "bl"{a,}st.py',
+  "python3 'b'{l,x}{a,}st.py",
+]);
 
 // ------------------------------------------------- a quoted argument can hold a command line
 // `sh -c 'python3 sender.py'` runs the sender. The quoted run as a whole names no file, and the path inside it must

@@ -242,8 +242,9 @@ function requireReadOnlyCommand(words, cwd) {
  *  judgment reads with `full` true: it follows those too, decodes `$'...'`, gives a variable its value in this
  *  process's environment, and throws only at what bash cannot parse or where a heredoc's end cannot be known. It hands
  *  `onText` the inside of an arithmetic command `((...))`, which a POSIX shell reads as two subshells. With `text` it
- *  reads `src` as an unquoted heredoc body, following only its expansions. */
-function readShell(src, { cwd, onCommand, onText, full = false, text = false }) {
+ *  reads `src` as an unquoted heredoc body, following only its expansions; with `single` it reads one word and
+ *  returns it. */
+function readShell(src, { cwd, onCommand, onText, full = false, text = false, single = false }) {
   let i = 0;
   let piped = false;
   const heredocs = [];
@@ -261,20 +262,27 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
   };
 
   // A word's text built from its pieces, and whether a piece the line does not fix comes before any it does. `parts`
-  // keeps each piece's text and, for a variable, its name.
-  const builder = () => {
+  // keeps each piece's text, whether it was quoted and, for a variable, its name; inside double quotes every piece is
+  // quoted.
+  const builder = (quoted = false) => {
     const b = { text: "", literal: true, opensDynamic: false, fixed: false, parts: [] };
     b.add = (piece, dynamic, opens = dynamic, fixed = !dynamic && piece !== "", parts = [{ text: piece }]) => {
       if (opens && !b.fixed) b.opensDynamic = true;
       b.fixed ||= fixed;
       b.text += piece;
-      b.parts.push(...parts);
+      for (const part of parts) {
+        const p = { ...part, quoted: quoted || part.quoted };
+        const last = b.parts.at(-1);
+        if (last && !last.name && !p.name && last.quoted === p.quoted) last.text += p.text;
+        else b.parts.push(p);
+      }
       if (dynamic) b.literal = false;
     };
     b.addPiece = (piece) => b.add(piece.text, piece.dynamic, piece.opens ?? piece.dynamic, piece.fixed,
-      piece.parts ?? [{ text: piece.text, name: piece.name }]);
+      piece.parts ?? [{ text: piece.text, name: piece.name, quoted: piece.quoted }]);
     return b;
   };
+  const quotedPart = (text) => [{ text, quoted: true }];
 
   // At a `$`: consumes an expansion and returns the piece it adds to the word, or returns null for a literal dollar
   // sign.
@@ -468,7 +476,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
   // At a double quote: the quoted text, whether it holds no expansion, whether an expansion comes before its first
   // fixed character, and whether it has one.
   const doubleQuoted = () => {
-    const b = builder();
+    const b = builder(true);
     for (i += 1; src[i] !== '"'; ) {
       const c = src[i];
       if (c === undefined) cannotRead();
@@ -494,13 +502,15 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
   };
 
   // One word after quote removal: its text, whether it holds no expansion or pattern, whether any of it is quoted or
-  // escaped, its source without line continuations, whether an expansion may supply its first character, and whether
-  // it may split.
+  // escaped, its source without line continuations, whether an expansion may supply its first character, whether it
+  // may split, and where in that source each unquoted `{`, `,`, `}` and `.` is, from which bash finds the braces it
+  // expands.
   const word = () => {
     const b = builder();
     let bare = "";
     let quoted = false;
     let splits = false;
+    const braces = [];
     while (i < src.length && !ENDS_WORD.has(src[i])) {
       const from = i;
       const c = src[i];
@@ -511,7 +521,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
       if (c === "'") {
         const end = src.indexOf("'", i + 1);
         if (end < 0) cannotRead();
-        b.add(src.slice(i + 1, end), false);
+        b.add(src.slice(i + 1, end), false, undefined, undefined, quotedPart(src.slice(i + 1, end)));
         i = end + 1;
         quoted = true;
       } else if (c === '"') {
@@ -520,7 +530,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
         quoted = true;
       } else if (c === "\\") {
         if (i + 1 >= src.length) cannotRead();
-        b.add(src[i + 1], false);
+        b.add(src[i + 1], false, undefined, undefined, quotedPart(src[i + 1]));
         i += 2;
         quoted = true;
       } else if (c === "`") {
@@ -535,6 +545,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
           quoted ||= Boolean(piece.quoted);
           splits ||= piece.dynamic && !piece.quoted;
         } else {
+          if ("{,}.".includes(c)) braces.push(bare.length);
           b.add(c, false);
           i += 1;
           if ("*?[]{}".includes(c)) {
@@ -545,7 +556,8 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
       }
       bare += src.slice(from, i);
     }
-    return { text: b.text, literal: b.literal, quoted, bare, opensDynamic: b.opensDynamic, splits, parts: b.parts };
+    return { text: b.text, literal: b.literal, quoted, bare, opensDynamic: b.opensDynamic, splits, parts: b.parts,
+             braces };
   };
 
   // At `<(` or `>(`: a word naming a pipe to the commands inside.
@@ -738,6 +750,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
     }
   };
 
+  if (single) return word();
   if (text) body();
   else list(false);
 }
@@ -837,11 +850,12 @@ function commandChain(words, values) {
   return chain;
 }
 
-/** What the full judgment reads from a line: the text of every word bash would build, in the line and in the shell
- *  code it carries, those of them bash would expand as globs, the words built from variables with the values the line
- *  assigns them, the directories it changes into, and, when it runs shell code the line does not show, where. */
+/** What the full judgment reads from a line: every word bash would build, in the line and in the shell code it
+ *  carries, with whether bash would expand it as a glob and whether it was read only for the names in it; the values
+ *  the line assigns each variable; the directories it changes into; and, when it runs shell code the line does not
+ *  show, where. */
 function readLine(command, cwd) {
-  const found = { texts: [], globs: [], templates: [], values: new Map(), dirs: [], unreadable: null };
+  const found = { texts: [], words: [], values: new Map(), dirs: [], unreadable: null };
   const assign = (name, value) => {
     const key = name.replace(/\+$|\[.*$/, "");
     if (!found.values.has(key)) found.values.set(key, new Set());
@@ -918,7 +932,7 @@ function readLine(command, cwd) {
   // The shell a word names, if any: literally, by its value in the environment, or by a value the line assigns.
   const shellNamed = (w) => {
     if (ASSIGNMENT.test(w.bare)) return null;
-    const texts = w.literal ? [w.text] : substitutions(w.parts ?? [], found.values, { left: 64 });
+    const texts = w.literal ? [w.text] : substitutions(w.parts ?? [], found.values, { left: 64 }).map((s) => s.text);
     return texts.map((t) => path.posix.basename(t)).find((name) => SHELLS.has(name)) ?? null;
   };
 
@@ -1006,10 +1020,8 @@ function readLine(command, cwd) {
     // An unquoted pattern character or expansion makes a word a glob, except in a case pattern or a [[ test.
     const tested = words[head]?.bare === "[[";
     for (const w of [...words, ...redirects.map((r) => r.target).filter(Boolean)]) {
-      const glob = w.splits && !w.pattern && !tested;
       found.texts.push(w.text);
-      if (glob && /[*?[]/.test(w.text)) found.globs.push(w.text);
-      if (w.parts?.some((p) => p.name)) found.templates.push({ parts: w.parts, glob });
+      found.words.push({ word: w, glob: w.splits && !w.pattern && !tested, lenient: lenient > 0 });
     }
     const name = words[head]?.literal ? words[head].text : null;
     const args = words.slice(head + 1);
@@ -1127,13 +1139,15 @@ function looksLikeSender(text, config) {
   return config.providers.some((h) => text.includes(h)) && SEND_VERB.test(text);
 }
 
-// The expansions below share one budget of work for a whole line: each extra word a brace or a variable makes, each
-// directory a glob reads and each path it visits spends one unit. A line that spends it all is refused rather than
-// resolved in part.
+// The expansions below share one budget of work for the words bash reads in a line: each word a brace or a variable
+// makes spends one unit, and one more for each further 1024 characters it holds, and each directory a glob reads and
+// each path it visits spends one unit. A line that spends it all is refused rather than resolved in part. The words
+// read only for the names in them share a second budget of the same size, which refuses nothing when it runs out.
+const cost = (text) => 1 + (text.length >> 10);
 
 /** The items of a `{a..e}` or `{1..9..2}` sequence, or null when `inner` is not one. */
 function braceSequence(inner, budget) {
-  const m = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?$/.exec(inner);
+  const m = /^([+-]?\d+|[A-Za-z])\.\.([+-]?\d+|[A-Za-z])(?:\.\.([+-]?\d+))?$/.exec(inner);
   if (!m || /\d/.test(m[1]) !== /\d/.test(m[2])) return null;
   const numeric = /\d/.test(m[1]);
   const [from, to] = numeric ? [Number(m[1]), Number(m[2])] : [m[1].charCodeAt(0), m[2].charCodeAt(0)];
@@ -1147,58 +1161,176 @@ function braceSequence(inner, budget) {
   return out;
 }
 
-/** The words bash makes of `text` by brace expansion. Quoting is not known here, so a quoted brace is expanded too,
- *  which only adds paths to try. */
-function braceExpand(text, budget, expanded = false) {
-  if (budget.left <= 0) return [];
-  for (let open = text.indexOf("{"); open >= 0; open = text.indexOf("{", open + 1)) {
-    let depth = 0;
-    const cuts = [open];
-    for (let k = open; k < text.length; k += 1) {
-      if (text[k] === "{") depth += 1;
-      if (text[k] === "," && depth === 1) cuts.push(k);
-      if (text[k] !== "}" || --depth > 0) continue;
-      const items = cuts.length > 1
-        ? [...cuts.slice(1), k].map((cut, n) => text.slice(cuts[n] + 1, cut))
-        : braceSequence(text.slice(open + 1, k), budget);
-      if (!items) break;
-      return items.flatMap((item) => braceExpand(text.slice(0, open) + item + text.slice(k + 1), budget, true));
+/** In `source`, the first brace bash expands, found as bash's brace_expand finds it among the unquoted `{`, `,`, `}`
+ *  and `.` at offsets `active`. A `{` is closed only by a `}` at its own level after a comma or a `..` at that level;
+ *  a word's leading `{}` is text. A closed pair holding a comma anywhere splits at the unquoted commas at its own
+ *  level; one holding none is a sequence or, failing that, text up to its `}`. Returns the items, each as the source with the
+ *  pair replaced by that item and the offsets still active there, or null when nothing expands. Each 1024 offsets
+ *  looked at spend one unit, so a word of braces that never close stops when the budget does. */
+function braceItems(source, active, budget) {
+  const mark = (m) => source[active[m]];
+  let steps = 0;
+  for (let n = 0; n < active.length && budget.left > 0; n += 1) {
+    const at = active[n];
+    if (mark(n) !== "{" || (at === 0 && source[1] === "}")) continue;
+    let level = 0;
+    let separators = 0;
+    let m = n + 1;
+    for (; m < active.length && !(mark(m) === "}" && level === 0 && separators > 0); m += 1) {
+      if ((steps += 1) % 1024 === 0 && (budget.left -= 1) <= 0) return null;
+      if (mark(m) === "{") level += 1;
+      else if (mark(m) === "}" && level > 0) level -= 1;
+      else if (level === 0 && (mark(m) === "," || (mark(m) === "." && active[m + 1] === active[m] + 1
+                                                    && mark(m + 1) === "." && source[active[m] + 2] !== "}"))) {
+        separators += 1;
+      }
     }
+    if (m >= active.length) continue;
+    const close = active[m];
+    const inside = active.slice(n + 1, m);
+    let items;
+    // bash looks for that comma in the raw text, where only a backslash hides one: `{"a,b"x}` is `"a,b"x`.
+    if (/^(?:[^\\,]|\\[\s\S])*,/.test(source.slice(at + 1, close))) {
+      const cuts = [at];
+      level = 0;
+      for (const a of inside) {
+        if (source[a] === "{") level += 1;
+        else if (source[a] === "}" && level > 0) level -= 1;
+        else if (source[a] === "," && level === 0) cuts.push(a);
+      }
+      cuts.push(close);
+      items = cuts.slice(1).map((cut, k) => ({ from: cuts[k] + 1, to: cut }));
+    } else {
+      items = braceSequence(source.slice(at + 1, close), budget)?.map((text) => ({ text }));
+      if (!items) {
+        n = m;
+        continue;
+      }
+    }
+    const before = active.slice(0, n);
+    const after = active.slice(m + 1);
+    return items.map(({ from, to, text = source.slice(from, to) }) => {
+      const shift = at + text.length - close - 1;
+      return { source: source.slice(0, at) + text + source.slice(close + 1),
+               active: [...before, ...inside.filter((a) => a >= from && a < to).map((a) => a - from + at),
+                        ...after.map((a) => a + shift)] };
+    });
   }
-  if (expanded) budget.left -= 1;
-  return [text];
+  return null;
 }
 
-/** The texts a word can take when each variable in it takes, besides the value it was read with, each value the line
- *  assigns it. */
+/** The words bash makes of `word` by brace expansion. bash expands only the braces it reads unquoted, and before any
+ *  variable, so the expansion runs on the word as written (`$x{a,b}` is `$xa` and `$xb`) and `reread` reads each
+ *  result as a word again. */
+function braceWords(word, budget, reread) {
+  if (!word.braces?.length || budget.left <= 0) return [word];
+  const first = braceItems(word.bare, word.braces, budget);
+  if (!first) return [word];
+  const out = [];
+  const stack = first.reverse();
+  while (stack.length && budget.left > 0) {
+    const node = stack.pop();
+    budget.left -= cost(node.source);
+    const items = braceItems(node.source, node.active, budget);
+    if (items) stack.push(...items.reverse());
+    else out.push(node.source);
+  }
+  return out.length ? out.map(reread) : [word];
+}
+
+// A quoted character is never a pattern character: in a pattern, a backslash keeps the character after it literal.
+const GLOB_SPECIAL = /[\\*?[\]@!+()|^-]/g;
+const patternOf = (text, part) => (part.quoted ? text.replace(GLOB_SPECIAL, "\\$&") : text);
+
+/** The texts a word can take, each with its pattern, when each variable in it takes, besides the value it was read
+ *  with, each value the line assigns it. With the budget spent, only the word as read. */
 function substitutions(parts, values, budget) {
-  let out = [""];
+  let out = [{ text: "", pattern: "" }];
   for (const part of parts) {
-    const choices = new Set([part.text, ...(values.get(part.name) ?? [])]);
-    if (choices.size > 1) budget.left -= out.length * (choices.size - 1);
-    if (budget.left <= 0) return [];
-    out = out.flatMap((head) => [...choices].map((choice) => head + choice));
+    const choices = new Set([part.text, ...(part.name ? values.get(part.name) ?? [] : [])]);
+    out = out.flatMap((head) => [...choices].map((choice) => ({ text: head.text + choice,
+                                                               pattern: head.pattern + patternOf(choice, part) })));
+    if (choices.size > 1) for (const o of out) budget.left -= cost(o.text);
+    if (budget.left <= 0) {
+      return [{ text: parts.map((p) => p.text).join(""), pattern: parts.map((p) => patternOf(p.text, p)).join("") }];
+    }
   }
   return out;
 }
 
-/** A RegExp for one path segment of a glob: `*`, `?` and bracket sets. A POSIX class matches any character here. */
-function globSegment(segment) {
-  let re = "";
-  for (let k = 0; k < segment.length; k += 1) {
-    const c = segment[k];
-    const end = c === "[" ? segment.indexOf("]", k + 2) : -1;
-    if (c === "*") re += ".*";
-    else if (c === "?") re += ".";
-    else if (end < 0) re += c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-    else {
-      const set = segment.slice(k + 1, end);
-      re += set.includes("[:") ? "." : `[${set.replace(/^[!^]/, "^").replace(/[\\\]]/g, "\\$&")}]`;
-      k = end;
-    }
+/** Whether a pattern holds an unquoted `*`, `?`, `[` or extglob group. */
+function hasGlob(pattern) {
+  for (let k = 0; k < pattern.length; k += 1) {
+    if (pattern[k] === "\\") k += 1;
+    else if ("*?[".includes(pattern[k]) || ("@!+".includes(pattern[k]) && pattern[k + 1] === "(")) return true;
   }
+  return false;
+}
+
+const unescape = (pattern) => pattern.replace(/\\([\s\S])/g, "$1");
+const regexText = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+/** A RegExp for one path segment of a glob: `*`, `?`, bracket sets and the extglob groups `@(...)`, `?(...)`,
+ *  `*(...)`, `+(...)` and `!(...)`, which bash cannot parse unless extglob is on. A POSIX class matches any character,
+ *  and `!(...)` any text. */
+function globSegment(segment) {
+  let k = 0;
+  const bracket = () => {
+    let j = k + 1;
+    const negate = segment[j] === "!" || segment[j] === "^";
+    if (negate) j += 1;
+    let set = "";
+    let anyChar = false;
+    for (let first = true; j < segment.length && (first || segment[j] !== "]"); first = false) {
+      if (segment[j] === "[" && ":=.".includes(segment[j + 1] ?? "x")) {
+        const end = segment.indexOf(`${segment[j + 1]}]`, j + 2);
+        if (end < 0) return null;
+        anyChar = true;
+        j = end + 2;
+      } else if (segment[j] === "\\") {
+        set += `\\${segment[j + 1] ?? "\\"}`;
+        j += 2;
+      } else {
+        set += segment[j] === "-" ? "-" : regexText(segment[j]);
+        j += 1;
+      }
+    }
+    if (j >= segment.length) return null;
+    k = j + 1;
+    return anyChar ? "." : `[${negate ? "^" : ""}${set}]`;
+  };
+  const sequence = (inGroup) => {
+    let re = "";
+    while (k < segment.length && !(inGroup && (segment[k] === "|" || segment[k] === ")"))) {
+      const c = segment[k];
+      if (c === "\\") {
+        re += regexText(segment[k + 1] ?? "\\");
+        k += 2;
+      } else if ("@!+*?".includes(c) && segment[k + 1] === "(") {
+        k += 2;
+        const alternatives = [sequence(true)];
+        while (segment[k] === "|") {
+          k += 1;
+          alternatives.push(sequence(true));
+        }
+        k += 1;
+        re += c === "!" ? ".*" : `(?:${alternatives.join("|")})${{ "@": "", "?": "?", "*": "*", "+": "+" }[c]}`;
+      } else if (c === "*" || c === "?") {
+        re += c === "*" ? ".*" : ".";
+        k += 1;
+      } else if (c === "[") {
+        const set = bracket();
+        re += set ?? "\\[";
+        if (set === null) k += 1;
+      } else {
+        re += regexText(c);
+        k += 1;
+      }
+    }
+    return re;
+  };
   try {
-    return new RegExp(`^${re}$`, "s");
+    return new RegExp(`^${sequence(false)}$`, "s");
   } catch {
     // A set bash would read differently, such as a reversed range: any name may match.
     return /^/;
@@ -1206,7 +1338,7 @@ function globSegment(segment) {
 }
 
 /** The paths a glob names from each of `dirs`, as bash expands it: a name starting with `.` only for a segment that
- *  does. */
+ *  does. A path is joined as the kernel reads it, so `link/..` is the parent of where link points. */
 function globFiles(pattern, dirs, budget) {
   const out = [];
   const segments = pattern.split("/");
@@ -1216,26 +1348,28 @@ function globFiles(pattern, dirs, budget) {
     budget.left -= 1;
     if (k === segments.length) {
       out.push(dir);
-    } else if (!/[*?[]/.test(segment)) {
-      walk(path.join(dir, segment), k + 1);
+    } else if (!hasGlob(segment)) {
+      walk(`${dir}/${unescape(segment)}`, k + 1);
     } else {
       if (!budget.listings.has(dir)) {
         budget.left -= 1;
         let names = [];
         try {
-          names = fs.readdirSync(dir);
+          names = fs.readdirSync(dir || "/");
         } catch {
           // Not a directory bash could read either: the segment matches nothing.
         }
         budget.listings.set(dir, names);
       }
       const re = globSegment(segment);
+      const dots = segment[0] === "." || segment.startsWith("\\.");
       for (const name of budget.listings.get(dir)) {
-        if ((segment[0] === "." || name[0] !== ".") && re.test(name)) walk(path.join(dir, name), k + 1);
+        if ((dots || name[0] !== ".") && re.test(name)) walk(`${dir}/${name}`, k + 1);
       }
     }
   };
-  for (const dir of path.isAbsolute(pattern) ? ["/"] : new Set(dirs)) walk(path.resolve(dir), 0);
+  if (path.isAbsolute(pattern)) walk("", 1);
+  else for (const dir of new Set(dirs)) walk(path.resolve(dir), 0);
   return out;
 }
 
@@ -1261,8 +1395,9 @@ function searchDirs(command, cwd, reading = readLine(command, cwd)) {
   return dirs;
 }
 
-/** Every existing script path named in the command: each word's text as bash builds it, the paths inside those texts,
- *  and those in the raw text, which still holds what the reader could not follow.
+/** Every existing script path named in the command, and the text of every word bash builds: each word's braces,
+ *  variables and globs expanded, the paths inside those texts, and those in the raw text, which still holds what the
+ *  reader could not follow.
  *
  * ⚠ A bare token must be resolved against the COMMAND's directory, not this
  * process's. `cd somewhere && python sender.py` is the shape people actually
@@ -1270,28 +1405,25 @@ function searchDirs(command, cwd, reading = readLine(command, cwd)) {
 function referencedFiles(command, cwd, reading, budget) {
   const dirs = searchDirs(command, cwd, reading);
   const out = new Set();
+  const texts = [];
   const tokens = new Set([...command.matchAll(QUOTED_PATH)].map((m) => m[1] || m[2]));
   for (const m of command.matchAll(BARE_PATH)) tokens.add(m[0]);
-  const texts = new Set(reading.texts);
-  const globs = new Set(reading.globs);
-  for (const { parts, glob } of reading.templates) {
-    for (const text of substitutions(parts, reading.values, budget)) {
-      texts.add(text);
-      if (glob && /[*?[]/.test(text)) globs.add(text);
-    }
-  }
-  for (const text of texts) {
-    for (const word of braceExpand(text, budget)) {
-      for (const m of word.matchAll(BARE_PATH)) tokens.add(m[0]);
-      for (const part of [word, word.slice(word.indexOf("=") + 1)]) if (SCRIPT_NAME.test(part)) tokens.add(part);
-    }
-  }
-  for (const glob of globs) {
-    for (const word of braceExpand(glob, budget)) {
-      // An assigned value is not a glob yet, but an unquoted expansion of it later is.
-      for (const part of new Set([word, word.slice(word.indexOf("=") + 1)])) {
-        const matches = globFiles(expandHome(part, cwd) ?? part, dirs, budget);
-        for (const fp of matches) if (SCRIPT_NAME.test(fp)) tokens.add(fp);
+  const lenientBudget = { left: EXPANSION_LIMIT, listings: budget.listings };
+  const reread = (source) => readShell(source, { cwd, onCommand: () => {}, full: true, single: true });
+  for (const { word, glob, lenient } of reading.words) {
+    const spend = lenient ? lenientBudget : budget;
+    for (const w of braceWords(word, spend, reread)) {
+      for (const { text, pattern } of substitutions(w.parts ?? [{ text: w.text }], reading.values, spend)) {
+        texts.push(text);
+        for (const m of text.matchAll(BARE_PATH)) tokens.add(m[0]);
+        for (const part of [text, text.slice(text.indexOf("=") + 1)]) if (SCRIPT_NAME.test(part)) tokens.add(part);
+        if (!glob || !hasGlob(pattern)) continue;
+        // An assigned value is not a glob yet, but an unquoted expansion of it later is.
+        for (const part of new Set([pattern, pattern.slice(pattern.indexOf("=") + 1)])) {
+          for (const fp of globFiles(expandHome(part, cwd) ?? part, dirs, spend)) {
+            if (SCRIPT_NAME.test(fp)) tokens.add(fp);
+          }
+        }
       }
     }
   }
@@ -1310,7 +1442,7 @@ function referencedFiles(command, cwd, reading, budget) {
       }
     }
   }
-  return out;
+  return { files: out, texts };
 }
 
 /** Local modules a python file imports, resolved beside it.
@@ -1368,12 +1500,13 @@ function judgeLine(command, cwd, config, tool) {
   // so a body fed to an interpreter is still judged.
   if (tool === "Bash" && readOnlyCommand(command, cwd)) return null;
   const reading = readLine(command, cwd);
-  if (looksLikeSender([command, ...reading.texts].join("\n"), config)) {
+  const budget = { left: EXPANSION_LIMIT, listings: new Map() };
+  const { files, texts } = referencedFiles(command, cwd, reading, budget);
+  if (looksLikeSender([command, ...reading.texts, ...texts].join("\n"), config)) {
     return { reason: "this command reaches a mail-send endpoint directly",
              where: "the command line" };
   }
-  const budget = { left: EXPANSION_LIMIT, listings: new Map() };
-  for (const fp of referencedFiles(command, cwd, reading, budget)) {
+  for (const fp of files) {
     const direct = senderVerdict(fp, config);
     if (direct) return direct;
     // An allowlisted file does not launder its imports, but the sanctioned

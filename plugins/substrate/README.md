@@ -389,7 +389,10 @@ the raw text and from every word as bash builds it:
   value the line assigns it: in a command made only of assignments, in
   `export`, `declare`, `typeset`, `local` or `readonly`, and as a `for`
   loop's words;
-- brace lists and sequences expanded;
+- brace lists and sequences expanded as bash expands them: only braces
+  it reads unquoted, found by bash's own matching rules, in the word as
+  written and before its variables, so `$x{a,b}` is `$xa` and `$xb` and
+  a quoted `'{a,b}'` stays text;
 - an unquoted glob matched against the filesystem from the command's
   directories (a `case` pattern and the operands of `[[` are not globs);
 - each `cd` or `pushd` target, built the same way, added to the
@@ -415,7 +418,9 @@ every heredoc body and the inside of `((...))`, which POSIX shells read as
 two subshells, is also read as a command line for the script names in it,
 since it may run as code: written to a file and run, handed to `su`,
 `watch` or `ssh`, or kept in an alias or an arithmetic subscript. That
-reading refuses nothing and stops eight strings deep.
+reading refuses nothing and stops eight strings deep, and its braces,
+globs and variable values are expanded from a second budget the size of
+the one below, which blocks nothing when it runs out.
 
 The line is blocked, whatever it names, when it runs shell code the gate
 cannot read:
@@ -438,8 +443,11 @@ cannot read:
   or a redirection;
 - a line the reader cannot follow to its end that names a shell, `env`,
   `eval`, `trap` or `source`;
-- braces, globs and variable values that together make more than 4096
-  words, directory reads and visited paths.
+- braces, globs and variable values in the words bash reads that
+  together spend more than 4096 units: one for each word a brace or a
+  variable value makes, plus one for each further 1024 characters in
+  it, one for each directory a glob reads and each path it visits, and
+  one for each 1024 brace characters looked at while finding a pair.
 
 Shell code is read with bash's grammar, whichever of those shells runs it.
 Not resolved: a value computed while the line runs (command output,
