@@ -289,7 +289,6 @@ for (const command of [
   "grep -n sendMail blast.py",
   "wc -l blast.py && sha256sum blast.py",
   "timeout 60 sha256sum blast.py",
-  "LC_ALL=C grep -c graph blast.py",
   "diff blast.py other.py",
   'grep -rn "graph.microsoft.com/v1.0/me/sendMail" .',
   'echo "$(sha256sum blast.py)"',
@@ -396,6 +395,36 @@ for (const command of [
     const dir = repo();
     file(dir, "blast.py", SENDER_BODY);
     assert.equal(hook(command, dir).status, 2);
+  });
+}
+
+// An assignment can change what any later word runs: LD_PRELOAD loads code into cat itself, PATH picks which file a
+// bare name is, LESSOPEN and GIT_* name programs. printf -v and a {name}> redirection assign as well.
+for (const command of [
+  "LD_PRELOAD=./shim.so cat blast.py",
+  'LESSOPEN="|python3 %s" cat blast.py',
+  "LC_ALL=C grep -c graph blast.py",
+  "PATH=./bin; cat blast.py",
+  "env PATH=./bin cat blast.py",
+  "printf -v PATH %s ./bin; cat blast.py",
+  "true {PATH}>x.txt; cat blast.py",
+]) {
+  test(`an assignment makes the command judged: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
+for (const command of [
+  "echo PATH=./bin blast.py",
+  'printf "%s\\n" "$(sha256sum blast.py)"',
+  "printf -- -v blast.py",
+]) {
+  test(`an assignment-shaped argument is not an assignment: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 0);
   });
 }
 

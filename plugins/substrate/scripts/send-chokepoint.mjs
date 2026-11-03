@@ -91,22 +91,28 @@ const PREFIXES = new Map([
   }],
   ["env", (words, i) => (words[i]?.startsWith("-") ? -1 : i)],
 ]);
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+// An assignment can change what a later word runs (PATH, LD_PRELOAD, LESSOPEN, GIT_*), so any one is judged. `{name}>`
+// assigns the new descriptor's number to name.
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+?=)/;
+const NAMED_FD = /^\{[A-Za-z_][A-Za-z0-9_]*\}[<>]/;
 const WORD = /"[^"]*"|'[^']*'|\S+/g;
 
 function readOnlySimple(segment) {
   // Redirections are not commands, and a substitution split inside quotes leaves the quote marks behind.
   const words = (segment.match(WORD) || []).filter((w) => !/^\d*[<>]/.test(w) && !/^["']+$/.test(w))
     .map((w) => w.replace(/^["']+|["']+$/g, ""));
+  if (words.some((w) => NAMED_FD.test(w))) return false;
   let i = 0;
   for (;;) {
-    while (i < words.length && ASSIGNMENT.test(words[i])) i += 1;
+    if (ASSIGNMENT.test(words[i] ?? "")) return false;
     const after = PREFIXES.get(words[i]);
     if (!after) break;
     i = after(words, i + 1);
     if (i < 0) return false;
   }
   if (i >= words.length) return true;
+  // printf -v NAME assigns its output to NAME.
+  if (words[i] === "printf" && /^-(?!-$)/.test(words[i + 1] ?? "")) return false;
   return READ_ONLY.has(words[i]);
 }
 
