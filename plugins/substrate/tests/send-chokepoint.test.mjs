@@ -418,6 +418,23 @@ expectEach(2, "a redirection to anything but an ordinary file is judged", [
   "2> cat python3 blast.py",
 ]);
 
+// bash reads the `-` after `<&` or `>&` as a token of its own that closes the descriptor, so the text after it starts a
+// new word: `<&-python3 <&-sender.py` runs python3 on sender.py with stdin closed. The full judgment reads that path
+// without the dash too.
+expectEach(2, "a descriptor close does not hide the word after it", [
+  "<&-python3 <&-blast.py",
+  "<&-python3 <&-'blast.py'",
+  ">&-python3 >&-blast.py",
+  "2>&-python3 2>&-blast.py",
+  "cat other.py <&-; <&-python3 <&-blast.py",
+  "<&-curl <&--X <&-POST <&-https://graph.microsoft.com/v1.0/me/sendMail",
+]);
+
+expectEach(0, "closing a descriptor keeps the exemption", [
+  "cat blast.py <&-",
+  "sha256sum blast.py 2>&- | uniq",
+]);
+
 // Quoting is read as bash reads it: a quoted ; or | separates nothing, and quoting cannot hide an option or an
 // assignment from the reader.
 expectEach(0, "a quoted separator or an ordinary redirection keeps the exemption", [

@@ -108,7 +108,7 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+?=)/;
 const NAMED_FD = /^\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 const ENDS_WORD = new Set([" ", "\t", "\n", ";", "&", "|", "(", ")", "<", ">"]);
 const REDIRECT_OP = /&>>?|<<<|<<-?|<>|[<>]&|>>|>\||[<>]/y;
-const FD_DUP = /(?:\d+-?|-)(?=[ \t\n;&|()<>]|$)/y;
+const FD_DUP = /\d+-?(?=[ \t\n;&|()<>]|$)/y;
 const PARAMETER = /\$(?:\{(?:[A-Za-z_][A-Za-z0-9_]*|\d+|[@*#?$!-])\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/y;
 // What bash would run or rejoin in an unquoted heredoc body: a command substitution, arithmetic, a ${...} operator,
 // or a trailing backslash, which joins the line to the next before the delimiter is looked for.
@@ -268,7 +268,14 @@ function requireReadOnly(src, cwd) {
   const redirect = (nested) => {
     const op = sticky(REDIRECT_OP);
     skipBlanks();
-    if ((op === "<&" || op === ">&") && sticky(FD_DUP)) return;
+    if (op === "<&" || op === ">&") {
+      // bash reads a `-` here as a token of its own that closes the descriptor; the text after it starts a new word.
+      if (src[i] === "-") {
+        i += 1;
+        return;
+      }
+      if (sticky(FD_DUP)) return;
+    }
     const target = word();
     if (!target.raw || target.raw.startsWith("#")) notExempt();
     if (op === "<<" || op === "<<-") {
@@ -430,15 +437,18 @@ function referencedFiles(command, cwd) {
   const out = [];
   for (const m of command.matchAll(PATH_TOKEN)) {
     const token = m[1] || m[2] || m[3] || "";
-    if (!token) continue;
-    const candidates = path.isAbsolute(token)
-      ? [token]
-      : [token, ...dirs.map((d) => path.resolve(d, token))];
-    for (const fp of candidates) {
-      try {
-        const st = fs.statSync(fp);
-        if (st.isFile() && st.size <= MAX_READ_BYTES) { out.push(fp); break; }
-      } catch { /* keep looking */ }
+    // bash reads `<&-sender.py` as a descriptor close and the word `sender.py`, so the path may start after the dashes.
+    for (const name of new Set([token, token.replace(/^-+/, "")])) {
+      if (!name) continue;
+      const candidates = path.isAbsolute(name)
+        ? [name]
+        : [name, ...dirs.map((d) => path.resolve(d, name))];
+      for (const fp of candidates) {
+        try {
+          const st = fs.statSync(fp);
+          if (st.isFile() && st.size <= MAX_READ_BYTES) { out.push(fp); break; }
+        } catch { /* keep looking */ }
+      }
     }
   }
   return out;
