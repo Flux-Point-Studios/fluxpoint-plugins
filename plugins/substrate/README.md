@@ -380,7 +380,8 @@ any compound command), `if`/`while`/`for`/`case` (with newlines before
 `in`), `time` and `time -p`, `$(...)`, backquotes, arithmetic, process
 substitution, `${...}` operators, bash 5.3's `${ list; }` and heredocs,
 whose delimiter is the word with quotes removed and nothing expanded, so
-`<<$D` ends at a line `$D`. A script is a name ending in `.py`,
+`<<$D` ends at a line `$D` (a delimiter holding a command substitution
+is not followed). A script is a name ending in `.py`,
 `.mjs`, `.js`, `.ts`, `.ps1`, `.sh` or `.rb`. Script names are taken from
 the raw text and from every word as bash builds it:
 
@@ -414,8 +415,9 @@ the raw text and from every word as bash builds it:
 - each `cd` or `pushd` target (none means HOME, `-` means OLDPWD) and
   each `env -C` or `--chdir` directory, built the same way, globs
   included, and resolved against every directory the line may be in:
-  through each CDPATH entry the environment or the line gives and
-  directly, both as `cd` joins it and as the kernel resolves it. This
+  directly and, for a name not starting with `/`, `.` or `..`, through
+  each CDPATH entry the environment or the line gives, both as `cd`
+  joins it and as the kernel resolves it. This
   repeats until no new directory appears, so neither the order of the
   line's commands nor a loop hides one, and only a directory that exists
   counts;
@@ -489,13 +491,16 @@ cannot read:
   variable value makes, plus one for each further 1024 characters in
   it, one for each directory a glob reads and each path it visits, one
   for each directory a `find -execdir` walk visits, and one for each
-  1024 brace characters looked at while finding a pair;
+  1024 unquoted `{`, `,`, `}` and `.` looked at while finding a pair;
 - a line that may run in more than 64 directories.
 
 Shell code is read with bash's grammar, whichever of those shells runs it.
 Not resolved: a value computed while the line runs (command output,
-arithmetic, other `${...}` operators, `read`, `printf -v`, arrays), a value
-an earlier command set that the hook's environment does not hold, `~user`,
+arithmetic, other `${...}` operators, `read`, `printf -v`, arrays,
+positional parameters from `set --` or a function's arguments), a name
+another program supplies (`find -exec ... {}`, the input of `xargs`), a
+value or an alias an earlier command set that the hook does not see,
+`~user`,
 a directory another program changes into (`git -C`, `make -C`, `sudo -D`),
 a script name without one of those extensions, code another interpreter
 assembles (`python3 -c`), syntax only `zsh` or another shell gives a
@@ -515,8 +520,8 @@ fails on, for instance by running out of call stack; a line longer than
 262 144 characters (256 KiB), without being read, since reading costs
 memory in proportion to its words; and a line not judged within 10
 seconds, a limit `SEND_CHOKEPOINT_DEADLINE_MS` in the hook's environment
-changes. Every scan of the line and of a script's text runs in one pass,
-so judging a line takes time in proportion to its size.
+changes. The scans of the line's text and of a script's text each run
+in one pass, and the work beyond them is bounded by the budgets above.
 Do not treat it as an egress sandbox. Its tests use local fixture files and
 never contact mail providers.
 

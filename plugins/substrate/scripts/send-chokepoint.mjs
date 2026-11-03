@@ -26,8 +26,9 @@
 // unreadable file or a missing config exits 0: a broken hook must never wedge a
 // session. A file it can read that is a sender outside the declared allowlist
 // exits 2. So does a line that runs shell code it cannot read, since that code
-// could name any file, and a line the judgment fails on, since what it did not
-// judge could be a send.
+// could name any file, and a line the judgment fails on, cannot read within
+// its size limit or cannot finish in time, since what it did not judge could
+// be a send.
 //
 // CONFIG — `.send-chokepoint.json`, found by walking up from the command's
 // working directory:
