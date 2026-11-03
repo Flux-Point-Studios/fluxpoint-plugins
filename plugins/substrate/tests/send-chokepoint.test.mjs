@@ -435,6 +435,24 @@ expectEach(0, "closing a descriptor keeps the exemption", [
   "sha256sum blast.py 2>&- | uniq",
 ]);
 
+// bash expands the word after `>&`, and when the result is neither a descriptor number nor `-` it expands that result
+// again as the file to open, so quoting does not keep a substitution in it from running: `>&'$(cmd)'` runs cmd. A
+// descriptor other than 0, 1 and 2 was inherited from whatever started the shell, and may be a socket.
+expectEach(2, "a >& target is read as bash expands it", [
+  "cat blast.py >&a'$(python3 blast.py)'",
+  "cat blast.py >&2x'${x:-$(python3 blast.py)}'",
+  'cat other.py >&"\\$(python3 blast.py)"',
+  "cat blast.py >&12",
+  "cat blast.py 2>&10",
+  "cat blast.py >&3-",
+]);
+
+expectEach(0, "a >& to a standard descriptor or an ordinary file keeps the exemption", [
+  "cat blast.py >&2",
+  "grep -n send blast.py 2>&1 >&2 <&0",
+  "cat blast.py >& copy.txt",
+]);
+
 // Quoting is read as bash reads it: a quoted ; or | separates nothing, and quoting cannot hide an option or an
 // assignment from the reader.
 expectEach(0, "a quoted separator or an ordinary redirection keeps the exemption", [

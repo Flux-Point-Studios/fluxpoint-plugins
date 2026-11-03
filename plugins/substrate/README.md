@@ -350,7 +350,11 @@ of these holds:
 - A redirection opens anything except an ordinary file or `/dev/null`,
   `/dev/stdin`, `/dev/stdout` and `/dev/stderr`: `/dev/tcp/HOST/PORT` and
   `/dev/udp/HOST/PORT`, which bash opens as sockets, any other path under
-  `/dev` or `/proc`, or a target built from an expansion.
+  `/dev` or `/proc`, or a target built from an expansion. `<&` and `>&` may
+  also duplicate descriptor 0, 1 or 2 or close one with `-`; any other
+  descriptor was inherited from whatever started the shell. bash expands a
+  `>&` target that is not a descriptor a second time, so one holding a
+  quote, `$`, a glob or a tilde is judged.
 - The reader cannot follow it: backquotes, arithmetic, subshells, process
   substitution, `${...}` operators, a backslash-newline right after `$`, `&`
   or a redirection operator (bash joins it to what follows), an unterminated

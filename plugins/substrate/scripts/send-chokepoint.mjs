@@ -108,7 +108,9 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+?=)/;
 const NAMED_FD = /^\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 const ENDS_WORD = new Set([" ", "\t", "\n", ";", "&", "|", "(", ")", "<", ">"]);
 const REDIRECT_OP = /&>>?|<<<|<<-?|<>|[<>]&|>>|>\||[<>]/y;
-const FD_DUP = /\d+-?(?=[ \t\n;&|()<>]|$)/y;
+// bash expands the word after `<&` or `>&`, and when the result is not a descriptor number or `-`, expands it again as
+// the file to open. Text made only of these characters comes out of that second pass unchanged.
+const PLAIN_TEXT = /^[\w./,:=%+@-]+$/;
 const PARAMETER = /\$(?:\{(?:[A-Za-z_][A-Za-z0-9_]*|\d+|[@*#?$!-])\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/y;
 // What bash would run or rejoin in an unquoted heredoc body: a command substitution, arithmetic, a ${...} operator,
 // or a trailing backslash, which joins the line to the next before the delimiter is looked for.
@@ -284,13 +286,12 @@ function requireReadOnly(src, cwd) {
     const op = sticky(REDIRECT_OP);
     if (continued(i)) notExempt();
     skipBlanks();
-    if (op === "<&" || op === ">&") {
-      // bash reads a `-` here as a token of its own that closes the descriptor; the text after it starts a new word.
-      if (src[i] === "-") {
-        i += 1;
-        return;
-      }
-      if (sticky(FD_DUP)) return;
+    const dup = op === "<&" || op === ">&";
+    // bash reads a `-` after `<&` or `>&` as a token of its own that closes the descriptor; the text after it starts a
+    // new word.
+    if (dup && src[i] === "-") {
+      i += 1;
+      return;
     }
     const target = word();
     if (!target.bare || target.bare.startsWith("#")) notExempt();
@@ -298,7 +299,10 @@ function requireReadOnly(src, cwd) {
       // The delimiter is the quote-removed word; any quoting in it leaves the body unexpanded.
       if (nested || !target.literal || !target.text || target.text.includes("\n")) notExempt();
       heredocs.push({ delimiter: target.text, tabs: op === "<<-", quoted: target.quoted });
-    } else if (op !== "<<<" && !ordinaryTarget(target, cwd)) {
+    } else if (dup && /^\d+-?$/.test(target.text)) {
+      // Any descriptor but the standard three was inherited from whatever started the shell, and may be a socket.
+      if (!target.literal || !/^[012]-?$/.test(target.text)) notExempt();
+    } else if ((dup && !PLAIN_TEXT.test(target.text)) || (op !== "<<<" && !ordinaryTarget(target, cwd))) {
       notExempt();
     }
   };
