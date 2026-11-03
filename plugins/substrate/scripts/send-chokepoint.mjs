@@ -127,7 +127,6 @@ const STD_STREAMS = new Set(["/dev/null", "/dev/stdin", "/dev/stdout", "/dev/std
 const STDIN_PATH = /^\/(?:dev\/stdin|dev\/fd\/0|proc\/(?:self|thread-self|\d+)\/fd\/0)$/;
 // The shells whose -c string, heredoc and here-string the full judgment reads as code.
 const SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "yash", "posh"]);
-const ENV = new Set(["env"]);
 const DECLARATIONS = new Set(["export", "declare", "typeset", "local", "readonly"]);
 // A shell, or a builtin that runs a string or a file as code, named as a word of its own.
 const RUNS_CODE = new RegExp(`(?:^|[^\\w.-])(?:${[...SHELLS, "env", "eval", "trap", "source"].join("|")})(?![\\w.-])`
@@ -227,11 +226,12 @@ function requireReadOnlyCommand(words, cwd) {
   if (WRITES_OPERAND.has(texts[i]) && !words.slice(i + 1).every((w) => ordinaryTarget(w, cwd))) notExempt();
 }
 
-/** Reads `src` as bash reads it and calls `onCommand(words, redirects)` at the end of every simple command, those in
- *  substitutions included. A word carries its text after quote removal (`text`), whether it holds no expansion or
- *  pattern (`literal`), whether any of it is quoted or escaped (`quoted`), its source without line continuations
- *  (`bare`), whether an expansion may supply its first character (`opensDynamic`), and whether an unquoted expansion
- *  or pattern may split it into several words (`splits`).
+/** Reads `src` as bash reads it and calls `onCommand(words, redirects, piped)` at the end of every simple command,
+ *  those in substitutions included; `piped` says the command reads a pipe. A word carries its text after quote removal
+ *  (`text`), whether it holds no expansion or pattern (`literal`), whether any of it is quoted or escaped (`quoted`),
+ *  its source without line continuations (`bare`), whether an expansion may supply its first character
+ *  (`opensDynamic`), whether an unquoted expansion or pattern may split it into several words (`splits`), and its
+ *  pieces, each with the name of the variable it came from, if any (`parts`).
  *
  *  The read-only exemption reads with `full` false. It follows a subset of the grammar and throws at the rest:
  *  backquotes, arithmetic, subshells, process substitution, `${...}` operators, a heredoc inside a substitution, a
@@ -242,6 +242,7 @@ function requireReadOnlyCommand(words, cwd) {
  *  reads `src` as an unquoted heredoc body, following only its expansions. */
 function readShell(src, { cwd, onCommand, onText, full = false, text = false }) {
   let i = 0;
+  let piped = false;
   const heredocs = [];
   const sticky = (re) => {
     re.lastIndex = i;
@@ -620,7 +621,8 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
   };
 
   // A list of commands, up to the end of src or, inside `$(` or `(`, its closing parenthesis, or with `brace`, inside
-  // `${ `, the `}` that ends it.
+  // `${ `, the `}` that ends it. A command reads a pipe when a `|` comes before it, or when the command a nested list
+  // belongs to does.
   const list = (nested, brace = false) => {
     let words = [];
     let redirects = [];
@@ -629,8 +631,9 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
     // Inside a case command, whether a pattern comes next: after `in`, `;;`, `;&` or `;;&`.
     let patterns = false;
     let groups = 0;
+    const inherited = piped;
     const command = () => {
-      onCommand(words, redirects);
+      onCommand(words, redirects, piped);
       words = [];
       redirects = [];
     };
@@ -651,6 +654,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
         i += 1;
         command();
         if (c === undefined) for (const doc of heredocs.splice(0)) doc.onBody?.("");
+        piped = inherited;
         return;
       }
       if (c === "(") {
@@ -670,9 +674,11 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
       if (c === "&" && continued(i + 1) && !full) notExempt();
       if (c === "\n" || c === ";" || c === "|" || (c === "&" && src[i + 1] !== ">")) {
         if (c === ";" && cases > 0 && (src[i + 1] === ";" || src[i + 1] === "&")) patterns = true;
+        const pipe = c === "|" && src[i + 1] !== "|";
         i += 1;
         if ((c === "|" || c === "&") && (src[i] === c || (c === "|" && src[i] === "&"))) i += 1;
         command();
+        piped = pipe || inherited;
         if (c === "\n" && heredocs.length) {
           if (nested && !full) notExempt();
           bodies();
@@ -700,6 +706,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false }) 
         if (full && words.every((v) => RESERVED.has(v.bare))) {
           if (brace && w.bare === "}" && groups === 0) {
             command();
+            piped = inherited;
             return;
           }
           if (w.bare === "{") groups += 1;
@@ -793,16 +800,17 @@ function splitEnvString(s) {
 }
 
 const literalWord = (text) => ({ text, literal: true, quoted: true, bare: text, opensDynamic: false, splits: false });
-const named = (w, names) => w.literal && !ASSIGNMENT.test(w.bare) && names.has(path.posix.basename(w.text));
 
 /** The indexes of the words that run a simple command: each program in RUNNERS and, last, the command it runs, past
- *  assignments and reserved words. The chain ends early at an env -S, whose words env splits, and at command -v. */
-function commandChain(words) {
+ *  assignments, reserved words and unquoted expansions that come out empty, which leave no word behind; `values` are
+ *  those the line assigns. The chain ends early at an env -S, whose words env splits, and at command -v. */
+function commandChain(words, values) {
   const chain = [];
   let k = 0;
   while (k < words.length) {
     const w = words[k];
-    if (RESERVED.has(w.bare) || ASSIGNMENT.test(w.bare)) {
+    const empty = w.splits && !w.quoted && w.text === "" && !w.parts?.some((p) => values.has(p.name));
+    if (RESERVED.has(w.bare) || ASSIGNMENT.test(w.bare) || empty) {
       k += 1;
       continue;
     }
@@ -891,16 +899,30 @@ function readLine(command, cwd) {
   };
 
   // A script operand under /dev, /proc or /sys is a stream: standard input, or a descriptor the line does not show.
-  const script = (operand, redirects, who) => {
+  // A script operand built from an expansion is resolved like any interpreter's, unless it may be a stream or the
+  // command's input is a pipe or a redirection it could name.
+  const script = (operand, redirects, who, piped) => {
     if (operand.process) unreadable(`${who} runs the output of a process substitution`);
     else if (operand.literal && inside(STDIN_PATH, operand.text)) input(redirects, who);
-    else if (operand.literal && inside(SPECIAL_ROOT, operand.text)) unreadable(`${who} reads ${operand.text}`);
+    else if (inside(SPECIAL_ROOT, operand.text)) {
+      unreadable(operand.literal ? `${who} reads ${operand.text}` : `${who} reads a stream named by an expansion`);
+    }
+    else if (!operand.literal && (piped || redirects.some((r) => (r.fd === null || r.fd === "0") && r.op[0] === "<"))) {
+      unreadable(`the script of ${who} is built from an expansion, and its input is a pipe or a redirection`);
+    }
+  };
+
+  // The shell a word names, if any: literally, by its value in the environment, or by a value the line assigns.
+  const shellNamed = (w) => {
+    if (ASSIGNMENT.test(w.bare)) return null;
+    const texts = w.literal ? [w.text] : substitutions(w.parts ?? [], found.values, { left: 64 });
+    return texts.map((t) => path.posix.basename(t)).find((name) => SHELLS.has(name)) ?? null;
   };
 
   // A shell named at words[j]. Its -c string is code. At the head of the command so is its standard input, when it has
   // no script operand, and an expansion among its options may be -c.
-  const shell = (words, j, redirects, head) => {
-    const who = path.posix.basename(words[j].text);
+  const shell = (words, j, redirects, head, piped) => {
+    const who = shellNamed(words[j]);
     let c = false;
     let s = false;
     let k = j + 1;
@@ -909,8 +931,9 @@ function readLine(command, cwd) {
       if (!w.literal) {
         if (c || w.process || !(/^[-+]/.test(w.text) || (head && w.opensDynamic))) break;
         if (w.splits) return unreadable(`the options of ${who} are built from an expansion`);
+        // This may be -c, and the next word its string, or it may be the script.
         if (words[k + 1]) readWord(words[k + 1], `the -c string of ${who}`);
-        return;
+        break;
       }
       const option = w.text;
       if (option === "-" || option === "--") {
@@ -929,13 +952,13 @@ function readLine(command, cwd) {
     }
     if (c) return readWord(words[k], `the -c string of ${who}`);
     if (!head) return;
-    if (words[k] && !s) return script(words[k], redirects, who);
+    if (words[k] && !s) return script(words[k], redirects, who, piped);
     input(redirects, who);
   };
 
   // env at words[j]. A -S string is split into words, and env reads its options again from them on. At the head of the
   // command an expansion among its options may be -S.
-  const env = (words, j, redirects, head) => {
+  const env = (words, j, redirects, head, piped) => {
     for (let k = j + 1; k < words.length; k += 1) {
       const w = words[k];
       if (!w.literal) {
@@ -970,12 +993,12 @@ function readLine(command, cwd) {
       if (attached === null && !words[k].literal) return unreadable(`${what} is built from an expansion`);
       const made = splitEnvString(attached ?? words[k].text);
       if (!made) return unreadable(`${what} cannot be read`);
-      return inspect([...words.slice(0, j + 1), ...made.map(literalWord), ...words.slice(k + 1)], redirects);
+      return inspect([...words.slice(0, j + 1), ...made.map(literalWord), ...words.slice(k + 1)], redirects, piped);
     }
   };
 
-  const inspect = (words, redirects) => {
-    const chain = commandChain(words);
+  const inspect = (words, redirects, piped = false) => {
+    const chain = commandChain(words, found.values);
     const head = chain.at(-1) ?? -1;
     // An unquoted pattern character or expansion makes a word a glob, except in a case pattern or a [[ test.
     const tested = words[head]?.bare === "[[";
@@ -1009,14 +1032,17 @@ function readLine(command, cwd) {
       if (args.length - n > 1) readWord(args[n], "the trap action");
     }
     const operand = args[0]?.text === "--" ? args[1] : args[0];
-    if ((name === "source" || name === ".") && operand) script(operand, redirects, name);
+    if ((name === "source" || name === ".") && operand) script(operand, redirects, name, piped);
     // A command named by an expansion and given -c may be a shell.
     if (words[head] && !words[head].literal && args[0]?.literal && /^-[A-Za-z]*c[A-Za-z]*$/.test(args[0].text)) {
       readWord(args[1], "the -c string of a command named by an expansion");
     }
     for (let j = 0; j < words.length; j += 1) {
-      if (named(words[j], ENV)) env(words, j, redirects, chain.includes(j));
-      if (named(words[j], SHELLS)) shell(words, j, redirects, j === head);
+      const w = words[j];
+      if (w.literal && !ASSIGNMENT.test(w.bare) && path.posix.basename(w.text) === "env") {
+        env(words, j, redirects, chain.includes(j), piped);
+      }
+      if (shellNamed(w)) shell(words, j, redirects, j === head, piped);
     }
     for (const w of words) if (!readAsCode.has(w)) readLeniently(w.text);
     for (const r of redirects) {

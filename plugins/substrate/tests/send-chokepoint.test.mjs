@@ -798,6 +798,25 @@ expectEach(2, "shell code the gate cannot read is blocked", [
   "cat <<$D\nx\n$D\nbash -c \"python3 bl''ast.py\"",
 ]);
 
+// A shell may be named by an expansion, and a script operand built from one may be the pipe the shell reads from.
+expectEach(2, "a shell named or fed through an expansion is judged", [
+  `S=bash; printf %s ${BUILT} | $S`,
+  `printf %s ${BUILT} | $NOTHING bash`,
+  `Z=0; printf %s ${BUILT} | bash /dev/fd/$Z`,
+  `printf %s ${BUILT} | bash "$(echo /dev/stdin)"`,
+  `printf %s ${BUILT} | (bash "$(echo /dev/stdin)")`,
+]);
+
+test("a shell named by a variable from the environment is judged", () => {
+  const dir = repo();
+  assert.equal(hook(`printf %s ${BUILT} | "$SHELL"`, dir, "Bash", { SHELL: "/bin/bash" }).status, 2);
+});
+
+expectEach(0, "a script file named by an expansion is run like any interpreter's", [
+  'ls *.sh | while read f; do bash "$f"; done',
+  'bash "$(ls run.sh)"',
+]);
+
 // Shell code written out in the line is read, and a shell that runs a script file is the same as any interpreter.
 expectEach(0, "shell code written out in the line is read, not refused", [
   "bash -c 'npm test'",
