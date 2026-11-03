@@ -982,7 +982,10 @@ function tree(at) {
   const proj = path.join(root, "proj");
   for (const dir of ["proj/sub/deeper", "elsewhere/d", "home"]) fs.mkdirSync(path.join(root, dir), { recursive: true });
   fs.writeFileSync(path.join(proj, ".send-chokepoint.json"), JSON.stringify({ sender: "outbound_mail.py" }));
-  if (at) file(root, at, SENDER_BODY);
+  if (at) {
+    fs.mkdirSync(path.dirname(path.join(root, at)), { recursive: true });
+    file(root, at, SENDER_BODY);
+  }
   return { root, proj };
 }
 
@@ -1055,6 +1058,34 @@ expectAt(0, "a glob option the line does not turn on is off", [
   ["python3 BLAST.P[Y]", "proj/blast.py"],
   ["bash ?hid.sh", "proj/.hid.sh"],
 ]);
+
+// bash finds a command name without a slash on PATH, and so do source and `.` (sourcepath is on), a shell given a
+// script it does not find in the directory, and the programs that run others. PATH may hold user-writable
+// directories, and a sourced script needs no exec bit.
+for (const [command, at] of [
+  ["pblast.sh", "bin/pblast.sh"],
+  ["source pblast.sh", "bin/pblast.sh"],
+  [". pblast.sh", "bin/pblast.sh"],
+  ["bash pblast.sh", "bin/pblast.sh"],
+  ["env pblast.py", "bin/pblast.py"],
+  ["xargs pblast.py </dev/null", "bin/pblast.py"],
+  ["watch -n 1 pblast.py", "bin/pblast.py"],
+  ["PATH=sub:$PATH; blast.sh", "proj/sub/blast.sh"],
+  ["PATH=~/tools:$PATH blast.sh", "home/tools/blast.sh"],
+]) {
+  test(`a name bash looks up on PATH is resolved there: ${command}`, () => {
+    const { root, proj } = tree(at);
+    const env = { HOME: path.join(root, "home"), PATH: `${path.join(root, "bin")}:${process.env.PATH}` };
+    assert.equal(hook(command, proj, "Bash", env).status, 2);
+  });
+}
+
+test("a reader on PATH is not a reason to block", () => {
+  const { root, proj } = tree(null);
+  fs.mkdirSync(path.join(root, "bin"));
+  file(path.join(root, "bin"), "pother.py", READER_BODY);
+  assert.equal(hook("pother.py", proj, "Bash", { PATH: `${path.join(root, "bin")}:${process.env.PATH}` }).status, 0);
+});
 
 expectAt(0, "a directory the line reaches holds no sender", [
   ["cd sub && cd deeper && python3 blast.py", "proj/blast.py.txt"],

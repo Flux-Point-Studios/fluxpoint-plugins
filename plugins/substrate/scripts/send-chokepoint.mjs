@@ -1689,9 +1689,16 @@ function referencedFiles(command, cwd, reading, budget) {
   }
   const resolve = (name, dirs) => tildeForms(name, scope)
     .flatMap((form) => existing(path.isAbsolute(form) ? [form] : dirs.map((dir) => `${dir}/${form}`)));
+  // bash finds a command, a source operand and a script a shell does not find in its directory on PATH, as the
+  // environment and the line set it, and so do the programs that run others; an empty entry is the directory itself.
+  const searchPath = [...new Set([process.env.PATH, ...(scope.get("PATH") ?? [])].filter((v) => typeof v === "string")
+    .flatMap((value) => value.split(":")).flatMap((entry) => tildeForms(entry || ".", scope))
+    .flatMap((entry) => (path.isAbsolute(entry) ? [entry] : places.map((dir) => path.resolve(dir, entry)))))];
   for (const token of tokens) {
     // bash reads `<&-sender.py` as a descriptor close and the word `sender.py`, so the path may start after the dashes.
-    for (const name of new Set([token, token.replace(/^-+/, "")])) for (const fp of resolve(name, places)) out.add(fp);
+    for (const name of new Set([token, token.replace(/^-+/, "")])) {
+      for (const fp of resolve(name, name.includes("/") ? places : [...places, ...searchPath])) out.add(fp);
+    }
   }
   // find -execdir runs its command in the directory of each file it finds: anywhere under its starting points.
   for (const { starts, words } of reading.finds) {

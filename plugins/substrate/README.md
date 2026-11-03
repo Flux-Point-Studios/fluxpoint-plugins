@@ -425,7 +425,12 @@ the raw text and from every word as bash builds it:
 
 A relative name is joined to each directory the line may be in without
 removing `..` first, as the kernel joins it, so `link/..` is the parent
-of where `link` points, and every copy found is judged. Each existing
+of where `link` points, and every copy found is judged. A name without a
+slash is also looked for in each directory of PATH, as the hook's
+environment and the line set it (`~` expanded, an empty entry meaning
+the directory itself), since bash finds a command, a `source` or `.`
+operand and a script a shell does not find in its directory there, and
+so do the programs that run others. Each existing
 script found is judged by its text and its local Python imports, as
 above. The sender and the exempt directories are compared with it after
 the kernel resolves symlinks, so a path that reads as the sender but
