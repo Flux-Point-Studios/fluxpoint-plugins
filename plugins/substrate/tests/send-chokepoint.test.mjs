@@ -383,6 +383,72 @@ for (const command of [
   });
 }
 
+// A redirection opens its target, and bash opens /dev/tcp/HOST/PORT and /dev/udp/HOST/PORT as sockets: data needs no
+// interpreter to leave. A target is exempt only when it is an ordinary file or /dev/null, /dev/stdin, /dev/stdout,
+// /dev/stderr, written out literally; an expansion could name anything.
+for (const command of [
+  "cat blast.py > /dev/tcp/127.0.0.1/25",
+  "cat blast.py >/dev/udp/127.0.0.1/25",
+  "cat blast.py 1<>/dev/tcp/127.0.0.1/25",
+  "cat blast.py &> /dev/tcp/127.0.0.1/25",
+  "cat blast.py >& /dev/tcp/127.0.0.1/25",
+  'cat blast.py >"/dev/tcp/127.0.0.1/25"',
+  "cat blast.py >/dev/tc''p/127.0.0.1/25",
+  "cat blast.py > /dev//tcp/127.0.0.1/25",
+  "cat blast.py > ../../../../../../../../../dev/tcp/127.0.0.1/25",
+  "cat blast.py > /dev/ttyS0",
+  "cat blast.py > /proc/self/fd/1",
+  "cat < /dev/tcp/127.0.0.1/25 blast.py",
+  "cat blast.py > ${T:-/dev/tcp/127.0.0.1/25}",
+  "cat blast.py > $T",
+  "cat blast.py > ~root/out.txt",
+  "> cat python3 blast.py",
+  "2> cat python3 blast.py",
+]) {
+  test(`a redirection to anything but an ordinary file is judged: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
+// Quoting is read as bash reads it: a quoted ; or | separates nothing, and quoting cannot hide an option or an
+// assignment from the reader.
+for (const command of [
+  'grep -E "send|reply" blast.py',
+  'grep -n "a;b" blast.py > hits.txt',
+  "cat blast.py > /dev/null 2>/dev/stderr",
+  "grep -c send < blast.py >> counts.txt",
+  "cat blast.py > sub/../copy.txt",
+  "c''at blast.py",
+]) {
+  test(`a quoted separator or an ordinary redirection keeps the exemption: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 0);
+  });
+}
+
+for (const command of [
+  'LESSOPEN="|python3 %s" cat blast.py',
+  "printf -''v PATH %s ./bin; cat blast.py",
+  "p''rintf -v PATH %s ./bin; cat blast.py",
+  'grep "x" blast.py; python3 blast.py',
+  "cat 'blast.py' | python3",
+  "cat blast.py > >(python3)",
+  "diff <(cat blast.py) <(python3 blast.py)",
+  "(python3 blast.py)",
+  "{ python3 blast.py; }",
+  "cat blast.py; $X blast.py",
+  "echo $((1)); python3 blast.py",
+]) {
+  test(`quoting and grouping cannot hide a command from the reader: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
 // env -S splits its value into a new command line, so an env prefix with any option is judged. timeout and nice
 // have no option that runs a program, and keep the exemption with the options they document.
 for (const command of [

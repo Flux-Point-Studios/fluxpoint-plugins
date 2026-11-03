@@ -37,6 +37,7 @@
 //
 // Exit codes: 0 = allow, 2 = block (stderr is shown to the author).
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -94,34 +95,207 @@ const PREFIXES = new Map([
 // An assignment can change what a later word runs (PATH, LD_PRELOAD, LESSOPEN, GIT_*), so any one is judged. `{name}>`
 // assigns the new descriptor's number to name.
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+?=)/;
-const NAMED_FD = /^\{[A-Za-z_][A-Za-z0-9_]*\}[<>]/;
-const WORD = /"[^"]*"|'[^']*'|\S+/g;
+const NAMED_FD = /^\{[A-Za-z_][A-Za-z0-9_]*\}$/;
+const ENDS_WORD = new Set([" ", "\t", "\n", ";", "&", "|", "(", ")", "<", ">"]);
+const REDIRECT_OP = /&>>?|<<<|<<-?|<>|[<>]&|>>|>\||[<>]/y;
+const FD_DUP = /(?:\d+-?|-)(?=[ \t\n;&|()<>]|$)/y;
+const PARAMETER = /\$(?:\{(?:[A-Za-z_][A-Za-z0-9_]*|\d+|[@*#?$!-])\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/y;
+// bash opens /dev/tcp/HOST/PORT and /dev/udp/HOST/PORT as sockets; the rest of /dev and /proc are devices and other
+// processes' descriptors. Only these four streams there are ordinary.
+const SPECIAL_ROOT = /^\/(?:dev|proc)(?:\/|$)/;
+const STD_STREAMS = new Set(["/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"]);
+const NOT_EXEMPT = Symbol("not exempt");
 
-function readOnlySimple(segment) {
-  // Redirections are not commands, and a substitution split inside quotes leaves the quote marks behind.
-  const words = (segment.match(WORD) || []).filter((w) => !/^\d*[<>]/.test(w) && !/^["']+$/.test(w))
-    .map((w) => w.replace(/^["']+|["']+$/g, ""));
-  if (words.some((w) => NAMED_FD.test(w))) return false;
-  let i = 0;
-  for (;;) {
-    if (ASSIGNMENT.test(words[i] ?? "")) return false;
-    const after = PREFIXES.get(words[i]);
-    if (!after) break;
-    i = after(words, i + 1);
-    if (i < 0) return false;
-  }
-  if (i >= words.length) return true;
-  // printf -v NAME assigns its output to NAME.
-  if (words[i] === "printf" && /^-(?!-$)/.test(words[i + 1] ?? "")) return false;
-  return READ_ONLY.has(words[i]);
+function notExempt() {
+  throw NOT_EXEMPT;
 }
 
-/** Every simple command in the line is a read-only tool. Pipes, lists, newlines and command substitutions all split
- *  the line, so `cat s.py | python3` and `python3 -c "$(cat s.py)"` are not read-only. */
-export function readOnlyCommand(command) {
-  // The & of `2>&1`, `>&2` and `&>` is part of a redirection, not a list separator.
-  return command.replace(/\d*[<>]&(?:\d+|-)|&>>?/g, (m) => (m[0] === "&" ? ">" : " "))
-    .split(/\$\(|[;&|\n`()]+/).every(readOnlySimple);
+/** A redirection target that opens an ordinary file: written out literally, outside /dev and /proc unless it is one
+ *  of the standard streams, and a regular file if it exists already. */
+function ordinaryTarget(target, cwd) {
+  if (!target.literal) return false;
+  let name = target.text;
+  if (target.raw.startsWith("~")) {
+    if (!/^~(?:\/|$)/.test(target.raw)) return false;
+    name = os.homedir() + name.slice(1);
+  }
+  if (STD_STREAMS.has(path.posix.normalize(name))) return true;
+  const full = path.resolve(cwd || process.cwd(), name);
+  if (SPECIAL_ROOT.test(path.posix.normalize(name)) || SPECIAL_ROOT.test(full)) return false;
+  try {
+    return fs.statSync(full).isFile();
+  } catch (err) {
+    return err.code === "ENOENT";
+  }
+}
+
+/** The command's words up to its name are literal, assign nothing, pass only harmless prefix options, and name a
+ *  read-only tool; printf's first argument is not an option (printf -v NAME assigns). */
+function requireReadOnlyCommand(words) {
+  const texts = words.map((w) => (w.literal ? w.text : null));
+  let i = 0;
+  for (;;) {
+    if (ASSIGNMENT.test(words[i]?.raw ?? "")) notExempt();
+    const after = PREFIXES.get(texts[i]);
+    if (!after) break;
+    i = after(texts, i + 1);
+    if (i < 0) notExempt();
+  }
+  if (i >= words.length) return;
+  if (words.slice(0, i + 1).some((w) => !w.literal) || !READ_ONLY.has(texts[i])) notExempt();
+  const first = words[i + 1];
+  if (texts[i] === "printf" && first && (!first.literal || /^-(?!-$)/.test(first.text))) notExempt();
+}
+
+/** Reads `src` as bash would and throws NOT_EXEMPT unless every simple command in it, command substitutions
+ *  included, is read-only and every redirection opens an ordinary file. Syntax it does not follow — backquotes,
+ *  arithmetic, subshells, process substitution, heredocs, an unterminated quote — throws too. */
+function requireReadOnly(src, cwd) {
+  let i = 0;
+  const sticky = (re) => {
+    re.lastIndex = i;
+    const m = re.exec(src);
+    if (m) i += m[0].length;
+    return m?.[0];
+  };
+  const skipBlanks = () => {
+    while (src[i] === " " || src[i] === "\t" || (src[i] === "\\" && src[i + 1] === "\n")) i += src[i] === "\\" ? 2 : 1;
+  };
+
+  // At a `$`: consumes an expansion and returns true, or returns false for a literal dollar sign.
+  const dollar = (inQuotes) => {
+    const next = src[i + 1];
+    if (next === "(") {
+      if (src[i + 2] === "(") notExempt();
+      i += 2;
+      list(true);
+      return true;
+    }
+    if (next === "[" || next === "{") return sticky(PARAMETER) ? true : notExempt();
+    if (!inQuotes && next === "'") {
+      for (i += 2; src[i] !== "'"; i += src[i] === "\\" ? 2 : 1) if (i >= src.length) notExempt();
+      i += 1;
+      return true;
+    }
+    if (!inQuotes && next === '"') {
+      i += 1;
+      quoted();
+      return true;
+    }
+    return Boolean(sticky(PARAMETER));
+  };
+
+  // At a double quote: the quoted text, and whether it holds no expansion.
+  const quoted = () => {
+    let text = "";
+    let literal = true;
+    for (i += 1; src[i] !== '"'; ) {
+      const c = src[i];
+      if (c === undefined || c === "`") notExempt();
+      if (c === "\\" && src[i + 1] !== undefined && '$`"\\\n'.includes(src[i + 1])) {
+        if (src[i + 1] !== "\n") text += src[i + 1];
+        i += 2;
+      } else if (c === "$" && dollar(true)) {
+        literal = false;
+      } else {
+        text += c;
+        i += 1;
+      }
+    }
+    i += 1;
+    return { text, literal };
+  };
+
+  // One word after quote removal: its text, whether it holds no expansion or pattern, and its source.
+  const word = () => {
+    const start = i;
+    let text = "";
+    let literal = true;
+    while (i < src.length && !ENDS_WORD.has(src[i])) {
+      const c = src[i];
+      if (c === "'") {
+        const end = src.indexOf("'", i + 1);
+        if (end < 0) notExempt();
+        text += src.slice(i + 1, end);
+        i = end + 1;
+      } else if (c === '"') {
+        const q = quoted();
+        text += q.text;
+        literal &&= q.literal;
+      } else if (c === "\\") {
+        if (i + 1 >= src.length) notExempt();
+        if (src[i + 1] !== "\n") text += src[i + 1];
+        i += 2;
+      } else if (c === "`") {
+        notExempt();
+      } else if (c === "$" && dollar(false)) {
+        literal = false;
+      } else {
+        if ("*?[]{}".includes(c)) literal = false;
+        text += c;
+        i += 1;
+      }
+    }
+    return { text, literal, raw: src.slice(start, i) };
+  };
+
+  const redirect = () => {
+    const op = sticky(REDIRECT_OP);
+    skipBlanks();
+    if (op.startsWith("<<") && op !== "<<<") notExempt();
+    if ((op === "<&" || op === ">&") && sticky(FD_DUP)) return;
+    const target = word();
+    if (!target.raw || target.raw.startsWith("#")) notExempt();
+    if (op !== "<<<" && !ordinaryTarget(target, cwd)) notExempt();
+  };
+
+  // A list of commands, up to the end of src or, inside `$(`, its closing parenthesis.
+  const list = (nested) => {
+    let words = [];
+    for (;;) {
+      skipBlanks();
+      const c = src[i];
+      if (c === undefined || c === ")") {
+        if ((c === ")") !== nested) notExempt();
+        i += 1;
+        requireReadOnlyCommand(words);
+        return;
+      }
+      if (c === "(") notExempt();
+      if (c === "\n" || c === ";" || c === "|" || (c === "&" && src[i + 1] !== ">")) {
+        i += 1;
+        if ((c === "|" || c === "&") && (src[i] === c || (c === "|" && src[i] === "&"))) i += 1;
+        requireReadOnlyCommand(words);
+        words = [];
+      } else if (c === "#") {
+        while (i < src.length && src[i] !== "\n") i += 1;
+      } else if (c === "<" || c === ">" || c === "&") {
+        redirect();
+      } else {
+        const w = word();
+        if (src[i] === "<" || src[i] === ">") {
+          if (NAMED_FD.test(w.raw)) notExempt();
+          if (/^\d+$/.test(w.raw)) continue;
+        }
+        words.push(w);
+      }
+    }
+  };
+
+  list(false);
+}
+
+/** Every simple command in the line is a read-only tool and every redirection opens an ordinary file. Pipes, lists
+ *  and command substitutions are followed, so `cat s.py | python3` and `python3 -c "$(cat s.py)"` are not
+ *  read-only; quoting is read as bash reads it. */
+export function readOnlyCommand(command, cwd) {
+  try {
+    requireReadOnly(command, cwd);
+    return true;
+  } catch {
+    // Whatever this reader cannot follow, its own failure included, is judged rather than exempted.
+    return false;
+  }
 }
 
 const HEREDOC_OP = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_][A-Za-z0-9_.-]*))/;
@@ -311,7 +485,7 @@ export function judge(command, cwd, config) {
   if (!config || typeof command !== "string" || !command.trim()) return null;
   // A heredoc body is data: set aside, it only decides whether the line is read-only. Every other judgment
   // reads the full text, so a body fed to an interpreter is still judged.
-  if (readOnlyCommand(withoutHeredocBodies(command) ?? command)) return null;
+  if (readOnlyCommand(withoutHeredocBodies(command) ?? command, cwd)) return null;
   if (looksLikeSender(command, config)) {
     return { reason: "this command reaches a mail-send endpoint directly",
              where: "the command line" };
