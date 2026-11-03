@@ -335,14 +335,17 @@ of these holds:
   honours repository configuration an agent can write, and `rg`, `ugrep`,
   `sort`, `less`, `more`, `sed` and `awk`, which each have an option or
   command that runs a program.
-- A read-only tool carries an option that runs a program, in any
-  abbreviation: `grep`, `egrep` or `fgrep` with `--filter`, `--pager`,
-  `--view`, `--config` or `---FILE` (in the Claude Code shell `grep` runs
-  ugrep, where these name a command or load a file that can), `diff` with
-  `-l` or `--paginate` (it runs `pr`), or `file` with `-z`, `-Z` or
-  `--uncompress` (it runs decompressors found on `PATH`). One of these
-  tools' arguments being an expansion or a glob judges the line too, since
-  it could produce such an option.
+- A read-only tool carries an option that runs a program or writes a file,
+  in any abbreviation: `grep`, `egrep` or `fgrep` with `--filter`,
+  `--pager`, `--view`, `--config`, `---FILE`, `-Q`/`--query` or
+  `--save-config` (in the Claude Code shell `grep` runs ugrep, where these
+  name a command, load a file that can, start a TUI that runs a pager on a
+  key press, or write a file), `diff` with `-l` or `--paginate` (it runs
+  `pr`), or `file` with `-z`, `-Z` or `--uncompress` (it runs decompressors
+  found on `PATH`). One of these tools' arguments being an expansion or a
+  glob judges the line too, since it could produce such an option.
+- `uniq` or `xxd` has an argument that is not an ordinary file, as defined
+  for redirections below: each writes its second operand.
 - It assigns a variable: `NAME=value`, `env NAME=value`, `printf -v NAME`, or
   a `{NAME}>` redirection.
 - `env` carries an option (`-S` splits its value into a new command line), or
@@ -350,7 +353,7 @@ of these holds:
 - A redirection opens anything except an ordinary file or `/dev/null`,
   `/dev/stdin`, `/dev/stdout` and `/dev/stderr`: `/dev/tcp/HOST/PORT` and
   `/dev/udp/HOST/PORT`, which bash opens as sockets, any other path under
-  `/dev` or `/proc`, or a target built from an expansion. `<&` and `>&` may
+  `/dev`, `/proc` or `/sys`, or a target built from an expansion. `<&` and `>&` may
   also duplicate descriptor 0, 1 or 2 or close one with `-`; any other
   descriptor was inherited from whatever started the shell. bash expands a
   `>&` target that is not a descriptor a second time, so one holding a

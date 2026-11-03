@@ -74,16 +74,19 @@ const PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_
 const READ_ONLY = new Set(["cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "sha1sum", "sha256sum",
   "sha512sum", "md5sum", "b2sum", "cksum", "diff", "cmp", "comm", "file", "stat", "ls", "readlink", "realpath",
   "basename", "dirname", "du", "od", "xxd", "hexdump", "strings", "uniq", "cut", "nl", "echo", "printf", "true"]);
-// The read-only tools with an option that runs a program, and those options' letters and long names. grep in the
-// Claude Code shell runs ugrep, whose --filter, --pager and --view name a command and whose --config or --- loads a
-// file that can; the host's wrapper hands those to the system grep, but the exemption does not lean on it. GNU diff
-// --paginate runs pr; file -z and -Z decompress through helpers found on PATH.
-const UGREP_RUNS = { letters: "", names: ["filter", "pager", "view", "config", "-"] };
-const RUNS_PROGRAM = new Map([
-  ["grep", UGREP_RUNS], ["egrep", UGREP_RUNS], ["fgrep", UGREP_RUNS],
+// The read-only tools with an option that runs a program or writes a file, and those options' letters and long names.
+// grep in the Claude Code shell runs ugrep, whose --filter, --pager and --view name a command, whose --config or ---
+// loads a file that can, whose -Q starts a TUI that runs $PAGER or the --view command on a key press, and whose
+// --save-config writes a file; the host's wrapper hands some of these to the system grep, but the exemption does not
+// lean on it. GNU diff --paginate runs pr; file -z and -Z decompress through helpers found on PATH.
+const UGREP_UNSAFE = { letters: "Q", names: ["filter", "pager", "view", "config", "-", "query", "save-config"] };
+const UNSAFE_OPTIONS = new Map([
+  ["grep", UGREP_UNSAFE], ["egrep", UGREP_UNSAFE], ["fgrep", UGREP_UNSAFE],
   ["diff", { letters: "l", names: ["paginate"] }],
   ["file", { letters: "zZ", names: ["uncompress", "uncompress-noreport"] }],
 ]);
+// uniq and xxd write their second operand, so each of their arguments must name an ordinary file or none.
+const WRITES_OPERAND = new Set(["uniq", "xxd"]);
 const TIMEOUT_FLAG = /^(?:-[sk]\S+|--signal=\S+|--kill-after=\S+|-v|--verbose|--foreground|--preserve-status|--)$/;
 const DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
 // Words that run the command after them. Each returns the index of that command, or -1 for an option this reader
@@ -108,16 +111,16 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+?=)/;
 const NAMED_FD = /^\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 const ENDS_WORD = new Set([" ", "\t", "\n", ";", "&", "|", "(", ")", "<", ">"]);
 const REDIRECT_OP = /&>>?|<<<|<<-?|<>|[<>]&|>>|>\||[<>]/y;
-// bash expands the word after `<&` or `>&`, and when the result is not a descriptor number or `-`, expands it again as
-// the file to open. Text made only of these characters comes out of that second pass unchanged.
+// bash expands the word after `>&`, and when the result is not a descriptor number or `-`, expands it again as the
+// file to open. Text made only of these characters comes out of that second pass unchanged.
 const PLAIN_TEXT = /^[\w./,:=%+@-]+$/;
 const PARAMETER = /\$(?:\{(?:[A-Za-z_][A-Za-z0-9_]*|\d+|[@*#?$!-])\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/y;
 // What bash would run or rejoin in an unquoted heredoc body: a command substitution, arithmetic, a ${...} operator,
 // or a trailing backslash, which joins the line to the next before the delimiter is looked for.
 const BODY_EXPANSION = /`|\$[([]|\$\{(?!(?:[A-Za-z_][A-Za-z0-9_]*|\d+|[@*#?$!-])\})|\\$/;
-// bash opens /dev/tcp/HOST/PORT and /dev/udp/HOST/PORT as sockets; the rest of /dev and /proc are devices and other
-// processes' descriptors. Only these four streams there are ordinary.
-const SPECIAL_ROOT = /^\/(?:dev|proc)(?:\/|$)/;
+// bash opens /dev/tcp/HOST/PORT and /dev/udp/HOST/PORT as sockets; the rest of /dev, /proc and /sys are devices, other
+// processes' descriptors and kernel settings. Only these four streams there are ordinary.
+const SPECIAL_ROOT = /^\/(?:dev|proc|sys)(?:\/|$)/;
 const STD_STREAMS = new Set(["/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"]);
 const NOT_EXEMPT = Symbol("not exempt");
 
@@ -125,8 +128,8 @@ function notExempt() {
   throw NOT_EXEMPT;
 }
 
-/** A redirection target that opens an ordinary file: written out literally, outside /dev and /proc unless it is one
- *  of the standard streams, and a regular file if it exists already. */
+/** A redirection target that opens an ordinary file: written out literally, outside /dev, /proc and /sys unless it is
+ *  one of the standard streams, and a regular file if it exists already. */
 function ordinaryTarget(target, cwd) {
   if (!target.literal) return false;
   let name = target.text;
@@ -144,18 +147,19 @@ function ordinaryTarget(target, cwd) {
   }
 }
 
-/** Whether `arg` sets one of `runs`' options: a letter anywhere in a short-option cluster, or a long name that
- *  abbreviates one of its names (getopt takes any unambiguous abbreviation) or begins with one (`---FILE`). */
-function runsProgram(runs, arg) {
-  if (/^-[^-]/.test(arg)) return [...arg.slice(1)].some((c) => runs.letters.includes(c));
+/** Whether `arg` sets one of `options`: a letter anywhere in a short-option cluster, or a long name that abbreviates
+ *  one of its names (getopt takes any unambiguous abbreviation) or begins with one (`---FILE`). */
+function setsOption(options, arg) {
+  if (/^-[^-]/.test(arg)) return [...arg.slice(1)].some((c) => options.letters.includes(c));
   const name = arg.startsWith("--") ? arg.slice(2).split("=")[0] : "";
-  return name !== "" && runs.names.some((n) => n.startsWith(name) || name.startsWith(n));
+  return name !== "" && options.names.some((n) => n.startsWith(name) || name.startsWith(n));
 }
 
 /** The command's words up to its name are literal, assign nothing, pass only harmless prefix options, and name a
- *  read-only tool; printf's first argument is not an option (printf -v NAME assigns); a tool in RUNS_PROGRAM takes
- *  only literal arguments, none of them an option that runs a program. */
-function requireReadOnlyCommand(words) {
+ *  read-only tool; printf's first argument is not an option (printf -v NAME assigns); a tool in UNSAFE_OPTIONS takes
+ *  only literal arguments, none of them one of those options; each argument of a tool in WRITES_OPERAND is an
+ *  ordinary target. */
+function requireReadOnlyCommand(words, cwd) {
   const texts = words.map((w) => (w.literal ? w.text : null));
   let i = 0;
   for (;;) {
@@ -169,8 +173,9 @@ function requireReadOnlyCommand(words) {
   if (words.slice(0, i + 1).some((w) => !w.literal) || !READ_ONLY.has(texts[i])) notExempt();
   const first = words[i + 1];
   if (texts[i] === "printf" && first && (!first.literal || /^-(?!-$)/.test(first.text))) notExempt();
-  const runs = RUNS_PROGRAM.get(texts[i]);
-  if (runs && words.slice(i + 1).some((w) => !w.literal || runsProgram(runs, w.text))) notExempt();
+  const unsafe = UNSAFE_OPTIONS.get(texts[i]);
+  if (unsafe && words.slice(i + 1).some((w) => !w.literal || setsOption(unsafe, w.text))) notExempt();
+  if (WRITES_OPERAND.has(texts[i]) && !words.slice(i + 1).every((w) => ordinaryTarget(w, cwd))) notExempt();
 }
 
 /** Reads `src` as bash would and throws NOT_EXEMPT unless every simple command in it, command substitutions
@@ -331,14 +336,14 @@ function requireReadOnly(src, cwd) {
       if (c === undefined || c === ")") {
         if ((c === ")") !== nested || (c === undefined && heredocs.length)) notExempt();
         i += 1;
-        requireReadOnlyCommand(words);
+        requireReadOnlyCommand(words, cwd);
         return;
       }
       if (c === "(" || (c === "&" && continued(i + 1))) notExempt();
       if (c === "\n" || c === ";" || c === "|" || (c === "&" && src[i + 1] !== ">")) {
         i += 1;
         if ((c === "|" || c === "&") && (src[i] === c || (c === "|" && src[i] === "&"))) i += 1;
-        requireReadOnlyCommand(words);
+        requireReadOnlyCommand(words, cwd);
         words = [];
         if (c === "\n" && heredocs.length) {
           if (nested) notExempt();

@@ -387,6 +387,29 @@ expectEach(2, "an option that runs a program is judged", [
   "file --uncompress blast.py",
 ]);
 
+// ugrep's -Q starts a TUI that runs $PAGER or the --view command on a key press, and --save-config writes a file
+// wherever it is told. xxd and uniq write their second operand, so each of their arguments must name an ordinary file
+// or none, as a redirection target must.
+expectEach(2, "an option or operand that prompts or writes is judged", [
+  "grep -Q x blast.py",
+  "grep -nQ x blast.py",
+  "grep --query x blast.py",
+  "grep --save-config=/proc/self/fd/1 x blast.py",
+  "xxd blast.py /dev/ttyS0",
+  "xxd -r blast.py /proc/self/fd/1",
+  "uniq blast.py /dev/ttyS0",
+  "cat blast.py > /sys/kernel/notes",
+]);
+
+expectEach(0, "xxd and uniq keep the exemption on ordinary files", [
+  "xxd blast.py",
+  "xxd -c 16 blast.py | head",
+  "xxd blast.py dump.txt",
+  "uniq -c blast.py",
+  "uniq blast.py out.txt",
+  "grep --quiet send blast.py",
+]);
+
 expectEach(0, "grep, diff and file keep the exemption with their other options", [
   "grep --color=never --count send blast.py",
   "grep --file=patterns.txt blast.py",
