@@ -709,6 +709,40 @@ expectEach(2, "shell code inside the line is read as bash reads it", [
   "sh -s <<EOF\npython3 bl''ast.py\nEOF",
 ]);
 
+// bash expands braces and globs into paths, and bash 5.3 runs `${ list; }` in the current shell. A string the line
+// writes to a file, hands to su, watch or ssh, or keeps for an arithmetic context or an alias may be run as code
+// later, so every word and heredoc body is also read as a command line, at the very least for the paths it names.
+expectEach(2, "a path bash expands or a string that may run later is resolved", [
+  "python3 bl{a,}st.py",
+  "python3 {bl,x}ast.py",
+  "python3 bl?st.py",
+  "python3 b*.py",
+  "python3 [b]last.py",
+  "python3 ./b*.py",
+  "X=b*.py; python3 $X",
+  "case a in a) (python3 b*.py);; esac",
+  "sh -c '((python3 bl\"\"ast.py))'",
+  "echo ${ python3 bl''ast.py; }",
+  "echo ${| python3 bl''ast.py; }",
+  "printf '%s\\n' \"python3 bl''ast.py\" > r.sh; bash r.sh",
+  "cat > r.sh <<'EOF'\npython3 bl''ast.py\nEOF\nbash r.sh",
+  "x='a[$(python3 bl\"\"ast.py)]'; echo $((x))",
+  "su -c \"python3 bl''ast.py\" nobody",
+  "watch -n 1 \"python3 bl''ast.py\"",
+  "alias p=\"python3 bl''ast.py\"",
+]);
+
+expectEach(0, "a string or pattern that names no sender is not refused", [
+  "git commit -m 'bash -c \"$X\" is now judged'",
+  "printf '%s\\n' 'python3 other.py' > r.sh; bash r.sh",
+  "rm -f *.pyc build/*",
+  "python3 o*.py",
+  "echo '${ unterminated'",
+  "case $(uname) in Linux) echo linux;; *) echo other;; esac",
+  "[[ $f == *.py ]] && echo script",
+  'touch "b*.py"',
+]);
+
 // Shell code the line does not show cannot be judged by what it names. A -c or -S string built from an expansion or
 // missing from the line, a shell reading its commands from a pipe, a process substitution, a descriptor or the input
 // it inherits, eval, a trap action or source of a stream built from an expansion, and code the reader cannot follow
