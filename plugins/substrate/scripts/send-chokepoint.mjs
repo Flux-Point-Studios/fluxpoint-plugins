@@ -136,6 +136,8 @@ const RUNS_CODE = new RegExp(`(?:^|[^\\w.-])(?:${[...SHELLS, "env", "eval", "tra
   + "|(?:^|[\\s;&|({])\\.(?=\\s)");
 // Reserved words that may come before a command's name. `time` is read with the runners below.
 const RESERVED = new Set(["!", "{", "if", "then", "elif", "else", "do", "while", "until", "coproc"]);
+// `NAME ()`, after which bash reads a function's body.
+const FUNCTION_PARENS = /\([ \t]*\)/y;
 // Programs that run the command after their options, each with the option letters whose argument is the next word.
 // timeout also takes a duration; env's -S is read on its own.
 const RUNNERS = new Map([["sudo", "CDghpRrtTUu"], ["doas", "Cu"], ["env", "aCSu"], ["exec", "a"], ["time", "fo"],
@@ -172,6 +174,48 @@ function ansiC(body) {
     if (ctl !== undefined) return String.fromCharCode(ctl.charCodeAt(0) & 0x1f);
     return C_ESCAPES[ch] ?? all;
   }).split("\0")[0];
+}
+
+/** The index of the first of `words` that is not a reserved word, `time` or the `-p` after it. A word read while
+ *  none is there starts a command, so it may be `case`, `{` or another reserved word. */
+function firstCommandWord(words) {
+  let k = 0;
+  while (k < words.length && (RESERVED.has(words[k].bare) || words[k].bare === "time"
+         || (words[k].bare === "-p" && words[k - 1]?.bare === "time"))) {
+    k += 1;
+  }
+  return k;
+}
+
+/** A heredoc delimiter as bash takes it from the word as written: quotes removed, `$'...'` decoded, nothing expanded.
+ *  Null for a word holding a command substitution, whose quotes this does not follow. */
+function delimiterOf(bare) {
+  if (/`|\$\(/.test(bare)) return null;
+  let out = "";
+  for (let k = 0; k < bare.length; ) {
+    const c = bare[k];
+    const ansi = c === "$" && bare[k + 1] === "'";
+    if (c === "\\") {
+      out += bare[k + 1] ?? "";
+      k += 2;
+    } else if (c === "'" || ansi) {
+      let end = k + (ansi ? 2 : 1);
+      const from = end;
+      while (end < bare.length && bare[end] !== "'") end += ansi && bare[end] === "\\" ? 2 : 1;
+      out += ansi ? ansiC(bare.slice(from, end)) : bare.slice(from, end);
+      k = end + 1;
+    } else if (c === '"' || (c === "$" && bare[k + 1] === '"')) {
+      for (k += c === "$" ? 2 : 1; k < bare.length && bare[k] !== '"'; k += 1) {
+        if (bare[k] === "\\" && '$`"\\'.includes(bare[k + 1])) k += 1;
+        out += bare[k];
+      }
+      k += 1;
+    } else {
+      out += c;
+      k += 1;
+    }
+  }
+  return out;
 }
 
 /** A variable's value in this process's environment, which the hook shares with the shell, or nothing. */
@@ -529,8 +573,10 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
         b.add(q.text, !q.literal, q.opensDynamic, q.fixed, q.parts);
         quoted = true;
       } else if (c === "\\") {
-        if (i + 1 >= src.length) cannotRead();
-        b.add(src[i + 1], false, undefined, undefined, quotedPart(src[i + 1]));
+        // bash keeps a backslash that ends its input as a backslash.
+        if (i + 1 >= src.length && !full) cannotRead();
+        const escaped = src[i + 1] ?? "\\";
+        b.add(escaped, false, undefined, undefined, quotedPart(escaped));
         i += 2;
         quoted = true;
       } else if (c === "`") {
@@ -587,10 +633,12 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
     const target = word();
     if (!target.bare || target.bare.startsWith("#")) cannotRead();
     if (op === "<<" || op === "<<-") {
-      // The delimiter is the quote-removed word; any quoting in it leaves the body unexpanded.
-      if (!target.literal || !target.text || target.text.includes("\n")) cannotRead();
+      // The delimiter is the word with its quotes removed and nothing expanded, so `<<$D` ends at a line `$D`; any
+      // quoting in it leaves the body unexpanded. The exemption takes only a delimiter that holds no expansion.
+      const delimiter = full ? delimiterOf(target.bare) : target.text;
+      if ((!full && !target.literal) || !delimiter || delimiter.includes("\n")) cannotRead();
       if (nested && !full) notExempt();
-      const doc = { delimiter: target.text, tabs: op === "<<-", quoted: target.quoted };
+      const doc = { delimiter, tabs: op === "<<-", quoted: target.quoted };
       heredocs.push(doc);
       return { op, fd, target, doc };
     }
@@ -655,6 +703,13 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
     for (;;) {
       skipBlanks();
       const c = src[i];
+      const opener = firstCommandWord(words);
+      if (full && c === "\n" && !heredocs.length && words.length === opener + 2
+          && ["case", "for", "select"].includes(words[opener].bare)) {
+        // bash reads on past a newline between `case WORD`, `for NAME` or `select NAME` and its `in`.
+        i += 1;
+        continue;
+      }
       if (full && c === ")" && cases > 0 && patterns) {
         // A case pattern ends here. bash matches it against the word; it names no file.
         i += 1;
@@ -675,8 +730,13 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
       if (c === "(") {
         if (!full) notExempt();
         const from = i;
+        FUNCTION_PARENS.lastIndex = i;
         if (patterns && (!words.length || words.at(-1).bare === "in")) {
           i += 1;
+        } else if (FUNCTION_PARENS.test(src)) {
+          // `NAME ()` defines a function: the name runs nothing, and the command after it starts a command.
+          i = FUNCTION_PARENS.lastIndex;
+          if (words.length > opener) words.pop();
         } else if (src[i + 1] === "(" && arithmetic()) {
           // dash and other POSIX shells read `((` as two subshells.
           onText?.(src.slice(from + 2, i - 2));
@@ -718,7 +778,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
             continue;
           }
         }
-        if (full && words.every((v) => RESERVED.has(v.bare))) {
+        if (full && opener === words.length) {
           if (brace && w.bare === "}" && groups === 0) {
             command();
             piped = inherited;
@@ -732,9 +792,13 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
             patterns = false;
           }
         }
-        const opener = words.findIndex((v) => !RESERVED.has(v.bare));
-        if (full && w.bare === "in" && opener >= 0 && words[opener].bare === "case" && words.length === opener + 2) {
+        if (full && w.bare === "in" && words[opener]?.bare === "case" && words.length === opener + 2) {
           patterns = true;
+        }
+        if (full && words[opener]?.bare === "function" && words.length === opener + 1) {
+          // `function NAME` defines a function: neither word runs anything.
+          words.pop();
+          continue;
         }
         words.push(w);
       }
@@ -853,8 +917,8 @@ function commandChain(words, values) {
 /** What the full judgment reads from a line: every word bash would build, in the line and in the shell code it
  *  carries, with whether bash would expand it as a glob and whether it was read only for the names in it; the values
  *  the line assigns each variable; the directories it changes into; and, when it runs shell code the line does not
- *  show, where. */
-function readLine(command, cwd) {
+ *  show, where. `tool` is the hook payload's tool_name. */
+function readLine(command, cwd, tool) {
   const found = { texts: [], words: [], values: new Map(), dirs: [], unreadable: null };
   const assign = (name, value) => {
     const key = name.replace(/\+$|\[.*$/, "");
@@ -1069,9 +1133,11 @@ function readLine(command, cwd) {
   try {
     read(command);
   } catch {
-    // The words read before the reader stopped are kept, and the raw text is still searched. A line it cannot follow
-    // that may hand code to a shell is refused.
-    if (RUNS_CODE.test(command)) {
+    // bash goes on past whatever stopped the reader, so a Bash line it cannot follow to its end is judged. Another
+    // tool's line is read with bash's grammar only for the names in it: the words read before the reader stopped are
+    // kept, the raw text is still searched, and only a line that may hand code to a shell is refused.
+    if (tool === "Bash") unreadable("the line cannot be read to its end");
+    else if (RUNS_CODE.test(command)) {
       unreadable("the line cannot be read to its end, and it names a shell, env, eval, trap or source");
     }
   }
@@ -1499,7 +1565,7 @@ function judgeLine(command, cwd, config, tool) {
   // A heredoc body is data to the exemption unless bash would expand it. Every other judgment reads the full text,
   // so a body fed to an interpreter is still judged.
   if (tool === "Bash" && readOnlyCommand(command, cwd)) return null;
-  const reading = readLine(command, cwd);
+  const reading = readLine(command, cwd, tool);
   const budget = { left: EXPANSION_LIMIT, listings: new Map() };
   const { files, texts } = referencedFiles(command, cwd, reading, budget);
   if (looksLikeSender([command, ...reading.texts, ...texts].join("\n"), config)) {

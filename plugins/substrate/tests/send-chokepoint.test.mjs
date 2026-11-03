@@ -694,6 +694,45 @@ for (const [shape, line] of Object.entries(QUOTED_BRACES)) {
   });
 }
 
+// A heredoc delimiter is its word with quotes removed and nothing expanded, newlines may separate `case WORD` from
+// `in`, `time` and a function header may come before a compound command, and a line can nest deeper than the reader's
+// stack. bash runs whatever follows each of these, so a reader that stops there must not stop judging.
+expectEach(2, "a line the reader cannot follow to its end is judged", [
+  "cat <<$D\nx\n$D\npython3 bl''ast.py",
+  'cat <<"$D"\nx\n$D\npython3 bl\'\'ast.py',
+  "cat <<*\nx\n*\npython3 bl''ast.py",
+  "case x\nin x) python3 bl''ast.py;; esac",
+  "time case x in x) python3 bl''ast.py;; esac",
+  "f() case x in x) python3 bl''ast.py;; esac\nf",
+  "script -qc \"cat <<\\$D\nx\n\\$D\npython3 bl''ast.py\" /dev/null",
+  "echo 'unterminated\npython3 bl''ast.py",
+]);
+
+test("a line nested deeper than the reader's stack is judged", () => {
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  assert.equal(hook(`${"( ".repeat(3000)}true${" )".repeat(3000)}; python3 bl''ast.py`, dir).status, 2);
+});
+
+expectEach(0, "the constructs bash accepts there are read, not refused", [
+  "cat <<$D\nx\n$D\necho done",
+  "cat <<\"$D\"\nx\n$D\necho done",
+  "cat <<$'E'\nx\nE\necho done",
+  "case x\nin x) echo hit;; esac",
+  "for x\nin a b; do echo $x; done",
+  "time case x in x) echo hit;; esac",
+  "time -p case x in x) echo hit;; esac",
+  "f() case x in x) echo f;; esac\nf",
+  "function g { echo g; }; g",
+  "function h() { echo h; }; h",
+]);
+
+// PowerShell is read with bash's grammar only for the names in it: a backtick escape there is no unterminated
+// substitution, and only a line that also names a shell, env, eval, trap or source is refused for it.
+expectEach(0, "a PowerShell line bash cannot read is not refused for that alone", [
+  'Write-Host "a`nb"',
+], "PowerShell");
+
 // bash expands braces before variables, in the word as written: `$x{a,b}.py` is `$xa.py` and `$xb.py`.
 expectEach(2, "braces expand in the word as written, before its variables", [
   "xa=blast; python3 $x{a,b}.py",

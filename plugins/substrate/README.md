@@ -375,9 +375,12 @@ write-then-run in one command are still caught.
 
 The full judgment reads every line the exemption does not cover, and every
 `PowerShell` line, with the same reader. Here it follows lists, pipelines,
-subshells, `{ }` groups, functions, `if`/`while`/`for`/`case`, `$(...)`,
-backquotes, arithmetic, process substitution, `${...}` operators, bash
-5.3's `${ list; }` and heredocs. A script is a name ending in `.py`,
+subshells, `{ }` groups, functions (`NAME ()` and `function NAME`, before
+any compound command), `if`/`while`/`for`/`case` (with newlines before
+`in`), `time` and `time -p`, `$(...)`, backquotes, arithmetic, process
+substitution, `${...}` operators, bash 5.3's `${ list; }` and heredocs,
+whose delimiter is the word with quotes removed and nothing expanded, so
+`<<$D` ends at a line `$D`. A script is a name ending in `.py`,
 `.mjs`, `.js`, `.ts`, `.ps1`, `.sh` or `.rb`. Script names are taken from
 the raw text and from every word as bash builds it:
 
@@ -441,8 +444,10 @@ cannot read:
   that is a process substitution, another path under `/dev`, `/proc` or
   `/sys`, or a word built from an expansion while the command reads a pipe
   or a redirection;
-- a line the reader cannot follow to its end that names a shell, `env`,
-  `eval`, `trap` or `source`;
+- a `Bash` line the reader cannot follow to its end, its call stack
+  included, since bash goes on past whatever stopped the reader; a line
+  from another tool, read with bash's grammar only for the names in it,
+  only when it also names a shell, `env`, `eval`, `trap` or `source`;
 - braces, globs and variable values in the words bash reads that
   together spend more than 4096 units: one for each word a brace or a
   variable value makes, plus one for each further 1024 characters in
