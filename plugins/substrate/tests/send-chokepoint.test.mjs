@@ -734,6 +734,24 @@ expectEach(0, "a PowerShell line bash cannot read is not refused for that alone"
   'Write-Host "a`nb"',
 ], "PowerShell");
 
+// The Claude Code shell expands aliases, and bash reads an alias's value as input in place of its name, so a value
+// that ends in a backslash joins the line after it: `alias p='python3 bl\'`, then `p` and `ast.py`, runs
+// `python3 blast.py`. An alias value is read as a command line of its own, and one the line does not show, or that
+// bash would join to what follows, blocks the line.
+expectEach(2, "an alias bash would run is read as code", [
+  "alias p='python3 bl\\'\np\nast.py",
+  "BASH_ALIASES[p]='python3 bl\\'\np\nast.py",
+  "printf -v 'BASH_ALIASES[p]' %s 'python3 bl\\'\np\nast.py",
+  "alias p=\"$CODE\"\np",
+  "alias p='bash -c \"$CODE\"'\np",
+]);
+
+expectEach(0, "an alias written out in full is read like any command", [
+  "alias ll='ls -la'\nll",
+  "alias g='git status' gl='git log --oneline'; alias",
+  "alias -p",
+]);
+
 // bash expands braces before variables, in the word as written: `$x{a,b}.py` is `$xa.py` and `$xb.py`.
 expectEach(2, "braces expand in the word as written, before its variables", [
   "xa=blast; python3 $x{a,b}.py",

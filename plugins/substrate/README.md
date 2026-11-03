@@ -437,8 +437,10 @@ string of `sh`, `bash`, `dash`, `zsh`, `ksh`, `mksh`, `ash`, `yash` or
 `posh` named anywhere in a command (so under `sudo`, `xargs` or
 `find -exec` too); `env`'s `-S` or `--split-string` string, split as GNU
 env splits it, after which env's options are read again; `eval`'s
-arguments; a `trap` action; and the commands a shell at the head of a
-command reads from a heredoc or here-string. A shell is at the head of a
+arguments; a `trap` action; an alias value, set by `alias NAME=VALUE`
+or `BASH_ALIASES[NAME]=VALUE` (the Claude Code shell expands aliases,
+reading the value in place of the name); and the commands a shell at the
+head of a command reads from a heredoc or here-string. A shell is at the head of a
 command when only assignments, reserved words, unquoted expansions that
 come out empty, and `sudo`, `doas`, `env`, `exec`, `time`, `nice`,
 `timeout`, `nohup`, `setsid`, `stdbuf`, `xargs`, `command` or `builtin`
@@ -447,7 +449,7 @@ in the hook's environment or a value the line assigns it. Every other word,
 every heredoc body and the inside of `((...))`, which POSIX shells read as
 two subshells, is also read as a command line for the script names in it,
 since it may run as code: written to a file and run, handed to `su`,
-`watch` or `ssh`, or kept in an alias or an arithmetic subscript. That
+`watch` or `ssh`, or kept in an arithmetic subscript. That
 reading refuses nothing and stops eight strings deep, and its braces,
 globs and variable values are expanded from a second budget the size of
 the one below, which blocks nothing when it runs out.
@@ -455,9 +457,11 @@ the one below, which blocks nothing when it runs out.
 The line is blocked, whatever it names, when it runs shell code the gate
 cannot read:
 
-- a `-c` or `-S` string, `eval`'s arguments or a `trap` action that is
-  built from an expansion, missing from the line, or that the reader
-  cannot follow;
+- a `-c` or `-S` string, `eval`'s arguments, a `trap` action or an
+  alias value that is built from an expansion, missing from the line, or
+  that the reader cannot follow; an alias value that ends in a
+  backslash, which joins it to the line after it; and a write to
+  `BASH_ALIASES` other than `BASH_ALIASES[NAME]=VALUE` written out;
 - an expansion among the options of a shell or `env` at the head of a
   command, where it may be `-c` or `-S`, or a command named by an
   expansion and given `-c`;

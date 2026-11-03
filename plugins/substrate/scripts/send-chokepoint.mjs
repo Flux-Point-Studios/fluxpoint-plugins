@@ -1156,6 +1156,30 @@ function readLine(command, cwd, tool) {
       if (args.some((w) => !w.literal)) unreadable("the arguments of eval are built from an expansion");
       else readCode(args.map((w) => w.text).join(" "), "the arguments of eval");
     }
+    // bash reads an alias's value as input in place of its name: as code, joined to what follows it when it ends in a
+    // backslash. BASH_ALIASES holds the same values, and any write to it other than `BASH_ALIASES[NAME]=VALUE` written
+    // out sets one the line does not show.
+    const aliasValue = (value) => {
+      if (value === null) unreadable("an alias value is not in the line");
+      else if ((value.length - value.replace(/\\+$/, "").length) % 2) {
+        unreadable("an alias value ends in a backslash, which joins it to the line after it");
+      } else {
+        readCode(value, "an alias value");
+      }
+    };
+    if (name === "alias") {
+      for (const w of args) {
+        if (w.text.startsWith("-") || !w.text.includes("=")) continue;
+        readAsCode.add(w);
+        aliasValue(w.literal ? w.text.slice(w.text.indexOf("=") + 1) : null);
+      }
+    }
+    for (const w of words) {
+      if (!w.text.includes("BASH_ALIASES")) continue;
+      readAsCode.add(w);
+      const set = /^BASH_ALIASES\[[^\]]*\]\+?=([\s\S]*)$/.exec(w.text);
+      aliasValue(set && !/[$`]/.test(w.bare) ? set[1] : null);
+    }
     if (name === "trap") {
       let n = 0;
       while (args[n]?.literal && /^-[lpP]+$/.test(args[n].text)) n += 1;
