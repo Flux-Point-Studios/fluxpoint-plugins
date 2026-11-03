@@ -74,7 +74,8 @@ const READ_ONLY = new Set(["cat", "head", "tail", "wc", "grep", "egrep", "fgrep"
   "sha512sum", "md5sum", "b2sum", "cksum", "diff", "cmp", "comm", "file", "stat", "ls", "readlink", "realpath",
   "basename", "dirname", "du", "od", "xxd", "hexdump", "strings", "uniq", "cut", "nl", "echo", "printf", "true"]);
 // Words that run the command after them: skipped, with their own option values.
-const PREFIXES = { timeout: /^(?:-\S+|\d+(?:\.\d+)?[smhd]?)$/, nice: /^(?:-n|-?\d+)$/, env: /^-\S*$/ };
+const PREFIXES = new Map([["timeout", /^(?:-\S+|\d+(?:\.\d+)?[smhd]?)$/], ["nice", /^(?:-n|-?\d+)$/],
+  ["env", /^-\S*$/]]);
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const WORD = /"[^"]*"|'[^']*'|\S+/g;
 
@@ -85,7 +86,7 @@ function readOnlySimple(segment) {
   let i = 0;
   for (;;) {
     while (i < words.length && ASSIGNMENT.test(words[i])) i += 1;
-    const skip = PREFIXES[words[i]];
+    const skip = PREFIXES.get(words[i]);
     if (!skip) break;
     i += 1;
     while (i < words.length && skip.test(words[i])) i += 1;

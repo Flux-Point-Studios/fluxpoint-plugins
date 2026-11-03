@@ -334,6 +334,20 @@ for (const command of [
   });
 }
 
+// A word the reader looks up must not reach an Object method: the hook fails open on its own errors, so a lookup
+// that throws would allow the whole line, sender and all.
+for (const command of [
+  "toString blast.py && python3 blast.py",
+  "valueOf x; python3 blast.py",
+  "hasOwnProperty a b | python3 blast.py",
+]) {
+  test(`a word named like an Object method does not open the gate: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
 // ------------------------------------------------- the exemption trusts nothing that runs a program
 // Every git subcommand honours repository configuration an agent can write: core.fsmonitor runs on status,
 // diff.external and textconv drivers on diff, show and log -p, core.pager under --paginate.
