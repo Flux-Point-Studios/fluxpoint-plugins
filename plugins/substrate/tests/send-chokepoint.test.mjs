@@ -678,6 +678,8 @@ const SLOW = {
   "10 000 /messages/ in a row": `echo '${"/messages/".repeat(10000)}'`,
   "a heredoc of 100 000 continued lines": `cat <<EOF\n${"x\\\n".repeat(100000)}EOF`,
   "60 000 script names": `git add ${Array.from({ length: 60000 }, (_, n) => `f${n}.py`).join(" ")}`,
+  "80 000 reserved words in a row": "{ ".repeat(80000),
+  "80 000 `if` in a row": "if ".repeat(80000),
 };
 for (const [shape, line] of Object.entries(SLOW)) {
   test(`a large line is judged within the hook's timeout: ${shape}`, () => {

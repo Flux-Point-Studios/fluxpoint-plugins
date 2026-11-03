@@ -206,15 +206,10 @@ function continues(line) {
   return (line.length - k) % 2 === 1;
 }
 
-/** The index of the first of `words` that is not a reserved word, `time` or the `-p` after it. A word read while
- *  none is there starts a command, so it may be `case`, `{` or another reserved word. */
-function firstCommandWord(words) {
-  let k = 0;
-  while (k < words.length && (RESERVED.has(words[k].bare) || words[k].bare === "time"
-         || (words[k].bare === "-p" && words[k - 1]?.bare === "time"))) {
-    k += 1;
-  }
-  return k;
+/** Whether `w`, read after `previous`, is a reserved word, `time` or the `-p` after it, so that the word after it
+ *  still starts a command and may be `case`, `{` or another reserved word. */
+function leadsCommand(w, previous) {
+  return RESERVED.has(w.bare) || w.bare === "time" || (w.bare === "-p" && previous?.bare === "time");
 }
 
 /** A heredoc delimiter as bash takes it from the word as written: quotes removed, `$'...'` decoded, nothing expanded.
@@ -319,8 +314,9 @@ function requireReadOnlyCommand(words, cwd) {
  *  process's environment, and throws only at what bash cannot parse or where a heredoc's end cannot be known. It hands
  *  `onText` the inside of an arithmetic command `((...))`, which a POSIX shell reads as two subshells. With `text` it
  *  reads `src` as an unquoted heredoc body, following only its expansions; with `single` it reads one word and
- *  returns it. */
-function readShell(src, { cwd, onCommand, onText, full = false, text = false, single = false }) {
+ *  returns it. Past `deadline` it throws OUT_OF_TIME. */
+function readShell(src, { cwd, onCommand, onText, full = false, text = false, single = false,
+                          deadline = Infinity }) {
   let i = 0;
   let piped = false;
   const heredocs = [];
@@ -486,7 +482,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
       }
     }
     i += 1;
-    readShell(code, { cwd, onCommand, onText, full });
+    readShell(code, { cwd, onCommand, onText, full, deadline });
   };
 
   // Inside arithmetic or a `$[...]`: one quoted run, expansion or character.
@@ -727,7 +723,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
         if (!full && !doc.quoted && BODY_EXPANSION.test(line)) notExempt();
         body += `${line}\n`;
       }
-      if (full && !doc.quoted) readShell(body, { cwd, onCommand, onText, full, text: true });
+      if (full && !doc.quoted) readShell(body, { cwd, onCommand, onText, full, text: true, deadline });
       doc.onBody?.(body);
     }
   };
@@ -737,6 +733,8 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
   // belongs to does.
   const list = (nested, brace = false) => {
     let words = [];
+    // How many of the words lead the command, so that the next word read still starts it.
+    let opener = 0;
     let redirects = [];
     let fd = null;
     let cases = 0;
@@ -747,12 +745,13 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
     const command = () => {
       onCommand(words, redirects, piped);
       words = [];
+      opener = 0;
       redirects = [];
     };
     for (;;) {
+      late(deadline);
       skipBlanks();
       const c = src[i];
-      const opener = firstCommandWord(words);
       if (full && c === "\n" && !heredocs.length && words.length === opener + 2
           && ["case", "for", "select"].includes(words[opener].bare)) {
         // bash reads on past a newline between `case WORD`, `for NAME` or `select NAME` and its `in`.
@@ -850,6 +849,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
           continue;
         }
         words.push(w);
+        if (opener === words.length - 1 && leadsCommand(w, words.at(-2))) opener += 1;
       }
     }
   };
@@ -873,10 +873,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
  *  read-only; quoting is read as bash reads it. */
 export function readOnlyCommand(command, cwd, deadline = Infinity) {
   try {
-    readShell(command, { cwd, onCommand: (words) => {
-      late(deadline);
-      requireReadOnlyCommand(words, cwd);
-    } });
+    readShell(command, { cwd, onCommand: (words) => requireReadOnlyCommand(words, cwd), deadline });
     return true;
   } catch {
     // Whatever this reader cannot follow, its own failure included, is judged rather than exempted.
@@ -984,7 +981,7 @@ function readLine(command, cwd, tool, deadline = Infinity) {
   const unreadable = (where) => {
     if (!lenient) found.unreadable ??= where;
   };
-  const read = (code) => readShell(code, { cwd, onCommand: inspect, onText: readLeniently, full: true });
+  const read = (code) => readShell(code, { cwd, onCommand: inspect, onText: readLeniently, full: true, deadline });
   const readCode = (code, what) => {
     try {
       read(code);
@@ -1141,7 +1138,6 @@ function readLine(command, cwd, tool, deadline = Infinity) {
   };
 
   const inspect = (words, redirects, piped = false) => {
-    late(deadline);
     const chain = commandChain(words, found.values);
     const head = chain.at(-1) ?? -1;
     // An unquoted pattern character or expansion makes a word a glob, except in a case pattern or a [[ test.
@@ -1724,7 +1720,8 @@ function referencedFiles(command, cwd, reading, budget) {
   const tokens = new Set([...command.matchAll(QUOTED_PATH)].map((m) => m[1] || m[2]));
   for (const name of scriptPaths(command)) tokens.add(name);
   const lenientBudget = { left: EXPANSION_LIMIT, listings: budget.listings };
-  const reread = (source) => readShell(source, { cwd, onCommand: () => {}, full: true, single: true });
+  const reread = (source) => readShell(source, { cwd, onCommand: () => {}, full: true, single: true,
+                                                 deadline: budget.deadline });
   const built = (w, spend) => substitutions(w.parts ?? [{ text: w.text }], scope, spend);
   for (const { word, glob, lenient } of reading.words) {
     late(budget.deadline);
