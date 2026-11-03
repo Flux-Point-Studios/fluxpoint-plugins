@@ -384,6 +384,36 @@ for (const command of [
   });
 }
 
+// env -S splits its value into a new command line, so an env prefix with any option is judged. timeout and nice
+// have no option that runs a program, and keep the exemption with the options they document.
+for (const command of [
+  "env -Spython3 cat blast.py",
+  "env --split-string=python3 cat blast.py",
+  "env -i cat blast.py",
+  "env -- cat blast.py",
+]) {
+  test(`an env prefix with an option is judged: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
+for (const command of [
+  "env cat blast.py",
+  "nice -n 5 sha256sum blast.py",
+  "nice -n5 cat blast.py",
+  "timeout -k 5 -s KILL 60 sha256sum blast.py",
+  "timeout --foreground --kill-after=5 60s cat blast.py",
+  "nice timeout 60 env cat blast.py",
+]) {
+  test(`a timeout, nice or bare env prefix keeps the exemption: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 0);
+  });
+}
+
 // ------------------------------------------------- a heredoc body is data
 // A line whose commands are all read-only once heredoc bodies are set aside is not
 // judged: writing a script that NAMES a sender is not running it. Any other line is

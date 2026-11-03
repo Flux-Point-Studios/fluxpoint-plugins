@@ -73,9 +73,24 @@ const PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_
 const READ_ONLY = new Set(["cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "sha1sum", "sha256sum",
   "sha512sum", "md5sum", "b2sum", "cksum", "diff", "cmp", "comm", "file", "stat", "ls", "readlink", "realpath",
   "basename", "dirname", "du", "od", "xxd", "hexdump", "strings", "uniq", "cut", "nl", "echo", "printf", "true"]);
-// Words that run the command after them: skipped, with their own option values.
-const PREFIXES = new Map([["timeout", /^(?:-\S+|\d+(?:\.\d+)?[smhd]?)$/], ["nice", /^(?:-n|-?\d+)$/],
-  ["env", /^-\S*$/]]);
+const TIMEOUT_FLAG = /^(?:-[sk]\S+|--signal=\S+|--kill-after=\S+|-v|--verbose|--foreground|--preserve-status|--)$/;
+const DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
+// Words that run the command after them. Each returns the index of that command, or -1 for an option this reader
+// does not know to be harmless. env takes no option at all: -S splits its value into a new command line.
+const PREFIXES = new Map([
+  ["timeout", (words, i) => {
+    while (words[i] === "-s" || words[i] === "-k" || TIMEOUT_FLAG.test(words[i] ?? "")) {
+      i += words[i] === "-s" || words[i] === "-k" ? 2 : 1;
+    }
+    return DURATION.test(words[i] ?? "") ? i + 1 : -1;
+  }],
+  ["nice", (words, i) => {
+    if (words[i] === "-n") return i + 2;
+    if (/^(?:-n|--adjustment=|-)-?\d+$/.test(words[i] ?? "")) return i + 1;
+    return words[i]?.startsWith("-") ? -1 : i;
+  }],
+  ["env", (words, i) => (words[i]?.startsWith("-") ? -1 : i)],
+]);
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const WORD = /"[^"]*"|'[^']*'|\S+/g;
 
@@ -86,10 +101,10 @@ function readOnlySimple(segment) {
   let i = 0;
   for (;;) {
     while (i < words.length && ASSIGNMENT.test(words[i])) i += 1;
-    const skip = PREFIXES.get(words[i]);
-    if (!skip) break;
-    i += 1;
-    while (i < words.length && skip.test(words[i])) i += 1;
+    const after = PREFIXES.get(words[i]);
+    if (!after) break;
+    i = after(words, i + 1);
+    if (i < 0) return false;
   }
   if (i >= words.length) return true;
   return READ_ONLY.has(words[i]);
