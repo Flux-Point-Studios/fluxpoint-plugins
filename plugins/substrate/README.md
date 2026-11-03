@@ -326,9 +326,10 @@ The tools are
 `true`, each named bare, so `./cat` is judged. They may be joined by pipes,
 `;`, `&&`, `||`, `&` and newlines, nested in `$(...)`, and run under
 `timeout` or `nice` with their documented options or under `env` with no
-option. Quoting is read as bash reads it, so `grep -E "send|reply" sender.py`
-is exempt while `cat sender.py | python3` and `echo $(python3 sender.py)` are
-judged. The whole line is judged when any of these holds:
+option. Quoting and line continuations are read as bash reads them, so
+`grep -E "send|reply" sender.py` is exempt while `cat sender.py | python3`
+and `echo $(python3 sender.py)` are judged. The whole line is judged when any
+of these holds:
 
 - It runs any other program. That includes `git`, whose every subcommand
   honours repository configuration an agent can write, and `rg`, `ugrep`,
@@ -351,8 +352,9 @@ judged. The whole line is judged when any of these holds:
   `/dev/udp/HOST/PORT`, which bash opens as sockets, any other path under
   `/dev` or `/proc`, or a target built from an expansion.
 - The reader cannot follow it: backquotes, arithmetic, subshells, process
-  substitution, `${...}` operators, an unterminated quote or heredoc, or
-  nesting deeper than the reader's stack.
+  substitution, `${...}` operators, a backslash-newline right after `$`, `&`
+  or a redirection operator (bash joins it to what follows), an unterminated
+  quote or heredoc, or nesting deeper than the reader's stack.
 
 A heredoc body is data. A line whose commands are all read-only is not judged
 when it writes a heredoc, so `cat > probe.py <<EOF` may write a script that

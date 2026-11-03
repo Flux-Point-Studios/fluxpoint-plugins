@@ -128,8 +128,8 @@ function notExempt() {
 function ordinaryTarget(target, cwd) {
   if (!target.literal) return false;
   let name = target.text;
-  if (target.raw.startsWith("~")) {
-    if (!/^~(?:\/|$)/.test(target.raw)) return false;
+  if (target.bare.startsWith("~")) {
+    if (!/^~(?:\/|$)/.test(target.bare)) return false;
     name = os.homedir() + name.slice(1);
   }
   if (STD_STREAMS.has(path.posix.normalize(name))) return true;
@@ -157,7 +157,7 @@ function requireReadOnlyCommand(words) {
   const texts = words.map((w) => (w.literal ? w.text : null));
   let i = 0;
   for (;;) {
-    if (ASSIGNMENT.test(words[i]?.raw ?? "")) notExempt();
+    if (ASSIGNMENT.test(words[i]?.bare ?? "")) notExempt();
     const after = PREFIXES.get(texts[i]);
     if (!after) break;
     i = after(texts, i + 1);
@@ -184,12 +184,16 @@ function requireReadOnly(src, cwd) {
     if (m) i += m[0].length;
     return m?.[0];
   };
+  // bash removes a backslash-newline before it reads a token. The reader follows one between words and inside a word,
+  // and judges a line where one would join an operator or an expansion to what follows.
+  const continued = (j) => src[j] === "\\" && src[j + 1] === "\n";
   const skipBlanks = () => {
-    while (src[i] === " " || src[i] === "\t" || (src[i] === "\\" && src[i + 1] === "\n")) i += src[i] === "\\" ? 2 : 1;
+    while (src[i] === " " || src[i] === "\t" || continued(i)) i += continued(i) ? 2 : 1;
   };
 
   // At a `$`: consumes an expansion and returns true, or returns false for a literal dollar sign.
   const dollar = (inQuotes) => {
+    if (continued(i + 1)) notExempt();
     const next = src[i + 1];
     if (next === "(") {
       if (src[i + 2] === "(") notExempt();
@@ -205,14 +209,14 @@ function requireReadOnly(src, cwd) {
     }
     if (!inQuotes && next === '"') {
       i += 1;
-      quoted();
+      doubleQuoted();
       return true;
     }
     return Boolean(sticky(PARAMETER));
   };
 
   // At a double quote: the quoted text, and whether it holds no expansion.
-  const quoted = () => {
+  const doubleQuoted = () => {
     let text = "";
     let literal = true;
     for (i += 1; src[i] !== '"'; ) {
@@ -232,26 +236,36 @@ function requireReadOnly(src, cwd) {
     return { text, literal };
   };
 
-  // One word after quote removal: its text, whether it holds no expansion or pattern, and its source.
+  // One word after quote removal: its text, whether it holds no expansion or pattern, whether any of it is quoted or
+  // escaped, and its source without line continuations.
   const word = () => {
-    const start = i;
     let text = "";
+    let bare = "";
     let literal = true;
+    let quoted = false;
     while (i < src.length && !ENDS_WORD.has(src[i])) {
+      const from = i;
       const c = src[i];
+      if (continued(i)) {
+        i += 2;
+        continue;
+      }
       if (c === "'") {
         const end = src.indexOf("'", i + 1);
         if (end < 0) notExempt();
         text += src.slice(i + 1, end);
         i = end + 1;
+        quoted = true;
       } else if (c === '"') {
-        const q = quoted();
+        const q = doubleQuoted();
         text += q.text;
         literal &&= q.literal;
+        quoted = true;
       } else if (c === "\\") {
         if (i + 1 >= src.length) notExempt();
-        if (src[i + 1] !== "\n") text += src[i + 1];
+        text += src[i + 1];
         i += 2;
+        quoted = true;
       } else if (c === "`") {
         notExempt();
       } else if (c === "$" && dollar(false)) {
@@ -261,12 +275,14 @@ function requireReadOnly(src, cwd) {
         text += c;
         i += 1;
       }
+      bare += src.slice(from, i);
     }
-    return { text, literal, raw: src.slice(start, i) };
+    return { text, literal, quoted, bare };
   };
 
   const redirect = (nested) => {
     const op = sticky(REDIRECT_OP);
+    if (continued(i)) notExempt();
     skipBlanks();
     if (op === "<&" || op === ">&") {
       // bash reads a `-` here as a token of its own that closes the descriptor; the text after it starts a new word.
@@ -277,11 +293,11 @@ function requireReadOnly(src, cwd) {
       if (sticky(FD_DUP)) return;
     }
     const target = word();
-    if (!target.raw || target.raw.startsWith("#")) notExempt();
+    if (!target.bare || target.bare.startsWith("#")) notExempt();
     if (op === "<<" || op === "<<-") {
       // The delimiter is the quote-removed word; any quoting in it leaves the body unexpanded.
       if (nested || !target.literal || !target.text || target.text.includes("\n")) notExempt();
-      heredocs.push({ delimiter: target.text, tabs: op === "<<-", quoted: /['"\\]/.test(target.raw) });
+      heredocs.push({ delimiter: target.text, tabs: op === "<<-", quoted: target.quoted });
     } else if (op !== "<<<" && !ordinaryTarget(target, cwd)) {
       notExempt();
     }
@@ -314,7 +330,7 @@ function requireReadOnly(src, cwd) {
         requireReadOnlyCommand(words);
         return;
       }
-      if (c === "(") notExempt();
+      if (c === "(" || (c === "&" && continued(i + 1))) notExempt();
       if (c === "\n" || c === ";" || c === "|" || (c === "&" && src[i + 1] !== ">")) {
         i += 1;
         if ((c === "|" || c === "&") && (src[i] === c || (c === "|" && src[i] === "&"))) i += 1;
@@ -331,8 +347,8 @@ function requireReadOnly(src, cwd) {
       } else {
         const w = word();
         if (src[i] === "<" || src[i] === ">") {
-          if (NAMED_FD.test(w.raw)) notExempt();
-          if (/^\d+$/.test(w.raw)) continue;
+          if (NAMED_FD.test(w.bare)) notExempt();
+          if (/^\d+$/.test(w.bare)) continue;
         }
         words.push(w);
       }

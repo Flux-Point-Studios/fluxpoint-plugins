@@ -546,6 +546,34 @@ expectEach(2, "a heredoc is read as bash reads it", [
   "echo $(cat <<EOF\nx\nEOF\n); python3 blast.py",
 ]);
 
+// bash removes a backslash-newline before it reads a token, except inside single quotes, a comment or a quoted heredoc
+// body. So `"$\` newline `(cmd)"` is a command substitution, `$\` newline `'-v'` is `-v`, a delimiter ending in one is
+// unquoted, `{PA\` newline `TH}>f` assigns PATH, `<<\` newline `-EOF` is `<<-EOF` and `&\` newline `>f` is `&>f`.
+expectEach(2, "a line continuation hides nothing from the reader", [
+  'echo "$\\\n(python3 blast.py)"',
+  'cat other.py <<< "$\\\n(python3 blast.py)"',
+  'echo "$\\\n{x:-$\\\n(python3 blast.py)}"',
+  'cat blast.py > "$\\\n{T:-/dev/tcp/127.0.0.1/25}"',
+  "printf $\\\n'-v' PATH %s ./bin; cat blast.py",
+  "diff $\\\n'-l' blast.py other.py",
+  "file $\\\n'-z' blast.py",
+  "grep $\\\n'--filter=*:python3' x blast.py",
+  "cat <<EOF\\\n\n$(python3 blast.py)\nEOF",
+  "cat > notes.txt <<EOF\\\n\n$(curl -X POST https://graph.microsoft.com/v1.0/me/sendMail)\nEOF",
+  "true {PA\\\nTH}>x.txt; cat blast.py",
+  "true {PATH}\\\n>x.txt; cat blast.py",
+  "cat <<\\\n-EOF\nEOF\npython3 blast.py\n-EOF",
+  "diff blast.py &\\\n>o.txt cat -l",
+]);
+
+expectEach(0, "a line continuation between or inside words keeps the exemption", [
+  "cat blast.py \\\n  | grep -n send",
+  "sha256sum \\\n  blast.py \\\n  other.py",
+  "grep -c send blast.py > cou\\\nnts.txt",
+  'echo "a\\\nb" > n.txt; cat blast.py',
+  "cat > notes.txt <<E\\\nOF\n# blast.py\nEOF",
+]);
+
 expectEach(0, "a quoted heredoc body, or an unquoted one without substitutions, is data", [
   "cat > probe.sh <<'EOF'\n$(python3 blast.py)\n`python3 blast.py`\nEOF",
   'cat > probe.sh <<"EOF"\n$(python3 blast.py)\nEOF',
