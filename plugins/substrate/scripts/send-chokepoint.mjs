@@ -457,11 +457,13 @@ function senderVerdict(fp, config, via) {
   };
 }
 
-export function judge(command, cwd, config) {
+/** `tool` is the hook payload's tool_name. The read-only exemption reads bash grammar, so it applies to the Bash tool
+ *  alone: PowerShell takes no backslash as an escape, and a separator bash reads as text can end its statement. */
+export function judge(command, cwd, config, tool) {
   if (!config || typeof command !== "string" || !command.trim()) return null;
   // A heredoc body is data to the exemption unless bash would expand it. Every other judgment reads the full text,
   // so a body fed to an interpreter is still judged.
-  if (readOnlyCommand(command, cwd)) return null;
+  if (tool === "Bash" && readOnlyCommand(command, cwd)) return null;
   if (looksLikeSender(command, config)) {
     return { reason: "this command reaches a mail-send endpoint directly",
              where: "the command line" };
@@ -513,7 +515,7 @@ function main() {
   }
   if (!loaded.config) process.exit(0);
   let verdict = null;
-  try { verdict = judge(command, cwd, loaded.config); } catch { process.exit(0); }
+  try { verdict = judge(command, cwd, loaded.config, payload?.tool_name); } catch { process.exit(0); }
   if (!verdict) process.exit(0);
   process.stderr.write(
     `BLOCKED: ${verdict.reason} (${verdict.where}).\n\n${advice(loaded.config)}\n`);

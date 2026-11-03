@@ -54,15 +54,15 @@ function file(dir, name, body) {
 }
 
 /** One test per command, each in a fresh repo where blast.py reaches a send endpoint, other.py only reads mail and
- *  thin.py imports blast, asserting the hook's exit status. */
-function expectEach(status, title, commands) {
+ *  thin.py imports blast, asserting the hook's exit status when `tool` runs the command. */
+function expectEach(status, title, commands, tool = "Bash") {
   for (const command of commands) {
     test(`${title}: ${command.includes("\n") ? JSON.stringify(command) : command}`, () => {
       const dir = repo();
       file(dir, "blast.py", SENDER_BODY);
       file(dir, "other.py", READER_BODY);
       file(dir, "thin.py", "import blast\n");
-      assert.equal(hook(command, dir).status, status);
+      assert.equal(hook(command, dir, tool).status, status);
     });
   }
 }
@@ -509,6 +509,20 @@ expectEach(0, "a quoted heredoc body, or an unquoted one without substitutions, 
   "cat > notes.txt <<EOF \\\n  && wc -l notes.txt\n# blast.py\nEOF",
   'cat > notes.txt <<EOF "$(sha256sum blast.py)"\n# blast.py\nEOF',
 ]);
+
+// ------------------------------------------------- the exemption reads bash alone
+// PowerShell takes no backslash as an escape or a line continuation, and no \" as a quote inside double quotes, so a
+// line bash reads as one echo can be two PowerShell statements, the second running the sender. The exemption reads
+// bash grammar, so it applies to the Bash tool alone; a line from any other tool is judged on its full text.
+const ONE_ECHO_IN_BASH = [
+  "echo x\\; python blast.py",
+  "echo x\\| python blast.py",
+  'echo "\\" ; python blast.py ; echo \\""',
+  "echo x \\\npython blast.py",
+];
+expectEach(2, "a PowerShell line is judged on its full text", ONE_ECHO_IN_BASH, "PowerShell");
+expectEach(2, "a line from a payload that names no tool is judged on its full text", ONE_ECHO_IN_BASH, null);
+expectEach(0, "under Bash the same line is one echo", ONE_ECHO_IN_BASH);
 
 test("a line too deep for the reader is judged, not exempted", () => {
   // The hook allows a command when its own code throws; the reader's failure must land on the judged side.

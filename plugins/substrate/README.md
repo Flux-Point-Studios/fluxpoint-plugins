@@ -313,8 +313,12 @@ its descendants. Paths resolve against the configuration's directory, so a
 same-named file elsewhere does not inherit permission. Leading `cd` commands
 and Windows paths are covered by regression fixtures.
 
-A command made only of read-only tools is not judged, so the files the gate
-protects can still be read, searched, hashed and compared. The tools are
+A `Bash` command made only of read-only tools is not judged, so the files the
+gate protects can still be read, searched, hashed and compared. The exemption
+reads bash grammar, so it covers the `Bash` tool alone: PowerShell takes no
+backslash as an escape, and a separator bash reads as text can end a
+PowerShell statement, so every `PowerShell` line is judged on its full text.
+The tools are
 `cat`, `head`, `tail`, `wc`, `grep`, `egrep`, `fgrep`, `sha1sum`,
 `sha256sum`, `sha512sum`, `md5sum`, `b2sum`, `cksum`, `diff`, `cmp`, `comm`,
 `file`, `stat`, `ls`, `readlink`, `realpath`, `basename`, `dirname`, `du`,
