@@ -956,6 +956,93 @@ test("a path under ~ is resolved against the home directory", () => {
   assert.equal(hook("python3 ~+/blast.py", dir).status, 2, "~+ is the working directory");
 });
 
+/** A repo at root/proj holding sub/deeper/, with elsewhere/ and home/ beside it, and the sender at `at`, relative to
+ *  root. */
+function tree(at) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "choke-tree-"));
+  const proj = path.join(root, "proj");
+  for (const dir of ["proj/sub/deeper", "elsewhere/d", "home"]) fs.mkdirSync(path.join(root, dir), { recursive: true });
+  fs.writeFileSync(path.join(proj, ".send-chokepoint.json"), JSON.stringify({ sender: "outbound_mail.py" }));
+  if (at) file(root, at, SENDER_BODY);
+  return { root, proj };
+}
+
+/** One test per [command, where the sender is], each run from proj with HOME at root/home. */
+function expectAt(status, title, cases) {
+  for (const [command, at] of cases) {
+    test(`${title}: ${JSON.stringify(command)} with the sender at ${at}`, () => {
+      const { root, proj } = tree(at);
+      assert.equal(hook(command, proj, "Bash", { HOME: path.join(root, "home") }).status, status);
+    });
+  }
+}
+
+// bash runs each command in the directory the line has reached by then: every cd, pushd or `env -C` resolved against
+// the directories before it, through CDPATH, HOME and `-`, and globs. `~`, `~+` and `~-` are HOME, PWD and OLDPWD as
+// the line has set them, and so are $PWD and $OLDPWD; `find -execdir` runs in the directory of each file it finds.
+expectAt(2, "a path is resolved from every directory the line reaches", [
+  ["cd sub && python3 ~+/blast.py", "proj/sub/blast.py"],
+  ["cd sub && python3 ~-/blast.py", "proj/blast.py"],
+  ["OLDPWD=sub; python3 ~-/blast.py", "proj/sub/blast.py"],
+  ["HOME=sub; python3 ~/blast.py", "proj/sub/blast.py"],
+  ["export HOME=$PWD/sub; python3 ~/blast.py", "proj/sub/blast.py"],
+  ["PWD=sub; python3 ~+/blast.py", "proj/sub/blast.py"],
+  ["bash -c 'cd sub && python3 ~+/blast.py'", "proj/sub/blast.py"],
+  ["HOME=$PWD/sub; cd; python3 blast.py", "proj/sub/blast.py"],
+  ["cd && python3 blast.py", "home/blast.py"],
+  ["cd sub && cd deeper && python3 blast.py", "proj/sub/deeper/blast.py"],
+  ["cd sub; cd deeper; python3 blast.py", "proj/sub/deeper/blast.py"],
+  ["cd sub && cd ../../elsewhere && python3 blast.py", "elsewhere/blast.py"],
+  ["cd sub && bash -c 'cd deeper && python3 blast.py'", "proj/sub/deeper/blast.py"],
+  ["CDPATH=..; cd elsewhere && python3 blast.py", "elsewhere/blast.py"],
+  ["CDPATH=.. cd elsewhere >/dev/null && python3 blast.py", "elsewhere/blast.py"],
+  ["cd s* && python3 blast.py", "proj/sub/blast.py"],
+  ["cd s?b && python3 blast.py", "proj/sub/blast.py"],
+  ["env -C sub python3 blast.py", "proj/sub/blast.py"],
+  ["env --chdir=sub python3 blast.py", "proj/sub/blast.py"],
+  ["find . -name '*.py' -execdir python3 blast.py \\;", "proj/sub/deeper/blast.py"],
+  ["python3 $PWD/blast.py", "proj/blast.py"],
+  ["cd sub && python3 $OLDPWD/blast.py", "proj/blast.py"],
+  ["cd sub && python3 $PWD/blast.py", "proj/sub/blast.py"],
+  ['cd sub && python3 "$PWD/blast.py"', "proj/sub/blast.py"],
+]);
+
+expectAt(0, "a directory the line reaches holds no sender", [
+  ["cd sub && cd deeper && python3 blast.py", "proj/blast.py.txt"],
+  ["find . -name '*.pyc' -execdir rm {} +", "proj/sub/deeper/blast.py"],
+]);
+
+test("a line that may run in more than 64 directories is refused", () => {
+  const { proj } = tree(null);
+  const names = Array.from({ length: 70 }, (_, n) => `d${n}`);
+  for (const name of names) fs.mkdirSync(path.join(proj, name));
+  const r = hook(`for d in ${names.join(" ")}; do cd "$d"; python3 other.py; cd ..; done`, proj);
+  assert.equal(r.status, 2);
+  assert.equal(hook(`for d in ${names.slice(0, 10).join(" ")}; do cd "$d"; cd ..; done`, proj).status, 0);
+});
+
+test("a name is judged in every directory the line may run it from, not only the first that holds it", () => {
+  const { proj } = tree("proj/sub/blast.py");
+  file(proj, "blast.py", READER_BODY);
+  assert.equal(hook("cd sub && python3 blast.py", proj).status, 2);
+});
+
+// The kernel resolves `..` after following a symlink, so `link/..` is the parent of where link points. A path that
+// reads as the sanctioned sender but leads elsewhere is not it.
+test("a path through a symlinked directory is resolved as the kernel resolves it", () => {
+  const { root, proj } = tree("elsewhere/blast.py");
+  fs.symlinkSync(path.join(root, "elsewhere", "d"), path.join(proj, "sub", "link"));
+  assert.equal(hook("cd sub && python3 link/../blast.py", proj).status, 2);
+});
+
+test("a symlink cannot pass another file off as the sanctioned sender", () => {
+  const { root, proj } = tree("elsewhere/outbound_mail.py");
+  file(proj, "outbound_mail.py", SENDER_BODY);
+  fs.symlinkSync(path.join(root, "elsewhere", "d"), path.join(proj, "x"));
+  assert.equal(hook("python3 outbound_mail.py", proj).status, 0, "the sanctioned sender still runs");
+  assert.equal(hook("python3 x/../outbound_mail.py", proj).status, 2);
+});
+
 test("a cd target is resolved as bash builds it", () => {
   const dir = repo();
   fs.mkdirSync(path.join(dir, "sub"));

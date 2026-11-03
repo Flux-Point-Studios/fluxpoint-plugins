@@ -147,6 +147,8 @@ const RUNNERS = new Map([["sudo", "CDghpRrtTUu"], ["doas", "Cu"], ["env", "aCSu"
 const CODE_LIKE = /[\s;&|()<>$`'"\\]/;
 const LENIENT_DEPTH = 8;
 const EXPANSION_LIMIT = 4096;
+// A line that may run in more directories than this is refused rather than resolved in part.
+const MAX_PLACES = 64;
 const ENV_ESCAPES = { '"': '"', "#": "#", $: "$", "'": "'", "\\": "\\", _: " ", f: "\f", n: "\n", r: "\r", t: "\t",
   v: "\v" };
 const C_ESCAPE = /\\(?:([0-7]{1,3})|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c([\s\S])|([\s\S]))/g;
@@ -218,8 +220,10 @@ function delimiterOf(bare) {
   return out;
 }
 
-/** A variable's value in this process's environment, which the hook shares with the shell, or nothing. */
-function variable(name) {
+/** A variable's value in this process's environment, which the hook shares with the shell, or nothing. PWD is the
+ *  shell's own directory, `cwd`, which this process need not share. */
+function variable(name, cwd) {
+  if (name === "PWD") return cwd || process.cwd();
   return /^[A-Za-z_]/.test(name) && Object.hasOwn(process.env, name) ? process.env[name] : null;
 }
 
@@ -391,7 +395,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
     const m = name.exec(src);
     if (!m) return null;
     i = j + m[0].length;
-    return { text: variable(m[0]) ?? "", dynamic: true, name: m[0] };
+    return { text: variable(m[0], cwd) ?? "", dynamic: true, name: m[0] };
   };
 
   // After `${`: the parameter and whatever follows it up to the closing brace. The piece is the variable's value or,
@@ -430,7 +434,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
       }
     }
     i += 1;
-    const value = variable(name);
+    const value = variable(name, cwd);
     const op = /^:?[-=+?]/.exec(tail);
     if (!op) return { text: value ?? "", dynamic: true, name: !tail || tail.startsWith("[") ? name : undefined };
     const set = value !== null && (value !== "" || !op[0].startsWith(":"));
@@ -916,10 +920,11 @@ function commandChain(words, values) {
 
 /** What the full judgment reads from a line: every word bash would build, in the line and in the shell code it
  *  carries, with whether bash would expand it as a glob and whether it was read only for the names in it; the values
- *  the line assigns each variable; the directories it changes into; and, when it runs shell code the line does not
- *  show, where. `tool` is the hook payload's tool_name. */
+ *  the line assigns each variable; the directory each `cd`, `pushd` or `env -C` changes into (null for HOME); the
+ *  starting points and command of each `find -execdir`; and, when it runs shell code the line does not show, where.
+ *  `tool` is the hook payload's tool_name. */
 function readLine(command, cwd, tool) {
-  const found = { texts: [], words: [], values: new Map(), dirs: [], unreadable: null };
+  const found = { texts: [], words: [], values: new Map(), moves: [], finds: [], unreadable: null };
   const assign = (name, value) => {
     const key = name.replace(/\+$|\[.*$/, "");
     if (!found.values.has(key)) found.values.set(key, new Set());
@@ -1051,23 +1056,27 @@ function readLine(command, cwd, tool) {
       const option = w.text;
       if (!/^-./.test(option) || option === "--") return;
       let split = false;
+      let chdir = false;
       let attached = null;
       let takesNext = false;
       if (option.startsWith("--")) {
         const eq = option.indexOf("=");
         const name = option.slice(2, eq < 0 ? undefined : eq);
         split = name.startsWith("s") && "split-string".startsWith(name);
+        chdir = name.startsWith("c") && "chdir".startsWith(name);
         if (eq >= 0) attached = option.slice(eq + 1);
         else takesNext = split || ["unset", "chdir", "argv0"].some((long) => long.startsWith(name));
       } else {
         const at = [...option.slice(1)].findIndex((letter) => "aCSu".includes(letter));
         if (at >= 0) {
           split = option[at + 1] === "S";
+          chdir = option[at + 1] === "C";
           attached = option.slice(at + 2) || null;
           takesNext = attached === null;
         }
       }
       if (takesNext) k += 1;
+      if (chdir && (attached !== null || words[k])) found.moves.push(attached === null ? words[k] : literalWord(attached));
       if (!split) continue;
       const what = "the -S string of env";
       if (attached === null && !words[k]) return unreadable(`${what} is not in the line`);
@@ -1089,15 +1098,27 @@ function readLine(command, cwd, tool) {
     }
     const name = words[head]?.literal ? words[head].text : null;
     const args = words.slice(head + 1);
-    // The values the line gives a variable: in a command made only of assignments, in a declaration's arguments, and
-    // as a for loop's words.
-    for (const w of head < 0 ? words : DECLARATIONS.has(name) ? args : []) {
+    // The values the line gives a variable: in a command made only of assignments, before a command's name (env's
+    // included), in a declaration's arguments, and as a for loop's words.
+    for (const w of [...words.slice(0, head < 0 ? words.length : head), ...(DECLARATIONS.has(name) ? args : [])]) {
       if (ASSIGNMENT.test(w.bare)) assign(w.text.slice(0, w.text.indexOf("=")), w.text.slice(w.text.indexOf("=") + 1));
     }
     if (name === "for" && args[1]?.bare === "in") for (const w of args.slice(2)) assign(args[0].text, w.text);
     if (name === "cd" || name === "pushd") {
-      const dir = args.find((w) => !w.text.startsWith("-"));
-      if (dir) found.dirs.push(dir.text);
+      let k = 0;
+      while (args[k]?.literal && /^-[LPe@]+$/.test(args[k].text)) k += 1;
+      if (args[k]?.text === "--") k += 1;
+      found.moves.push(args[k] ?? null);
+    }
+    if (path.posix.basename(name ?? "") === "find") {
+      const exec = args.findIndex((w) => w.literal && (w.text === "-execdir" || w.text === "-okdir"));
+      if (exec >= 0) {
+        let k = 0;
+        while (args[k]?.literal && /^-(?:[HLP]|D|O\d*)$/.test(args[k].text)) k += args[k].text === "-D" ? 2 : 1;
+        const starts = [];
+        for (; k < exec && !(args[k].literal && /^[-(!,]/.test(args[k].text)); k += 1) starts.push(args[k]);
+        found.finds.push({ starts: starts.length ? starts : [literalWord(".")], words: args.slice(exec + 1) });
+      }
     }
     if (name === "eval" && args.length) {
       for (const w of args) readAsCode.add(w);
@@ -1181,7 +1202,17 @@ export function loadConfig(from) {
   }
 }
 
-const norm = (p) => p.replace(/\\/g, "/").toLowerCase();
+/** A path as the kernel resolves it, symlinks and `..` included, normalised for comparison. Only the native
+ *  realpath asks the kernel: the JavaScript one removes `x/..` before it follows x. */
+const norm = (p) => {
+  let real = path.resolve(p);
+  try {
+    real = fs.realpathSync.native(p);
+  } catch {
+    // Nothing there yet: compare the path as written.
+  }
+  return real.replace(/\\/g, "/").toLowerCase();
+};
 
 /** Is this file the declared sender, or inside a declared exempt directory?
  *
@@ -1189,10 +1220,12 @@ const norm = (p) => p.replace(/\\/g, "/").toLowerCase();
  * would let any readable file called `outbound_mail.py` — including one written
  * to a temp directory — impersonate the sanctioned sender and reach a send
  * endpoint. `sender` and every `exempt` entry are resolved against the folder
- * holding `.send-chokepoint.json`, and compared as exact normalised paths.
+ * holding `.send-chokepoint.json`, and compared as exact paths after the
+ * kernel resolves them: `x/../outbound_mail.py` through a symlink x is
+ * another file.
  */
 function isAllowedPath(fp, config) {
-  const n = norm(path.resolve(fp));
+  const n = norm(fp);
   if (n === norm(path.resolve(config.root, config.sender))) return true;
   return config.exempt.some((frag) => {
     if (!frag) return false;
@@ -1439,73 +1472,168 @@ function globFiles(pattern, dirs, budget) {
   return out;
 }
 
-/** `name` with a leading `~`, `~+` or `~-` replaced as bash replaces it, or null when it has none. */
-function expandHome(name, cwd) {
+/** `name` with a leading `~`, `~+` or `~-` replaced by each value `scope` gives HOME, PWD or OLDPWD; a name without
+ *  one is itself. */
+function tildeForms(name, scope) {
   const m = /^~([+-]?)(?=\/|$)/.exec(name);
-  if (!m) return null;
-  const base = { "": os.homedir(), "+": cwd || process.cwd(), "-": process.env.OLDPWD }[m[1]];
-  return base ? base + name.slice(m[0].length) : null;
+  if (!m) return [name];
+  return [...(scope.get({ "": "HOME", "+": "PWD", "-": "OLDPWD" }[m[1]]) ?? [])].map((base) => base
+    + name.slice(m[0].length));
 }
 
-/** The directories the command may run in. The reader gives each `cd` target as bash builds it; the raw text is
- *  searched too, for a line the reader could not follow to its end. */
-function searchDirs(command, cwd, reading = readLine(command, cwd)) {
-  const dirs = [];
-  for (const m of command.matchAll(CD_PREFIX)) {
-    const d = m[1] || m[2] || m[3];
-    if (d) dirs.push(d);
+const isDirectory = (dir) => {
+  try {
+    return fs.statSync(dir).isDirectory();
+  } catch {
+    return false;
   }
-  for (const d of reading.dirs) dirs.push(path.resolve(cwd || process.cwd(), expandHome(d, cwd) ?? d));
-  if (cwd) dirs.push(cwd);
-  dirs.push(process.cwd());
-  return dirs;
+};
+
+/** Where a `cd`, `pushd` or `env -C` operand (null: none, so HOME) may lead from any of `places`: built with the
+ *  values in `scope`, `-` as OLDPWD, `~` forms and globs expanded, a relative name through each CDPATH entry and
+ *  directly, each both as bash's default logical cd joins it and as the kernel resolves it. */
+function moveTargets(operand, places, scope, budget) {
+  const out = [];
+  const texts = operand ? substitutions(operand.parts ?? [{ text: operand.text }], scope, budget) : [{ text: "~" }];
+  const cdpath = [process.env.CDPATH, ...(scope.get("CDPATH") ?? [])].filter((v) => typeof v === "string")
+    .flatMap((v) => v.split(":"));
+  for (const { text, pattern } of texts) {
+    const names = text === "-" ? [...scope.get("OLDPWD")]
+      : operand?.splits && hasGlob(pattern) ? tildeForms(pattern, scope).flatMap((p) => globFiles(p, places, budget))
+        : tildeForms(text, scope);
+    for (const name of names) {
+      const bases = path.isAbsolute(name) || /^\.\.?(?:\/|$)/.test(name) ? [""] : ["", ...cdpath];
+      for (const place of places) {
+        for (const base of bases) {
+          out.push(path.resolve(place, base, name));
+          try {
+            out.push(fs.realpathSync.native(path.isAbsolute(name) ? name : `${place}/${base}/${name}`));
+          } catch {
+            // No such directory: cd fails and the line stays where it was.
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** The directories the command may run in, and the values HOME, PWD and OLDPWD may take there. Each move the reader
+ *  found is resolved against every directory the line may be in, again until no new directory appears, so the order
+ *  of a line's commands and loops cannot hide one; a target that does not exist is no directory bash enters. The raw
+ *  text's `cd` targets count too, for a line the reader could not follow. PWD and OLDPWD take every directory found,
+ *  HOME this process's home and the line's values. More than MAX_PLACES directories spend the budget. */
+function directories(command, cwd, reading, budget) {
+  const start = path.resolve(cwd || process.cwd());
+  const places = new Set([start, path.resolve(process.cwd())]);
+  for (const m of command.matchAll(CD_PREFIX)) {
+    const dir = path.resolve(start, m[1] || m[2] || m[3]);
+    if (isDirectory(dir)) places.add(dir);
+  }
+  const scope = new Map(reading.values);
+  const extend = (name, more) => scope.set(name, new Set([...(reading.values.get(name) ?? []), ...more]));
+  extend("HOME", [os.homedir()]);
+  for (let grew = true; grew && budget.left > 0; ) {
+    extend("PWD", places);
+    extend("OLDPWD", [process.env.OLDPWD, ...places].filter(Boolean));
+    grew = false;
+    for (const operand of reading.moves) {
+      for (const dir of moveTargets(operand, [...places], scope, budget)) {
+        if (places.has(dir) || !isDirectory(dir)) continue;
+        if (places.size >= MAX_PLACES) budget.left = 0;
+        else places.add(dir);
+        grew = true;
+      }
+    }
+  }
+  return { places: [...places], scope };
+}
+
+/** The script names in a word's text: the paths inside it, and the whole text or what follows its `=`. */
+function namesIn(text) {
+  const names = [...text.matchAll(BARE_PATH)].map((m) => m[0]);
+  for (const part of [text, text.slice(text.indexOf("=") + 1)]) if (SCRIPT_NAME.test(part)) names.push(part);
+  return names;
+}
+
+/** Every directory under `root`, root included, as find walks it: symlinks are not followed. */
+function subdirectories(root, budget) {
+  const out = [];
+  for (const queue = [root]; queue.length && budget.left > 0; budget.left -= 1) {
+    const dir = queue.shift();
+    out.push(dir);
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) queue.push(`${dir}/${entry.name}`);
+      }
+    } catch {
+      // Not a directory find could read either.
+    }
+  }
+  return out;
+}
+
+/** The candidates that are regular files small enough to read. */
+function existing(candidates) {
+  return candidates.filter((fp) => {
+    try {
+      const st = fs.statSync(fp);
+      return st.isFile() && st.size <= MAX_READ_BYTES;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /** Every existing script path named in the command, and the text of every word bash builds: each word's braces,
  *  variables and globs expanded, the paths inside those texts, and those in the raw text, which still holds what the
- *  reader could not follow.
+ *  reader could not follow. A relative name is joined to each directory the line may run in as the kernel joins it,
+ *  so `link/..` is the parent of where link points, and every copy found is judged.
  *
  * ⚠ A bare token must be resolved against the COMMAND's directory, not this
  * process's. `cd somewhere && python sender.py` is the shape people actually
  * type, and resolving it here would find nothing and allow the send. */
 function referencedFiles(command, cwd, reading, budget) {
-  const dirs = searchDirs(command, cwd, reading);
+  const { places, scope } = directories(command, cwd, reading, budget);
   const out = new Set();
   const texts = [];
   const tokens = new Set([...command.matchAll(QUOTED_PATH)].map((m) => m[1] || m[2]));
   for (const m of command.matchAll(BARE_PATH)) tokens.add(m[0]);
   const lenientBudget = { left: EXPANSION_LIMIT, listings: budget.listings };
   const reread = (source) => readShell(source, { cwd, onCommand: () => {}, full: true, single: true });
+  const built = (w, spend) => substitutions(w.parts ?? [{ text: w.text }], scope, spend);
   for (const { word, glob, lenient } of reading.words) {
     const spend = lenient ? lenientBudget : budget;
     for (const w of braceWords(word, spend, reread)) {
-      for (const { text, pattern } of substitutions(w.parts ?? [{ text: w.text }], reading.values, spend)) {
+      for (const { text, pattern } of built(w, spend)) {
         texts.push(text);
-        for (const m of text.matchAll(BARE_PATH)) tokens.add(m[0]);
-        for (const part of [text, text.slice(text.indexOf("=") + 1)]) if (SCRIPT_NAME.test(part)) tokens.add(part);
+        for (const name of namesIn(text)) tokens.add(name);
         if (!glob || !hasGlob(pattern)) continue;
         // An assigned value is not a glob yet, but an unquoted expansion of it later is.
         for (const part of new Set([pattern, pattern.slice(pattern.indexOf("=") + 1)])) {
-          for (const fp of globFiles(expandHome(part, cwd) ?? part, dirs, spend)) {
-            if (SCRIPT_NAME.test(fp)) tokens.add(fp);
+          for (const form of tildeForms(part, scope)) {
+            for (const fp of globFiles(form, places, spend)) if (SCRIPT_NAME.test(fp)) tokens.add(fp);
           }
         }
       }
     }
   }
+  const resolve = (name, dirs) => tildeForms(name, scope)
+    .flatMap((form) => existing(path.isAbsolute(form) ? [form] : dirs.map((dir) => `${dir}/${form}`)));
   for (const token of tokens) {
     // bash reads `<&-sender.py` as a descriptor close and the word `sender.py`, so the path may start after the dashes.
-    for (const name of new Set([token, token.replace(/^-+/, ""), expandHome(token, cwd)])) {
-      if (!name) continue;
-      const candidates = path.isAbsolute(name)
-        ? [name]
-        : [name, ...dirs.map((d) => path.resolve(d, name))];
-      for (const fp of candidates) {
-        try {
-          const st = fs.statSync(fp);
-          if (st.isFile() && st.size <= MAX_READ_BYTES) { out.add(fp); break; }
-        } catch { /* keep looking */ }
-      }
+    for (const name of new Set([token, token.replace(/^-+/, "")])) for (const fp of resolve(name, places)) out.add(fp);
+  }
+  // find -execdir runs its command in the directory of each file it finds: anywhere under its starting points.
+  for (const { starts, words } of reading.finds) {
+    const names = words.flatMap((w) => built(w, budget).flatMap(({ text }) => namesIn(text)))
+      .filter((name) => !path.isAbsolute(name));
+    if (!names.length) continue;
+    for (const { text } of starts.flatMap((w) => built(w, budget))) {
+      const dirs = tildeForms(text, scope)
+        .flatMap((form) => (path.isAbsolute(form) ? [form] : places.map((dir) => `${dir}/${form}`)))
+        .filter(isDirectory).flatMap((dir) => subdirectories(dir, budget));
+      for (const name of names) for (const fp of resolve(name, dirs)) out.add(fp);
     }
   }
   return { files: out, texts };
@@ -1588,7 +1716,7 @@ function judgeLine(command, cwd, config, tool) {
   }
   if (budget.left <= 0) {
     return { reason: "this command makes more paths than the gate resolves",
-             where: "its braces, globs and variables", unreadable: true };
+             where: "its braces, globs, variables and directories", unreadable: true };
   }
   return null;
 }
@@ -1617,12 +1745,14 @@ function main() {
   // the `cd` is ever considered — the same bypass shape as resolving a bare
   // path against the wrong directory, one layer up.
   let loaded = { config: null, problems: [] };
-  let dirs;
+  let dirs = [cwd, process.cwd()].filter(Boolean).map((dir) => path.resolve(dir));
   try {
-    dirs = searchDirs(typeof command === "string" ? command : "", cwd);
+    const text = typeof command === "string" ? command : "";
+    const budget = { left: EXPANSION_LIMIT, listings: new Map() };
+    const { places } = directories(text, cwd, readLine(text, cwd, payload?.tool_name), budget);
+    dirs = [...places.filter((dir) => !dirs.includes(dir)), ...dirs];
   } catch {
     // A line that defeats the reader still answers to the session's own config.
-    dirs = [cwd, process.cwd()].filter(Boolean);
   }
   try {
     for (const dir of dirs) {

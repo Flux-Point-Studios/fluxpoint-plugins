@@ -387,23 +387,41 @@ the raw text and from every word as bash builds it:
 - quotes, escapes, line continuations and `$'...'` joined, so
   `bl''ast.py`, `"bl"ast.py`, `bl\ast.py` and `$'bl\x61st.py'` are all
   `blast.py`;
-- `~`, `~+` and `~-` expanded;
-- a variable given its value in the hook's environment, and also each
-  value the line assigns it: in a command made only of assignments, in
-  `export`, `declare`, `typeset`, `local` or `readonly`, and as a `for`
-  loop's words;
+- `~`, `~+` and `~-` expanded to each value HOME, PWD and OLDPWD may
+  take: HOME from the hook's environment, PWD and OLDPWD as every
+  directory the line may be in, and each of them as the line assigns it;
+- a variable given its value in the hook's environment (`$PWD` is the
+  command's own directory), and also each value the line assigns it: in
+  a command made only of assignments, before a command's name (`env`'s
+  included), in `export`, `declare`, `typeset`, `local` or `readonly`,
+  and as a `for` loop's words; `$PWD` and `$OLDPWD` also take every
+  directory the line may be in;
 - brace lists and sequences expanded as bash expands them: only braces
   it reads unquoted, found by bash's own matching rules, in the word as
   written and before its variables, so `$x{a,b}` is `$xa` and `$xb` and
   a quoted `'{a,b}'` stays text;
 - an unquoted glob matched against the filesystem from the command's
   directories (a `case` pattern and the operands of `[[` are not globs);
-- each `cd` or `pushd` target, built the same way, added to the
-  directories a relative name is resolved against.
+- each `cd` or `pushd` target (none means HOME, `-` means OLDPWD) and
+  each `env -C` or `--chdir` directory, built the same way, globs
+  included, and resolved against every directory the line may be in:
+  through each CDPATH entry the environment or the line gives and
+  directly, both as `cd` joins it and as the kernel resolves it. This
+  repeats until no new directory appears, so neither the order of the
+  line's commands nor a loop hides one, and only a directory that exists
+  counts;
+- for `find -execdir` or `-okdir`, the script names in its command
+  resolved in every directory under find's starting points, walked as
+  find walks them.
 
-Each existing script found is judged by its text and its local Python
-imports, as above. The inline send check reads the built words as well as
-the raw text.
+A relative name is joined to each directory the line may be in without
+removing `..` first, as the kernel joins it, so `link/..` is the parent
+of where `link` points, and every copy found is judged. Each existing
+script found is judged by its text and its local Python imports, as
+above. The sender and the exempt directories are compared with it after
+the kernel resolves symlinks, so a path that reads as the sender but
+leads elsewhere is judged. The inline send check reads the built words
+as well as the raw text.
 
 Shell code inside the line is read the same way, to any depth: the `-c`
 string of `sh`, `bash`, `dash`, `zsh`, `ksh`, `mksh`, `ash`, `yash` or
@@ -451,13 +469,16 @@ cannot read:
 - braces, globs and variable values in the words bash reads that
   together spend more than 4096 units: one for each word a brace or a
   variable value makes, plus one for each further 1024 characters in
-  it, one for each directory a glob reads and each path it visits, and
-  one for each 1024 brace characters looked at while finding a pair.
+  it, one for each directory a glob reads and each path it visits, one
+  for each directory a `find -execdir` walk visits, and one for each
+  1024 brace characters looked at while finding a pair;
+- a line that may run in more than 64 directories.
 
 Shell code is read with bash's grammar, whichever of those shells runs it.
 Not resolved: a value computed while the line runs (command output,
 arithmetic, other `${...}` operators, `read`, `printf -v`, arrays), a value
 an earlier command set that the hook's environment does not hold, `~user`,
+a directory another program changes into (`git -C`, `make -C`, `sudo -D`),
 a script name without one of those extensions, code another interpreter
 assembles (`python3 -c`), syntax only `zsh` or another shell gives a
 meaning, a script operand built from an expansion in a loop body that reads
