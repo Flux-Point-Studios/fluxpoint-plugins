@@ -37,6 +37,7 @@
 //
 // Exit codes: 0 = allow, 2 = block (stderr is shown to the author).
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -65,100 +66,318 @@ const PATH_TOKEN = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs
 const CD_PREFIX = /(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
 const PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))/gm;
 
-// Tools that print, search, hash, compare or list a file and cannot run it. A command made only of these is never
-// judged: the operator must be able to read and hash the very files this gate protects. sed (its `e` command) and
-// awk (system()) can run code, so they are not here.
-const READ_ONLY = new Set(["cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep", "rg", "ugrep",
-  "sha256sum", "sha1sum", "sha512sum", "md5sum", "b2sum", "cksum", "diff", "cmp", "comm", "file", "stat", "ls",
-  "readlink", "realpath", "basename", "dirname", "du", "od", "xxd", "hexdump", "strings", "sort", "uniq", "cut",
-  "nl", "echo", "printf", "true"]);
-const GIT_READ_ONLY = new Set(["show", "diff", "log", "blame", "grep", "status", "cat-file", "ls-files", "rev-parse"]);
-// Words that run the command after them: skipped, with their own option values.
-const PREFIXES = { timeout: /^(?:-\S+|\d+(?:\.\d+)?[smhd]?)$/, nice: /^(?:-n|-?\d+)$/, env: /^-\S*$/ };
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
-const WORD = /"[^"]*"|'[^']*'|\S+/g;
+// Tools that print, search, hash, compare or list a file. A command made only of these, named bare, is never judged:
+// the operator must be able to read and hash the very files this gate protects. Tools that can run code are not
+// here: sed (its `e` command), awk (system()), rg (--pre), ugrep (--filter), sort (--compress-program), less and more
+// (LESSOPEN, shell escapes), and git, whose every subcommand honours repository configuration an agent can write
+// (core.fsmonitor, diff.external, textconv, core.pager).
+const READ_ONLY = new Set(["cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "sha1sum", "sha256sum",
+  "sha512sum", "md5sum", "b2sum", "cksum", "diff", "cmp", "comm", "file", "stat", "ls", "readlink", "realpath",
+  "basename", "dirname", "du", "od", "xxd", "hexdump", "strings", "uniq", "cut", "nl", "echo", "printf", "true"]);
+// The read-only tools with an option that runs a program or writes a file, and those options' letters and long names.
+// grep in the Claude Code shell runs ugrep, whose --filter, --pager and --view name a command, whose --config or ---
+// loads a file that can, whose -Q starts a TUI that runs $PAGER or the --view command on a key press, and whose
+// --save-config writes a file; the host's wrapper hands some of these to the system grep, but the exemption does not
+// lean on it. GNU diff --paginate runs pr; file -z and -Z decompress through helpers found on PATH.
+const UGREP_UNSAFE = { letters: "Q", names: ["filter", "pager", "view", "config", "-", "query", "save-config"] };
+const UNSAFE_OPTIONS = new Map([
+  ["grep", UGREP_UNSAFE], ["egrep", UGREP_UNSAFE], ["fgrep", UGREP_UNSAFE],
+  ["diff", { letters: "l", names: ["paginate"] }],
+  ["file", { letters: "zZ", names: ["uncompress", "uncompress-noreport"] }],
+]);
+// uniq and xxd write their second operand, so each of their arguments must name an ordinary file or none.
+const WRITES_OPERAND = new Set(["uniq", "xxd"]);
+const TIMEOUT_FLAG = /^(?:-[sk]\S+|--signal=\S+|--kill-after=\S+|-v|--verbose|--foreground|--preserve-status|--)$/;
+const DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
+// Words that run the command after them. Each returns the index of that command, or -1 for an option this reader
+// does not know to be harmless. env takes no option at all: -S splits its value into a new command line.
+const PREFIXES = new Map([
+  ["timeout", (words, i) => {
+    while (words[i] === "-s" || words[i] === "-k" || TIMEOUT_FLAG.test(words[i] ?? "")) {
+      i += words[i] === "-s" || words[i] === "-k" ? 2 : 1;
+    }
+    return DURATION.test(words[i] ?? "") ? i + 1 : -1;
+  }],
+  ["nice", (words, i) => {
+    if (words[i] === "-n") return i + 2;
+    if (/^(?:-n|--adjustment=|-)-?\d+$/.test(words[i] ?? "")) return i + 1;
+    return words[i]?.startsWith("-") ? -1 : i;
+  }],
+  ["env", (words, i) => (words[i]?.startsWith("-") ? -1 : i)],
+]);
+// An assignment can change what a later word runs (PATH, LD_PRELOAD, LESSOPEN, GIT_*), so any one is judged. `{name}>`
+// assigns the new descriptor's number to name.
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+?=)/;
+const NAMED_FD = /^\{[A-Za-z_][A-Za-z0-9_]*\}$/;
+const ENDS_WORD = new Set([" ", "\t", "\n", ";", "&", "|", "(", ")", "<", ">"]);
+const REDIRECT_OP = /&>>?|<<<|<<-?|<>|[<>]&|>>|>\||[<>]/y;
+// bash expands the word after `>&`, and when the result is not a descriptor number or `-`, expands it again as the
+// file to open. Text made only of these characters comes out of that second pass unchanged.
+const PLAIN_TEXT = /^[\w./,:=%+@-]+$/;
+const PARAMETER = /\$(?:\{(?:[A-Za-z_][A-Za-z0-9_]*|\d+|[@*#?$!-])\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/y;
+// What bash would run or rejoin in an unquoted heredoc body: a command substitution, arithmetic, a ${...} operator,
+// or a trailing backslash, which joins the line to the next before the delimiter is looked for.
+const BODY_EXPANSION = /`|\$[([]|\$\{(?!(?:[A-Za-z_][A-Za-z0-9_]*|\d+|[@*#?$!-])\})|\\$/;
+// bash opens /dev/tcp/HOST/PORT and /dev/udp/HOST/PORT as sockets; the rest of /dev, /proc and /sys are devices, other
+// processes' descriptors and kernel settings. Only these four streams there are ordinary.
+const SPECIAL_ROOT = /^\/(?:dev|proc|sys)(?:\/|$)/;
+const STD_STREAMS = new Set(["/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"]);
+const NOT_EXEMPT = Symbol("not exempt");
 
-function readOnlySimple(segment) {
-  // Redirections are not commands, and a substitution split inside quotes leaves the quote marks behind.
-  const words = (segment.match(WORD) || []).filter((w) => !/^\d*[<>]/.test(w) && !/^["']+$/.test(w))
-    .map((w) => w.replace(/^["']+|["']+$/g, ""));
+function notExempt() {
+  throw NOT_EXEMPT;
+}
+
+/** A redirection target that opens an ordinary file: written out literally, outside /dev, /proc and /sys unless it is
+ *  one of the standard streams, and a regular file if it exists already. */
+function ordinaryTarget(target, cwd) {
+  if (!target.literal) return false;
+  let name = target.text;
+  if (target.bare.startsWith("~")) {
+    if (!/^~(?:\/|$)/.test(target.bare)) return false;
+    name = os.homedir() + name.slice(1);
+  }
+  if (STD_STREAMS.has(path.posix.normalize(name))) return true;
+  const full = path.resolve(cwd || process.cwd(), name);
+  if (SPECIAL_ROOT.test(path.posix.normalize(name)) || SPECIAL_ROOT.test(full)) return false;
+  try {
+    return fs.statSync(full).isFile();
+  } catch (err) {
+    return err.code === "ENOENT";
+  }
+}
+
+/** Whether `arg` sets one of `options`: a letter anywhere in a short-option cluster, or a long name that abbreviates
+ *  one of its names (getopt takes any unambiguous abbreviation) or begins with one (`---FILE`). */
+function setsOption(options, arg) {
+  if (/^-[^-]/.test(arg)) return [...arg.slice(1)].some((c) => options.letters.includes(c));
+  const name = arg.startsWith("--") ? arg.slice(2).split("=")[0] : "";
+  return name !== "" && options.names.some((n) => n.startsWith(name) || name.startsWith(n));
+}
+
+/** The command's words up to its name are literal, assign nothing, pass only harmless prefix options, and name a
+ *  read-only tool; printf's first argument is not an option (printf -v NAME assigns); a tool in UNSAFE_OPTIONS takes
+ *  only literal arguments, none of them one of those options; each argument of a tool in WRITES_OPERAND is an
+ *  ordinary target. */
+function requireReadOnlyCommand(words, cwd) {
+  const texts = words.map((w) => (w.literal ? w.text : null));
   let i = 0;
   for (;;) {
-    while (i < words.length && ASSIGNMENT.test(words[i])) i += 1;
-    const skip = PREFIXES[words[i]];
-    if (!skip) break;
-    i += 1;
-    while (i < words.length && skip.test(words[i])) i += 1;
+    if (ASSIGNMENT.test(words[i]?.bare ?? "")) notExempt();
+    const after = PREFIXES.get(texts[i]);
+    if (!after) break;
+    i = after(texts, i + 1);
+    if (i < 0) notExempt();
   }
-  if (i >= words.length) return true;
-  const name = path.basename(words[i]);
-  if (name === "git") {
-    let j = i + 1;
-    while (j < words.length && words[j].startsWith("-")) j += words[j] === "-C" ? 2 : 1;
-    return GIT_READ_ONLY.has(words[j]);
-  }
-  return READ_ONLY.has(name);
+  if (i >= words.length) return;
+  if (words.slice(0, i + 1).some((w) => !w.literal) || !READ_ONLY.has(texts[i])) notExempt();
+  const first = words[i + 1];
+  if (texts[i] === "printf" && first && (!first.literal || /^-(?!-$)/.test(first.text))) notExempt();
+  const unsafe = UNSAFE_OPTIONS.get(texts[i]);
+  if (unsafe && words.slice(i + 1).some((w) => !w.literal || setsOption(unsafe, w.text))) notExempt();
+  if (WRITES_OPERAND.has(texts[i]) && !words.slice(i + 1).every((w) => ordinaryTarget(w, cwd))) notExempt();
 }
 
-/** Every simple command in the line is a read-only tool. Pipes, lists, newlines and command substitutions all split
- *  the line, so `cat s.py | python3` and `python3 -c "$(cat s.py)"` are not read-only. */
-export function readOnlyCommand(command) {
-  // The & of `2>&1`, `>&2` and `&>` is part of a redirection, not a list separator.
-  return command.replace(/\d*[<>]&(?:\d+|-)|&>>?/g, (m) => (m[0] === "&" ? ">" : " "))
-    .split(/\$\(|[;&|\n`()]+/).every(readOnlySimple);
-}
+/** Reads `src` as bash would and throws NOT_EXEMPT unless every simple command in it, command substitutions
+ *  included, is read-only and every redirection opens an ordinary file. A heredoc body is data unless bash would
+ *  expand something in it. Syntax it does not follow — backquotes, arithmetic, subshells, process substitution, a
+ *  heredoc inside a substitution, an unterminated quote or heredoc — throws too. */
+function requireReadOnly(src, cwd) {
+  let i = 0;
+  const heredocs = [];
+  const sticky = (re) => {
+    re.lastIndex = i;
+    const m = re.exec(src);
+    if (m) i += m[0].length;
+    return m?.[0];
+  };
+  // bash removes a backslash-newline before it reads a token. The reader follows one between words and inside a word,
+  // and judges a line where one would join an operator or an expansion to what follows.
+  const continued = (j) => src[j] === "\\" && src[j + 1] === "\n";
+  const skipBlanks = () => {
+    while (src[i] === " " || src[i] === "\t" || continued(i)) i += continued(i) ? 2 : 1;
+  };
 
-const HEREDOC_OP = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_][A-Za-z0-9_.-]*))/;
-
-/** The heredocs a line opens, in order, as {word, tabs}, and the line with each operator blanked; null when the
- *  line cannot be read for certain (an operator the pattern does not take, arithmetic, or a quote left open).
- *  `<<<` is a here-string, and `<<` inside quotes or after a comment opens nothing. */
-function heredocsOn(line) {
-  if (line.includes("((")) return null;
-  const docs = [];
-  let bare = line;
-  let quote = null;
-  for (let i = 0; i < line.length; i += 1) {
-    const c = line[i];
-    if (quote) {
-      if (c === quote) quote = null;
-      else if (c === "\\" && quote === '"') i += 1;
-      continue;
+  // At a `$`: consumes an expansion and returns true, or returns false for a literal dollar sign.
+  const dollar = (inQuotes) => {
+    if (continued(i + 1)) notExempt();
+    const next = src[i + 1];
+    if (next === "(") {
+      if (src[i + 2] === "(") notExempt();
+      i += 2;
+      list(true);
+      return true;
     }
-    if (c === "'" || c === '"') quote = c;
-    else if (c === "\\") {
-      // A continued line runs on into the next, so the body would start a line later than it seems.
-      if (i === line.length - 1) return null;
+    if (next === "[" || next === "{") return sticky(PARAMETER) ? true : notExempt();
+    if (!inQuotes && next === "'") {
+      for (i += 2; src[i] !== "'"; i += src[i] === "\\" ? 2 : 1) if (i >= src.length) notExempt();
       i += 1;
-    } else if (c === "#" && (i === 0 || /\s/.test(line[i - 1]))) break;
-    else if (line.startsWith("<<<", i)) i += 2;
-    else if (line.startsWith("<<", i)) {
-      const m = HEREDOC_OP.exec(line.slice(i));
-      if (!m) return null;
-      docs.push({ word: m[2] ?? m[3] ?? m[4], tabs: m[1] === "-" });
-      bare = bare.slice(0, i) + " ".repeat(m[0].length) + bare.slice(i + m[0].length);
-      i += m[0].length - 1;
+      return true;
     }
-  }
-  return quote ? null : { docs, bare };
+    if (!inQuotes && next === '"') {
+      i += 1;
+      doubleQuoted();
+      return true;
+    }
+    return Boolean(sticky(PARAMETER));
+  };
+
+  // At a double quote: the quoted text, and whether it holds no expansion.
+  const doubleQuoted = () => {
+    let text = "";
+    let literal = true;
+    for (i += 1; src[i] !== '"'; ) {
+      const c = src[i];
+      if (c === undefined || c === "`") notExempt();
+      if (c === "\\" && src[i + 1] !== undefined && '$`"\\\n'.includes(src[i + 1])) {
+        if (src[i + 1] !== "\n") text += src[i + 1];
+        i += 2;
+      } else if (c === "$" && dollar(true)) {
+        literal = false;
+      } else {
+        text += c;
+        i += 1;
+      }
+    }
+    i += 1;
+    return { text, literal };
+  };
+
+  // One word after quote removal: its text, whether it holds no expansion or pattern, whether any of it is quoted or
+  // escaped, and its source without line continuations.
+  const word = () => {
+    let text = "";
+    let bare = "";
+    let literal = true;
+    let quoted = false;
+    while (i < src.length && !ENDS_WORD.has(src[i])) {
+      const from = i;
+      const c = src[i];
+      if (continued(i)) {
+        i += 2;
+        continue;
+      }
+      if (c === "'") {
+        const end = src.indexOf("'", i + 1);
+        if (end < 0) notExempt();
+        text += src.slice(i + 1, end);
+        i = end + 1;
+        quoted = true;
+      } else if (c === '"') {
+        const q = doubleQuoted();
+        text += q.text;
+        literal &&= q.literal;
+        quoted = true;
+      } else if (c === "\\") {
+        if (i + 1 >= src.length) notExempt();
+        text += src[i + 1];
+        i += 2;
+        quoted = true;
+      } else if (c === "`") {
+        notExempt();
+      } else if (c === "$" && dollar(false)) {
+        literal = false;
+      } else {
+        if ("*?[]{}".includes(c)) literal = false;
+        text += c;
+        i += 1;
+      }
+      bare += src.slice(from, i);
+    }
+    return { text, literal, quoted, bare };
+  };
+
+  const redirect = (nested) => {
+    const op = sticky(REDIRECT_OP);
+    if (continued(i)) notExempt();
+    skipBlanks();
+    const dup = op === "<&" || op === ">&";
+    // bash reads a `-` after `<&` or `>&` as a token of its own that closes the descriptor; the text after it starts a
+    // new word.
+    if (dup && src[i] === "-") {
+      i += 1;
+      return;
+    }
+    const target = word();
+    if (!target.bare || target.bare.startsWith("#")) notExempt();
+    if (op === "<<" || op === "<<-") {
+      // The delimiter is the quote-removed word; any quoting in it leaves the body unexpanded.
+      if (nested || !target.literal || !target.text || target.text.includes("\n")) notExempt();
+      heredocs.push({ delimiter: target.text, tabs: op === "<<-", quoted: target.quoted });
+    } else if (dup && /^\d+-?$/.test(target.text)) {
+      // Any descriptor but the standard three was inherited from whatever started the shell, and may be a socket.
+      if (!target.literal || !/^[012]-?$/.test(target.text)) notExempt();
+    } else if ((dup && !PLAIN_TEXT.test(target.text)) || (op !== "<<<" && !ordinaryTarget(target, cwd))) {
+      notExempt();
+    }
+  };
+
+  // After the newline that ends a line, the bodies of the heredocs it opened, in order.
+  const bodies = () => {
+    for (const doc of heredocs.splice(0)) {
+      for (;;) {
+        if (i >= src.length) notExempt();
+        let end = src.indexOf("\n", i);
+        if (end < 0) end = src.length;
+        const line = src.slice(i, end);
+        i = end + 1;
+        if ((doc.tabs ? line.replace(/^\t+/, "") : line) === doc.delimiter) break;
+        if (!doc.quoted && BODY_EXPANSION.test(line)) notExempt();
+      }
+    }
+  };
+
+  // A list of commands, up to the end of src or, inside `$(`, its closing parenthesis.
+  const list = (nested) => {
+    let words = [];
+    for (;;) {
+      skipBlanks();
+      const c = src[i];
+      if (c === undefined || c === ")") {
+        if ((c === ")") !== nested || (c === undefined && heredocs.length)) notExempt();
+        i += 1;
+        requireReadOnlyCommand(words, cwd);
+        return;
+      }
+      if (c === "(" || (c === "&" && continued(i + 1))) notExempt();
+      if (c === "\n" || c === ";" || c === "|" || (c === "&" && src[i + 1] !== ">")) {
+        i += 1;
+        if ((c === "|" || c === "&") && (src[i] === c || (c === "|" && src[i] === "&"))) i += 1;
+        requireReadOnlyCommand(words, cwd);
+        words = [];
+        if (c === "\n" && heredocs.length) {
+          if (nested) notExempt();
+          bodies();
+        }
+      } else if (c === "#") {
+        while (i < src.length && src[i] !== "\n") i += 1;
+      } else if (c === "<" || c === ">" || c === "&") {
+        redirect(nested);
+      } else {
+        const w = word();
+        if (src[i] === "<" || src[i] === ">") {
+          if (NAMED_FD.test(w.bare)) notExempt();
+          if (/^\d+$/.test(w.bare)) continue;
+        }
+        words.push(w);
+      }
+    }
+  };
+
+  list(false);
 }
 
-/** The command with every heredoc body taken out, or null when any heredoc cannot be delimited for certain. */
-function withoutHeredocBodies(command) {
-  const lines = command.split("\n");
-  const kept = [];
-  for (let i = 0; i < lines.length;) {
-    const read = lines[i].includes("<<") ? heredocsOn(lines[i]) : { docs: [], bare: lines[i] };
-    if (read === null) return null;
-    kept.push(read.bare);
-    i += 1;
-    for (const { word, tabs } of read.docs) {
-      while (i < lines.length && (tabs ? lines[i].replace(/^\t+/, "") : lines[i]) !== word) i += 1;
-      if (i >= lines.length) return null;
-      i += 1;
-    }
+/** Every simple command in the line is a read-only tool and every redirection opens an ordinary file. Pipes, lists
+ *  and command substitutions are followed, so `cat s.py | python3` and `python3 -c "$(cat s.py)"` are not
+ *  read-only; quoting is read as bash reads it. */
+export function readOnlyCommand(command, cwd) {
+  try {
+    requireReadOnly(command, cwd);
+    return true;
+  } catch {
+    // Whatever this reader cannot follow, its own failure included, is judged rather than exempted.
+    return false;
   }
-  return kept.join("\n");
 }
 
 /** The nearest `.send-chokepoint.json` at or above `from`, validated.
@@ -243,15 +462,18 @@ function referencedFiles(command, cwd) {
   const out = [];
   for (const m of command.matchAll(PATH_TOKEN)) {
     const token = m[1] || m[2] || m[3] || "";
-    if (!token) continue;
-    const candidates = path.isAbsolute(token)
-      ? [token]
-      : [token, ...dirs.map((d) => path.resolve(d, token))];
-    for (const fp of candidates) {
-      try {
-        const st = fs.statSync(fp);
-        if (st.isFile() && st.size <= MAX_READ_BYTES) { out.push(fp); break; }
-      } catch { /* keep looking */ }
+    // bash reads `<&-sender.py` as a descriptor close and the word `sender.py`, so the path may start after the dashes.
+    for (const name of new Set([token, token.replace(/^-+/, "")])) {
+      if (!name) continue;
+      const candidates = path.isAbsolute(name)
+        ? [name]
+        : [name, ...dirs.map((d) => path.resolve(d, name))];
+      for (const fp of candidates) {
+        try {
+          const st = fs.statSync(fp);
+          if (st.isFile() && st.size <= MAX_READ_BYTES) { out.push(fp); break; }
+        } catch { /* keep looking */ }
+      }
     }
   }
   return out;
@@ -291,11 +513,13 @@ function senderVerdict(fp, config, via) {
   };
 }
 
-export function judge(command, cwd, config) {
+/** `tool` is the hook payload's tool_name. The read-only exemption reads bash grammar, so it applies to the Bash tool
+ *  alone: PowerShell takes no backslash as an escape, and a separator bash reads as text can end its statement. */
+export function judge(command, cwd, config, tool) {
   if (!config || typeof command !== "string" || !command.trim()) return null;
-  // A heredoc body is data: set aside, it only decides whether the line is read-only. Every other judgment
-  // reads the full text, so a body fed to an interpreter is still judged.
-  if (readOnlyCommand(withoutHeredocBodies(command) ?? command)) return null;
+  // A heredoc body is data to the exemption unless bash would expand it. Every other judgment reads the full text,
+  // so a body fed to an interpreter is still judged.
+  if (tool === "Bash" && readOnlyCommand(command, cwd)) return null;
   if (looksLikeSender(command, config)) {
     return { reason: "this command reaches a mail-send endpoint directly",
              where: "the command line" };
@@ -347,7 +571,7 @@ function main() {
   }
   if (!loaded.config) process.exit(0);
   let verdict = null;
-  try { verdict = judge(command, cwd, loaded.config); } catch { process.exit(0); }
+  try { verdict = judge(command, cwd, loaded.config, payload?.tool_name); } catch { process.exit(0); }
   if (!verdict) process.exit(0);
   process.stderr.write(
     `BLOCKED: ${verdict.reason} (${verdict.where}).\n\n${advice(loaded.config)}\n`);

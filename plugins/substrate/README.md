@@ -313,23 +313,65 @@ its descendants. Paths resolve against the configuration's directory, so a
 same-named file elsewhere does not inherit permission. Leading `cd` commands
 and Windows paths are covered by regression fixtures.
 
-A command made only of read-only tools is not judged, so the files the gate
-protects can still be read, searched, hashed and compared: `cat`, `head`,
-`tail`, `grep`, `rg`, the `sha*sum`/`md5sum` family, `wc`, `diff`, `ls`,
-`stat` and similar, plus the git subcommands `show`, `diff`, `log`, `blame`,
-`grep`, `status`, `cat-file`, `ls-files` and `rev-parse`. Leading variable
-assignments and `timeout`, `nice` and `env` prefixes are skipped. Pipes, lists
-and command substitutions split the line, so `cat sender.py | python3` and
-`echo $(python3 sender.py)` are still judged. `sed` and `awk` can run code and
-are not on the list.
+A `Bash` command made only of read-only tools is not judged, so the files the
+gate protects can still be read, searched, hashed and compared. The exemption
+reads bash grammar, so it covers the `Bash` tool alone: PowerShell takes no
+backslash as an escape, and a separator bash reads as text can end a
+PowerShell statement, so every `PowerShell` line is judged on its full text.
+The tools are
+`cat`, `head`, `tail`, `wc`, `grep`, `egrep`, `fgrep`, `sha1sum`,
+`sha256sum`, `sha512sum`, `md5sum`, `b2sum`, `cksum`, `diff`, `cmp`, `comm`,
+`file`, `stat`, `ls`, `readlink`, `realpath`, `basename`, `dirname`, `du`,
+`od`, `xxd`, `hexdump`, `strings`, `uniq`, `cut`, `nl`, `echo`, `printf` and
+`true`, each named bare, so `./cat` is judged. They may be joined by pipes,
+`;`, `&&`, `||`, `&` and newlines, nested in `$(...)`, and run under
+`timeout` or `nice` with their documented options or under `env` with no
+option. Quoting and line continuations are read as bash reads them, so
+`grep -E "send|reply" sender.py` is exempt while `cat sender.py | python3`
+and `echo $(python3 sender.py)` are judged. The whole line is judged when any
+of these holds:
 
-A heredoc body is data. A line whose commands are all read-only once its
-heredoc bodies are set aside is not judged, so `cat > probe.py <<EOF` may write
-a script that names a sender. Any other line is judged on its full text,
-bodies included, so `python3 <<EOF` and a write-then-run in one command are
-still caught. A heredoc that cannot be delimited for certain (unterminated,
-inside quotes or a comment, a continued line, arithmetic) leaves the whole
-line judged.
+- It runs any other program. That includes `git`, whose every subcommand
+  honours repository configuration an agent can write, and `rg`, `ugrep`,
+  `sort`, `less`, `more`, `sed` and `awk`, which each have an option or
+  command that runs a program.
+- A read-only tool carries an option that runs a program or writes a file,
+  in any abbreviation: `grep`, `egrep` or `fgrep` with `--filter`,
+  `--pager`, `--view`, `--config`, `---FILE`, `-Q`/`--query` or
+  `--save-config` (in the Claude Code shell `grep` runs ugrep, where these
+  name a command, load a file that can, start a TUI that runs a pager on a
+  key press, or write a file), `diff` with `-l` or `--paginate` (it runs
+  `pr`), or `file` with `-z`, `-Z` or `--uncompress` (it runs decompressors
+  found on `PATH`). One of these tools' arguments being an expansion or a
+  glob judges the line too, since it could produce such an option.
+- `uniq` or `xxd` has an argument that is not an ordinary file, as defined
+  for redirections below: each writes its second operand.
+- It assigns a variable: `NAME=value`, `env NAME=value`, `printf -v NAME`, or
+  a `{NAME}>` redirection.
+- `env` carries an option (`-S` splits its value into a new command line), or
+  `timeout` or `nice` carries one they do not document.
+- A redirection opens anything except an ordinary file or `/dev/null`,
+  `/dev/stdin`, `/dev/stdout` and `/dev/stderr`: `/dev/tcp/HOST/PORT` and
+  `/dev/udp/HOST/PORT`, which bash opens as sockets, any other path under
+  `/dev`, `/proc` or `/sys`, or a target built from an expansion. `<&` and
+  `>&` may also duplicate descriptor 0, 1 or 2 or close one with `-`; any
+  other descriptor was inherited from whatever started the shell. bash
+  expands a `>&` target that is not a descriptor a second time, so a file
+  named there must be plain text: letters, digits and `_ . / , : = % + @ -`.
+- The reader cannot follow it: backquotes, arithmetic, subshells, process
+  substitution, `${...}` operators, a backslash-newline right after `$`, `&`
+  or a redirection operator (bash joins it to what follows), an unterminated
+  quote or heredoc, or nesting deeper than the reader's stack.
+
+A heredoc body is data. A line whose commands are all read-only is not judged
+when it writes a heredoc, so `cat > probe.py <<EOF` may write a script that
+names a sender. bash expands an unquoted body, so one holding a command
+substitution, arithmetic, a `${...}` operator or a trailing backslash leaves
+the line judged. A body is quoted, and always data, when a quote or an
+escaping backslash appears in its delimiter (`<<'EOF'`, `<<"EOF"`,
+`<<\EOF`); a backslash-newline there quotes nothing. Any other line is
+judged on its full text, bodies included, so `python3 <<EOF` and a
+write-then-run in one command are still caught.
 
 Omit `providers` to use the built-in Microsoft Graph, Gmail, SendGrid, Mailgun,
 Postmark and Resend hosts. This is a static routing check: it does not send
