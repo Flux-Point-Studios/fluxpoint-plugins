@@ -53,6 +53,20 @@ function file(dir, name, body) {
   return p;
 }
 
+/** One test per command, each in a fresh repo where blast.py reaches a send endpoint, other.py only reads mail and
+ *  thin.py imports blast, asserting the hook's exit status. */
+function expectEach(status, title, commands) {
+  for (const command of commands) {
+    test(`${title}: ${command.includes("\n") ? JSON.stringify(command) : command}`, () => {
+      const dir = repo();
+      file(dir, "blast.py", SENDER_BODY);
+      file(dir, "other.py", READER_BODY);
+      file(dir, "thin.py", "import blast\n");
+      assert.equal(hook(command, dir).status, status);
+    });
+  }
+}
+
 // ------------------------------------------------------------- opt-in default
 test("with no config the hook allows everything", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "choke-noconf-"));
@@ -278,11 +292,11 @@ test("the config is found from the command's directory, not only the session's",
 });
 
 // ------------------------------------------------- reading a sender is not sending
-// A command made only of read-only tools (print, search, hash, compare, list, git
-// read subcommands) cannot run the file it names, so it is never judged; the
-// operator must be able to read, grep and hash the very files the gate protects.
-// Anything that can run a file keeps the full judgment.
-for (const command of [
+// A command made only of read-only tools (print, search, hash, compare, list) cannot
+// run the file it names, so it is never judged; the operator must be able to read,
+// grep and hash the very files the gate protects. Anything that can run a file keeps
+// the full judgment.
+expectEach(0, "a read-only command on a sender is allowed", [
   "sha256sum blast.py",
   "cat blast.py",
   "head -n 40 blast.py | grep -n send",
@@ -299,16 +313,9 @@ for (const command of [
   "cat blast.py &>/dev/null",
   "cat blast.py &>> log.txt",
   "grep -n send blast.py >&2",
-]) {
-  test(`a read-only command on a sender is allowed: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    file(dir, "other.py", READER_BODY);
-    assert.equal(hook(command, dir).status, 0, "reading or hashing a file is not a send");
-  });
-}
+]);
 
-for (const command of [
+expectEach(2, "a command that can run the sender keeps the full judgment", [
   "cat blast.py | python3",
   'python3 -c "$(cat blast.py)"',
   "cat blast.py && python blast.py",
@@ -325,49 +332,31 @@ for (const command of [
   "sha256sum blast.py >&2 && python3 blast.py",
   "cat blast.py &>/dev/null; python3 blast.py",
   "&>cat python3 blast.py",
-]) {
-  test(`a command that can run the sender keeps the full judgment: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 2);
-  });
-}
+]);
 
 // A word the reader looks up must not reach an Object method: the hook fails open on its own errors, so a lookup
 // that throws would allow the whole line, sender and all.
-for (const command of [
+expectEach(2, "a word named like an Object method does not open the gate", [
   "toString blast.py && python3 blast.py",
   "valueOf x; python3 blast.py",
   "hasOwnProperty a b | python3 blast.py",
-]) {
-  test(`a word named like an Object method does not open the gate: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 2);
-  });
-}
+]);
 
 // ------------------------------------------------- the exemption trusts nothing that runs a program
 // Every git subcommand honours repository configuration an agent can write: core.fsmonitor runs on status,
 // diff.external and textconv drivers on diff, show and log -p, core.pager under --paginate.
-for (const command of [
+expectEach(2, "git is never exempt", [
   "git status -- blast.py",
   "git diff -- blast.py",
   "git log -p -- blast.py",
   "git --paginate show HEAD -- blast.py",
   "git -C . diff -- blast.py",
   "git grep --open-files-in-pager=python3 send -- blast.py",
-]) {
-  test(`git is never exempt: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 2);
-  });
-}
+]);
 
 // rg --pre, ugrep --filter and sort --compress-program name a program to run; less and more run LESSOPEN
 // filters and shell escapes; a path-qualified name is whatever file sits at that path.
-for (const command of [
+expectEach(2, "a tool that can run a program is never exempt", [
   "rg --pre python3 . blast.py",
   'ugrep --filter="py:python3 %" x blast.py',
   "sort --compress-program=python3 blast.py",
@@ -375,18 +364,12 @@ for (const command of [
   "more blast.py",
   "./cat blast.py",
   "bin/sha256sum blast.py",
-]) {
-  test(`a tool that can run a program is never exempt: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 2);
-  });
-}
+]);
 
 // A redirection opens its target, and bash opens /dev/tcp/HOST/PORT and /dev/udp/HOST/PORT as sockets: data needs no
 // interpreter to leave. A target is exempt only when it is an ordinary file or /dev/null, /dev/stdin, /dev/stdout,
 // /dev/stderr, written out literally; an expansion could name anything.
-for (const command of [
+expectEach(2, "a redirection to anything but an ordinary file is judged", [
   "cat blast.py > /dev/tcp/127.0.0.1/25",
   "cat blast.py >/dev/udp/127.0.0.1/25",
   "cat blast.py 1<>/dev/tcp/127.0.0.1/25",
@@ -404,32 +387,20 @@ for (const command of [
   "cat blast.py > ~root/out.txt",
   "> cat python3 blast.py",
   "2> cat python3 blast.py",
-]) {
-  test(`a redirection to anything but an ordinary file is judged: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 2);
-  });
-}
+]);
 
 // Quoting is read as bash reads it: a quoted ; or | separates nothing, and quoting cannot hide an option or an
 // assignment from the reader.
-for (const command of [
+expectEach(0, "a quoted separator or an ordinary redirection keeps the exemption", [
   'grep -E "send|reply" blast.py',
   'grep -n "a;b" blast.py > hits.txt',
   "cat blast.py > /dev/null 2>/dev/stderr",
   "grep -c send < blast.py >> counts.txt",
   "cat blast.py > sub/../copy.txt",
   "c''at blast.py",
-]) {
-  test(`a quoted separator or an ordinary redirection keeps the exemption: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 0);
-  });
-}
+]);
 
-for (const command of [
+expectEach(2, "quoting and grouping cannot hide a command from the reader", [
   'LESSOPEN="|python3 %s" cat blast.py',
   "printf -''v PATH %s ./bin; cat blast.py",
   "p''rintf -v PATH %s ./bin; cat blast.py",
@@ -441,32 +412,20 @@ for (const command of [
   "{ python3 blast.py; }",
   "cat blast.py; $X blast.py",
   "echo $((1)); python3 blast.py",
-]) {
-  test(`quoting and grouping cannot hide a command from the reader: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 2);
-  });
-}
+]);
 
 // env -S splits its value into a new command line, so an env prefix with any option is judged. timeout and nice
 // have no option that runs a program, and keep the exemption with the options they document.
-for (const command of [
+expectEach(2, "an env prefix with an option is judged", [
   "env -Spython3 cat blast.py",
   "env --split-string=python3 cat blast.py",
   "env -i cat blast.py",
   "env -- cat blast.py",
-]) {
-  test(`an env prefix with an option is judged: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 2);
-  });
-}
+]);
 
 // An assignment can change what any later word runs: LD_PRELOAD loads code into cat itself, PATH picks which file a
 // bare name is, LESSOPEN and GIT_* name programs. printf -v and a {name}> redirection assign as well.
-for (const command of [
+expectEach(2, "an assignment makes the command judged", [
   "LD_PRELOAD=./shim.so cat blast.py",
   'LESSOPEN="|python3 %s" cat blast.py',
   "LC_ALL=C grep -c graph blast.py",
@@ -474,48 +433,30 @@ for (const command of [
   "env PATH=./bin cat blast.py",
   "printf -v PATH %s ./bin; cat blast.py",
   "true {PATH}>x.txt; cat blast.py",
-]) {
-  test(`an assignment makes the command judged: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 2);
-  });
-}
+]);
 
-for (const command of [
+expectEach(0, "an assignment-shaped argument is not an assignment", [
   "echo PATH=./bin blast.py",
   'printf "%s\\n" "$(sha256sum blast.py)"',
   "printf -- -v blast.py",
-]) {
-  test(`an assignment-shaped argument is not an assignment: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 0);
-  });
-}
+]);
 
-for (const command of [
+expectEach(0, "a timeout, nice or bare env prefix keeps the exemption", [
   "env cat blast.py",
   "nice -n 5 sha256sum blast.py",
   "nice -n5 cat blast.py",
   "timeout -k 5 -s KILL 60 sha256sum blast.py",
   "timeout --foreground --kill-after=5 60s cat blast.py",
   "nice timeout 60 env cat blast.py",
-]) {
-  test(`a timeout, nice or bare env prefix keeps the exemption: ${command}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 0);
-  });
-}
+]);
 
 // ------------------------------------------------- a heredoc body is data
-// A line whose commands are all read-only once heredoc bodies are set aside is not
-// judged: writing a script that NAMES a sender is not running it. Any other line is
-// judged on its full text, bodies included, and a heredoc that cannot be delimited
-// for certain leaves the line judged.
+// A line whose commands are all read-only is not judged when it writes a heredoc:
+// writing a script that NAMES a sender is not running it. Any other line is judged
+// on its full text, bodies included, and a heredoc that bash would expand, or that
+// cannot be delimited for certain, leaves the line judged.
 const INLINE_SEND = 'urllib.request.urlopen("https://graph.microsoft.com/v1.0/me/sendMail")';
-for (const command of [
+expectEach(0, "a heredoc into a read-only command is not judged", [
   "cat > probe.py <<EOF\n# provenance: thin.py\nimport other\nEOF",
   "cat > probe.py <<EOF\n# copied from blast.py\nEOF",
   "cat > probe.py <<'EOF'\n# copied from blast.py\nEOF",
@@ -527,16 +468,9 @@ for (const command of [
   "cat <<<x > a.txt; cat > probe.py <<EOF\n# copied from blast.py\nEOF",
   'echo "say \\"hi\\"" > a.txt; cat > probe.py <<EOF\n# copied from blast.py\nEOF',
   "echo 'c:\\' > a.txt; cat > probe.py <<EOF\n# copied from blast.py\nEOF",
-]) {
-  test(`a heredoc into a read-only command is not judged: ${JSON.stringify(command)}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    file(dir, "thin.py", "import blast\n");
-    assert.equal(hook(command, dir).status, 0, "a heredoc body is data until something runs it");
-  });
-}
+]);
 
-for (const command of [
+expectEach(2, "a heredoc that runs, or cannot be delimited, keeps the full judgment", [
   `python3 <<EOF\n${INLINE_SEND}\nEOF`,
   `cat <<EOF | python3\n${INLINE_SEND}\nEOF`,
   `cat > p.py <<EOF\n${INLINE_SEND}\nEOF\npython3 p.py`,
@@ -550,18 +484,12 @@ for (const command of [
   "cat > p.txt <<-EOF\npython3 blast.py\n  EOF",
   'echo "a\n<<EOF"\npython3 blast.py\nEOF',
   "cat > p.txt <<EOF \\\n; python3 blast.py\nEOF",
-]) {
-  test(`a heredoc that runs, or cannot be delimited, keeps the full judgment: ${JSON.stringify(command)}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 2);
-  });
-}
+]);
 
 // bash expands an unquoted heredoc body, so a command substitution in it runs; a delimiter is the whole quote-removed
 // word; an unquoted body joins a line ending in a backslash to the next before it looks for the delimiter; and
 // a heredoc operator inside a quote opened on an earlier line is text.
-for (const command of [
+expectEach(2, "a heredoc is read as bash reads it", [
   "cat <<EOF\n$(python3 blast.py)\nEOF",
   "cat <<EOF\n`python3 blast.py`\nEOF",
   "cat > a.txt <<-EOF\n\t${x:-$(python3 blast.py)}\n\tEOF",
@@ -570,15 +498,9 @@ for (const command of [
   "cat <<EOF\nE\\\nOF\npython3 blast.py\nEOF",
   'echo "\n<<EOF "cat"\n"; python3 blast.py; echo "\nEOF\n"',
   "echo $(cat <<EOF\nx\nEOF\n); python3 blast.py",
-]) {
-  test(`a heredoc is read as bash reads it: ${JSON.stringify(command)}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 2);
-  });
-}
+]);
 
-for (const command of [
+expectEach(0, "a quoted heredoc body, or an unquoted one without substitutions, is data", [
   "cat > probe.sh <<'EOF'\n$(python3 blast.py)\n`python3 blast.py`\nEOF",
   'cat > probe.sh <<"EOF"\n$(python3 blast.py)\nEOF',
   "cat > probe.sh <<\\EOF\n$(python3 blast.py)\nEOF",
@@ -586,13 +508,7 @@ for (const command of [
   "cat > a.txt <<A; cat > b.txt <<'B'\n# blast.py $x\nA\n$(python3 blast.py)\nB",
   "cat > notes.txt <<EOF \\\n  && wc -l notes.txt\n# blast.py\nEOF",
   'cat > notes.txt <<EOF "$(sha256sum blast.py)"\n# blast.py\nEOF',
-]) {
-  test(`a quoted heredoc body, or an unquoted one without substitutions, is data: ${JSON.stringify(command)}`, () => {
-    const dir = repo();
-    file(dir, "blast.py", SENDER_BODY);
-    assert.equal(hook(command, dir).status, 0);
-  });
-}
+]);
 
 test("a line too deep for the reader is judged, not exempted", () => {
   // The hook allows a command when its own code throws; the reader's failure must land on the judged side.

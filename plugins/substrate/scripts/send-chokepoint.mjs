@@ -264,7 +264,8 @@ function requireReadOnly(src, cwd) {
     for (const doc of heredocs.splice(0)) {
       for (;;) {
         if (i >= src.length) notExempt();
-        const end = src.indexOf("\n", i) < 0 ? src.length : src.indexOf("\n", i);
+        let end = src.indexOf("\n", i);
+        if (end < 0) end = src.length;
         const line = src.slice(i, end);
         i = end + 1;
         if ((doc.tabs ? line.replace(/^\t+/, "") : line) === doc.delimiter) break;
