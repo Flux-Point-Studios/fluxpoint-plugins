@@ -675,7 +675,8 @@ for (const [shape, line] of Object.entries(LARGE)) {
 const objects = (n) => `[${Array.from({ length: n }, (_, k) => `{"id":${k},"name":"n${k}"}`).join(",")}]`;
 const pairs = (n) => Array.from({ length: n }, (_, k) => `{a${k}:1,b${k}:2}`).join(" + ");
 const QUOTED_BRACES = {
-  "curl with a JSON body": `curl -sS -X POST -H 'Content-Type: application/json' -d '${objects(13)}' https://api.example.com/v1/items`,
+  "curl with a JSON body":
+    `curl -sS -X POST -H 'Content-Type: application/json' -d '${objects(13)}' https://api.example.com/v1/items`,
   "curl with a larger JSON body": `curl -sS -d '${objects(40)}' https://api.example.com/v1/items`,
   "gh api from a quoted heredoc": `gh api repos/o/r/labels --input - <<'EOF'\n${objects(20)}\nEOF`,
   "jq": `jq -n '${pairs(13)}'`,
@@ -1005,6 +1006,36 @@ expectAt(2, "a path is resolved from every directory the line reaches", [
   ["cd sub && python3 $OLDPWD/blast.py", "proj/blast.py"],
   ["cd sub && python3 $PWD/blast.py", "proj/sub/blast.py"],
   ['cd sub && python3 "$PWD/blast.py"', "proj/sub/blast.py"],
+]);
+
+// A line can turn on the glob options its own later lines use: Claude Code's shell evaluates a line one command at a
+// time, so `shopt -s extglob` on one line takes effect on the next, and a shell's -O sets them for its -c string.
+expectAt(2, "a glob is matched with the options the line turns on", [
+  ["shopt -s extglob\npython3 @(blast).py", "proj/blast.py"],
+  ["shopt -s extglob\npython3 !(other).py", "proj/blast.py"],
+  ["bash -O extglob -c 'python3 @(blast).py'", "proj/blast.py"],
+  ["bash -c $'shopt -s extglob\\npython3 @(blast).py'", "proj/blast.py"],
+  ["shopt -s nocaseglob; python3 BLAST.P[Y]", "proj/blast.py"],
+  ["bash -O nocaseglob -c 'python3 BLAST.P[Y]'", "proj/blast.py"],
+  ["shopt -s globstar; python3 **/bl?st.py", "proj/sub/deeper/blast.py"],
+  ["o=globstar; shopt -s $o; python3 **/bl?st.py", "proj/sub/deeper/blast.py"],
+  ["shopt -s $(echo globstar); python3 **/bl?st.py", "proj/sub/deeper/blast.py"],
+  ["shopt -s dotglob; bash ?hid.sh", "proj/.hid.sh"],
+  ["GLOBIGNORE=x; bash ?hid.sh", "proj/.hid.sh"],
+]);
+
+expectEach(0, "an extglob group is read as part of its word", [
+  "shopt -s extglob\nls @(a|b c)",
+  "shopt -s extglob\ntouch ?(x).txt",
+  "case $x in @(a|b)) echo ab;; esac",
+  "[[ $x == +(a|b) ]] && echo ab",
+  "! (true) && echo negated",
+]);
+
+expectAt(0, "a glob option the line does not turn on is off", [
+  ["python3 **/blast.py", "proj/sub/deeper/blast.py"],
+  ["python3 BLAST.P[Y]", "proj/blast.py"],
+  ["bash ?hid.sh", "proj/.hid.sh"],
 ]);
 
 expectAt(0, "a directory the line reaches holds no sender", [

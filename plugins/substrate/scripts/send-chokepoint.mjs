@@ -149,6 +149,9 @@ const LENIENT_DEPTH = 8;
 const EXPANSION_LIMIT = 4096;
 // A line that may run in more directories than this is refused rather than resolved in part.
 const MAX_PLACES = 64;
+// The shell options that change what a glob matches. extglob is not among them: its groups are read as patterns
+// always, since bash refuses a line holding one while it is off.
+const GLOB_OPTIONS = ["dotglob", "globstar", "nocaseglob"];
 const ENV_ESCAPES = { '"': '"', "#": "#", $: "$", "'": "'", "\\": "\\", _: " ", f: "\f", n: "\n", r: "\r", t: "\t",
   v: "\v" };
 const C_ESCAPE = /\\(?:([0-7]{1,3})|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c([\s\S])|([\s\S]))/g;
@@ -552,21 +555,35 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
   // One word after quote removal: its text, whether it holds no expansion or pattern, whether any of it is quoted or
   // escaped, its source without line continuations, whether an expansion may supply its first character, whether it
   // may split, and where in that source each unquoted `{`, `,`, `}` and `.` is, from which bash finds the braces it
-  // expands.
-  const word = () => {
+  // expands. The full judgment reads an extglob group, `@(...)`, `?(...)`, `*(...)`, `+(...)` or `!(...)`, into the
+  // word, blanks and `|` included, as bash does with extglob on; with it off bash refuses the line. A `!(` that opens a
+  // word at the start of a command is `!` before a subshell either way.
+  const word = (start = false) => {
     const b = builder();
+    const begin = i;
     let bare = "";
     let quoted = false;
     let splits = false;
+    let groups = 0;
     const braces = [];
-    while (i < src.length && !ENDS_WORD.has(src[i])) {
+    while (i < src.length && (groups > 0 || !ENDS_WORD.has(src[i]))) {
       const from = i;
       const c = src[i];
       if (continued(i)) {
         i += 2;
         continue;
       }
-      if (c === "'") {
+      if (full && "@!+*?".includes(c) && src[i + 1] === "(" && !(c === "!" && start && i === begin)) {
+        b.add(src.slice(i, i + 2), false);
+        i += 2;
+        groups += 1;
+        b.literal = false;
+        splits = true;
+      } else if (groups > 0 && (c === "(" || c === ")")) {
+        b.add(c, false);
+        i += 1;
+        groups += c === "(" ? 1 : -1;
+      } else if (c === "'") {
         const end = src.indexOf("'", i + 1);
         if (end < 0) cannotRead();
         b.add(src.slice(i + 1, end), false, undefined, undefined, quotedPart(src.slice(i + 1, end)));
@@ -606,6 +623,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
       }
       bare += src.slice(from, i);
     }
+    if (groups > 0) cannotRead();
     return { text: b.text, literal: b.literal, quoted, bare, opensDynamic: b.opensDynamic, splits, parts: b.parts,
              braces };
   };
@@ -770,7 +788,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
         redirects.push(redirect(nested, fd));
         fd = null;
       } else {
-        const w = word();
+        const w = word(opener === words.length);
         if (src[i] === "<" || src[i] === ">") {
           if (NAMED_FD.test(w.bare)) {
             if (!full) notExempt();
@@ -921,10 +939,11 @@ function commandChain(words, values) {
 /** What the full judgment reads from a line: every word bash would build, in the line and in the shell code it
  *  carries, with whether bash would expand it as a glob and whether it was read only for the names in it; the values
  *  the line assigns each variable; the directory each `cd`, `pushd` or `env -C` changes into (null for HOME); the
- *  starting points and command of each `find -execdir`; and, when it runs shell code the line does not show, where.
- *  `tool` is the hook payload's tool_name. */
+ *  starting points and command of each `find -execdir`; the glob options it may turn on; and, when it runs shell code
+ *  the line does not show, where. `tool` is the hook payload's tool_name. */
 function readLine(command, cwd, tool) {
-  const found = { texts: [], words: [], values: new Map(), moves: [], finds: [], unreadable: null };
+  const found = { texts: [], words: [], values: new Map(), moves: [], finds: [], options: new Set(),
+                  unreadable: null };
   const assign = (name, value) => {
     const key = name.replace(/\+$|\[.*$/, "");
     if (!found.values.has(key)) found.values.set(key, new Set());
@@ -1076,7 +1095,9 @@ function readLine(command, cwd, tool) {
         }
       }
       if (takesNext) k += 1;
-      if (chdir && (attached !== null || words[k])) found.moves.push(attached === null ? words[k] : literalWord(attached));
+      if (chdir && (attached !== null || words[k])) {
+        found.moves.push(attached === null ? words[k] : literalWord(attached));
+      }
       if (!split) continue;
       const what = "the -S string of env";
       if (attached === null && !words[k]) return unreadable(`${what} is not in the line`);
@@ -1095,6 +1116,10 @@ function readLine(command, cwd, tool) {
     for (const w of [...words, ...redirects.map((r) => r.target).filter(Boolean)]) {
       found.texts.push(w.text);
       found.words.push({ word: w, glob: w.splits && !w.pattern && !tested, lenient: lenient > 0 });
+      // A word that names a glob option may turn it on for the rest of the line, through shopt, a shell's -O or
+      // BASHOPTS; a value GLOBIGNORE takes turns dotglob on.
+      for (const option of GLOB_OPTIONS) if (w.text.includes(option)) found.options.add(option);
+      if (w.text.includes("GLOBIGNORE")) found.options.add("dotglob");
     }
     const name = words[head]?.literal ? words[head].text : null;
     const args = words.slice(head + 1);
@@ -1104,6 +1129,12 @@ function readLine(command, cwd, tool) {
       if (ASSIGNMENT.test(w.bare)) assign(w.text.slice(0, w.text.indexOf("=")), w.text.slice(w.text.indexOf("=") + 1));
     }
     if (name === "for" && args[1]?.bare === "in") for (const w of args.slice(2)) assign(args[0].text, w.text);
+    // An option shopt, a shell's -O or BASHOPTS takes from an expansion may be any of them.
+    if ((name === "shopt" && args.some((w) => !w.literal))
+        || words.some((w, k) => !w.literal
+                       && (/^[-+]O$/.test(words[k - 1]?.text ?? "") || /^BASHOPTS=/.test(w.text)))) {
+      for (const option of GLOB_OPTIONS) found.options.add(option);
+    }
     if (name === "cd" || name === "pushd") {
       let k = 0;
       while (args[k]?.literal && /^-[LPe@]+$/.test(args[k].text)) k += 1;
@@ -1263,9 +1294,9 @@ function braceSequence(inner, budget) {
 /** In `source`, the first brace bash expands, found as bash's brace_expand finds it among the unquoted `{`, `,`, `}`
  *  and `.` at offsets `active`. A `{` is closed only by a `}` at its own level after a comma or a `..` at that level;
  *  a word's leading `{}` is text. A closed pair holding a comma anywhere splits at the unquoted commas at its own
- *  level; one holding none is a sequence or, failing that, text up to its `}`. Returns the items, each as the source with the
- *  pair replaced by that item and the offsets still active there, or null when nothing expands. Each 1024 offsets
- *  looked at spend one unit, so a word of braces that never close stops when the budget does. */
+ *  level; one holding none is a sequence or, failing that, text up to its `}`. Returns the items, each as the source
+ *  with the pair replaced by that item and the offsets still active there, or null when nothing expands. Each 1024
+ *  offsets looked at spend one unit, so a word of braces that never close stops when the budget does. */
 function braceItems(source, active, budget) {
   const mark = (m) => source[active[m]];
   let steps = 0;
@@ -1371,8 +1402,8 @@ const regexText = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 
 /** A RegExp for one path segment of a glob: `*`, `?`, bracket sets and the extglob groups `@(...)`, `?(...)`,
  *  `*(...)`, `+(...)` and `!(...)`, which bash cannot parse unless extglob is on. A POSIX class matches any character,
- *  and `!(...)` any text. */
-function globSegment(segment) {
+ *  and `!(...)` any text. `nocase` is nocaseglob. */
+function globSegment(segment, nocase) {
   let k = 0;
   const bracket = () => {
     let j = k + 1;
@@ -1429,40 +1460,53 @@ function globSegment(segment) {
     return re;
   };
   try {
-    return new RegExp(`^${sequence(false)}$`, "s");
+    return new RegExp(`^${sequence(false)}$`, nocase ? "si" : "s");
   } catch {
     // A set bash would read differently, such as a reversed range: any name may match.
     return /^/;
   }
 }
 
-/** The paths a glob names from each of `dirs`, as bash expands it: a name starting with `.` only for a segment that
- *  does. A path is joined as the kernel reads it, so `link/..` is the parent of where link points. */
-function globFiles(pattern, dirs, budget) {
+/** The paths a glob names from each of `dirs`, as bash expands it with the glob `options` on: a name starting with `.`
+ *  only for a segment that does, or with dotglob; with globstar, a `**` segment for any depth of directories, symlinks
+ *  not followed, and as the last segment for everything below. A path is joined as the kernel reads it, so `link/..`
+ *  is the parent of where link points. */
+function globFiles(pattern, dirs, budget, options = new Set()) {
   const out = [];
   const segments = pattern.split("/");
+  const listing = (dir) => {
+    if (!budget.listings.has(dir)) {
+      budget.left -= 1;
+      let entries = [];
+      try {
+        entries = fs.readdirSync(dir || "/", { withFileTypes: true })
+          .map((entry) => ({ name: entry.name, directory: entry.isDirectory() }));
+      } catch {
+        // Not a directory bash could read either: the segment matches nothing.
+      }
+      budget.listings.set(dir, entries);
+    }
+    return budget.listings.get(dir);
+  };
   const walk = (dir, k) => {
     const segment = segments[k];
     if (budget.left <= 0) return;
     budget.left -= 1;
+    const dots = options.has("dotglob") || segment?.[0] === "." || segment?.startsWith("\\.");
     if (k === segments.length) {
       out.push(dir);
+    } else if (segment === "**" && options.has("globstar")) {
+      for (const { name, directory } of listing(dir)) {
+        if (!dots && name[0] === ".") continue;
+        if (k + 1 === segments.length) out.push(`${dir}/${name}`);
+        if (directory) walk(`${dir}/${name}`, k);
+      }
+      if (k + 1 < segments.length) walk(dir, k + 1);
     } else if (!hasGlob(segment)) {
       walk(`${dir}/${unescape(segment)}`, k + 1);
     } else {
-      if (!budget.listings.has(dir)) {
-        budget.left -= 1;
-        let names = [];
-        try {
-          names = fs.readdirSync(dir || "/");
-        } catch {
-          // Not a directory bash could read either: the segment matches nothing.
-        }
-        budget.listings.set(dir, names);
-      }
-      const re = globSegment(segment);
-      const dots = segment[0] === "." || segment.startsWith("\\.");
-      for (const name of budget.listings.get(dir)) {
+      const re = globSegment(segment, options.has("nocaseglob"));
+      for (const { name } of listing(dir)) {
         if ((dots || name[0] !== ".") && re.test(name)) walk(`${dir}/${name}`, k + 1);
       }
     }
@@ -1490,16 +1534,17 @@ const isDirectory = (dir) => {
 };
 
 /** Where a `cd`, `pushd` or `env -C` operand (null: none, so HOME) may lead from any of `places`: built with the
- *  values in `scope`, `-` as OLDPWD, `~` forms and globs expanded, a relative name through each CDPATH entry and
- *  directly, each both as bash's default logical cd joins it and as the kernel resolves it. */
-function moveTargets(operand, places, scope, budget) {
+ *  values in `scope`, `-` as OLDPWD, `~` forms and globs (with the glob `options`) expanded, a relative name through
+ *  each CDPATH entry and directly, each both as bash's default logical cd joins it and as the kernel resolves it. */
+function moveTargets(operand, places, scope, budget, options) {
   const out = [];
   const texts = operand ? substitutions(operand.parts ?? [{ text: operand.text }], scope, budget) : [{ text: "~" }];
   const cdpath = [process.env.CDPATH, ...(scope.get("CDPATH") ?? [])].filter((v) => typeof v === "string")
     .flatMap((v) => v.split(":"));
   for (const { text, pattern } of texts) {
+    const glob = operand?.splits && hasGlob(pattern);
     const names = text === "-" ? [...scope.get("OLDPWD")]
-      : operand?.splits && hasGlob(pattern) ? tildeForms(pattern, scope).flatMap((p) => globFiles(p, places, budget))
+      : glob ? tildeForms(pattern, scope).flatMap((p) => globFiles(p, places, budget, options))
         : tildeForms(text, scope);
     for (const name of names) {
       const bases = path.isAbsolute(name) || /^\.\.?(?:\/|$)/.test(name) ? [""] : ["", ...cdpath];
@@ -1538,7 +1583,7 @@ function directories(command, cwd, reading, budget) {
     extend("OLDPWD", [process.env.OLDPWD, ...places].filter(Boolean));
     grew = false;
     for (const operand of reading.moves) {
-      for (const dir of moveTargets(operand, [...places], scope, budget)) {
+      for (const dir of moveTargets(operand, [...places], scope, budget, reading.options)) {
         if (places.has(dir) || !isDirectory(dir)) continue;
         if (places.size >= MAX_PLACES) budget.left = 0;
         else places.add(dir);
@@ -1612,7 +1657,7 @@ function referencedFiles(command, cwd, reading, budget) {
         // An assigned value is not a glob yet, but an unquoted expansion of it later is.
         for (const part of new Set([pattern, pattern.slice(pattern.indexOf("=") + 1)])) {
           for (const form of tildeForms(part, scope)) {
-            for (const fp of globFiles(form, places, spend)) if (SCRIPT_NAME.test(fp)) tokens.add(fp);
+            for (const fp of globFiles(form, places, spend, reading.options)) if (SCRIPT_NAME.test(fp)) tokens.add(fp);
           }
         }
       }

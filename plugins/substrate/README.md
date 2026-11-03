@@ -401,7 +401,16 @@ the raw text and from every word as bash builds it:
   written and before its variables, so `$x{a,b}` is `$xa` and `$xb` and
   a quoted `'{a,b}'` stays text;
 - an unquoted glob matched against the filesystem from the command's
-  directories (a `case` pattern and the operands of `[[` are not globs);
+  directories (a `case` pattern and the operands of `[[` are not globs).
+  Extglob groups (`@(...)`, `?(...)`, `*(...)`, `+(...)`, `!(...)`) are
+  read into their word and matched as patterns always, since bash refuses
+  a line holding one while extglob is off; `!(...)` matches as `*` does.
+  `nocaseglob`, `globstar` and `dotglob` count as on for the whole line
+  when any word it reads names one of them (as `shopt -s` or a shell's
+  `-O` would), `GLOBIGNORE` turns `dotglob` on the same way, and all
+  three count as on when `shopt`, `-O` or `BASHOPTS=` takes a value
+  built from an expansion. With `globstar`, `**` walks every directory
+  below, as bash does, without following symlinks;
 - each `cd` or `pushd` target (none means HOME, `-` means OLDPWD) and
   each `env -C` or `--chdir` directory, built the same way, globs
   included, and resolved against every directory the line may be in:
