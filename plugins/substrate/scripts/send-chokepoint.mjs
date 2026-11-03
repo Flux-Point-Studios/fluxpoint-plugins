@@ -22,11 +22,12 @@
 // in every script that READS a mailbox. Reading mail is not sending it, and
 // blocking readers is how a gate earns being removed.
 //
-// FAILS OPEN ON ITSELF, CLOSED ON THE SEND. A malformed payload, an unreadable
-// file or a missing config exits 0: a broken hook must never wedge a session. A
-// file it can read that is a sender outside the declared allowlist exits 2, and
-// so does a line that runs shell code it cannot read, since that code could
-// name any file.
+// FAILS OPEN ON ITS INPUT, CLOSED ON THE SEND. A malformed payload, an
+// unreadable file or a missing config exits 0: a broken hook must never wedge a
+// session. A file it can read that is a sender outside the declared allowlist
+// exits 2. So does a line that runs shell code it cannot read, since that code
+// could name any file, and a line the judgment fails on, since what it did not
+// judge could be a send.
 //
 // CONFIG — `.send-chokepoint.json`, found by walking up from the command's
 // working directory:
@@ -1347,9 +1348,22 @@ function senderVerdict(fp, config, via) {
 }
 
 /** `tool` is the hook payload's tool_name. The read-only exemption reads bash grammar, so it applies to the Bash tool
- *  alone: PowerShell takes no backslash as an escape, and a separator bash reads as text can end its statement. */
+ *  alone: PowerShell takes no backslash as an escape, and a separator bash reads as text can end its statement.
+ *
+ * ⚠ NEVER THROWS. The hook allows a line it fails on, so a line that drives the
+ * judgment into a limit (the call stack, a string's length) would run unjudged,
+ * along with every sender it names. Any failure here is a block. */
 export function judge(command, cwd, config, tool) {
   if (!config || typeof command !== "string" || !command.trim()) return null;
+  try {
+    return judgeLine(command, cwd, config, tool);
+  } catch (err) {
+    return { reason: "the gate could not finish judging this command", where: String(err?.name ?? err),
+             unreadable: true };
+  }
+}
+
+function judgeLine(command, cwd, config, tool) {
   // A heredoc body is data to the exemption unless bash would expand it. Every other judgment reads the full text,
   // so a body fed to an interpreter is still judged.
   if (tool === "Bash" && readOnlyCommand(command, cwd)) return null;
@@ -1404,8 +1418,15 @@ function main() {
   // the `cd` is ever considered — the same bypass shape as resolving a bare
   // path against the wrong directory, one layer up.
   let loaded = { config: null, problems: [] };
+  let dirs;
   try {
-    for (const dir of searchDirs(typeof command === "string" ? command : "", cwd)) {
+    dirs = searchDirs(typeof command === "string" ? command : "", cwd);
+  } catch {
+    // A line that defeats the reader still answers to the session's own config.
+    dirs = [cwd, process.cwd()].filter(Boolean);
+  }
+  try {
+    for (const dir of dirs) {
       const attempt = loadConfig(dir);
       loaded.problems.push(...(attempt.problems || []));
       if (attempt.config) { loaded = { ...attempt, problems: loaded.problems }; break; }
@@ -1415,8 +1436,7 @@ function main() {
     process.stdout.write(`send-chokepoint: ${p}\n`);
   }
   if (!loaded.config) process.exit(0);
-  let verdict = null;
-  try { verdict = judge(command, cwd, loaded.config, payload?.tool_name); } catch { process.exit(0); }
+  const verdict = judge(command, cwd, loaded.config, payload?.tool_name);
   if (!verdict) process.exit(0);
   process.stderr.write(
     `BLOCKED: ${verdict.reason} (${verdict.where}).\n\n${advice(loaded.config, verdict)}\n`);

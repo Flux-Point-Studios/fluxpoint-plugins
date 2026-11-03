@@ -43,9 +43,10 @@ function repo(config = { sender: "outbound_mail.py" }) {
 function hook(command, cwd, toolName = "Bash", env = {}) {
   const payload = JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd });
   // Claude Code runs the hook in the session's directory, so the hook here runs in the test's own repo, never in
-  // whatever tree the suite was started from.
+  // whatever tree the suite was started from. It also runs the command when the hook outlives the 15 s timeout
+  // hooks.json gives it, so a hook killed here has allowed the line.
   return spawnSync("node", [SCRIPT, "--hook"], { input: payload, encoding: "utf8", cwd,
-    env: { ...process.env, ...env } });
+    env: { ...process.env, ...env }, timeout: 15000 });
 }
 
 function file(dir, name, body) {
@@ -647,6 +648,22 @@ test("a line too deep for the reader is judged, not exempted", () => {
   const deep = `echo ${'"$(echo '.repeat(20000)}true${')"'.repeat(20000)}; python3 blast.py`;
   assert.equal(hook(deep, dir).status, 2);
 });
+
+// The hook allows a line when it fails, so no limit the judgment can reach, such as the call stack, may end it with a
+// throw: whatever else the line runs would run unjudged.
+const JSON_BODY = `[${Array.from({ length: 3000 }, (_, n) => `{"i":${n},"n":1}`).join(",")}]`;
+const LARGE = {
+  "3000 brace lists": `echo '${"{a,}".repeat(3000)}'`,
+  "3000 nested brace lists": `echo '${"{a,".repeat(3000)}b${"}".repeat(3000)}'`,
+  "a 50 KB JSON body": `curl -d '${JSON_BODY}' https://api.example.com`,
+};
+for (const [shape, line] of Object.entries(LARGE)) {
+  test(`a line large enough to exhaust the gate is still judged: ${shape}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(`${line}; python3 blast.py`, dir).status, 2);
+  });
+}
 
 // ------------------------------------------------- a quoted argument can hold a command line
 // `sh -c 'python3 sender.py'` runs the sender. The quoted run as a whole names no file, and the path inside it must

@@ -456,7 +456,9 @@ mail, grant authorization, verify recipients or prove that the approved
 sender enforces its own checks. Dynamic URLs, the values listed as not
 resolved above and unsupported imports can escape detection. Missing
 configuration, malformed payloads and unreadable files allow execution;
-configuration problems are reported when observed.
+configuration problems are reported when observed. A line the judgment
+itself fails on, for instance by running out of call stack, is blocked,
+since the hook would otherwise allow whatever else it runs.
 Do not treat it as an egress sandbox. Its tests use local fixture files and
 never contact mail providers.
 
