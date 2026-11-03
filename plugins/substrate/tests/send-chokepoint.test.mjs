@@ -40,11 +40,12 @@ function repo(config = { sender: "outbound_mail.py" }) {
   return dir;
 }
 
-function hook(command, cwd, toolName = "Bash") {
+function hook(command, cwd, toolName = "Bash", env = {}) {
   const payload = JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd });
   // Claude Code runs the hook in the session's directory, so the hook here runs in the test's own repo, never in
   // whatever tree the suite was started from.
-  return spawnSync("node", [SCRIPT, "--hook"], { input: payload, encoding: "utf8", cwd });
+  return spawnSync("node", [SCRIPT, "--hook"], { input: payload, encoding: "utf8", cwd,
+    env: { ...process.env, ...env } });
 }
 
 function file(dir, name, body) {
@@ -656,6 +657,74 @@ expectEach(2, "a script named inside a quoted argument is judged", [
   "env -S'python3 blast.py'",
   "dash -c 'cd . && python3 thin.py'",
 ]);
+
+// bash joins a word from its quoted, escaped and continued parts and expands an unset variable to nothing, so the path
+// it runs need not appear in the line as one run of text. The full judgment reads every word as bash builds it, in
+// every construct bash runs commands from.
+expectEach(2, "a path is resolved as bash builds the word", [
+  "python3 bl''ast.py",
+  'python3 "bl"ast.py',
+  "python3 b'l'a\"s\"t.py",
+  "python3 bl\\ast.py",
+  "python3 bl\\\nast.py",
+  "python3 $'bl\\x61st.py'",
+  "python3 bl${NO_SUCH_VARIABLE}ast.py",
+  "X=bl''ast.py; python3 $X",
+  "python3 --script=bl''ast.py",
+  "(python3 bl''ast.py)",
+  "{ python3 bl''ast.py; }",
+  "echo `python3 bl''ast.py`",
+  "echo $((1 << 2)); python3 bl''ast.py",
+  "case a in a) python3 bl''ast.py;; esac",
+  "cat <(python3 bl''ast.py)",
+  "if true; then python3 bl''ast.py; fi",
+  "for f in 1; do python3 'bl'ast.py; done",
+  "f() { python3 bl''ast.py; }; f",
+  "python3 th''in.py",
+  'curl -X POST "https://graph.microsoft.com/v1.0/me/sen""dMail"',
+  "curl -X POST https://graph.microsoft.com/v1.0/me/sen\\dMail",
+]);
+
+// A shell's -c string, env's -S string, eval's arguments, a trap action and the commands a shell reads from a heredoc
+// or here-string are command lines of their own, read the same way, to any depth.
+expectEach(2, "shell code inside the line is read as bash reads it", [
+  "bash -c \"python3 bl''ast.py\"",
+  "sh -c 'python3 bl\"\"ast.py'",
+  "dash -c 'python3 bl\\\nast.py'",
+  "zsh -c 'python3 bl\"\"ast.py'",
+  "sh -c 'bash -c \"python3 bl\\\"\\\"ast.py\"'",
+  "sudo -u nobody bash -lc \"python3 bl''ast.py\"",
+  "timeout 5 sh -ec \"python3 bl''ast.py\"",
+  "bash -o pipefail -c \"python3 bl''ast.py\"",
+  "find . -maxdepth 0 -exec sh -c \"python3 bl''ast.py\" \\;",
+  "env -S\"python3 bl''ast.py\"",
+  "env -S'python3 \"bl\"ast.py'",
+  "env -i -S'sh -c \"python3 bl\\\"\\\"ast.py\"'",
+  "eval \"python3 bl''ast.py\"",
+  "trap \"python3 bl''ast.py\" EXIT",
+  "bash <<'EOF'\npython3 bl''ast.py\nEOF",
+  "bash <<< \"python3 bl''ast.py\"",
+  "sh -s <<EOF\npython3 bl''ast.py\nEOF",
+]);
+
+test("a path under ~ is resolved against the home directory", () => {
+  const dir = repo();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "choke-home-"));
+  file(home, "blast.py", SENDER_BODY);
+  for (const command of ["python3 ~/blast.py", "python3 ~/bl''ast.py", "cd ~ && python3 blast.py",
+                         "bash -c 'python3 ~/blast.py'"]) {
+    assert.equal(hook(command, dir, "Bash", { HOME: home }).status, 2, command);
+  }
+  file(dir, "blast.py", SENDER_BODY);
+  assert.equal(hook("python3 ~+/blast.py", dir).status, 2, "~+ is the working directory");
+});
+
+test("a cd target is resolved as bash builds it", () => {
+  const dir = repo();
+  fs.mkdirSync(path.join(dir, "sub"));
+  file(path.join(dir, "sub"), "blast.py", SENDER_BODY);
+  assert.equal(hook("cd s''ub && python3 blast.py", dir).status, 2);
+});
 
 test("an inline send is still BLOCKED when it rides with a read-only command", () => {
   const dir = repo();

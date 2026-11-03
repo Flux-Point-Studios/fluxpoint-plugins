@@ -63,6 +63,7 @@ const MAX_READ_BYTES = 2_000_000;
 // run can be a whole command line (`sh -c 'python3 blast.py'`), which names no file itself.
 const QUOTED_PATH = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))'/g;
 const BARE_PATH = /[A-Za-z0-9_.:\\/~-]+\.(?:py|mjs|js|ts|ps1|sh|rb)\b/g;
+const SCRIPT_NAME = /\.(?:py|mjs|js|ts|ps1|sh|rb)$/;
 // A leading `cd <dir> &&` sets the directory the rest of the command runs in.
 const CD_PREFIX = /(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
 const PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))/gm;
@@ -123,10 +124,48 @@ const BODY_EXPANSION = /`|\$[([]|\$\{(?!(?:[A-Za-z_][A-Za-z0-9_]*|\d+|[@*#?$!-])
 // processes' descriptors and kernel settings. Only these four streams there are ordinary.
 const SPECIAL_ROOT = /^\/(?:dev|proc|sys)(?:\/|$)/;
 const STD_STREAMS = new Set(["/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"]);
+// The shells whose -c string, heredoc and here-string the full judgment reads as code.
+const SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "yash", "posh"]);
+const ENV = new Set(["env"]);
+// Reserved words that may come before a command's name. `time` is read with the runners below.
+const RESERVED = new Set(["!", "{", "if", "then", "elif", "else", "do", "while", "until", "coproc"]);
+// Programs that run the command after their options, each with the option letters whose argument is the next word.
+// timeout also takes a duration; env's -S is read on its own.
+const RUNNERS = new Map([["sudo", "CDghpRrtTUu"], ["doas", "Cu"], ["env", "aCSu"], ["exec", "a"], ["time", "fo"],
+  ["nice", "n"], ["timeout", "ks"], ["nohup", ""], ["setsid", ""], ["stdbuf", "eio"], ["xargs", "adEILnPs"],
+  ["command", ""], ["builtin", ""]]);
+const ENV_ESCAPES = { '"': '"', "#": "#", $: "$", "'": "'", "\\": "\\", _: " ", f: "\f", n: "\n", r: "\r", t: "\t",
+  v: "\v" };
+const C_ESCAPES = { a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\",
+  "'": "'", '"': '"', "?": "?" };
+// A piece of a word whose text the line does not fix: an expansion, or a command's output.
+const DYNAMIC = Object.freeze({ text: "", dynamic: true });
 const NOT_EXEMPT = Symbol("not exempt");
+const UNREADABLE = Symbol("unreadable");
 
 function notExempt() {
   throw NOT_EXEMPT;
+}
+
+function cannotRead() {
+  throw UNREADABLE;
+}
+
+/** The text of a `$'...'` string's contents. bash ends the string at a NUL. */
+function ansiC(body) {
+  return body.replace(/\\(?:([0-7]{1,3})|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c([\s\S])|([\s\S]))/g,
+    (all, oct, hex, u, U, ctl, ch) => {
+      if (oct) return String.fromCharCode(parseInt(oct, 8) & 0xff);
+      const code = parseInt(hex || u || U, 16);
+      if (!Number.isNaN(code)) return code <= 0x10ffff ? String.fromCodePoint(code) : "";
+      if (ctl !== undefined) return String.fromCharCode(ctl.charCodeAt(0) & 0x1f);
+      return C_ESCAPES[ch] ?? all;
+    }).split("\0")[0];
+}
+
+/** A variable's value in this process's environment, which the hook shares with the shell, or nothing. */
+function variable(name) {
+  return /^[A-Za-z_]/.test(name) && Object.hasOwn(process.env, name) ? process.env[name] : null;
 }
 
 /** A redirection target that opens an ordinary file: written out literally, outside /dev, /proc and /sys unless it is
@@ -179,11 +218,19 @@ function requireReadOnlyCommand(words, cwd) {
   if (WRITES_OPERAND.has(texts[i]) && !words.slice(i + 1).every((w) => ordinaryTarget(w, cwd))) notExempt();
 }
 
-/** Reads `src` as bash would and throws NOT_EXEMPT unless every simple command in it, command substitutions
- *  included, is read-only and every redirection opens an ordinary file. A heredoc body is data unless bash would
- *  expand something in it. Syntax it does not follow — backquotes, arithmetic, subshells, process substitution, a
- *  heredoc inside a substitution, an unterminated quote or heredoc — throws too. */
-function requireReadOnly(src, cwd) {
+/** Reads `src` as bash reads it and calls `onCommand(words, redirects)` at the end of every simple command, those in
+ *  substitutions included. A word carries its text after quote removal (`text`), whether it holds no expansion or
+ *  pattern (`literal`), whether any of it is quoted or escaped (`quoted`), its source without line continuations
+ *  (`bare`), whether an expansion may supply its first character (`opensDynamic`), and whether an unquoted expansion
+ *  or pattern may split it into several words (`splits`).
+ *
+ *  The read-only exemption reads with `full` false. It follows a subset of the grammar and throws at the rest:
+ *  backquotes, arithmetic, subshells, process substitution, `${...}` operators, a heredoc inside a substitution, a
+ *  continuation that joins an operator or an expansion, and an unquoted heredoc body bash would expand. The full
+ *  judgment reads with `full` true: it follows those too, decodes `$'...'`, gives a variable its value in this
+ *  process's environment, and throws only at what bash cannot parse or where a heredoc's end cannot be known. With
+ *  `text` it reads `src` as an unquoted heredoc body, following only its expansions. */
+function readShell(src, { cwd, onCommand, full = false, text = false }) {
   let i = 0;
   const heredocs = [];
   const sticky = (re) => {
@@ -199,58 +246,236 @@ function requireReadOnly(src, cwd) {
     while (src[i] === " " || src[i] === "\t" || continued(i)) i += continued(i) ? 2 : 1;
   };
 
-  // At a `$`: consumes an expansion and returns true, or returns false for a literal dollar sign.
+  // A word's text built from its pieces, and whether a piece the line does not fix comes before any it does.
+  const builder = () => {
+    const b = { text: "", literal: true, opensDynamic: false, fixed: false };
+    b.add = (piece, dynamic, opens = dynamic, fixed = !dynamic && piece !== "") => {
+      if (opens && !b.fixed) b.opensDynamic = true;
+      b.fixed ||= fixed;
+      b.text += piece;
+      if (dynamic) b.literal = false;
+    };
+    return b;
+  };
+
+  // At a `$`: consumes an expansion and returns the piece it adds to the word, or returns null for a literal dollar
+  // sign.
   const dollar = (inQuotes) => {
+    if (full) return dollarFull(inQuotes);
     if (continued(i + 1)) notExempt();
     const next = src[i + 1];
     if (next === "(") {
       if (src[i + 2] === "(") notExempt();
       i += 2;
       list(true);
-      return true;
+      return DYNAMIC;
     }
-    if (next === "[" || next === "{") return sticky(PARAMETER) ? true : notExempt();
+    if (next === "[" || next === "{") return sticky(PARAMETER) ? DYNAMIC : notExempt();
     if (!inQuotes && next === "'") {
       for (i += 2; src[i] !== "'"; i += src[i] === "\\" ? 2 : 1) if (i >= src.length) notExempt();
       i += 1;
-      return true;
+      return DYNAMIC;
     }
     if (!inQuotes && next === '"') {
       i += 1;
       doubleQuoted();
-      return true;
+      return DYNAMIC;
     }
-    return Boolean(sticky(PARAMETER));
+    return sticky(PARAMETER) ? DYNAMIC : null;
   };
 
-  // At a double quote: the quoted text, and whether it holds no expansion.
-  const doubleQuoted = () => {
-    let text = "";
-    let literal = true;
-    for (i += 1; src[i] !== '"'; ) {
+  const dollarFull = (inQuotes) => {
+    let j = i + 1;
+    while (continued(j)) j += 2;
+    const next = src[j];
+    if (next === "(") {
+      i = j;
+      if (src[i + 1] === "(" && arithmetic()) return DYNAMIC;
+      i += 1;
+      list(true);
+      return DYNAMIC;
+    }
+    if (next === "[") {
+      i = j;
+      enclosed("[", "]");
+      return DYNAMIC;
+    }
+    if (next === "{") {
+      i = j + 1;
+      return braced(inQuotes);
+    }
+    if (next === "'" && !inQuotes) {
+      const from = j + 1;
+      for (i = from; src[i] !== "'"; i += src[i] === "\\" ? 2 : 1) if (i >= src.length) cannotRead();
+      i += 1;
+      return { text: ansiC(src.slice(from, i - 1)), dynamic: false, quoted: true };
+    }
+    if (next === '"' && !inQuotes) {
+      i = j;
+      const q = doubleQuoted();
+      return { text: q.text, dynamic: !q.literal, opens: q.opensDynamic, fixed: q.fixed, quoted: true };
+    }
+    const name = /[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]/y;
+    name.lastIndex = j;
+    const m = name.exec(src);
+    if (!m) return null;
+    i = j + m[0].length;
+    return { text: variable(m[0]) ?? "", dynamic: true };
+  };
+
+  // After `${`: the parameter and whatever follows it up to the closing brace. The piece is the variable's value or,
+  // where an operator supplies one for an unset variable, that word.
+  const braced = (inQuotes) => {
+    const name = sticky(/[#!]?(?:[A-Za-z_][A-Za-z0-9_]*|\d+|[@*#?$!-])?/y);
+    let tail = "";
+    for (;;) {
       const c = src[i];
-      if (c === undefined || c === "`") notExempt();
-      if (c === "\\" && src[i + 1] !== undefined && '$`"\\\n'.includes(src[i + 1])) {
-        if (src[i + 1] !== "\n") text += src[i + 1];
+      if (c === undefined) cannotRead();
+      if (c === "}") break;
+      if (continued(i)) {
         i += 2;
-      } else if (c === "$" && dollar(true)) {
-        literal = false;
+      } else if (c === "\\") {
+        tail += src[i + 1] ?? "";
+        i += 2;
+      } else if (c === "'") {
+        const end = src.indexOf("'", i + 1);
+        if (end < 0) cannotRead();
+        tail += inQuotes ? src.slice(i, end + 1) : src.slice(i + 1, end);
+        i = end + 1;
+      } else if (c === '"') {
+        tail += doubleQuoted().text;
+      } else if (c === "`") {
+        backquote(inQuotes);
       } else {
-        text += c;
-        i += 1;
+        const piece = c === "$" && dollar(inQuotes);
+        tail += piece ? piece.text : c;
+        if (!piece) i += 1;
       }
     }
     i += 1;
-    return { text, literal };
+    const value = variable(name);
+    const op = /^:?[-=+?]/.exec(tail);
+    if (!op) return { text: value ?? "", dynamic: true };
+    const set = value !== null && (value !== "" || !op[0].startsWith(":"));
+    const word = tail.slice(op[0].length);
+    if (op[0].endsWith("+")) return { text: set ? word : "", dynamic: true };
+    if (op[0].endsWith("?")) return { text: value ?? "", dynamic: true };
+    return { text: set ? value : word, dynamic: true };
+  };
+
+  // At a backquote: the command it holds, read once `\$`, `` \` ``, `\\` and, inside double quotes, `\"` have lost
+  // their backslash.
+  const backquote = (inQuotes) => {
+    let code = "";
+    for (i += 1; src[i] !== "`"; i += 1) {
+      if (i >= src.length) cannotRead();
+      if (src[i] === "\\" && i + 1 < src.length) {
+        i += 1;
+        code += "$`\\".includes(src[i]) || (inQuotes && src[i] === '"') ? src[i] : `\\${src[i]}`;
+      } else {
+        code += src[i];
+      }
+    }
+    i += 1;
+    readShell(code, { cwd, onCommand, full });
+  };
+
+  // Inside arithmetic or a `$[...]`: one quoted run, expansion or character.
+  const arithmeticPiece = () => {
+    const c = src[i];
+    if (c === "\\") {
+      i += 2;
+    } else if (c === "'") {
+      const end = src.indexOf("'", i + 1);
+      if (end < 0) cannotRead();
+      i = end + 1;
+    } else if (c === '"') {
+      doubleQuoted();
+    } else if (c === "`") {
+      backquote(false);
+    } else if (!(c === "$" && dollar(true))) {
+      i += 1;
+    }
+  };
+
+  // At `((`: bash reads arithmetic up to the matching `))`. When the parenthesis that closes the first `(` is not
+  // followed by another, the two were subshells, and this returns false having consumed nothing. Each start is tried
+  // once, so a run of parentheses costs no more than its length times the text after it.
+  const arithmeticEnds = new Map();
+  const arithmetic = () => {
+    const from = i;
+    if (!arithmeticEnds.has(from)) {
+      let depth = 0;
+      let end = -1;
+      for (i += 2; i < src.length && end < 0; ) {
+        if (src[i] === "(") {
+          depth += 1;
+          i += 1;
+        } else if (src[i] === ")" && depth > 0) {
+          depth -= 1;
+          i += 1;
+        } else if (src[i] === ")") {
+          if (src[i + 1] !== ")") break;
+          end = i + 2;
+        } else {
+          arithmeticPiece();
+        }
+      }
+      arithmeticEnds.set(from, end);
+    }
+    const end = arithmeticEnds.get(from);
+    i = end < 0 ? from : end;
+    return end >= 0;
+  };
+
+  const enclosed = (open, close) => {
+    let depth = 0;
+    for (i += 1; src[i] !== close || depth > 0; ) {
+      if (i >= src.length) cannotRead();
+      if (src[i] === open) depth += 1;
+      if (src[i] === close) depth -= 1;
+      if (src[i] === open || src[i] === close) i += 1;
+      else arithmeticPiece();
+    }
+    i += 1;
+  };
+
+  // At a double quote: the quoted text, whether it holds no expansion, whether an expansion comes before its first
+  // fixed character, and whether it has one.
+  const doubleQuoted = () => {
+    const b = builder();
+    for (i += 1; src[i] !== '"'; ) {
+      const c = src[i];
+      if (c === undefined) cannotRead();
+      if (c === "`") {
+        if (!full) notExempt();
+        backquote(true);
+        b.add("", true);
+      } else if (c === "\\" && src[i + 1] !== undefined && '$`"\\\n'.includes(src[i + 1])) {
+        if (src[i + 1] !== "\n") b.add(src[i + 1], false);
+        i += 2;
+      } else {
+        const piece = c === "$" && dollar(true);
+        if (piece) {
+          b.add(piece.text, piece.dynamic, piece.opens ?? piece.dynamic, piece.fixed);
+        } else {
+          b.add(c, false);
+          i += 1;
+        }
+      }
+    }
+    i += 1;
+    return b;
   };
 
   // One word after quote removal: its text, whether it holds no expansion or pattern, whether any of it is quoted or
-  // escaped, and its source without line continuations.
+  // escaped, its source without line continuations, whether an expansion may supply its first character, and whether
+  // it may split.
   const word = () => {
-    let text = "";
+    const b = builder();
     let bare = "";
-    let literal = true;
     let quoted = false;
+    let splits = false;
     while (i < src.length && !ENDS_WORD.has(src[i])) {
       const from = i;
       const c = src[i];
@@ -260,112 +485,203 @@ function requireReadOnly(src, cwd) {
       }
       if (c === "'") {
         const end = src.indexOf("'", i + 1);
-        if (end < 0) notExempt();
-        text += src.slice(i + 1, end);
+        if (end < 0) cannotRead();
+        b.add(src.slice(i + 1, end), false);
         i = end + 1;
         quoted = true;
       } else if (c === '"') {
         const q = doubleQuoted();
-        text += q.text;
-        literal &&= q.literal;
+        b.add(q.text, !q.literal, q.opensDynamic, q.fixed);
         quoted = true;
       } else if (c === "\\") {
-        if (i + 1 >= src.length) notExempt();
-        text += src[i + 1];
+        if (i + 1 >= src.length) cannotRead();
+        b.add(src[i + 1], false);
         i += 2;
         quoted = true;
       } else if (c === "`") {
-        notExempt();
-      } else if (c === "$" && dollar(false)) {
-        literal = false;
+        if (!full) notExempt();
+        backquote(false);
+        b.add("", true);
+        splits = true;
       } else {
-        if ("*?[]{}".includes(c)) literal = false;
-        text += c;
-        i += 1;
+        const piece = c === "$" && dollar(false);
+        if (piece) {
+          b.add(piece.text, piece.dynamic, piece.opens ?? piece.dynamic, piece.fixed);
+          quoted ||= Boolean(piece.quoted);
+          splits ||= piece.dynamic && !piece.quoted;
+        } else {
+          b.add(c, false);
+          i += 1;
+          if ("*?[]{}".includes(c)) {
+            b.literal = false;
+            splits = true;
+          }
+        }
       }
       bare += src.slice(from, i);
     }
-    return { text, literal, quoted, bare };
+    return { text: b.text, literal: b.literal, quoted, bare, opensDynamic: b.opensDynamic, splits };
   };
 
-  const redirect = (nested) => {
+  // At `<(` or `>(`: a word naming a pipe to the commands inside.
+  const processSubstitution = () => {
+    const from = i;
+    i += 2;
+    list(true);
+    return { text: "", literal: false, quoted: false, bare: src.slice(from, i), opensDynamic: true, splits: false,
+             process: true };
+  };
+
+  // A redirection, and the descriptor `fd` it applies to when a number or {name} came before it.
+  const redirect = (nested, fd) => {
     const op = sticky(REDIRECT_OP);
-    if (continued(i)) notExempt();
+    if (continued(i) && !full) notExempt();
     skipBlanks();
     const dup = op === "<&" || op === ">&";
     // bash reads a `-` after `<&` or `>&` as a token of its own that closes the descriptor; the text after it starts a
     // new word.
     if (dup && src[i] === "-") {
       i += 1;
-      return;
+      return { op, fd };
+    }
+    if (full && (src[i] === "<" || src[i] === ">") && src[i + 1] === "(") {
+      return { op, fd, target: processSubstitution() };
     }
     const target = word();
-    if (!target.bare || target.bare.startsWith("#")) notExempt();
+    if (!target.bare || target.bare.startsWith("#")) cannotRead();
     if (op === "<<" || op === "<<-") {
       // The delimiter is the quote-removed word; any quoting in it leaves the body unexpanded.
-      if (nested || !target.literal || !target.text || target.text.includes("\n")) notExempt();
-      heredocs.push({ delimiter: target.text, tabs: op === "<<-", quoted: target.quoted });
-    } else if (dup && /^\d+-?$/.test(target.text)) {
+      if (!target.literal || !target.text || target.text.includes("\n")) cannotRead();
+      if (nested && !full) notExempt();
+      const doc = { delimiter: target.text, tabs: op === "<<-", quoted: target.quoted };
+      heredocs.push(doc);
+      return { op, fd, target, doc };
+    }
+    if (full) return { op, fd, target };
+    if (dup && /^\d+-?$/.test(target.text)) {
       // Any descriptor but the standard three was inherited from whatever started the shell, and may be a socket.
       if (!target.literal || !/^[012]-?$/.test(target.text)) notExempt();
     } else if ((dup && !PLAIN_TEXT.test(target.text)) || (op !== "<<<" && !ordinaryTarget(target, cwd))) {
       notExempt();
     }
+    return { op, fd, target };
   };
 
-  // After the newline that ends a line, the bodies of the heredocs it opened, in order.
+  // After the newline that ends a line, the bodies of the heredocs it opened, in order. bash joins a line of an
+  // unquoted body that ends in a backslash to the next before it looks for the delimiter, and ends a body the input
+  // does not delimit at the end of the input.
   const bodies = () => {
     for (const doc of heredocs.splice(0)) {
+      let body = "";
       for (;;) {
-        if (i >= src.length) notExempt();
+        if (i >= src.length) {
+          if (!full) notExempt();
+          break;
+        }
         let end = src.indexOf("\n", i);
         if (end < 0) end = src.length;
-        const line = src.slice(i, end);
+        let line = src.slice(i, end);
         i = end + 1;
-        if ((doc.tabs ? line.replace(/^\t+/, "") : line) === doc.delimiter) break;
-        if (!doc.quoted && BODY_EXPANSION.test(line)) notExempt();
+        while (full && !doc.quoted && /(?:^|[^\\])(?:\\\\)*\\$/.test(line) && i <= src.length) {
+          end = src.indexOf("\n", i);
+          if (end < 0) end = src.length;
+          line = line.slice(0, -1) + src.slice(i, end);
+          i = end + 1;
+        }
+        if (doc.tabs) line = line.replace(/^\t+/, "");
+        if (line === doc.delimiter) break;
+        if (!full && !doc.quoted && BODY_EXPANSION.test(line)) notExempt();
+        body += `${line}\n`;
       }
+      if (full && !doc.quoted) readShell(body, { cwd, onCommand, full, text: true });
+      doc.onBody?.(body);
     }
   };
 
-  // A list of commands, up to the end of src or, inside `$(`, its closing parenthesis.
+  // A list of commands, up to the end of src or, inside `$(` or `(`, its closing parenthesis.
   const list = (nested) => {
     let words = [];
+    let redirects = [];
+    let fd = null;
+    let cases = 0;
+    const command = () => {
+      onCommand(words, redirects);
+      words = [];
+      redirects = [];
+    };
     for (;;) {
       skipBlanks();
       const c = src[i];
-      if (c === undefined || c === ")") {
-        if ((c === ")") !== nested || (c === undefined && heredocs.length)) notExempt();
+      if (full && c === ")" && cases > 0) {
+        // A case pattern ends here.
         i += 1;
-        requireReadOnlyCommand(words, cwd);
+        command();
+        continue;
+      }
+      if (c === undefined || c === ")") {
+        if ((c === ")") !== nested) cannotRead();
+        if (c === undefined && heredocs.length && !full) notExempt();
+        i += 1;
+        command();
+        if (c === undefined) for (const doc of heredocs.splice(0)) doc.onBody?.("");
         return;
       }
-      if (c === "(" || (c === "&" && continued(i + 1))) notExempt();
+      if (c === "(") {
+        if (!full) notExempt();
+        if (cases > 0 && (!words.length || words.at(-1).bare === "in")) i += 1;
+        else if (src[i + 1] !== "(" || !arithmetic()) {
+          i += 1;
+          list(true);
+        }
+        continue;
+      }
+      if (c === "&" && continued(i + 1) && !full) notExempt();
       if (c === "\n" || c === ";" || c === "|" || (c === "&" && src[i + 1] !== ">")) {
         i += 1;
         if ((c === "|" || c === "&") && (src[i] === c || (c === "|" && src[i] === "&"))) i += 1;
-        requireReadOnlyCommand(words, cwd);
-        words = [];
+        command();
         if (c === "\n" && heredocs.length) {
-          if (nested) notExempt();
+          if (nested && !full) notExempt();
           bodies();
         }
       } else if (c === "#") {
         while (i < src.length && src[i] !== "\n") i += 1;
+      } else if (full && (c === "<" || c === ">") && src[i + 1] === "(") {
+        words.push(processSubstitution());
       } else if (c === "<" || c === ">" || c === "&") {
-        redirect(nested);
+        redirects.push(redirect(nested, fd));
+        fd = null;
       } else {
         const w = word();
         if (src[i] === "<" || src[i] === ">") {
-          if (NAMED_FD.test(w.bare)) notExempt();
-          if (/^\d+$/.test(w.bare)) continue;
+          if (NAMED_FD.test(w.bare)) {
+            if (!full) notExempt();
+            fd = w.bare;
+            continue;
+          }
+          if (/^\d+$/.test(w.bare)) {
+            fd = w.bare;
+            continue;
+          }
         }
+        if (full && !words.length && w.bare === "case") cases += 1;
+        if (full && !words.length && w.bare === "esac" && cases > 0) cases -= 1;
         words.push(w);
       }
     }
   };
 
-  list(false);
+  // An unquoted heredoc body: text in which only expansions do anything.
+  const body = () => {
+    while (i < src.length) {
+      if (src[i] === "\\") i += 2;
+      else if (src[i] === "`") backquote(true);
+      else if (!(src[i] === "$" && dollar(true))) i += 1;
+    }
+  };
+
+  if (text) body();
+  else list(false);
 }
 
 /** Every simple command in the line is a read-only tool and every redirection opens an ordinary file. Pipes, lists
@@ -373,12 +689,192 @@ function requireReadOnly(src, cwd) {
  *  read-only; quoting is read as bash reads it. */
 export function readOnlyCommand(command, cwd) {
   try {
-    requireReadOnly(command, cwd);
+    readShell(command, { cwd, onCommand: (words) => requireReadOnlyCommand(words, cwd) });
     return true;
   } catch {
     // Whatever this reader cannot follow, its own failure included, is judged rather than exempted.
     return false;
   }
+}
+
+/** The words env runs from a -S string, split as GNU env splits it, or null for a string env refuses or one that
+ *  expands a variable, whose value is env's to know. */
+function splitEnvString(s) {
+  const out = [];
+  let arg = null;
+  let single = false;
+  let double = false;
+  const end = () => {
+    if (arg !== null) out.push(arg);
+    arg = null;
+  };
+  for (let k = 0; k < s.length; k += 1) {
+    let c = s[k];
+    if ((c === "'" && !double) || (c === '"' && !single)) {
+      if (c === "'") single = !single;
+      else double = !double;
+      arg ??= "";
+      continue;
+    }
+    if (" \t\n\v\f\r".includes(c) && !single && !double) {
+      end();
+      continue;
+    }
+    if (c === "#" && arg === null) break;
+    if (c === "\\" && !(single && s[k + 1] !== "\\" && s[k + 1] !== "'")) {
+      k += 1;
+      c = s[k];
+      if (c === "_" && !double) {
+        end();
+        continue;
+      }
+      if (c === "c") {
+        if (double) return null;
+        break;
+      }
+      c = ENV_ESCAPES[c];
+      if (c === undefined) return null;
+    } else if (c === "$" && !single) {
+      return null;
+    }
+    arg = (arg ?? "") + c;
+  }
+  if (single || double) return null;
+  end();
+  return out;
+}
+
+const literalWord = (text) => ({ text, literal: true, quoted: true, bare: text, opensDynamic: false, splits: false });
+const named = (w, names) => w.literal && !ASSIGNMENT.test(w.bare) && names.has(path.posix.basename(w.text));
+
+/** The index of the word a simple command runs, past assignments, reserved words and the programs in RUNNERS, or -1
+ *  when the words do not show one. */
+function commandIndex(words) {
+  let k = 0;
+  while (k < words.length) {
+    const w = words[k];
+    if (RESERVED.has(w.bare) || ASSIGNMENT.test(w.bare)) {
+      k += 1;
+      continue;
+    }
+    const runner = w.literal ? path.posix.basename(w.text) : "";
+    const takes = RUNNERS.get(runner);
+    if (takes === undefined) return k;
+    for (k += 1; words[k]?.literal && /^-./.test(words[k].text); k += 1) {
+      const option = words[k].text;
+      if (option === "--") {
+        k += 1;
+        break;
+      }
+      const at = option.startsWith("--") ? -1 : [...option.slice(1)].findIndex((letter) => takes.includes(letter));
+      if (runner === "env" && (option[at + 1] === "S" || /^--s/.test(option))) return -1;
+      if (runner === "command" && /^-[^-]*[vV]/.test(option)) return -1;
+      if (at >= 0 && at === option.length - 2) k += 1;
+    }
+    if (runner === "timeout") k += 1;
+  }
+  return -1;
+}
+
+/** What the full judgment reads from a line: the text of every word bash would build, in the line and in the shell
+ *  code it carries, and the directories it changes into. */
+function readLine(command, cwd) {
+  const found = { texts: [], dirs: [] };
+  const read = (code) => readShell(code, { cwd, onCommand: inspect, full: true });
+  const readCode = (code) => {
+    try {
+      read(code);
+    } catch {
+      // Code the reader cannot follow adds the words it read before it stopped.
+    }
+  };
+  const readWord = (w) => w?.literal && readCode(w.text);
+
+  // A shell named at words[j]. Its -c string is code; at the head of the command, so is what it reads from a heredoc
+  // or here-string when it has no script operand.
+  const shell = (words, j, redirects, head) => {
+    let c = false;
+    let s = false;
+    let k = j + 1;
+    for (; words[k]?.literal; k += 1) {
+      const option = words[k].text;
+      if (option === "-" || option === "--") {
+        k += 1;
+        break;
+      }
+      if (!/^[-+]./.test(option)) break;
+      if (option === "--rcfile" || option === "--init-file" || option === "--emulate") k += 1;
+      if (option.startsWith("--")) continue;
+      if (option[0] === "-") {
+        c ||= option.includes("c");
+        s ||= option.includes("s");
+      }
+      k += (option.match(/[oO]/g) ?? []).length;
+    }
+    if (c) return readWord(words[k]);
+    if (!head || (words[k] && !s)) return;
+    for (const r of redirects) {
+      if (r.fd !== null && r.fd !== "0") continue;
+      if (r.op === "<<<") readWord(r.target);
+      else if (r.doc) r.doc.onBody = (body) => (r.doc.quoted || !/[$`\\]/.test(body)) && readCode(body);
+    }
+  };
+
+  // env at words[j]. A -S string is split into words, and env reads its options again from them on.
+  const env = (words, j, redirects) => {
+    for (let k = j + 1; words[k]?.literal && /^-./.test(words[k].text) && words[k].text !== "--"; k += 1) {
+      const option = words[k].text;
+      let split = false;
+      let attached = null;
+      let takesNext = false;
+      if (option.startsWith("--")) {
+        const eq = option.indexOf("=");
+        const name = option.slice(2, eq < 0 ? undefined : eq);
+        split = name.startsWith("s") && "split-string".startsWith(name);
+        if (eq >= 0) attached = option.slice(eq + 1);
+        else takesNext = split || ["unset", "chdir", "argv0"].some((long) => long.startsWith(name));
+      } else {
+        const at = [...option.slice(1)].findIndex((letter) => "aCSu".includes(letter));
+        if (at >= 0) {
+          split = option[at + 1] === "S";
+          attached = option.slice(at + 2) || null;
+          takesNext = attached === null;
+        }
+      }
+      if (takesNext) k += 1;
+      if (!split) continue;
+      const value = attached ?? (words[k]?.literal ? words[k].text : null);
+      const made = value === null ? null : splitEnvString(value);
+      if (made) inspect([...words.slice(0, j + 1), ...made.map(literalWord), ...words.slice(k + 1)], redirects);
+      return;
+    }
+  };
+
+  const inspect = (words, redirects) => {
+    for (const w of words) found.texts.push(w.text);
+    for (const r of redirects) if (r.target) found.texts.push(r.target.text);
+    const head = commandIndex(words);
+    const name = head >= 0 && words[head].literal ? words[head].text : null;
+    const args = words.slice(head + 1);
+    if (name === "cd" || name === "pushd") {
+      const dir = args.find((w) => !w.text.startsWith("-"));
+      if (dir) found.dirs.push(dir.text);
+    }
+    if (name === "eval" && args.every((w) => w.literal)) readCode(args.map((w) => w.text).join(" "));
+    if (name === "trap") {
+      let n = 0;
+      while (args[n]?.literal && /^-[lpP]+$/.test(args[n].text)) n += 1;
+      if (args[n]?.text === "--") n += 1;
+      if (args.length - n > 1) readWord(args[n]);
+    }
+    for (let j = 0; j < words.length; j += 1) {
+      if (named(words[j], ENV)) env(words, j, redirects);
+      if (named(words[j], SHELLS)) shell(words, j, redirects, j === head);
+    }
+  };
+
+  readCode(command);
+  return found;
 }
 
 /** The nearest `.send-chokepoint.json` at or above `from`, validated.
@@ -442,30 +938,47 @@ function looksLikeSender(text, config) {
   return config.providers.some((h) => text.includes(h)) && SEND_VERB.test(text);
 }
 
-function searchDirs(command, cwd) {
+/** `name` with a leading `~`, `~+` or `~-` replaced as bash replaces it, or null when it has none. */
+function expandHome(name, cwd) {
+  const m = /^~([+-]?)(?=\/|$)/.exec(name);
+  if (!m) return null;
+  const base = { "": os.homedir(), "+": cwd || process.cwd(), "-": process.env.OLDPWD }[m[1]];
+  return base ? base + name.slice(m[0].length) : null;
+}
+
+/** The directories the command may run in. The reader gives each `cd` target as bash builds it; the raw text is
+ *  searched too, for a line the reader could not follow to its end. */
+function searchDirs(command, cwd, reading = readLine(command, cwd)) {
   const dirs = [];
   for (const m of command.matchAll(CD_PREFIX)) {
     const d = m[1] || m[2] || m[3];
     if (d) dirs.push(d);
   }
+  for (const d of reading.dirs) dirs.push(path.resolve(cwd || process.cwd(), expandHome(d, cwd) ?? d));
   if (cwd) dirs.push(cwd);
   dirs.push(process.cwd());
   return dirs;
 }
 
-/** Every existing script path named in the command.
+/** Every existing script path named in the command: each word's text as bash builds it, the paths inside those texts,
+ *  and those in the raw text, which still holds what the reader could not follow.
  *
  * ⚠ A bare token must be resolved against the COMMAND's directory, not this
  * process's. `cd somewhere && python sender.py` is the shape people actually
  * type, and resolving it here would find nothing and allow the send. */
-function referencedFiles(command, cwd) {
-  const dirs = searchDirs(command, cwd);
-  const out = [];
-  const tokens = [...command.matchAll(QUOTED_PATH)].map((m) => m[1] || m[2])
-    .concat([...command.matchAll(BARE_PATH)].map((m) => m[0]));
+function referencedFiles(command, cwd, reading) {
+  const dirs = searchDirs(command, cwd, reading);
+  const out = new Set();
+  const tokens = new Set([...command.matchAll(QUOTED_PATH)].map((m) => m[1] || m[2]));
+  for (const text of [command, ...reading.texts]) {
+    for (const m of text.matchAll(BARE_PATH)) tokens.add(m[0]);
+  }
+  for (const text of reading.texts) {
+    for (const part of [text, text.slice(text.indexOf("=") + 1)]) if (SCRIPT_NAME.test(part)) tokens.add(part);
+  }
   for (const token of tokens) {
     // bash reads `<&-sender.py` as a descriptor close and the word `sender.py`, so the path may start after the dashes.
-    for (const name of new Set([token, token.replace(/^-+/, "")])) {
+    for (const name of new Set([token, token.replace(/^-+/, ""), expandHome(token, cwd)])) {
       if (!name) continue;
       const candidates = path.isAbsolute(name)
         ? [name]
@@ -473,7 +986,7 @@ function referencedFiles(command, cwd) {
       for (const fp of candidates) {
         try {
           const st = fs.statSync(fp);
-          if (st.isFile() && st.size <= MAX_READ_BYTES) { out.push(fp); break; }
+          if (st.isFile() && st.size <= MAX_READ_BYTES) { out.add(fp); break; }
         } catch { /* keep looking */ }
       }
     }
@@ -522,11 +1035,12 @@ export function judge(command, cwd, config, tool) {
   // A heredoc body is data to the exemption unless bash would expand it. Every other judgment reads the full text,
   // so a body fed to an interpreter is still judged.
   if (tool === "Bash" && readOnlyCommand(command, cwd)) return null;
-  if (looksLikeSender(command, config)) {
+  const reading = readLine(command, cwd);
+  if (looksLikeSender([command, ...reading.texts].join("\n"), config)) {
     return { reason: "this command reaches a mail-send endpoint directly",
              where: "the command line" };
   }
-  for (const fp of referencedFiles(command, cwd)) {
+  for (const fp of referencedFiles(command, cwd, reading)) {
     const direct = senderVerdict(fp, config);
     if (direct) return direct;
     // An allowlisted file does not launder its imports, but the sanctioned
