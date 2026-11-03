@@ -296,7 +296,7 @@ for (const command of [
   "wc -l blast.py;",
   "cat blast.py > copy.txt",
   "cat blast.py > copy.txt 2>&1",
-  "sha256sum blast.py 2>&1 | sort",
+  "sha256sum blast.py 2>&1 | uniq",
   "cat blast.py &>/dev/null",
   "cat blast.py &>> log.txt",
   "grep -n send blast.py >&2",
@@ -346,6 +346,24 @@ for (const command of [
   "git grep --open-files-in-pager=python3 send -- blast.py",
 ]) {
   test(`git is never exempt: ${command}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+  });
+}
+
+// rg --pre, ugrep --filter and sort --compress-program name a program to run; less and more run LESSOPEN
+// filters and shell escapes; a path-qualified name is whatever file sits at that path.
+for (const command of [
+  "rg --pre python3 . blast.py",
+  'ugrep --filter="py:python3 %" x blast.py',
+  "sort --compress-program=python3 blast.py",
+  "less blast.py",
+  "more blast.py",
+  "./cat blast.py",
+  "bin/sha256sum blast.py",
+]) {
+  test(`a tool that can run a program is never exempt: ${command}`, () => {
     const dir = repo();
     file(dir, "blast.py", SENDER_BODY);
     assert.equal(hook(command, dir).status, 2);

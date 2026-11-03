@@ -65,14 +65,14 @@ const PATH_TOKEN = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs
 const CD_PREFIX = /(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
 const PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))/gm;
 
-// Tools that print, search, hash, compare or list a file and cannot run it. A command made only of these is never
-// judged: the operator must be able to read and hash the very files this gate protects. sed (its `e` command) and
-// awk (system()) can run code, so they are not here, and neither is git: every subcommand honours repository
-// configuration an agent can write (core.fsmonitor, diff.external, textconv drivers, core.pager).
-const READ_ONLY = new Set(["cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep", "rg", "ugrep",
-  "sha256sum", "sha1sum", "sha512sum", "md5sum", "b2sum", "cksum", "diff", "cmp", "comm", "file", "stat", "ls",
-  "readlink", "realpath", "basename", "dirname", "du", "od", "xxd", "hexdump", "strings", "sort", "uniq", "cut",
-  "nl", "echo", "printf", "true"]);
+// Tools that print, search, hash, compare or list a file and have no option that runs a program. A command made only
+// of these, named bare, is never judged: the operator must be able to read and hash the very files this gate
+// protects. Tools that can run code are not here: sed (its `e` command), awk (system()), rg (--pre), ugrep
+// (--filter), sort (--compress-program), less and more (LESSOPEN, shell escapes), and git, whose every subcommand
+// honours repository configuration an agent can write (core.fsmonitor, diff.external, textconv, core.pager).
+const READ_ONLY = new Set(["cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "sha1sum", "sha256sum",
+  "sha512sum", "md5sum", "b2sum", "cksum", "diff", "cmp", "comm", "file", "stat", "ls", "readlink", "realpath",
+  "basename", "dirname", "du", "od", "xxd", "hexdump", "strings", "uniq", "cut", "nl", "echo", "printf", "true"]);
 // Words that run the command after them: skipped, with their own option values.
 const PREFIXES = { timeout: /^(?:-\S+|\d+(?:\.\d+)?[smhd]?)$/, nice: /^(?:-n|-?\d+)$/, env: /^-\S*$/ };
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -91,7 +91,7 @@ function readOnlySimple(segment) {
     while (i < words.length && skip.test(words[i])) i += 1;
   }
   if (i >= words.length) return true;
-  return READ_ONLY.has(path.basename(words[i]));
+  return READ_ONLY.has(words[i]);
 }
 
 /** Every simple command in the line is a read-only tool. Pipes, lists, newlines and command substitutions all split
