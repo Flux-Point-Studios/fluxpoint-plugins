@@ -124,9 +124,13 @@ const BODY_EXPANSION = /`|\$[([]|\$\{(?!(?:[A-Za-z_][A-Za-z0-9_]*|\d+|[@*#?$!-])
 // processes' descriptors and kernel settings. Only these four streams there are ordinary.
 const SPECIAL_ROOT = /^\/(?:dev|proc|sys)(?:\/|$)/;
 const STD_STREAMS = new Set(["/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"]);
+const STDIN_PATH = /^\/(?:dev\/stdin|dev\/fd\/0|proc\/(?:self|thread-self|\d+)\/fd\/0)$/;
 // The shells whose -c string, heredoc and here-string the full judgment reads as code.
 const SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "yash", "posh"]);
 const ENV = new Set(["env"]);
+// A shell, or a builtin that runs a string or a file as code, named as a word of its own.
+const RUNS_CODE = new RegExp(`(?:^|[^\\w.-])(?:${[...SHELLS, "env", "eval", "trap", "source"].join("|")})(?![\\w.-])`
+  + "|(?:^|[\\s;&|({])\\.(?=\\s)");
 // Reserved words that may come before a command's name. `time` is read with the runners below.
 const RESERVED = new Set(["!", "{", "if", "then", "elif", "else", "do", "while", "until", "coproc"]);
 // Programs that run the command after their options, each with the option letters whose argument is the next word.
@@ -136,6 +140,7 @@ const RUNNERS = new Map([["sudo", "CDghpRrtTUu"], ["doas", "Cu"], ["env", "aCSu"
   ["command", ""], ["builtin", ""]]);
 const ENV_ESCAPES = { '"': '"', "#": "#", $: "$", "'": "'", "\\": "\\", _: " ", f: "\f", n: "\n", r: "\r", t: "\t",
   v: "\v" };
+const C_ESCAPE = /\\(?:([0-7]{1,3})|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c([\s\S])|([\s\S]))/g;
 const C_ESCAPES = { a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\",
   "'": "'", '"': '"', "?": "?" };
 // A piece of a word whose text the line does not fix: an expansion, or a command's output.
@@ -153,14 +158,13 @@ function cannotRead() {
 
 /** The text of a `$'...'` string's contents. bash ends the string at a NUL. */
 function ansiC(body) {
-  return body.replace(/\\(?:([0-7]{1,3})|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c([\s\S])|([\s\S]))/g,
-    (all, oct, hex, u, U, ctl, ch) => {
-      if (oct) return String.fromCharCode(parseInt(oct, 8) & 0xff);
-      const code = parseInt(hex || u || U, 16);
-      if (!Number.isNaN(code)) return code <= 0x10ffff ? String.fromCodePoint(code) : "";
-      if (ctl !== undefined) return String.fromCharCode(ctl.charCodeAt(0) & 0x1f);
-      return C_ESCAPES[ch] ?? all;
-    }).split("\0")[0];
+  return body.replace(C_ESCAPE, (all, oct, hex, u, U, ctl, ch) => {
+    if (oct) return String.fromCharCode(parseInt(oct, 8) & 0xff);
+    const code = parseInt(hex || u || U, 16);
+    if (!Number.isNaN(code)) return code <= 0x10ffff ? String.fromCodePoint(code) : "";
+    if (ctl !== undefined) return String.fromCharCode(ctl.charCodeAt(0) & 0x1f);
+    return C_ESCAPES[ch] ?? all;
+  }).split("\0")[0];
 }
 
 /** A variable's value in this process's environment, which the hook shares with the shell, or nothing. */
@@ -664,8 +668,9 @@ function readShell(src, { cwd, onCommand, full = false, text = false }) {
             continue;
           }
         }
-        if (full && !words.length && w.bare === "case") cases += 1;
-        if (full && !words.length && w.bare === "esac" && cases > 0) cases -= 1;
+        const first = words.every((v) => RESERVED.has(v.bare));
+        if (full && first && w.bare === "case") cases += 1;
+        if (full && first && w.bare === "esac" && cases > 0) cases -= 1;
         words.push(w);
       }
     }
@@ -747,9 +752,10 @@ function splitEnvString(s) {
 const literalWord = (text) => ({ text, literal: true, quoted: true, bare: text, opensDynamic: false, splits: false });
 const named = (w, names) => w.literal && !ASSIGNMENT.test(w.bare) && names.has(path.posix.basename(w.text));
 
-/** The index of the word a simple command runs, past assignments, reserved words and the programs in RUNNERS, or -1
- *  when the words do not show one. */
-function commandIndex(words) {
+/** The indexes of the words that run a simple command: each program in RUNNERS and, last, the command it runs, past
+ *  assignments and reserved words. The chain ends early at an env -S, whose words env splits, and at command -v. */
+function commandChain(words) {
+  const chain = [];
   let k = 0;
   while (k < words.length) {
     const w = words[k];
@@ -757,9 +763,10 @@ function commandIndex(words) {
       k += 1;
       continue;
     }
+    chain.push(k);
     const runner = w.literal ? path.posix.basename(w.text) : "";
     const takes = RUNNERS.get(runner);
-    if (takes === undefined) return k;
+    if (takes === undefined) break;
     for (k += 1; words[k]?.literal && /^-./.test(words[k].text); k += 1) {
       const option = words[k].text;
       if (option === "--") {
@@ -767,42 +774,85 @@ function commandIndex(words) {
         break;
       }
       const at = option.startsWith("--") ? -1 : [...option.slice(1)].findIndex((letter) => takes.includes(letter));
-      if (runner === "env" && (option[at + 1] === "S" || /^--s/.test(option))) return -1;
-      if (runner === "command" && /^-[^-]*[vV]/.test(option)) return -1;
+      if (runner === "env" && (option[at + 1] === "S" || /^--s/.test(option))) return chain;
+      if (runner === "command" && /^-[^-]*[vV]/.test(option)) return chain;
       if (at >= 0 && at === option.length - 2) k += 1;
     }
     if (runner === "timeout") k += 1;
   }
-  return -1;
+  return chain;
 }
 
 /** What the full judgment reads from a line: the text of every word bash would build, in the line and in the shell
- *  code it carries, and the directories it changes into. */
+ *  code it carries, the directories it changes into, and, when it runs shell code the line does not show, where. */
 function readLine(command, cwd) {
-  const found = { texts: [], dirs: [] };
+  const found = { texts: [], dirs: [], unreadable: null };
+  const unreadable = (where) => {
+    found.unreadable ??= where;
+  };
   const read = (code) => readShell(code, { cwd, onCommand: inspect, full: true });
-  const readCode = (code) => {
+  const readCode = (code, what) => {
     try {
       read(code);
     } catch {
-      // Code the reader cannot follow adds the words it read before it stopped.
+      unreadable(`${what} cannot be read`);
     }
   };
-  const readWord = (w) => w?.literal && readCode(w.text);
+  // A word that holds code must be in the line and written out.
+  const readWord = (w, what) => {
+    if (!w) unreadable(`${what} is not in the line`);
+    else if (!w.literal) unreadable(`${what} is built from an expansion`);
+    else readCode(w.text, what);
+  };
+  const inside = (re, name) => re.test(path.posix.normalize(name)) || re.test(path.resolve(cwd || process.cwd(), name));
 
-  // A shell named at words[j]. Its -c string is code; at the head of the command, so is what it reads from a heredoc
-  // or here-string when it has no script operand.
+  // What a shell or source reads from standard input. Only a heredoc or here-string written out in the line, or a file,
+  // shows it; a pipe, a descriptor, a stream under /dev, /proc or /sys, or the input the command inherits does not.
+  const input = (redirects, who) => {
+    const what = `the input of ${who}`;
+    const from = redirects.filter((r) => (r.fd === null || r.fd === "0") && r.op.startsWith("<"));
+    if (!from.length) unreadable(`${what} is not in the line`);
+    for (const r of from) {
+      if (r.doc) {
+        r.doc.onBody = (body) => (r.doc.quoted || !/[$`\\]/.test(body)
+          ? readCode(body, what) : unreadable(`${what} is built from an expansion`));
+      } else if (r.op === "<<<") {
+        readWord(r.target, what);
+      } else if (r.op === "<&" || !r.target.literal || inside(SPECIAL_ROOT, r.target.text)) {
+        unreadable(`${what} is not in the line`);
+      }
+    }
+  };
+
+  // A script operand under /dev, /proc or /sys is a stream: standard input, or a descriptor the line does not show.
+  const script = (operand, redirects, who) => {
+    if (operand.process) unreadable(`${who} runs the output of a process substitution`);
+    else if (operand.literal && inside(STDIN_PATH, operand.text)) input(redirects, who);
+    else if (operand.literal && inside(SPECIAL_ROOT, operand.text)) unreadable(`${who} reads ${operand.text}`);
+  };
+
+  // A shell named at words[j]. Its -c string is code. At the head of the command so is its standard input, when it has
+  // no script operand, and an expansion among its options may be -c.
   const shell = (words, j, redirects, head) => {
+    const who = path.posix.basename(words[j].text);
     let c = false;
     let s = false;
     let k = j + 1;
-    for (; words[k]?.literal; k += 1) {
-      const option = words[k].text;
+    for (; k < words.length; k += 1) {
+      const w = words[k];
+      if (!w.literal) {
+        if (c || w.process || !(/^[-+]/.test(w.text) || (head && w.opensDynamic))) break;
+        if (w.splits) return unreadable(`the options of ${who} are built from an expansion`);
+        if (words[k + 1]) readWord(words[k + 1], `the -c string of ${who}`);
+        return;
+      }
+      const option = w.text;
       if (option === "-" || option === "--") {
         k += 1;
         break;
       }
       if (!/^[-+]./.test(option)) break;
+      if (option === "--version" || option === "--help") return;
       if (option === "--rcfile" || option === "--init-file" || option === "--emulate") k += 1;
       if (option.startsWith("--")) continue;
       if (option[0] === "-") {
@@ -811,19 +861,25 @@ function readLine(command, cwd) {
       }
       k += (option.match(/[oO]/g) ?? []).length;
     }
-    if (c) return readWord(words[k]);
-    if (!head || (words[k] && !s)) return;
-    for (const r of redirects) {
-      if (r.fd !== null && r.fd !== "0") continue;
-      if (r.op === "<<<") readWord(r.target);
-      else if (r.doc) r.doc.onBody = (body) => (r.doc.quoted || !/[$`\\]/.test(body)) && readCode(body);
-    }
+    if (c) return readWord(words[k], `the -c string of ${who}`);
+    if (!head) return;
+    if (words[k] && !s) return script(words[k], redirects, who);
+    input(redirects, who);
   };
 
-  // env at words[j]. A -S string is split into words, and env reads its options again from them on.
-  const env = (words, j, redirects) => {
-    for (let k = j + 1; words[k]?.literal && /^-./.test(words[k].text) && words[k].text !== "--"; k += 1) {
-      const option = words[k].text;
+  // env at words[j]. A -S string is split into words, and env reads its options again from them on. At the head of the
+  // command an expansion among its options may be -S.
+  const env = (words, j, redirects, head) => {
+    for (let k = j + 1; k < words.length; k += 1) {
+      const w = words[k];
+      if (!w.literal) {
+        if (w.text.startsWith("-") || (head && w.opensDynamic)) {
+          unreadable("the options of env are built from an expansion");
+        }
+        return;
+      }
+      const option = w.text;
+      if (!/^-./.test(option) || option === "--") return;
       let split = false;
       let attached = null;
       let takesNext = false;
@@ -843,37 +899,57 @@ function readLine(command, cwd) {
       }
       if (takesNext) k += 1;
       if (!split) continue;
-      const value = attached ?? (words[k]?.literal ? words[k].text : null);
-      const made = value === null ? null : splitEnvString(value);
-      if (made) inspect([...words.slice(0, j + 1), ...made.map(literalWord), ...words.slice(k + 1)], redirects);
-      return;
+      const what = "the -S string of env";
+      if (attached === null && !words[k]) return unreadable(`${what} is not in the line`);
+      if (attached === null && !words[k].literal) return unreadable(`${what} is built from an expansion`);
+      const made = splitEnvString(attached ?? words[k].text);
+      if (!made) return unreadable(`${what} cannot be read`);
+      return inspect([...words.slice(0, j + 1), ...made.map(literalWord), ...words.slice(k + 1)], redirects);
     }
   };
 
   const inspect = (words, redirects) => {
     for (const w of words) found.texts.push(w.text);
     for (const r of redirects) if (r.target) found.texts.push(r.target.text);
-    const head = commandIndex(words);
-    const name = head >= 0 && words[head].literal ? words[head].text : null;
+    const chain = commandChain(words);
+    const head = chain.at(-1) ?? -1;
+    const name = words[head]?.literal ? words[head].text : null;
     const args = words.slice(head + 1);
     if (name === "cd" || name === "pushd") {
       const dir = args.find((w) => !w.text.startsWith("-"));
       if (dir) found.dirs.push(dir.text);
     }
-    if (name === "eval" && args.every((w) => w.literal)) readCode(args.map((w) => w.text).join(" "));
+    if (name === "eval" && args.length) {
+      if (args.some((w) => !w.literal)) unreadable("the arguments of eval are built from an expansion");
+      else readCode(args.map((w) => w.text).join(" "), "the arguments of eval");
+    }
     if (name === "trap") {
       let n = 0;
       while (args[n]?.literal && /^-[lpP]+$/.test(args[n].text)) n += 1;
       if (args[n]?.text === "--") n += 1;
-      if (args.length - n > 1) readWord(args[n]);
+      if (args.length - n > 1) readWord(args[n], "the trap action");
+    }
+    const operand = args[0]?.text === "--" ? args[1] : args[0];
+    if ((name === "source" || name === ".") && operand) script(operand, redirects, name);
+    // A command named by an expansion and given -c may be a shell.
+    if (words[head] && !words[head].literal && args[0]?.literal && /^-[A-Za-z]*c[A-Za-z]*$/.test(args[0].text)) {
+      readWord(args[1], "the -c string of a command named by an expansion");
     }
     for (let j = 0; j < words.length; j += 1) {
-      if (named(words[j], ENV)) env(words, j, redirects);
+      if (named(words[j], ENV)) env(words, j, redirects, chain.includes(j));
       if (named(words[j], SHELLS)) shell(words, j, redirects, j === head);
     }
   };
 
-  readCode(command);
+  try {
+    read(command);
+  } catch {
+    // The words read before the reader stopped are kept, and the raw text is still searched. A line it cannot follow
+    // that may hand code to a shell is refused.
+    if (RUNS_CODE.test(command)) {
+      unreadable("the line cannot be read to its end, and it names a shell, env, eval, trap or source");
+    }
+  }
   return found;
 }
 
@@ -1051,15 +1127,21 @@ export function judge(command, cwd, config, tool) {
       if (indirect) return indirect;
     }
   }
+  if (reading.unreadable) {
+    return { reason: "this command runs shell code the gate cannot read", where: reading.unreadable, unreadable: true };
+  }
   return null;
 }
 
-const advice = (config) => [
+const advice = (config, verdict) => [
   `Mail leaves through ${config.sender} alone, so its checks cannot be walked past.`,
   "",
-  "If this command does not send mail, it named a file that does — move that",
-  `send into ${config.sender}, or add its directory to "exempt" in`,
-  `${CONFIG_BASENAME}.`,
+  ...(verdict.unreadable
+    ? ["The gate reads the code a shell runs before it allows the line, so that code",
+       "must be written out in the line itself, or put in a script file the line runs."]
+    : ["If this command does not send mail, it named a file that does — move that",
+       `send into ${config.sender}, or add its directory to "exempt" in`,
+       `${CONFIG_BASENAME}.`]),
 ].join("\n");
 
 function main() {
@@ -1090,7 +1172,7 @@ function main() {
   try { verdict = judge(command, cwd, loaded.config, payload?.tool_name); } catch { process.exit(0); }
   if (!verdict) process.exit(0);
   process.stderr.write(
-    `BLOCKED: ${verdict.reason} (${verdict.where}).\n\n${advice(loaded.config)}\n`);
+    `BLOCKED: ${verdict.reason} (${verdict.where}).\n\n${advice(loaded.config, verdict)}\n`);
   process.exit(2);
 }
 

@@ -676,6 +676,8 @@ expectEach(2, "a path is resolved as bash builds the word", [
   "echo `python3 bl''ast.py`",
   "echo $((1 << 2)); python3 bl''ast.py",
   "case a in a) python3 bl''ast.py;; esac",
+  "if true; then case a in a) python3 bl''ast.py;; esac; fi",
+  "{ case a in a) python3 bl''ast.py;; esac; }",
   "cat <(python3 bl''ast.py)",
   "if true; then python3 bl''ast.py; fi",
   "for f in 1; do python3 'bl'ast.py; done",
@@ -706,6 +708,71 @@ expectEach(2, "shell code inside the line is read as bash reads it", [
   "bash <<< \"python3 bl''ast.py\"",
   "sh -s <<EOF\npython3 bl''ast.py\nEOF",
 ]);
+
+// Shell code the line does not show cannot be judged by what it names. A -c or -S string built from an expansion or
+// missing from the line, a shell reading its commands from a pipe, a process substitution, a descriptor or the input
+// it inherits, eval, a trap action or source of a stream built from an expansion, and code the reader cannot follow
+// each block the line.
+const BUILT = "\"$(printf 'python3 bl%sast.py' '')\"";
+expectEach(2, "shell code the gate cannot read is blocked", [
+  `bash -c ${BUILT}`,
+  'bash -c "$CODE"',
+  '"$SHELL" -c "$CODE"',
+  "bash $FLAGS \"$CODE\"",
+  `printf %s ${BUILT} | xargs -0 sh -c`,
+  `printf %s ${BUILT} | sh`,
+  `printf %s ${BUILT} | bash -s`,
+  `echo ${BUILT} | (bash)`,
+  `{ bash; } <<< ${BUILT}`,
+  `bash < <(printf %s ${BUILT})`,
+  `bash <(printf %s ${BUILT})`,
+  `bash /dev/stdin <<< ${BUILT}`,
+  `source <(printf %s ${BUILT})`,
+  `. /dev/stdin <<< ${BUILT}`,
+  `eval ${BUILT}`,
+  `trap ${BUILT} EXIT`,
+  `env -S${BUILT}`,
+  "env -S'python3 bl${EMPTY}ast.py'",
+  "bash <<EOF\npython3 bl$(true)ast.py\nEOF",
+  "sh -c 'echo \"unterminated'",
+  "bash -c 'echo ok' && sh -c 'echo \"unterminated'",
+  "cat <<$D\nx\n$D\nbash -c \"python3 bl''ast.py\"",
+]);
+
+// Shell code written out in the line is read, and a shell that runs a script file is the same as any interpreter.
+expectEach(0, "shell code written out in the line is read, not refused", [
+  "bash -c 'npm test'",
+  "sh -c 'cd sub && make'",
+  "bash -c 'case $1 in a) echo a;; esac' _ a",
+  "bash -c 'echo $((1 << 2))'",
+  "bash run.sh",
+  'for f in *.sh; do bash "$f"; done',
+  "which bash",
+  "command -v bash",
+  "bash --version",
+  "chsh -s /bin/bash",
+  "pgrep -c bash",
+  "sudo apt-get install -y zsh",
+  "bash <<'EOF'\necho hi\nEOF",
+  "bash <<< 'echo hi'",
+  "trap 'rm -f out.tmp' EXIT",
+  "eval 'echo hi'",
+  "source ./env.sh",
+  ". ~/.profile",
+  'env PATH="$HOME/bin:$PATH" make',
+  "env -S'echo hi'",
+  "docker exec web bash -c 'npm test'",
+  "git commit -m 'bash -c is fine'",
+  "python3 -c 'print(1)'",
+]);
+
+test("a block for unreadable shell code says what to do instead", () => {
+  const dir = repo();
+  const r = hook('bash -c "$CODE"', dir);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /the -c string of bash/);
+  assert.match(r.stderr, /written out in the line/);
+});
 
 test("a path under ~ is resolved against the home directory", () => {
   const dir = repo();
