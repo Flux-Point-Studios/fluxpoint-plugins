@@ -24,7 +24,9 @@
 //
 // FAILS OPEN ON ITSELF, CLOSED ON THE SEND. A malformed payload, an unreadable
 // file or a missing config exits 0: a broken hook must never wedge a session. A
-// file it can read that is a sender outside the declared allowlist exits 2.
+// file it can read that is a sender outside the declared allowlist exits 2, and
+// so does a line that runs shell code it cannot read, since that code could
+// name any file.
 //
 // CONFIG — `.send-chokepoint.json`, found by walking up from the command's
 // working directory:

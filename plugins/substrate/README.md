@@ -373,12 +373,90 @@ escaping backslash appears in its delimiter (`<<'EOF'`, `<<"EOF"`,
 judged on its full text, bodies included, so `python3 <<EOF` and a
 write-then-run in one command are still caught.
 
+The full judgment reads every line the exemption does not cover, and every
+`PowerShell` line, with the same reader. Here it follows lists, pipelines,
+subshells, `{ }` groups, functions, `if`/`while`/`for`/`case`, `$(...)`,
+backquotes, arithmetic, process substitution, `${...}` operators, bash
+5.3's `${ list; }` and heredocs. A script is a name ending in `.py`,
+`.mjs`, `.js`, `.ts`, `.ps1`, `.sh` or `.rb`. Script names are taken from
+the raw text and from every word as bash builds it:
+
+- quotes, escapes, line continuations and `$'...'` joined, so
+  `bl''ast.py`, `"bl"ast.py`, `bl\ast.py` and `$'bl\x61st.py'` are all
+  `blast.py`;
+- `~`, `~+` and `~-` expanded;
+- a variable given its value in the hook's environment, and also each
+  value the line assigns it: in a command made only of assignments, in
+  `export`, `declare`, `typeset`, `local` or `readonly`, and as a `for`
+  loop's words;
+- brace lists and sequences expanded;
+- an unquoted glob matched against the filesystem from the command's
+  directories (a `case` pattern and the operands of `[[` are not globs);
+- each `cd` or `pushd` target, built the same way, added to the
+  directories a relative name is resolved against.
+
+Each existing script found is judged by its text and its local Python
+imports, as above. The inline send check reads the built words as well as
+the raw text.
+
+Shell code inside the line is read the same way, to any depth: the `-c`
+string of `sh`, `bash`, `dash`, `zsh`, `ksh`, `mksh`, `ash`, `yash` or
+`posh` named anywhere in a command (so under `sudo`, `xargs` or
+`find -exec` too); `env`'s `-S` or `--split-string` string, split as GNU
+env splits it, after which env's options are read again; `eval`'s
+arguments; a `trap` action; and the commands a shell at the head of a
+command reads from a heredoc or here-string. A shell is at the head of a
+command when only assignments, reserved words, unquoted expansions that
+come out empty, and `sudo`, `doas`, `env`, `exec`, `time`, `nice`,
+`timeout`, `nohup`, `setsid`, `stdbuf`, `xargs`, `command` or `builtin`
+with their options come before it. A word names a shell through its text, its value
+in the hook's environment or a value the line assigns it. Every other word,
+every heredoc body and the inside of `((...))`, which POSIX shells read as
+two subshells, is also read as a command line for the script names in it,
+since it may run as code: written to a file and run, handed to `su`,
+`watch` or `ssh`, or kept in an alias or an arithmetic subscript. That
+reading refuses nothing and stops eight strings deep.
+
+The line is blocked, whatever it names, when it runs shell code the gate
+cannot read:
+
+- a `-c` or `-S` string, `eval`'s arguments or a `trap` action that is
+  built from an expansion, missing from the line, or that the reader
+  cannot follow;
+- an expansion among the options of a shell or `env` at the head of a
+  command, where it may be `-c` or `-S`, or a command named by an
+  expansion and given `-c`;
+- a shell at the head of a command that reads its commands from standard
+  input (it has no script operand, or `-s`, or `/dev/stdin` or one of its
+  aliases as its script), unless a heredoc or here-string written out in
+  the line or an ordinary file supplies that input: a pipe, a descriptor,
+  a process substitution, a path under `/dev`, `/proc` or `/sys`, the input
+  it inherits, or a heredoc or here-string built from expansions;
+- a script operand of a shell at the head of a command, `source` or `.`
+  that is a process substitution, another path under `/dev`, `/proc` or
+  `/sys`, or a word built from an expansion while the command reads a pipe
+  or a redirection;
+- a line the reader cannot follow to its end that names a shell, `env`,
+  `eval`, `trap` or `source`;
+- braces, globs and variable values that together make more than 4096
+  words, directory reads and visited paths.
+
+Shell code is read with bash's grammar, whichever of those shells runs it.
+Not resolved: a value computed while the line runs (command output,
+arithmetic, other `${...}` operators, `read`, `printf -v`, arrays), a value
+an earlier command set that the hook's environment does not hold, `~user`,
+a script name without one of those extensions, code another interpreter
+assembles (`python3 -c`), syntax only `zsh` or another shell gives a
+meaning, a script operand built from an expansion in a loop body that reads
+a pipe, and the scripts a script file runs.
+
 Omit `providers` to use the built-in Microsoft Graph, Gmail, SendGrid, Mailgun,
 Postmark and Resend hosts. This is a static routing check: it does not send
 mail, grant authorization, verify recipients or prove that the approved
-sender enforces its own checks. Dynamic URLs and unsupported imports can
-escape detection. Missing configuration, malformed payloads and unreadable
-files allow execution; configuration problems are reported when observed.
+sender enforces its own checks. Dynamic URLs, the values listed as not
+resolved above and unsupported imports can escape detection. Missing
+configuration, malformed payloads and unreadable files allow execution;
+configuration problems are reported when observed.
 Do not treat it as an egress sandbox. Its tests use local fixture files and
 never contact mail providers.
 
