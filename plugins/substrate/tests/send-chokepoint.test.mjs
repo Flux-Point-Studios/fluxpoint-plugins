@@ -732,6 +732,31 @@ expectEach(2, "a path bash expands or a string that may run later is resolved", 
   "alias p=\"python3 bl''ast.py\"",
 ]);
 
+// A variable the line assigns, declares or loops over takes each of those values as well as the one it has in the
+// hook's environment.
+expectEach(2, "a variable takes the values the line gives it", [
+  "X=bl; python3 ${X}ast.py",
+  "X=bl''; python3 \"$X\"ast.py",
+  "export D=bl; python3 ${D}ast.py",
+  "declare -x D=bl; bash -c 'python3 ${D}ast.py'",
+  "for X in zz bl; do python3 ${X}ast.py; done",
+  "X=bl; for f in ${X}a?t.py; do python3 $f; done",
+]);
+
+expectEach(0, "a variable the line gives harmless values is not refused", [
+  "X=ot; python3 ${X}her.py",
+  "for f in a b; do echo $f; done",
+  "touch f{1..100}.txt",
+]);
+
+// Braces, globs and variables can make more paths than any check could try; padding a line with them must not push a
+// sender past the gate's reach.
+expectEach(2, "a line that makes more paths than the gate resolves is refused", [
+  `python3 ${"{a,b}".repeat(13)}.py`,
+  "touch f{1..5000}.txt; python3 other.py",
+  `for X in ${Array.from({ length: 70 }, (_, n) => `v${n}`).join(" ")}; do touch $X$X; done`,
+]);
+
 expectEach(0, "a string or pattern that names no sender is not refused", [
   "git commit -m 'bash -c \"$X\" is now judged'",
   "printf '%s\\n' 'python3 other.py' > r.sh; bash r.sh",
