@@ -353,11 +353,11 @@ of these holds:
 - A redirection opens anything except an ordinary file or `/dev/null`,
   `/dev/stdin`, `/dev/stdout` and `/dev/stderr`: `/dev/tcp/HOST/PORT` and
   `/dev/udp/HOST/PORT`, which bash opens as sockets, any other path under
-  `/dev`, `/proc` or `/sys`, or a target built from an expansion. `<&` and `>&` may
-  also duplicate descriptor 0, 1 or 2 or close one with `-`; any other
-  descriptor was inherited from whatever started the shell. bash expands a
-  `>&` target that is not a descriptor a second time, so one holding a
-  quote, `$`, a glob or a tilde is judged.
+  `/dev`, `/proc` or `/sys`, or a target built from an expansion. `<&` and
+  `>&` may also duplicate descriptor 0, 1 or 2 or close one with `-`; any
+  other descriptor was inherited from whatever started the shell. bash
+  expands a `>&` target that is not a descriptor a second time, so a file
+  named there must be plain text: letters, digits and `_ . / , : = % + @ -`.
 - The reader cannot follow it: backquotes, arithmetic, subshells, process
   substitution, `${...}` operators, a backslash-newline right after `$`, `&`
   or a redirection operator (bash joins it to what follows), an unterminated
@@ -367,7 +367,9 @@ A heredoc body is data. A line whose commands are all read-only is not judged
 when it writes a heredoc, so `cat > probe.py <<EOF` may write a script that
 names a sender. bash expands an unquoted body, so one holding a command
 substitution, arithmetic, a `${...}` operator or a trailing backslash leaves
-the line judged; a quoted body (`<<'EOF'`) is always data. Any other line is
+the line judged. A body is quoted, and always data, when a quote or an
+escaping backslash appears in its delimiter (`<<'EOF'`, `<<"EOF"`,
+`<<\EOF`); a backslash-newline there quotes nothing. Any other line is
 judged on its full text, bodies included, so `python3 <<EOF` and a
 write-then-run in one command are still caught.
 
