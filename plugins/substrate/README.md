@@ -508,9 +508,15 @@ mail, grant authorization, verify recipients or prove that the approved
 sender enforces its own checks. Dynamic URLs, the values listed as not
 resolved above and unsupported imports can escape detection. Missing
 configuration, malformed payloads and unreadable files allow execution;
-configuration problems are reported when observed. A line the judgment
-itself fails on, for instance by running out of call stack, is blocked,
-since the hook would otherwise allow whatever else it runs.
+configuration problems are reported when observed. Claude Code runs a
+command whose hook fails, runs out of memory or outlives the 15 seconds
+`hooks.json` gives it, so these are blocked: a line the judgment itself
+fails on, for instance by running out of call stack; a line longer than
+262 144 characters (256 KiB), without being read, since reading costs
+memory in proportion to its words; and a line not judged within 10
+seconds, a limit `SEND_CHOKEPOINT_DEADLINE_MS` in the hook's environment
+changes. Every scan of the line and of a script's text runs in one pass,
+so judging a line takes time in proportion to its size.
 Do not treat it as an egress sandbox. Its tests use local fixture files and
 never contact mail providers.
 

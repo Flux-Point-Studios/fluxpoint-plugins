@@ -56,8 +56,10 @@ const DEFAULT_PROVIDERS = [
   "api.postmarkapp.com",
   "api.resend.com",
 ];
-// The verbs that mean "this one SENDS", as opposed to reading a mailbox.
-const SEND_VERB = /\/sendMail\b|\/messages\/[^"'\s]*\/send\b|%s\/send\b|\{\}\/send\b|\/send["']|createReply|\/mail\.send\b|\/v3\/mail\/send\b|\/messages\.json\b/i;
+// The verbs that mean "this one SENDS", as opposed to reading a mailbox, and `/messages/<id>/send`, which
+// looksLikeSender finds without backtracking.
+const SEND_VERB = /\/sendMail\b|%s\/send\b|\{\}\/send\b|\/send["']|createReply|\/mail\.send\b|\/v3\/mail\/send\b|\/messages\.json\b/i;
+const MESSAGE_SEND = { run: /[^"'\s]+/g, messages: /\/messages\//i, send: /\/send\b/i };
 
 const MAX_READ_BYTES = 2_000_000;
 // Quoted runs that may contain spaces, and bare tokens. Without the quoted forms, `python "space dir/blast.py"`
@@ -65,7 +67,9 @@ const MAX_READ_BYTES = 2_000_000;
 // user directories contain spaces as a matter of course. Bare tokens are searched for inside quoted runs too: a quoted
 // run can be a whole command line (`sh -c 'python3 blast.py'`), which names no file itself.
 const QUOTED_PATH = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))'/g;
-const BARE_PATH = /[A-Za-z0-9_.:\\/~-]+\.(?:py|mjs|js|ts|ps1|sh|rb)\b/g;
+// A run of the characters a bare path is written with, and a script extension that ends a word inside one.
+const PATH_RUN = /[A-Za-z0-9_.:\\/~-]+/g;
+const SCRIPT_END = /\.(?:py|mjs|js|ts|ps1|sh|rb)(?![A-Za-z0-9_])/g;
 const SCRIPT_NAME = /\.(?:py|mjs|js|ts|ps1|sh|rb)$/;
 // A leading `cd <dir> &&` sets the directory the rest of the command runs in.
 const CD_PREFIX = /(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
@@ -149,6 +153,19 @@ const LENIENT_DEPTH = 8;
 const EXPANSION_LIMIT = 4096;
 // A line that may run in more directories than this is refused rather than resolved in part.
 const MAX_PLACES = 64;
+// Claude Code runs a command whose hook outlives the 15 s hooks.json gives it, and kills a hook that runs out of
+// memory the same way. A line longer than MAX_LINE is refused without being read, since reading costs memory in
+// proportion to its words, and one not judged within the deadline is refused.
+const MAX_LINE = 1 << 18;
+const DEADLINE_MS = Number(process.env.SEND_CHOKEPOINT_DEADLINE_MS) || 10000;
+const OUT_OF_TIME = Symbol("out of time");
+const late = (deadline) => {
+  if (Date.now() > deadline) throw OUT_OF_TIME;
+};
+// A catch that stands for code the reader cannot follow passes running out of time on.
+const passOnLate = (err) => {
+  if (err === OUT_OF_TIME) throw err;
+};
 // The shell options that change what a glob matches. extglob is not among them: its groups are read as patterns
 // always, since bash refuses a line holding one while it is off.
 const GLOB_OPTIONS = ["dotglob", "globstar", "nocaseglob"];
@@ -179,6 +196,13 @@ function ansiC(body) {
     if (ctl !== undefined) return String.fromCharCode(ctl.charCodeAt(0) & 0x1f);
     return C_ESCAPES[ch] ?? all;
   }).split("\0")[0];
+}
+
+/** Whether a line ends in an odd run of backslashes, whose last bash joins to the next line. */
+function continues(line) {
+  let k = line.length;
+  while (k > 0 && line[k - 1] === "\\") k -= 1;
+  return (line.length - k) % 2 === 1;
 }
 
 /** The index of the first of `words` that is not a reserved word, `time` or the `-p` after it. A word read while
@@ -687,14 +711,16 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
         }
         let end = src.indexOf("\n", i);
         if (end < 0) end = src.length;
-        let line = src.slice(i, end);
+        const pieces = [src.slice(i, end)];
         i = end + 1;
-        while (full && !doc.quoted && /(?:^|[^\\])(?:\\\\)*\\$/.test(line) && i <= src.length) {
+        while (full && !doc.quoted && continues(pieces.at(-1)) && i <= src.length) {
+          pieces.push(pieces.pop().slice(0, -1));
           end = src.indexOf("\n", i);
           if (end < 0) end = src.length;
-          line = line.slice(0, -1) + src.slice(i, end);
+          pieces.push(src.slice(i, end));
           i = end + 1;
         }
+        let line = pieces.join("");
         if (doc.tabs) line = line.replace(/^\t+/, "");
         if (line === doc.delimiter) break;
         if (!full && !doc.quoted && BODY_EXPANSION.test(line)) notExempt();
@@ -844,9 +870,12 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
 /** Every simple command in the line is a read-only tool and every redirection opens an ordinary file. Pipes, lists
  *  and command substitutions are followed, so `cat s.py | python3` and `python3 -c "$(cat s.py)"` are not
  *  read-only; quoting is read as bash reads it. */
-export function readOnlyCommand(command, cwd) {
+export function readOnlyCommand(command, cwd, deadline = Infinity) {
   try {
-    readShell(command, { cwd, onCommand: (words) => requireReadOnlyCommand(words, cwd) });
+    readShell(command, { cwd, onCommand: (words) => {
+      late(deadline);
+      requireReadOnlyCommand(words, cwd);
+    } });
     return true;
   } catch {
     // Whatever this reader cannot follow, its own failure included, is judged rather than exempted.
@@ -940,8 +969,8 @@ function commandChain(words, values) {
  *  carries, with whether bash would expand it as a glob and whether it was read only for the names in it; the values
  *  the line assigns each variable; the directory each `cd`, `pushd` or `env -C` changes into (null for HOME); the
  *  starting points and command of each `find -execdir`; the glob options it may turn on; and, when it runs shell code
- *  the line does not show, where. `tool` is the hook payload's tool_name. */
-function readLine(command, cwd, tool) {
+ *  the line does not show, where. `tool` is the hook payload's tool_name; past `deadline` it throws OUT_OF_TIME. */
+function readLine(command, cwd, tool, deadline = Infinity) {
   const found = { texts: [], words: [], values: new Map(), moves: [], finds: [], options: new Set(),
                   unreadable: null };
   const assign = (name, value) => {
@@ -958,7 +987,8 @@ function readLine(command, cwd, tool) {
   const readCode = (code, what) => {
     try {
       read(code);
-    } catch {
+    } catch (err) {
+      passOnLate(err);
       unreadable(`${what} cannot be read`);
     }
   };
@@ -971,14 +1001,15 @@ function readLine(command, cwd, tool) {
     else readCode(w.text, what);
   };
   // Any other word or heredoc body may still run as code later: written to a file and run, handed to su, watch or ssh,
-  // or kept for an alias or an arithmetic context. Each is read for the paths it names, to a bounded depth.
+  // or kept for an arithmetic context. Each is read for the paths it names, to a bounded depth.
   const readLeniently = (text) => {
     if (lenient >= LENIENT_DEPTH || !CODE_LIKE.test(text)) return;
     lenient += 1;
     try {
       read(text);
-    } catch {
+    } catch (err) {
       // The words read before the reader stopped are kept; a string need not be code at all.
+      passOnLate(err);
     } finally {
       lenient -= 1;
     }
@@ -1109,6 +1140,7 @@ function readLine(command, cwd, tool) {
   };
 
   const inspect = (words, redirects, piped = false) => {
+    late(deadline);
     const chain = commandChain(words, found.values);
     const head = chain.at(-1) ?? -1;
     // An unquoted pattern character or expansion makes a word a glob, except in a case pattern or a [[ test.
@@ -1161,7 +1193,7 @@ function readLine(command, cwd, tool) {
     // out sets one the line does not show.
     const aliasValue = (value) => {
       if (value === null) unreadable("an alias value is not in the line");
-      else if ((value.length - value.replace(/\\+$/, "").length) % 2) {
+      else if (continues(value)) {
         unreadable("an alias value ends in a backslash, which joins it to the line after it");
       } else {
         readCode(value, "an alias value");
@@ -1208,7 +1240,8 @@ function readLine(command, cwd, tool) {
 
   try {
     read(command);
-  } catch {
+  } catch (err) {
+    passOnLate(err);
     // bash goes on past whatever stopped the reader, so a Bash line it cannot follow to its end is judged. Another
     // tool's line is read with bash's grammar only for the names in it: the words read before the reader stopped are
     // kept, the raw text is still searched, and only a line that may hand code to a shell is refused.
@@ -1289,8 +1322,17 @@ function isAllowedPath(fp, config) {
   });
 }
 
+/** Whether `text` names a provider host and a send verb. `/messages/<id>/send` is a `/send` after the first
+ *  `/messages/` in one run of characters other than blanks and quotes: a backtracking pattern for it takes quadratic
+ *  time over a run of `/messages/`, and the hook allows a line it has not judged before its timeout. */
 function looksLikeSender(text, config) {
-  return config.providers.some((h) => text.includes(h)) && SEND_VERB.test(text);
+  if (!config.providers.some((h) => text.includes(h))) return false;
+  if (SEND_VERB.test(text)) return true;
+  for (const [run] of text.matchAll(MESSAGE_SEND.run)) {
+    const at = run.search(MESSAGE_SEND.messages);
+    if (at >= 0 && MESSAGE_SEND.send.test(run.slice(at + "/messages/".length))) return true;
+  }
+  return false;
 }
 
 // The expansions below share one budget of work for the words bash reads in a line: each word a brace or a variable
@@ -1602,11 +1644,13 @@ function directories(command, cwd, reading, budget) {
   const scope = new Map(reading.values);
   const extend = (name, more) => scope.set(name, new Set([...(reading.values.get(name) ?? []), ...more]));
   extend("HOME", [os.homedir()]);
+  const moves = new Map(reading.moves.map((operand) => [operand?.bare ?? null, operand]));
   for (let grew = true; grew && budget.left > 0; ) {
     extend("PWD", places);
     extend("OLDPWD", [process.env.OLDPWD, ...places].filter(Boolean));
     grew = false;
-    for (const operand of reading.moves) {
+    for (const operand of moves.values()) {
+      late(budget.deadline);
       for (const dir of moveTargets(operand, [...places], scope, budget, reading.options)) {
         if (places.has(dir) || !isDirectory(dir)) continue;
         if (places.size >= MAX_PLACES) budget.left = 0;
@@ -1618,9 +1662,22 @@ function directories(command, cwd, reading, budget) {
   return { places: [...places], scope };
 }
 
+/** The script paths written in `text`: in each run of path characters, everything up to the last script extension
+ *  that ends a word inside it, so `blast.py.bak` gives `blast.py`. One pass over each run: a pattern that backtracks
+ *  over a long run takes quadratic time, and the hook allows a line it has not judged before its timeout. */
+function scriptPaths(text) {
+  const out = [];
+  for (const [run] of text.matchAll(PATH_RUN)) {
+    let end = 0;
+    for (const m of run.matchAll(SCRIPT_END)) if (m.index > 0) end = m.index + m[0].length;
+    if (end) out.push(run.slice(0, end));
+  }
+  return out;
+}
+
 /** The script names in a word's text: the paths inside it, and the whole text or what follows its `=`. */
 function namesIn(text) {
-  const names = [...text.matchAll(BARE_PATH)].map((m) => m[0]);
+  const names = scriptPaths(text);
   for (const part of [text, text.slice(text.indexOf("=") + 1)]) if (SCRIPT_NAME.test(part)) names.push(part);
   return names;
 }
@@ -1642,17 +1699,14 @@ function subdirectories(root, budget) {
   return out;
 }
 
-/** The candidates that are regular files small enough to read. */
-function existing(candidates) {
-  return candidates.filter((fp) => {
-    try {
-      const st = fs.statSync(fp);
-      return st.isFile() && st.size <= MAX_READ_BYTES;
-    } catch {
-      return false;
-    }
-  });
-}
+const isReadableFile = (fp) => {
+  try {
+    const st = fs.statSync(fp);
+    return st.isFile() && st.size <= MAX_READ_BYTES;
+  } catch {
+    return false;
+  }
+};
 
 /** Every existing script path named in the command, and the text of every word bash builds: each word's braces,
  *  variables and globs expanded, the paths inside those texts, and those in the raw text, which still holds what the
@@ -1667,11 +1721,12 @@ function referencedFiles(command, cwd, reading, budget) {
   const out = new Set();
   const texts = [];
   const tokens = new Set([...command.matchAll(QUOTED_PATH)].map((m) => m[1] || m[2]));
-  for (const m of command.matchAll(BARE_PATH)) tokens.add(m[0]);
+  for (const name of scriptPaths(command)) tokens.add(name);
   const lenientBudget = { left: EXPANSION_LIMIT, listings: budget.listings };
   const reread = (source) => readShell(source, { cwd, onCommand: () => {}, full: true, single: true });
   const built = (w, spend) => substitutions(w.parts ?? [{ text: w.text }], scope, spend);
   for (const { word, glob, lenient } of reading.words) {
+    late(budget.deadline);
     const spend = lenient ? lenientBudget : budget;
     for (const w of braceWords(word, spend, reread)) {
       for (const { text, pattern } of built(w, spend)) {
@@ -1687,21 +1742,43 @@ function referencedFiles(command, cwd, reading, budget) {
       }
     }
   }
-  const resolve = (name, dirs) => tildeForms(name, scope)
-    .flatMap((form) => existing(path.isAbsolute(form) ? [form] : dirs.map((dir) => `${dir}/${form}`)));
+  // A directory is listed once, so a name it does not hold costs no stat. The listing is compared without case, as a
+  // case-insensitive filesystem matches a name, and a stat decides; a directory that exists but cannot be listed is
+  // left to the stat.
+  const listings = new Map();
+  const holds = (dir, lower) => {
+    if (!listings.has(dir)) {
+      let names;
+      try {
+        names = new Set(fs.readdirSync(dir).map((entry) => entry.toLowerCase()));
+      } catch (err) {
+        names = err.code === "EACCES" || err.code === "EPERM" ? null : new Set();
+      }
+      listings.set(dir, names);
+    }
+    return listings.get(dir)?.has(lower) ?? true;
+  };
+  const resolve = (name, dirs) => tildeForms(name, scope).flatMap((form) => {
+    if (path.isAbsolute(form)) return [form];
+    const lower = form.includes("/") ? null : form.toLowerCase();
+    return dirs.filter((dir) => lower === null || holds(dir, lower)).map((dir) => `${dir}/${form}`);
+  }).filter(isReadableFile);
   // bash finds a command, a source operand and a script a shell does not find in its directory on PATH, as the
   // environment and the line set it, and so do the programs that run others; an empty entry is the directory itself.
   const searchPath = [...new Set([process.env.PATH, ...(scope.get("PATH") ?? [])].filter((v) => typeof v === "string")
     .flatMap((value) => value.split(":")).flatMap((entry) => tildeForms(entry || ".", scope))
     .flatMap((entry) => (path.isAbsolute(entry) ? [entry] : places.map((dir) => path.resolve(dir, entry)))))];
+  const everywhere = [...places, ...searchPath];
   for (const token of tokens) {
+    late(budget.deadline);
     // bash reads `<&-sender.py` as a descriptor close and the word `sender.py`, so the path may start after the dashes.
     for (const name of new Set([token, token.replace(/^-+/, "")])) {
-      for (const fp of resolve(name, name.includes("/") ? places : [...places, ...searchPath])) out.add(fp);
+      for (const fp of resolve(name, name.includes("/") ? places : everywhere)) out.add(fp);
     }
   }
   // find -execdir runs its command in the directory of each file it finds: anywhere under its starting points.
   for (const { starts, words } of reading.finds) {
+    late(budget.deadline);
     const names = words.flatMap((w) => built(w, budget).flatMap(({ text }) => namesIn(text)))
       .filter((name) => !path.isAbsolute(name));
     if (!names.length) continue;
@@ -1752,31 +1829,38 @@ function senderVerdict(fp, config, via) {
 /** `tool` is the hook payload's tool_name. The read-only exemption reads bash grammar, so it applies to the Bash tool
  *  alone: PowerShell takes no backslash as an escape, and a separator bash reads as text can end its statement.
  *
- * ⚠ NEVER THROWS. The hook allows a line it fails on, so a line that drives the
- * judgment into a limit (the call stack, a string's length) would run unjudged,
- * along with every sender it names. Any failure here is a block. */
-export function judge(command, cwd, config, tool) {
+ * ⚠ NEVER THROWS, AND NEVER OUTLIVES THE HOOK. The hook allows a line it
+ * fails on or does not finish judging in time, so a line that drives the
+ * judgment into a limit (the call stack, memory, the clock) would run
+ * unjudged, along with every sender it names. A line longer than MAX_LINE, one
+ * not judged by `deadline`, and any failure here are blocks. */
+export function judge(command, cwd, config, tool, deadline = Date.now() + DEADLINE_MS) {
   if (!config || typeof command !== "string" || !command.trim()) return null;
+  if (command.length > MAX_LINE) {
+    return { reason: "this command is too large for the gate to read",
+             where: `${command.length} characters, more than ${MAX_LINE}`, unreadable: true };
+  }
   try {
-    return judgeLine(command, cwd, config, tool);
+    return judgeLine(command, cwd, config, tool, deadline);
   } catch (err) {
-    return { reason: "the gate could not finish judging this command", where: String(err?.name ?? err),
-             unreadable: true };
+    return { reason: "the gate could not finish judging this command",
+             where: err === OUT_OF_TIME ? `not within ${DEADLINE_MS} ms` : String(err?.name ?? err), unreadable: true };
   }
 }
 
-function judgeLine(command, cwd, config, tool) {
+function judgeLine(command, cwd, config, tool, deadline) {
   // A heredoc body is data to the exemption unless bash would expand it. Every other judgment reads the full text,
   // so a body fed to an interpreter is still judged.
-  if (tool === "Bash" && readOnlyCommand(command, cwd)) return null;
-  const reading = readLine(command, cwd, tool);
-  const budget = { left: EXPANSION_LIMIT, listings: new Map() };
+  if (tool === "Bash" && readOnlyCommand(command, cwd, deadline)) return null;
+  const reading = readLine(command, cwd, tool, deadline);
+  const budget = { left: EXPANSION_LIMIT, listings: new Map(), deadline };
   const { files, texts } = referencedFiles(command, cwd, reading, budget);
   if (looksLikeSender([command, ...reading.texts, ...texts].join("\n"), config)) {
     return { reason: "this command reaches a mail-send endpoint directly",
              where: "the command line" };
   }
   for (const fp of files) {
+    late(deadline);
     const direct = senderVerdict(fp, config);
     if (direct) return direct;
     // An allowlisted file does not launder its imports, but the sanctioned
@@ -1820,15 +1904,19 @@ function main() {
   // repo's config; looking only at the payload cwd finds none and exits before
   // the `cd` is ever considered — the same bypass shape as resolving a bare
   // path against the wrong directory, one layer up.
+  const deadline = Date.now() + DEADLINE_MS;
   let loaded = { config: null, problems: [] };
   let dirs = [cwd, process.cwd()].filter(Boolean).map((dir) => path.resolve(dir));
   try {
     const text = typeof command === "string" ? command : "";
-    const budget = { left: EXPANSION_LIMIT, listings: new Map() };
-    const { places } = directories(text, cwd, readLine(text, cwd, payload?.tool_name), budget);
+    const budget = { left: EXPANSION_LIMIT, listings: new Map(), deadline };
+    // A line too large to read still has the cd targets its raw text names.
+    const reading = text.length > MAX_LINE ? { values: new Map(), moves: [], options: new Set() }
+      : readLine(text, cwd, payload?.tool_name, deadline);
+    const { places } = directories(text, cwd, reading, budget);
     dirs = [...places.filter((dir) => !dirs.includes(dir)), ...dirs];
   } catch {
-    // A line that defeats the reader still answers to the session's own config.
+    // A line that defeats the reader, or its time, still answers to the session's own config.
   }
   try {
     for (const dir of dirs) {
@@ -1841,7 +1929,7 @@ function main() {
     process.stdout.write(`send-chokepoint: ${p}\n`);
   }
   if (!loaded.config) process.exit(0);
-  const verdict = judge(command, cwd, loaded.config, payload?.tool_name);
+  const verdict = judge(command, cwd, loaded.config, payload?.tool_name, deadline);
   if (!verdict) process.exit(0);
   process.stderr.write(
     `BLOCKED: ${verdict.reason} (${verdict.where}).\n\n${advice(loaded.config, verdict)}\n`);

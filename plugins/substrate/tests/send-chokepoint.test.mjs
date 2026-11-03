@@ -670,6 +670,47 @@ for (const [shape, line] of Object.entries(LARGE)) {
   });
 }
 
+// The hook allows a line it has not judged within the 15 s hooks.json gives it, so the judgment must stay close to
+// linear in the line's size and in a script's: a scan that backtracks over a long run of text is a way past it.
+const SLOW = {
+  "a 100 KB run of path characters": `echo '${"a".repeat(100000)}'`,
+  "a 100 KB run of dots": `echo ${".".repeat(100000)}`,
+  "10 000 /messages/ in a row": `echo '${"/messages/".repeat(10000)}'`,
+  "a heredoc of 100 000 continued lines": `cat <<EOF\n${"x\\\n".repeat(100000)}EOF`,
+  "60 000 script names": `git add ${Array.from({ length: 60000 }, (_, n) => `f${n}.py`).join(" ")}`,
+};
+for (const [shape, line] of Object.entries(SLOW)) {
+  test(`a large line is judged within the hook's timeout: ${shape}`, () => {
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    assert.equal(hook(`${line}; python3 blast.py`, dir).status, 2);
+  });
+}
+
+test("a sender padded to slow its scan is judged within the hook's timeout", () => {
+  const dir = repo();
+  file(dir, "padded.py", `# ${"/messages/".repeat(100000)}\n${SENDER_BODY}`);
+  assert.equal(hook("python3 padded.py", dir).status, 2);
+});
+
+// Reading a line costs memory in proportion to its words, and many large scripts cost time; past a size or a time
+// limit the line is refused rather than allowed by a hook that ran out of either.
+test("a line over 256 KiB is refused without being read", () => {
+  const dir = repo();
+  const r = hook(`echo "${"a ".repeat(5000000)}"; python3 other.py`, dir);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /too large/);
+});
+
+test("a line the gate cannot judge in time is refused", () => {
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  const r = hook("python3 other.py", dir, "Bash", { SEND_CHOKEPOINT_DEADLINE_MS: "1" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /not within 1 ms/);
+  assert.equal(hook("python3 other.py", dir).status, 0, "the default limit judges an ordinary line");
+});
+
 // bash expands only the braces it reads unquoted, so a quoted brace is text and makes no words: JSON bodies, jq and
 // node programs and commit messages are ordinary commands, however many brace pairs they hold.
 const objects = (n) => `[${Array.from({ length: n }, (_, k) => `{"id":${k},"name":"n${k}"}`).join(",")}]`;
