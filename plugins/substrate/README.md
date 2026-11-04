@@ -295,6 +295,12 @@ what a config is for.
 
 ## Mail-sender gate
 
+The gate is a tripwire. It is not a security boundary. It stops a script or
+an agent reaching a mail provider by an ordinary route outside the declared
+sender, and a command written to evade it gets through. Keep provider
+credentials where only the sender can use them, and treat this hook as the
+alarm in front of that.
+
 Opt in with `.send-chokepoint.json` in the project or a parent directory:
 
 ```json
@@ -389,6 +395,27 @@ an error in the hook, or no answer after 8 seconds. Claude Code runs a
 command whose hook crashes or outlives the 15 seconds `hooks.json` allows, so
 the judgment runs in a child process with a 512 MB heap that the hook kills
 at its 8-second deadline.
+
+These shapes are not resolved, and a sender reached through one of them
+runs:
+
+- A script name the line builds instead of spelling it as one plain word:
+  quotes or escapes inside it (`bl''ast.py`), variables, brace lists, globs,
+  `~`, command output, or a directory entered other than by one `cd DIR`.
+- Shell code in a string another program runs (`sh -c`, `bash -c`,
+  `env -S`, `eval`, `trap`, `find -exec`, `xargs`), fed to a shell through a
+  pipe, heredoc, here-string or process substitution, or written to a file
+  by the same line that runs it.
+- Code an interpreter finds itself: `python3 -m mod`, `-c 'import mod'`,
+  `perl -Mmod`, a script without an extension or with one other than `.py`,
+  `.mjs`, `.js`, `.ts`, `.ps1`, `.sh` or `.rb`, and any import but a Python
+  `import` of a module beside the script.
+- A provider host or send verb assembled at run time, so the two never
+  appear together as text.
+- A nearer `.send-chokepoint.json`, or an edit to this one: the config sits
+  in a tree the agent can write.
+- Any route but a watched host with a recognized verb: SMTP, a relay, or
+  another provider's API.
 
 ## Honest limitations
 
