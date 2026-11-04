@@ -995,6 +995,39 @@ expectEach(2, "an expansion splits where the line's IFS splits it", [
   "IFS=:; for f in x:blast.py; do python3 $f; done",
 ]);
 
+// The `${...}` operators that cut, replace, slice, change the case of or transform a value, and indirection, apply to
+// every value the variable may take.
+expectEach(2, "a parameter operator is applied to every value", [
+  "X=xblast.py; python3 ${X#x}",
+  "X=xxblast.py; python3 ${X##*x}",
+  "X=blast.pyx; python3 ${X%x}",
+  "X=blast.pyxyx; python3 ${X%%x*}",
+  "X=blxast.py; python3 ${X/x/}",
+  "X=bxlxast.py; python3 ${X//x}",
+  "X=xlast.py; python3 ${X/#x/b}",
+  "X=blast.pz; python3 ${X/%z/y}",
+  "X=xxblast.py; python3 ${X:2}",
+  "X=blast.pyxx; python3 ${X:0:8}",
+  "X=xblast.pyx; python3 ${X:1:-1}",
+  "X=xxblast.py; python3 ${X: -8}",
+  "X=BLAST.PY; python3 ${X,,}",
+  "X=Blast.py; python3 ${X,}",
+  "X=BLAST.PY; python3 ${X~~}",
+  "X=BLAST.py; python3 ${X,,[A-Z]}",
+  "X=BLAST.PY; python3 ${X@L}",
+  "X='bl\\x61st.py'; python3 ${X@E}",
+  "A=bl; R=A; python3 ${!R}ast.py",
+  "blast=1; python3 ${!bla*}.py",
+  "P=x; X=xblast.py; python3 ${X#$P}",
+  'X=xblast.py; python3 "${X#"x"}"',
+]);
+
+expectEach(0, "a parameter operator on harmless values is not refused", [
+  'for f in *.txt; do echo "${f%.txt}.md"; done',
+  "X=other.py.bak; python3 ${X%.bak}",
+  'X=/tmp/a/b.txt; echo "${X##*/}" "${X%/*}" "${X:0:3}" "${X^^}" "${#X}"',
+]);
+
 expectEach(0, "a line that sets IFS to read its input is not refused", [
   "while IFS= read -r line; do echo \"$line\"; done < a.txt",
   "IFS=, read -r a b <<< 'x,y'; echo $a",

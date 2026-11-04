@@ -374,7 +374,8 @@ function readShell(src, { cwd, onCommand, onText, onAssign, onFunction, full = f
       if (dynamic) b.literal = false;
     };
     b.addPiece = (piece) => b.add(piece.text, piece.dynamic, piece.opens ?? piece.dynamic, piece.fixed,
-      piece.parts ?? [{ text: piece.text, name: piece.name, alternatives: piece.alternatives, quoted: piece.quoted }]);
+      piece.parts ?? [{ text: piece.text, name: piece.name, alternatives: piece.alternatives,
+                        transform: piece.transform, quoted: piece.quoted }]);
     return b;
   };
   const quotedPart = (text) => [{ text, quoted: true }];
@@ -492,7 +493,14 @@ function readShell(src, { cwd, onCommand, onText, onAssign, onFunction, full = f
     const value = variable(name, cwd);
     const op = /^:?[-=+?]/.exec(tail.text);
     if (!op) {
-      return { text: value ?? "", dynamic: true, name: !tail.text || tail.text.startsWith("[") ? name : undefined };
+      // A subscript selects from an array, which takes every value; `${!PREFIX*}` names variables.
+      const subscript = /^\[[^\]]*\]/.exec(tail.text)?.[0] ?? "";
+      const rest = tail.text.slice(subscript.length);
+      if (!rest) return { text: value ?? "", dynamic: true, name };
+      if (/^![A-Za-z_]\w*$/.test(name) && (rest === "*" || rest === "@")) return { ...DYNAMIC, name: name + rest };
+      const transform = parameterOperator(withoutPrefix(tail.parts, subscript.length));
+      if (!transform) return { text: value ?? "", dynamic: true };
+      return { text: transform(value ?? "", new Map(), { left: 64 })[0] ?? "", dynamic: true, name, transform };
     }
     const set = value !== null && (value !== "" || !op[0].startsWith(":"));
     const word = tail.text.slice(op[0].length);
@@ -997,9 +1005,9 @@ function fieldBreaks(values) {
   return new RegExp(`[${[...characters].map((c) => `\\u{${c.codePointAt(0).toString(16)}}`).join("")}]+`, "u");
 }
 
-/** A text and, when it has more than one, the fields `breaks` cuts it into. */
+/** A text and, when it has more than one, the fields `breaks` cuts it into; with no `breaks`, the text alone. */
 function withFields(text, breaks) {
-  const fields = text.split(breaks).filter(Boolean);
+  const fields = breaks ? text.split(breaks).filter(Boolean) : [];
   return fields.length > 1 ? [text, ...fields] : [text];
 }
 
@@ -1637,11 +1645,152 @@ function braceWords(word, budget, reread) {
 const GLOB_SPECIAL = /[\\*?[\]@!+()|^-]/g;
 const patternOf = (text, part) => (part.quoted ? text.replace(GLOB_SPECIAL, "\\$&") : text);
 
+const environment = (name) => (Object.hasOwn(process.env, name) ? process.env[name] : "");
+
 /** The values the line gives a parameter. Every positional parameter, `$0` included, and `$@` take each word the line
- *  passes as one, since `shift` and `set` move them; `$*` takes those and each run of them joined. */
+ *  passes as one, since `shift` and `set` move them; `$*` takes those and each run of them joined. `${#NAME}` is the
+ *  length of each value, `${!NAME}` each value of each variable a value of NAME names, and `${!PREFIX*}` the name of
+ *  each variable that starts with PREFIX. */
 function valuesOf(values, name) {
   if (name === "*") return [...(values.get("@") ?? []), ...(values.get("*") ?? [])];
-  return values.get(/^\d+$/.test(name) ? "@" : name) ?? [];
+  const prefix = /^!(\w+)[*@]$/.exec(name);
+  if (prefix) {
+    return [...new Set([...values.keys(), ...Object.keys(process.env)])].filter((key) => key.startsWith(prefix[1]));
+  }
+  if (/^#./.test(name)) return valuesOf(values, name.slice(1)).map((value) => String([...value].length));
+  if (/^!./.test(name)) {
+    return [...valuesOf(values, name.slice(1)), environment(name.slice(1))]
+      .filter((target) => /^(?:[A-Za-z_]\w*|\d+)$/.test(target))
+      .flatMap((target) => [...valuesOf(values, target), environment(target)]);
+  }
+  return [...(values.get(/^\d+$/.test(name) ? "@" : name) ?? [])];
+}
+
+// The value longer than which an operator that searches it for a pattern refuses the line rather than search it.
+const SEARCHED = 1 << 12;
+const caseChange = { "^": (c) => c.toUpperCase(), ",": (c) => c.toLowerCase(),
+                     "~": (c) => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase()) };
+// The `${NAME@X}` transformations that change a value's text; the others leave it as it is or name its attributes.
+const TRANSFORMS = { U: (v) => v.toUpperCase(), L: (v) => v.toLowerCase(),
+                     u: (v) => v.charAt(0).toUpperCase() + v.slice(1), E: (v) => ansiC(v), Q: (v) => `'${v}'` };
+
+/** The pieces of a word before and after its first unquoted `separator`, or the whole word and null. */
+function splitParts(parts, separator) {
+  for (let n = 0; n < parts.length; n += 1) {
+    const at = fixedPart(parts[n]) && !parts[n].quoted ? parts[n].text.indexOf(separator) : -1;
+    if (at < 0) continue;
+    return [[...parts.slice(0, n), { text: parts[n].text.slice(0, at) }],
+            [{ text: parts[n].text.slice(at + 1) }, ...parts.slice(n + 1)]];
+  }
+  return [parts, null];
+}
+
+/** The texts an offset or length of `${NAME:offset:length}` may take as integers, or null when one is not a literal
+ *  integer, in which case it may be any. */
+function integers(parts, values, budget) {
+  const texts = substitutions(parts, values, budget).map(({ text }) => text.trim());
+  return texts.every((text) => /^[-+]?\d+$/.test(text)) ? texts.map(Number) : null;
+}
+
+/** What an operator after `${NAME` (and any subscript) does to one value, as a function of the value, the values the
+ *  line gives, and the budget, returning each text it may make; null for text that starts no such operator. Removing,
+ *  replacing or changing the case of what matches a pattern, and slicing, are done as bash does them; a pattern, a
+ *  replacement, an offset and a length take each text their own words may take, and an offset or length that is not
+ *  a literal integer may be any. */
+function parameterOperator(parts) {
+  const op = /^(?:##?|%%?|\/[/#%]?|\^\^?|,,?|~~?|@[A-Za-z]|:)/.exec(parts.map((p) => p.text).join(""))?.[0];
+  if (!op) return null;
+  const words = withoutPrefix(parts, op.length);
+  const patterns = (wordParts, values, budget) => substitutions(wordParts, values, budget).map((s) => s.pattern);
+  if (op[0] === "@") return (value) => [TRANSFORMS[op[1]]?.(value) ?? value, value];
+  if ("^,~".includes(op[0])) {
+    return (value, values, budget) => patterns(words, values, budget).map((pattern) => {
+      const re = pattern ? globSegment(pattern, false) : /^/;
+      const chars = [...value];
+      return chars.map((c, k) => (re.test(c) && (op.length === 2 || k === 0) ? caseChange[op[0]](c) : c)).join("");
+    });
+  }
+  if (op === ":") {
+    const [offsetParts, lengthParts] = splitParts(words, ":");
+    return (value, values, budget) => {
+      const chars = [...value];
+      const n = chars.length;
+      const offsets = integers(offsetParts, values, budget) ?? [...Array(n + 1).keys()];
+      const lengths = lengthParts ? integers(lengthParts, values, budget) : [n];
+      if (offsets.length * (lengths?.length ?? n + 1) > 1 << 12) budget.left = 0;
+      if (budget.left <= 0) return [value];
+      const out = new Set();
+      for (const offset of offsets) {
+        const from = offset < 0 ? Math.max(n + offset, 0) : Math.min(offset, n);
+        for (const length of lengths ?? [...Array(n + 1).keys()]) {
+          out.add(chars.slice(from, length < 0 ? Math.max(n + length, from) : from + length).join(""));
+        }
+      }
+      return [...out];
+    };
+  }
+  if (op[0] === "#" || op[0] === "%") {
+    return (value, values, budget) => {
+      if (value.length > SEARCHED) budget.left = 0;
+      if (budget.left <= 0) return [value];
+      return patterns(words, values, budget).map((pattern) => removeMatch(value, pattern, op));
+    };
+  }
+  const [patternParts, replacementParts] = splitParts(words, "/");
+  return (value, values, budget) => {
+    if (value.length > SEARCHED >> 4) budget.left = 0;
+    if (budget.left <= 0) return [value];
+    const replacements = replacementParts ? substitutions(replacementParts, values, budget).map((s) => s.text) : [""];
+    return patterns(patternParts, values, budget)
+      .flatMap((pattern) => replacements.map((replacement) => replaceMatch(value, pattern, op, replacement)));
+  };
+}
+
+/** `value` without the shortest (`#`, `%`) or longest (`##`, `%%`) prefix (`#`) or suffix (`%`) that matches. */
+function removeMatch(value, pattern, op) {
+  const re = globSegment(pattern, false);
+  const n = value.length;
+  const cuts = [...Array(n + 1).keys()];
+  if ((op === "##") !== (op === "%")) cuts.reverse();
+  for (const k of cuts) {
+    if (op[0] === "#" && re.test(value.slice(0, k))) return value.slice(k);
+    if (op[0] === "%" && re.test(value.slice(k))) return value.slice(0, k);
+  }
+  return value;
+}
+
+/** `value` with the longest match of `pattern` at the first place it matches replaced (`/`), at every place (`//`),
+ *  only at the start (`/#`) or only at the end (`/%`). */
+function replaceMatch(value, pattern, op, replacement) {
+  if (!pattern) return value;
+  const re = globSegment(pattern, false);
+  const n = value.length;
+  const longest = (i) => {
+    for (let j = n; j >= i; j -= 1) if (re.test(value.slice(i, j))) return j;
+    return -1;
+  };
+  if (op === "/#") {
+    const j = longest(0);
+    return j < 0 ? value : replacement + value.slice(j);
+  }
+  if (op === "/%") {
+    for (let i = 0; i <= n; i += 1) if (re.test(value.slice(i))) return value.slice(0, i) + replacement;
+    return value;
+  }
+  let out = "";
+  for (let i = 0; i <= n;) {
+    const j = longest(i);
+    if (j < 0) {
+      out += value[i] ?? "";
+      i += 1;
+    } else if (op === "/") {
+      return out + replacement + value.slice(j);
+    } else {
+      out += replacement + (j === i ? value[i] ?? "" : "");
+      i = j === i ? i + 1 : j;
+    }
+  }
+  return out;
 }
 
 /** The texts a word can take, each with its pattern, when each variable in it takes, besides the value it was read
@@ -1650,7 +1799,9 @@ function valuesOf(values, name) {
 function substitutions(parts, values, budget) {
   let out = [{ text: "", pattern: "" }];
   for (const part of parts) {
-    const choices = new Set([part.text, ...(part.name ? valuesOf(values, part.name) : []),
+    const named = part.name ? valuesOf(values, part.name) : [];
+    const choices = new Set([part.text,
+      ...(part.transform ? named.flatMap((value) => part.transform(value, values, budget)) : named),
       ...(part.alternatives ?? []).flatMap((alternative) => substitutions(alternative, values, budget)
         .map(({ text }) => text))]);
     out = out.flatMap((head) => [...choices].map((choice) => ({ text: head.text + choice,
@@ -1945,8 +2096,9 @@ function referencedFiles(command, cwd, reading, budget) {
   const out = new Set();
   const texts = [];
   const tokens = new Set([...command.matchAll(QUOTED_PATH)].map((m) => m[1] || m[2]));
-  // Where the line gives IFS a value, an expansion of any text may split there.
-  const breaks = fieldBreaks(scope);
+  // Where the line gives IFS a value, an expansion of any text may split there. Blanks already end a run of path
+  // characters.
+  const breaks = scope.get("IFS")?.size ? fieldBreaks(scope) : null;
   for (const field of withFields(command, breaks)) for (const name of scriptPaths(field)) tokens.add(name);
   const lenientBudget = { left: EXPANSION_LIMIT, listings: budget.listings };
   const reread = (source) => readShell(source, { cwd, onCommand: () => {}, full: true, single: true,
@@ -1961,8 +2113,8 @@ function referencedFiles(command, cwd, reading, budget) {
         for (const field of withFields(text, breaks)) for (const name of namesIn(field)) tokens.add(name);
         if (!glob || !hasGlob(pattern)) continue;
         // An assigned value is not a glob yet, but an unquoted expansion of it later is.
-        const parts = [pattern, pattern.slice(pattern.indexOf("=") + 1), ...withFields(pattern, breaks).filter(hasGlob)];
-        for (const part of new Set(parts)) {
+        const forms = [pattern, pattern.slice(pattern.indexOf("=") + 1), ...withFields(pattern, breaks).filter(hasGlob)];
+        for (const part of new Set(forms)) {
           for (const form of tildeForms(part, scope)) {
             for (const fp of globFiles(form, places, spend, reading.options)) if (SCRIPT_NAME.test(fp)) tokens.add(fp);
           }

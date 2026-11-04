@@ -405,7 +405,16 @@ the raw text and from every word as bash builds it:
   them once in whatever order the line assigns them. The word of
   `${NAME:-word}`, `${NAME:=word}` or `${NAME:+word}` (with or without
   the colon) takes its values the same way, `${NAME:+word}` may also be
-  empty, and `${NAME:?word}` is the variable's value. The decisions that
+  empty, and `${NAME:?word}` is the variable's value. The operators that
+  remove a matching prefix or suffix (`#`, `##`, `%`, `%%`), replace a
+  match (`/`, `//`, `/#`, `/%`), slice (`:offset` and `:offset:length`,
+  where an offset or length that is not a literal integer may be any),
+  change case (`^`, `^^`, `,`, `,,`, `~`, `~~`, each limited to what its
+  pattern matches) or transform (`@U`, `@L`, `@u`, `@E`, `@Q`) apply to
+  every value, with each text their pattern and replacement may take, as
+  bash applies them; `${#NAME}` is each value's length, `${!NAME}` each
+  value of each variable a value of NAME names, and `${!PREFIX*}` each
+  variable name starting with PREFIX. The decisions that
   rest on a value (which word names a shell) are made again with every
   value the line gives, until a reading of the line finds no new one, so
   neither a loop nor the order of the line's commands hides one;
@@ -545,13 +554,14 @@ cannot read:
   they are built from each other between readings of the line, or that
   still grow after four readings, and runs of positional parameters
   joined for `$*` that hold more than 4 MiB of text in all;
+- a value longer than 4096 characters that an operator searches for a
+  pattern to remove, or 256 for one to replace, and a slice whose
+  offsets and lengths may make more than 4096 texts;
 - a line that may run in more than 64 directories.
 
 Shell code is read with bash's grammar, whichever of those shells runs it.
 Not resolved: a value computed while the line runs (command output,
-arithmetic, the other `${...}` operators (a substring, a length,
-indirection, and those that cut, replace or change the case of a
-value), `read`, `printf -v`, arrays, and a value a loop builds from its
+arithmetic, `read`, `printf -v`, arrays, and a value a loop builds from its
 own earlier value over more passes than the line assigns distinct
 variables), the positional parameters a script file or `source`
 passes, a name
