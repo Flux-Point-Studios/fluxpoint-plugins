@@ -22,9 +22,17 @@
 // in every script that READS a mailbox. Reading mail is not sending it, and
 // blocking readers is how a gate earns being removed.
 //
-// FAILS OPEN ON ITSELF, CLOSED ON THE SEND. A malformed payload, an unreadable
-// file or a missing config exits 0: a broken hook must never wedge a session. A
-// file it can read that is a sender outside the declared allowlist exits 2.
+// FAILS CLOSED WHERE IT IS ON. Claude Code runs a command whose hook crashes,
+// exits with any status but 2, or outlives the timeout hooks.json gives it, so a
+// judgment that throws or stalls would let the command through. The judgment
+// runs in a child process with a deadline and a heap limit, and anything short
+// of its answer blocks: an error, a payload, config or script it cannot read, a
+// script over the read budget, or no answer by the deadline. Only an unreadable
+// payload outside an opted-in repo is allowed, since nothing there is enforced.
+//
+// IT IS A TRIPWIRE, NOT A SECURITY BOUNDARY. It reads the text of a command and
+// the scripts it names; a command can build a name, a URL or shell code that no
+// static reading sees. The README lists the shapes it does not resolve.
 //
 // CONFIG — `.send-chokepoint.json`, found by walking up from the command's
 // working directory:
@@ -36,10 +44,16 @@
 //   }
 //
 // Exit codes: 0 = allow, 2 = block (stderr is shown to the author).
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+const SCRIPT = fileURLToPath(import.meta.url);
+// hooks.json gives the hook 15 s; the answer must come well inside it on a loaded machine.
+const DEADLINE_MS = 8000;
+const HEAP_MB = 512;
 
 const CONFIG_BASENAME = ".send-chokepoint.json";
 const CONFIG_KEYS = new Set(["sender", "exempt", "providers"]);
@@ -56,7 +70,7 @@ const DEFAULT_PROVIDERS = [
 // The verbs that mean "this one SENDS", as opposed to reading a mailbox.
 const SEND_VERB = /\/sendMail\b|\/messages\/[^"'\s]*\/send\b|%s\/send\b|\{\}\/send\b|\/send["']|createReply|\/mail\.send\b|\/v3\/mail\/send\b|\/messages\.json\b/i;
 
-const MAX_READ_BYTES = 2_000_000;
+const MAX_READ_BYTES = 16 * 1024 * 1024;
 // Bare tokens, plus quoted runs that may contain spaces. Without the quoted
 // forms, `python "space dir/blast.py"` matches only the tail after the space,
 // which resolves to nothing and lets an unsanctioned sender run — and Windows
@@ -388,10 +402,13 @@ export function loadConfig(from) {
   for (;;) {
     const candidate = path.join(dir, CONFIG_BASENAME);
     if (fs.existsSync(candidate)) {
+      // A config that exists but cannot be read throws, and the hook blocks: the repo opted in.
+      const text = fs.readFileSync(candidate, "utf8");
       let doc;
       try {
-        doc = JSON.parse(fs.readFileSync(candidate, "utf8"));
-      } catch {
+        doc = JSON.parse(text);
+      } catch (err) {
+        if (!(err instanceof SyntaxError)) throw err;
         problems.push(`${candidate}: not valid JSON — ignored`);
         return { config: null, problems };
       }
@@ -470,8 +487,7 @@ function referencedFiles(command, cwd) {
         : [name, ...dirs.map((d) => path.resolve(d, name))];
       for (const fp of candidates) {
         try {
-          const st = fs.statSync(fp);
-          if (st.isFile() && st.size <= MAX_READ_BYTES) { out.push(fp); break; }
+          if (fs.statSync(fp).isFile()) { out.push(fp); break; }
         } catch { /* keep looking */ }
       }
     }
@@ -485,8 +501,7 @@ function referencedFiles(command, cwd) {
  * helper and call it, so the provider host never appears in the file the
  * command names. Checking only that file lets every one of them through. */
 function localImports(fp) {
-  let body = "";
-  try { body = fs.readFileSync(fp, "utf8"); } catch { return []; }
+  const body = fs.readFileSync(fp, "utf8");
   const dir = path.dirname(fp);
   const out = [];
   for (const m of body.matchAll(PY_IMPORT)) {
@@ -500,17 +515,16 @@ function localImports(fp) {
   return out;
 }
 
+/** A script that is not the sender's and reaches a send endpoint, or is too large to tell, is refused. One the hook
+ *  cannot read throws, which blocks too. */
 function senderVerdict(fp, config, via) {
   if (isAllowedPath(fp, config)) return null;
-  let body = "";
-  try { body = fs.readFileSync(fp, "utf8"); } catch { return null; }
-  if (!looksLikeSender(body, config)) return null;
-  return {
-    reason: via
-      ? `${path.basename(via)} imports ${path.basename(fp)}, which reaches a mail-send endpoint`
-      : "this script reaches a mail-send endpoint",
-    where: fp,
-  };
+  const subject = via ? `${path.basename(via)} imports ${path.basename(fp)}, which` : "this script";
+  if (fs.statSync(fp).size > MAX_READ_BYTES) {
+    return { reason: `${subject} is larger than the ${MAX_READ_BYTES / 2 ** 20} MiB the gate reads`, where: fp };
+  }
+  if (!looksLikeSender(fs.readFileSync(fp, "utf8"), config)) return null;
+  return { reason: `${subject} reaches a mail-send endpoint`, where: fp };
 }
 
 /** `tool` is the hook payload's tool_name. The read-only exemption reads bash grammar, so it applies to the Bash tool
@@ -546,39 +560,98 @@ const advice = (config) => [
   `${CONFIG_BASENAME}.`,
 ].join("\n");
 
-function main() {
-  let raw = "";
-  try { raw = fs.readFileSync(0, "utf8"); } catch { process.exit(0); }
+const cannotJudge = (why) => [
+  `BLOCKED: the send chokepoint could not finish judging this command: ${why}.`,
+  "",
+  "What the gate cannot judge does not run. Fix what stopped it, or split the",
+  "command so each part names fewer and smaller files.",
+].join("\n") + "\n";
+
+/** Without a payload the command's directories are unknown, so the session's own config decides. */
+function withoutPayload(why) {
+  const { config, problems } = loadConfig(process.cwd());
+  return { problems, refusal: config && cannotJudge(why) };
+}
+
+/** The answer to the payload on stdin: config problems to report, and the refusal when the command may not run. */
+function answer() {
   let payload;
-  try { payload = JSON.parse(raw); } catch { process.exit(0); }
-  const command = (payload?.tool_input || {}).command;
+  try {
+    payload = JSON.parse(fs.readFileSync(0, "utf8"));
+  } catch (err) {
+    return withoutPayload(`its payload could not be read (${err.message})`);
+  }
+  const command = payload?.tool_input?.command;
   const cwd = payload?.cwd;
+  if (typeof command !== "string" || !(cwd === undefined || typeof cwd === "string")) {
+    return withoutPayload("its payload holds no shell command");
+  }
   // ⚠ Search the directories the command will actually RUN in before the
   // session's own. `cd repo && python blast.py` from a parent is governed by
   // repo's config; looking only at the payload cwd finds none and exits before
   // the `cd` is ever considered — the same bypass shape as resolving a bare
   // path against the wrong directory, one layer up.
-  let loaded = { config: null, problems: [] };
-  try {
-    for (const dir of searchDirs(typeof command === "string" ? command : "", cwd)) {
-      const attempt = loadConfig(dir);
-      loaded.problems.push(...(attempt.problems || []));
-      if (attempt.config) { loaded = { ...attempt, problems: loaded.problems }; break; }
+  const problems = [];
+  for (const dir of searchDirs(command, cwd)) {
+    const attempt = loadConfig(dir);
+    problems.push(...attempt.problems);
+    if (attempt.config) {
+      const verdict = judge(command, cwd, attempt.config, payload.tool_name);
+      const refusal = verdict && `BLOCKED: ${verdict.reason} (${verdict.where}).\n\n${advice(attempt.config)}\n`;
+      return { problems, refusal };
     }
-  } catch { process.exit(0); }
-  for (const p of [...new Set(loaded.problems || [])]) {
-    process.stdout.write(`send-chokepoint: ${p}\n`);
   }
-  if (!loaded.config) process.exit(0);
-  let verdict = null;
-  try { verdict = judge(command, cwd, loaded.config, payload?.tool_name); } catch { process.exit(0); }
-  if (!verdict) process.exit(0);
-  process.stderr.write(
-    `BLOCKED: ${verdict.reason} (${verdict.where}).\n\n${advice(loaded.config)}\n`);
-  process.exit(2);
+  return { problems, refusal: null };
 }
 
-if (process.argv[1]
-    && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
-  main();
+/** The judgment itself, run by supervise() in a child process: exits 0 to allow and 2 to block. */
+function judgeHook() {
+  let result;
+  try {
+    result = answer();
+  } catch (err) {
+    fs.writeSync(2, cannotJudge(err?.message ?? String(err)));
+    process.exit(2);
+  }
+  for (const p of new Set(result.problems)) fs.writeSync(1, `send-chokepoint: ${p}\n`);
+  if (result.refusal) {
+    fs.writeSync(2, result.refusal);
+    process.exit(2);
+  }
+  process.exit(0);
+}
+
+/** Runs the judgment in a child process and exits 2 unless the child answers 0 or 2 by the deadline. The child is
+ *  killed at the deadline whatever it is doing; a worker thread would not do, because process.exit waits for a thread
+ *  stuck in a blocking read. */
+function supervise() {
+  let child;
+  const refuse = (why) => {
+    try {
+      child?.kill("SIGKILL");
+      fs.writeSync(2, cannotJudge(why));
+    } finally {
+      process.exit(2);
+    }
+  };
+  process.on("uncaughtException", (err) => refuse(err?.message ?? String(err)));
+  setTimeout(() => refuse(`it was still running after ${DEADLINE_MS / 1000} s`), DEADLINE_MS);
+  try {
+    child = spawn(process.execPath, [`--max-old-space-size=${HEAP_MB}`, SCRIPT, "--judge"],
+      { stdio: ["inherit", "pipe", "pipe"], windowsHide: true });
+  } catch (err) {
+    refuse(err.message);
+  }
+  child.on("error", (err) => refuse(err.message));
+  child.stdout.on("data", (chunk) => fs.writeSync(1, chunk));
+  child.stderr.on("data", (chunk) => fs.writeSync(2, chunk));
+  child.on("close", (code, signal) => {
+    if (code === 0 || code === 2) process.exit(code);
+    refuse(signal ? `it was stopped by ${signal}` : `it exited with status ${code}`);
+  });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(SCRIPT)) {
+  if (process.argv.includes("--judge")) judgeHook();
+  else supervise();
 }

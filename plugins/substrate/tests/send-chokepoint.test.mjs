@@ -10,13 +10,18 @@
 // repo declares in .send-chokepoint.json. With no config it does nothing.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT = fileURLToPath(new URL("../scripts/send-chokepoint.mjs", import.meta.url));
+// Claude Code runs the command when its hook outlives the timeout hooks.json gives it, so every run here gets the same
+// limit: a hook killed at it (status null) is a hook that let the command through.
+const HOOKS = JSON.parse(fs.readFileSync(fileURLToPath(new URL("../hooks/hooks.json", import.meta.url)), "utf8"));
+const HOOK_TIMEOUT_MS = HOOKS.hooks.PreToolUse.flatMap((entry) => entry.hooks)
+  .find((h) => h.command.includes("send-chokepoint.mjs")).timeout * 1000;
 
 // A real sender: talks to a provider host AND uses a send verb.
 const SENDER_BODY = `
@@ -41,10 +46,13 @@ function repo(config = { sender: "outbound_mail.py" }) {
 }
 
 function hook(command, cwd, toolName = "Bash") {
-  const payload = JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd });
+  return hookRaw(JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd }), cwd);
+}
+
+function hookRaw(input, cwd) {
   // Claude Code runs the hook in the session's directory, so the hook here runs in the test's own repo, never in
   // whatever tree the suite was started from.
-  return spawnSync("node", [SCRIPT, "--hook"], { input: payload, encoding: "utf8", cwd });
+  return spawnSync("node", [SCRIPT, "--hook"], { input, encoding: "utf8", cwd, timeout: HOOK_TIMEOUT_MS });
 }
 
 function file(dir, name, body) {
@@ -178,9 +186,18 @@ test("a path in the command that does not exist is not a reason to block", () =>
   assert.equal(hook("python /nope/does-not-exist.py", dir).status, 0);
 });
 
-test("a malformed payload never blocks the session", () => {
-  const r = spawnSync("node", [SCRIPT, "--hook"], { input: "not json", encoding: "utf8" });
-  assert.equal(r.status, 0, "a broken hook must fail open on its own input");
+test("a payload the hook cannot read is allowed where no repo opted in", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "choke-noconf-"));
+  assert.equal(hookRaw("not json", dir).status, 0, "without a config the hook has nothing to enforce");
+});
+
+test("a payload the hook cannot read is BLOCKED in a repo that opted in", () => {
+  const dir = repo();
+  for (const input of ["not json", "null", JSON.stringify({ tool_name: "Bash", tool_input: {} })]) {
+    const r = hookRaw(input, dir);
+    assert.equal(r.status, 2, `${input}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /could not finish judging/);
+  }
 });
 
 test("PowerShell is covered too, not just Bash", () => {
@@ -334,8 +351,8 @@ expectEach(2, "a command that can run the sender keeps the full judgment", [
   "&>cat python3 blast.py",
 ]);
 
-// A word the reader looks up must not reach an Object method: the hook fails open on its own errors, so a lookup
-// that throws would allow the whole line, sender and all.
+// A word the reader looks up must not reach an Object method: a lookup that throws would exempt or refuse the line
+// for the wrong reason.
 expectEach(2, "a word named like an Object method does not open the gate", [
   "toString blast.py && python3 blast.py",
   "valueOf x; python3 blast.py",
@@ -640,15 +657,94 @@ expectEach(2, "a line from a payload that names no tool is judged on its full te
 expectEach(0, "under Bash the same line is one echo", ONE_ECHO_IN_BASH);
 
 test("a line too deep for the reader is judged, not exempted", () => {
-  // The hook allows a command when its own code throws; the reader's failure must land on the judged side.
+  // The reader's failure must land on the judged side, where the sender itself is found.
   const dir = repo();
   file(dir, "blast.py", SENDER_BODY);
   const deep = `echo ${'"$(echo '.repeat(20000)}true${')"'.repeat(20000)}; python3 blast.py`;
-  assert.equal(hook(deep, dir).status, 2);
+  const r = hook(deep, dir);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /reaches a mail-send endpoint/);
 });
 
 test("an inline send is still BLOCKED when it rides with a read-only command", () => {
   const dir = repo();
   const r = hook("cat notes.txt; curl -X POST https://graph.microsoft.com/v1.0/me/sendMail", dir);
   assert.equal(r.status, 2);
+});
+
+// ------------------------------------------------- what it cannot judge does not run
+// Claude Code runs a command whose hook crashes, exits with any status but 2, or outlives the timeout hooks.json gives
+// it. In a repo that opted in, a judgment that cannot finish must end in a block.
+test("a judgment still running at the deadline is BLOCKED before the hook timeout",
+  { skip: process.platform === "win32" && "mkfifo is POSIX" }, () => {
+    // Reading a FIFO waits for a writer that never comes, here inside the config lookup.
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    fs.mkdirSync(path.join(dir, "sub"));
+    execFileSync("mkfifo", [path.join(dir, "sub", ".send-chokepoint.json")]);
+    const r = hook("cd sub && python3 ../blast.py", dir);
+    assert.equal(r.status, 2, `signal=${r.signal} ${r.stderr}`);
+    assert.match(r.stderr, /could not finish judging.*still running after \d+ s/);
+  });
+
+test("a judgment that exhausts its heap is BLOCKED", () => {
+  // The reader holds every word of a command until the command ends; twelve million of them outgrow the judgment's
+  // heap, which kills it. A host slow enough to reach the deadline first refuses it there.
+  const dir = repo();
+  const r = hook(`echo ${"a ".repeat(12_000_000)}`, dir);
+  assert.equal(r.status, 2, `signal=${r.signal} ${r.stderr.slice(-300)}`);
+  assert.match(r.stderr, /could not finish judging this command: it was (stopped by SIG[A-Z]+|still running after)/);
+});
+
+test("an error while judging BLOCKS the command", () => {
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  fs.mkdirSync(path.join(dir, "sub"));
+  fs.writeFileSync(path.join(dir, "sub", ".send-chokepoint.json"), "null");
+  const r = hook("cd sub && python3 ../blast.py", dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /could not finish judging/);
+});
+
+test("a config path the hook cannot read BLOCKS rather than switching the gate off", () => {
+  // The session runs in work/, under the repo's real config, and work/.send-chokepoint.json is a directory.
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  fs.mkdirSync(path.join(dir, "work", ".send-chokepoint.json"), { recursive: true });
+  const r = hook("python3 ../blast.py", path.join(dir, "work"));
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /could not finish judging/);
+});
+
+test("a script the gate cannot read is BLOCKED", () => {
+  // Run as root, the file stays readable and is blocked as the sender it is.
+  const dir = repo();
+  fs.chmodSync(file(dir, "blast.py", SENDER_BODY), 0o000);
+  const r = hook("python3 blast.py", dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+});
+
+// The gate reads a script of up to 16 MiB; one byte more cannot be judged.
+const OVER_BUDGET_SENDER = `#${"x".repeat(16 * 1024 * 1024)}\n${SENDER_BODY}`;
+
+test("a script larger than the gate reads is BLOCKED, not skipped", () => {
+  const dir = repo();
+  file(dir, "big.py", OVER_BUDGET_SENDER);
+  const r = hook("python3 big.py", dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /larger than the 16 MiB the gate reads \(.*big\.py\)/);
+});
+
+test("an imported module larger than the gate reads is BLOCKED", () => {
+  const dir = repo();
+  file(dir, "mailer.py", OVER_BUDGET_SENDER);
+  const r = hook(`python3 "${file(dir, "notify.py", "import mailer\n")}"`, dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /notify\.py imports mailer\.py, which is larger than/);
+});
+
+test("the declared sender is allowed at any size", () => {
+  const dir = repo();
+  file(dir, "outbound_mail.py", OVER_BUDGET_SENDER);
+  assert.equal(hook("python3 outbound_mail.py", dir).status, 0);
 });

@@ -377,10 +377,18 @@ Omit `providers` to use the built-in Microsoft Graph, Gmail, SendGrid, Mailgun,
 Postmark and Resend hosts. This is a static routing check: it does not send
 mail, grant authorization, verify recipients or prove that the approved
 sender enforces its own checks. Dynamic URLs and unsupported imports can
-escape detection. Missing configuration, malformed payloads and unreadable
-files allow execution; configuration problems are reported when observed.
-Do not treat it as an egress sandbox. Its tests use local fixture files and
-never contact mail providers.
+escape detection. Do not treat it as an egress sandbox. Its tests use local
+fixture files and never contact mail providers.
+
+Missing configuration allows execution. Configuration problems are reported
+when observed, and a config that is not valid JSON is ignored. In a repo that
+opted in, a command the hook cannot finish judging is blocked: a payload
+with no shell command, a config or script it cannot read, a script or
+imported module over 16 MiB (the declared sender and exempt paths aside),
+an error in the hook, or no answer after 8 seconds. Claude Code runs a
+command whose hook crashes or outlives the 15 seconds `hooks.json` allows, so
+the judgment runs in a child process with a 512 MB heap that the hook kills
+at its 8-second deadline.
 
 ## Honest limitations
 
