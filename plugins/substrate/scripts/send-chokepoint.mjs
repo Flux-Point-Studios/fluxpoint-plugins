@@ -27,8 +27,9 @@
 // judgment that throws or stalls would let the command through. The judgment
 // runs in a child process with a deadline and a heap limit, and anything short
 // of its answer blocks: an error, a payload, config or script it cannot read, a
-// script over the read budget, or no answer by the deadline. Only an unreadable
-// payload outside an opted-in repo is allowed, since nothing there is enforced.
+// script path it cannot stat, a script over the read budget, or no answer by
+// the deadline. Only an unreadable payload outside an opted-in repo is allowed,
+// since nothing there is enforced.
 //
 // IT IS A TRIPWIRE, NOT A SECURITY BOUNDARY. It reads the text of a command and
 // the scripts it names; a command can build a name, a URL or shell code that no
@@ -479,6 +480,21 @@ function looksLikeSender(text, config) {
   return config.providers.some((h) => text.includes(h)) && hasSendVerb(text);
 }
 
+// No filesystem holds a name longer than this, whether it counts bytes, UTF-16 units or characters.
+const NAME_MAX = 255;
+
+/** Whether `fp` is a file. A stat that fails for any reason but a path to nothing throws: a script behind a directory
+ *  the hook cannot search, or on a path too long to stat whole, may still be one bash opens. */
+function isFile(fp) {
+  try {
+    return fs.statSync(fp).isFile();
+  } catch (err) {
+    if (err.code === "ENOENT" || err.code === "ENOTDIR") return false;
+    if (err.code === "ENAMETOOLONG" && fp.split(/[\\/]/).some((part) => [...part].length > NAME_MAX)) return false;
+    throw err;
+  }
+}
+
 function searchDirs(command, cwd) {
   const dirs = [];
   for (const m of command.matchAll(CD_PREFIX)) {
@@ -506,11 +522,8 @@ function referencedFiles(command, cwd) {
       const candidates = path.isAbsolute(name)
         ? [name]
         : [name, ...dirs.map((d) => path.resolve(d, name))];
-      for (const fp of candidates) {
-        try {
-          if (fs.statSync(fp).isFile()) { out.push(fp); break; }
-        } catch { /* keep looking */ }
-      }
+      const found = candidates.find(isFile);
+      if (found) out.push(found);
     }
   }
   return out;
@@ -528,10 +541,9 @@ function localImports(fp) {
   for (const m of body.matchAll(PY_IMPORT)) {
     const mod = (m[1] || m[2] || "").split(".")[0];
     if (!mod) continue;
+    // A module with no file beside the script is stdlib or a dependency, not ours to judge.
     const candidate = path.join(dir, mod + ".py");
-    try {
-      if (fs.statSync(candidate).isFile()) out.push(candidate);
-    } catch { /* stdlib or a dependency, not ours to judge */ }
+    if (isFile(candidate)) out.push(candidate);
   }
   return out;
 }

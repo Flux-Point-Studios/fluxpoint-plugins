@@ -744,6 +744,63 @@ test("a script the gate cannot read is BLOCKED", () => {
   assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
 });
 
+/** `dir`/`name`, made unsearchable until test `t` ends. */
+function lockedDir(t, dir, name) {
+  const locked = path.join(dir, name);
+  fs.mkdirSync(locked);
+  t.after(() => fs.chmodSync(locked, 0o700));
+  return locked;
+}
+
+test("a script in a directory the gate cannot search is BLOCKED", (t) => {
+  // Run as root, the directory stays searchable and the script is blocked as the sender it is. Otherwise its stat
+  // fails with EACCES, which the gate must not read as "no such file": the line can open the directory before it runs.
+  const dir = repo();
+  const locked = lockedDir(t, dir, "locked");
+  file(locked, "blast.py", SENDER_BODY);
+  fs.chmodSync(locked, 0o000);
+  for (const command of ["python3 locked/blast.py", `python3 "${path.join(locked, "blast.py")}"`,
+                         "chmod 700 locked && python3 locked/blast.py"]) {
+    const r = hook(command, dir);
+    assert.equal(r.status, 2, `${command}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /could not finish judging this command: EACCES|reaches a mail-send endpoint/);
+  }
+});
+
+test("an imported module behind a directory the gate cannot search is BLOCKED", (t) => {
+  const dir = repo();
+  const vault = lockedDir(t, dir, "vault");
+  fs.symlinkSync(file(vault, "mailer.py", SENDER_BODY), path.join(dir, "mailer.py"));
+  file(dir, "thin.py", "import mailer\n");
+  fs.chmodSync(vault, 0o000);
+  const r = hook("chmod 700 vault && python3 thin.py", dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /could not finish judging this command: EACCES|thin\.py imports mailer\.py/);
+});
+
+test("a script whose resolved path is too long to stat is BLOCKED", () => {
+  // bash enters the directory relatively and opens blast.py there; the gate resolves the whole path, which passes
+  // PATH_MAX while every component stays short enough to exist.
+  const dir = repo();
+  const deep = Array.from({ length: 21 }, () => "d".repeat(199)).join("/");
+  const r = hook(`cd ${deep} && python3 blast.py`, dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr.slice(0, 300)}`);
+  assert.match(r.stderr, /could not finish judging this command: ENAMETOOLONG/);
+});
+
+test("a path that cannot name a file is not taken for a script", () => {
+  // No filesystem holds a name over 255 characters, and no file sits inside another, so neither bash nor the gate
+  // finds a script at such a path.
+  const dir = repo();
+  file(dir, "notes.txt", "");
+  for (const command of [`git commit -m "${"x".repeat(300)} in send.py"`,
+                         `gh pr comment 1 --body "${"y".repeat(300)} see scripts/send.py"`,
+                         "python3 notes.txt/send.py"]) {
+    const r = hook(command, dir);
+    assert.equal(r.status, 0, `${command.slice(0, 40)}: ${r.stderr.slice(0, 300)}`);
+  }
+});
+
 // The gate reads a script of up to 16 MiB; one byte more cannot be judged.
 const OVER_BUDGET_SENDER = `#${"x".repeat(16 * 1024 * 1024)}\n${SENDER_BODY}`;
 

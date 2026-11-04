@@ -390,11 +390,12 @@ Missing configuration allows execution. Configuration problems are reported
 when observed, and a config that is not valid JSON is ignored. In a repo that
 opted in, a command the hook cannot finish judging is blocked: a payload
 with no shell command, a config or script it cannot read, a script or
-imported module over 16 MiB (the declared sender and exempt paths aside),
-an error in the hook, or no answer after 8 seconds. Claude Code runs a
-command whose hook crashes or outlives the 15 seconds `hooks.json` allows, so
-the judgment runs in a child process with a 512 MB heap that the hook kills
-at its 8-second deadline.
+imported module it cannot stat (one behind a directory it cannot search, or
+on a path longer than the system allows) or one over 16 MiB (the declared
+sender and exempt paths aside), an error in the hook, or no answer after 8
+seconds. Claude Code runs a command whose hook crashes or outlives the 15
+seconds `hooks.json` allows, so the judgment runs in a child process with a
+512 MB heap that the hook kills at its 8-second deadline.
 
 These shapes are not resolved, and a sender reached through one of them
 runs:
@@ -414,6 +415,9 @@ runs:
   appear together as text.
 - A nearer `.send-chokepoint.json`, or an edit to this one: the config sits
   in a tree the agent can write.
+- A config in a directory the hook cannot search. The hook sees no opt-in
+  there, so a line that opens the directory and runs a sender inside it is
+  allowed unless a config above the directory applies.
 - Any route but a watched host with a recognized verb: SMTP, a relay, or
   another provider's API.
 
