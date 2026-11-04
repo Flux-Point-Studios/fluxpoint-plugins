@@ -16,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PATH_TOKEN, PY_IMPORT, hasSendVerb } from "../scripts/send-chokepoint.mjs";
+import { linkedPluginRoot } from "./helpers.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../scripts/send-chokepoint.mjs", import.meta.url));
 // Claude Code runs the command when its hook outlives the timeout hooks.json gives it, so every run here gets the same
@@ -57,10 +58,10 @@ function hook(command, cwd, toolName = "Bash") {
   return hookRaw(JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd }), cwd);
 }
 
-function hookRaw(input, cwd) {
+function hookRaw(input, cwd, script = SCRIPT) {
   // Claude Code runs the hook in the session's directory, so the hook here runs in the test's own repo, never in
   // whatever tree the suite was started from.
-  return spawnSync("node", [SCRIPT, "--hook"], { input, encoding: "utf8", cwd, timeout: HOOK_TIMEOUT_MS });
+  return spawnSync("node", [script, "--hook"], { input, encoding: "utf8", cwd, timeout: HOOK_TIMEOUT_MS });
 }
 
 function file(dir, name, body) {
@@ -683,6 +684,17 @@ test("an inline send is still BLOCKED when it rides with a read-only command", (
 // ------------------------------------------------- what it cannot judge does not run
 // Claude Code runs a command whose hook crashes, exits with any status but 2, or outlives the timeout hooks.json gives
 // it. In a repo that opted in, a judgment that cannot finish must end in a block.
+test("a hook reached through a symlinked plugin root still judges", (t) => {
+  // A ~/.claude a dotfiles manager links in, or a --plugin-dir reached through a link, puts one in CLAUDE_PLUGIN_ROOT.
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  const script = path.join(linkedPluginRoot(t), "scripts", "send-chokepoint.mjs");
+  const r = hookRaw(JSON.stringify({ tool_name: "Bash", tool_input: { command: "python3 blast.py" }, cwd: dir }),
+    dir, script);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /blast\.py/);
+});
+
 test("a judgment still running at the deadline is BLOCKED before the hook timeout",
   { skip: process.platform === "win32" && "mkfifo is POSIX" }, () => {
     // Reading a FIFO waits for a writer that never comes, here inside the config lookup.

@@ -672,7 +672,9 @@ function supervise() {
   });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(SCRIPT)) {
+// The loader names this module by its realpath, while argv[1] keeps any symlink or junction in CLAUDE_PLUGIN_ROOT;
+// compared unresolved, the two differ and the hook exits 0 without judging anything.
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(SCRIPT)) {
   if (process.argv.includes("--judge")) judgeHook();
   else supervise();
 }

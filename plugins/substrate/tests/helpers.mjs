@@ -74,6 +74,19 @@ export function makeGitRepo(root, dir, manifest, files = { "code.txt": "code\n" 
   return mf;
 }
 
+/** The plugin directory reached through a symlink (a junction on Windows), as Claude Code reaches it when
+ *  CLAUDE_PLUGIN_ROOT runs through one; the link is removed when test `t` ends. */
+export function linkedPluginRoot(t) {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "substrate-link-"));
+  const root = path.join(parent, "substrate");
+  fs.symlinkSync(path.dirname(path.dirname(SCRIPT)), root, "junction");
+  t.after(() => {
+    fs.unlinkSync(root);
+    fs.rmdirSync(parent);
+  });
+  return root;
+}
+
 export function setMtime(file, ms) {
   fs.utimesSync(file, new Date(ms), new Date(ms));
 }
