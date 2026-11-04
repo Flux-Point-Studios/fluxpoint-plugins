@@ -397,8 +397,18 @@ the raw text and from every word as bash builds it:
   command's own directory), and also each value the line assigns it: in
   a command made only of assignments, before a command's name (`env`'s
   included), in `export`, `declare`, `typeset`, `local` or `readonly`,
-  and as a `for` loop's words; `$PWD` and `$OLDPWD` also take every
-  directory the line may be in;
+  as a `for` loop's words, and by `${NAME:=word}` or `${NAME=word}`;
+  `$PWD` and `$OLDPWD` also take every directory the line may be in. A
+  value built from other variables takes each value they take: every
+  assignment is built again, in line order, for as many rounds as the
+  line assigns distinct variables, so a value passes through each of
+  them once in whatever order the line assigns them. The word of
+  `${NAME:-word}`, `${NAME:=word}` or `${NAME:+word}` (with or without
+  the colon) takes its values the same way, `${NAME:+word}` may also be
+  empty, and `${NAME:?word}` is the variable's value. The decisions that
+  rest on a value (which word names a shell) are made again with every
+  value the line gives, until a reading of the line finds no new one, so
+  neither a loop nor the order of the line's commands hides one;
 - brace lists and sequences expanded as bash expands them: only braces
   it reads unquoted, found by bash's own matching rules, in the word as
   written and before its variables, so `$x{a,b}` is `$xa` and `$xb` and
@@ -500,12 +510,19 @@ cannot read:
   for each directory a `find -execdir` walk visits, one for each 1024
   unquoted `{`, `,`, `}` and `.` looked at while finding a pair, and
   one for each letter of a short-option cluster read for a path;
+- variable values that spend more than 4096 units of their own while
+  they are built from each other between readings of the line, or that
+  still grow after four readings;
 - a line that may run in more than 64 directories.
 
 Shell code is read with bash's grammar, whichever of those shells runs it.
 Not resolved: a value computed while the line runs (command output,
-arithmetic, other `${...}` operators, `read`, `printf -v`, arrays,
-positional parameters from `set --` or a function's arguments), a name
+arithmetic, the other `${...}` operators (a substring, a length,
+indirection, and those that cut, replace or change the case of a
+value), `read`, `printf -v`, arrays, positional parameters from
+`set --` or a function's arguments, and a value a loop builds from its
+own earlier value over more passes than the line assigns distinct
+variables), a name
 another program supplies (`find -exec ... {}`, the input of `xargs`), a
 value or an alias an earlier command set that the hook does not see,
 `~user`,

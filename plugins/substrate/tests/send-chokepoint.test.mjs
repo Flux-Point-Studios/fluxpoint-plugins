@@ -928,10 +928,27 @@ expectEach(2, "a variable takes the values the line gives it", [
   "X=bl; for f in ${X}a?t.py; do python3 $f; done",
 ]);
 
+// `${NAME:=word}` and `${NAME=word}` assign as they expand. A value built from other variables takes each value the
+// line gives them, through any number of assignments, and so does the word of `${NAME:-word}` or `${NAME:+word}`.
+expectEach(2, "a variable takes every value the line gives it, however it gives it", [
+  ": ${x:=bl}; python3 ${x}ast.py",
+  ": ${x=bl}; python3 ${x}ast.py",
+  'echo "${x:=bl}"; python3 ${x}ast.py',
+  "A=bl; B=$A; python3 ${B}ast.py",
+  "X=bl; Y=$X; Z=$Y; python3 ${Z}ast.py",
+  "Y=bl; python3 ${X:-$Y}ast.py",
+  "X=1; Y=bl; python3 ${X:+$Y}ast.py",
+  "for i in 1 2; do : ${x:=$Y}; Y=bl; done; python3 ${x}ast.py",
+  "for i in 1 2 3; do python3 $Z.py; Z=${Y}ast; Y=bl; done",
+]);
+
 expectEach(0, "a variable the line gives harmless values is not refused", [
   "X=ot; python3 ${X}her.py",
   "for f in a b; do echo $f; done",
   "touch f{1..100}.txt",
+  "A=ot; B=${A}her; python3 $B.py",
+  ": ${CC:=gcc}; $CC --version >/dev/null 2>&1 || true",
+  "OLD=$PATH; export PATH=$HOME/bin:$PATH; PATH=/usr/local/bin:$PATH; make -n >/dev/null 2>&1 || true; PATH=$OLD",
 ]);
 
 // Braces, globs and variables can make more paths than any check could try; padding a line with them must not push a
@@ -990,6 +1007,16 @@ expectEach(2, "a shell named or fed through an expansion is judged", [
   `Z=0; printf %s ${BUILT} | bash /dev/fd/$Z`,
   `printf %s ${BUILT} | bash "$(echo /dev/stdin)"`,
   `printf %s ${BUILT} | (bash "$(echo /dev/stdin)")`,
+]);
+
+// A value carried through other variables can name the shell, and a loop can run a later assignment before an earlier
+// command, so the order of the line's commands hides none of the values it gives.
+expectEach(2, "a shell is found through every value the line gives, in any order", [
+  `S=bash; T=$S; printf %s ${BUILT} | $T`,
+  `: \${S:=bash}; printf %s ${BUILT} | $S`,
+  `for i in 1 2; do printf %s ${BUILT} | $S; S=bash; done`,
+  `for i in 1 2; do $S -c ${BUILT}; S=bash; done`,
+  `for i in 1 2 3; do printf %s ${BUILT} | $T; T=$S; S=bash; done`,
 ]);
 
 test("a shell named by a variable from the environment is judged", () => {
