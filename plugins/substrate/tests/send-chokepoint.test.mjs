@@ -46,6 +46,13 @@ function repo(config = { sender: "outbound_mail.py" }) {
   return dir;
 }
 
+/** An opted-in repo removed when test `t` ends, for fixtures measured in megabytes. */
+function largeRepo(t) {
+  const dir = repo();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
 function hook(command, cwd, toolName = "Bash") {
   return hookRaw(JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd }), cwd);
 }
@@ -728,24 +735,24 @@ test("a script the gate cannot read is BLOCKED", () => {
 // The gate reads a script of up to 16 MiB; one byte more cannot be judged.
 const OVER_BUDGET_SENDER = `#${"x".repeat(16 * 1024 * 1024)}\n${SENDER_BODY}`;
 
-test("a script larger than the gate reads is BLOCKED, not skipped", () => {
-  const dir = repo();
+test("a script larger than the gate reads is BLOCKED, not skipped", (t) => {
+  const dir = largeRepo(t);
   file(dir, "big.py", OVER_BUDGET_SENDER);
   const r = hook("python3 big.py", dir);
   assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
   assert.match(r.stderr, /larger than the 16 MiB the gate reads \(.*big\.py\)/);
 });
 
-test("an imported module larger than the gate reads is BLOCKED", () => {
-  const dir = repo();
+test("an imported module larger than the gate reads is BLOCKED", (t) => {
+  const dir = largeRepo(t);
   file(dir, "mailer.py", OVER_BUDGET_SENDER);
   const r = hook(`python3 "${file(dir, "notify.py", "import mailer\n")}"`, dir);
   assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
   assert.match(r.stderr, /notify\.py imports mailer\.py, which is larger than/);
 });
 
-test("the declared sender is allowed at any size", () => {
-  const dir = repo();
+test("the declared sender is allowed at any size", (t) => {
+  const dir = largeRepo(t);
   file(dir, "outbound_mail.py", OVER_BUDGET_SENDER);
   assert.equal(hook("python3 outbound_mail.py", dir).status, 0);
 });
@@ -761,16 +768,16 @@ test("a long run of path characters is judged at once", () => {
   assert.match(r.stderr, /this script reaches a mail-send endpoint \(.*blast\.py\)/);
 });
 
-test("a sender padded with /messages/ runs is judged at once", () => {
-  const dir = repo();
+test("a sender padded with /messages/ runs is judged at once", (t) => {
+  const dir = largeRepo(t);
   file(dir, "padded.py", `# ${"/messages/".repeat(150_000)}\n${SENDER_BODY}`);
   const r = hook("python3 padded.py", dir);
   assert.equal(r.status, 2, `signal=${r.signal}`);
   assert.match(r.stderr, /this script reaches a mail-send endpoint \(.*padded\.py\)/);
 });
 
-test("a thin script padded with line ends is judged at once", () => {
-  const dir = repo();
+test("a thin script padded with line ends is judged at once", (t) => {
+  const dir = largeRepo(t);
   file(dir, "blast.py", SENDER_BODY);
   file(dir, "thin.py", `import blast\n${"\n\r\u2028\u2029".repeat(400_000)}`);
   const r = hook("python3 thin.py", dir);
