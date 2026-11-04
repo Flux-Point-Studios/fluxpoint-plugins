@@ -480,8 +480,9 @@ function looksLikeSender(text, config) {
   return config.providers.some((h) => text.includes(h)) && hasSendVerb(text);
 }
 
-// No filesystem holds a name longer than this, whether it counts bytes, UTF-16 units or characters.
+// The longest file name a filesystem holds: 255 UTF-8 bytes on Linux and macOS, 255 UTF-16 units on Windows.
 const NAME_MAX = 255;
+const nameLength = process.platform === "win32" ? (part) => part.length : (part) => Buffer.byteLength(part);
 
 /** Whether `fp` is a file. A stat that fails for any reason but a path to nothing throws: a script behind a directory
  *  the hook cannot search, or on a path too long to stat whole, may still be one bash opens. */
@@ -490,7 +491,7 @@ function isFile(fp) {
     return fs.statSync(fp).isFile();
   } catch (err) {
     if (err.code === "ENOENT" || err.code === "ENOTDIR") return false;
-    if (err.code === "ENAMETOOLONG" && fp.split(/[\\/]/).some((part) => [...part].length > NAME_MAX)) return false;
+    if (err.code === "ENAMETOOLONG" && fp.split(/[\\/]/).some((part) => nameLength(part) > NAME_MAX)) return false;
     throw err;
   }
 }

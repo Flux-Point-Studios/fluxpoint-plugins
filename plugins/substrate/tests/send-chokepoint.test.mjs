@@ -812,12 +812,14 @@ test("a script whose resolved path is too long to stat is BLOCKED", () => {
 });
 
 test("a path that cannot name a file is not taken for a script", () => {
-  // No filesystem holds a name over 255 characters, and no file sits inside another, so neither bash nor the gate
-  // finds a script at such a path.
+  // No file name is longer than its filesystem allows (255 UTF-8 bytes on Linux and macOS, 255 UTF-16 units on
+  // Windows), and no file sits inside another, so neither bash nor the gate finds a script at such a path.
   const dir = repo();
   file(dir, "notes.txt", "");
+  const wide = process.platform === "win32" ? "😀".repeat(130) : "😀".repeat(90);
   for (const command of [`git commit -m "${"x".repeat(300)} in send.py"`,
                          `gh pr comment 1 --body "${"y".repeat(300)} see scripts/send.py"`,
+                         `git commit -m "${wide} in send.py"`,
                          "python3 notes.txt/send.py"]) {
     const r = hook(command, dir);
     assert.equal(r.status, 0, `${command.slice(0, 40)}: ${r.stderr.slice(0, 300)}`);
