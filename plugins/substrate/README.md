@@ -403,7 +403,13 @@ runs:
 
 - A script name the line builds instead of spelling it as one plain word:
   quotes or escapes inside it (`bl''ast.py`), variables, brace lists, globs,
-  `~`, command output, or a directory entered other than by one `cd DIR`.
+  `~`, command output, or a directory entered other than by one `cd DIR`. An
+  unquoted name with a non-ASCII character (`envoi_relancé.py`) is not read
+  as a word at all.
+- Code run by a tool the hook is not routed to. The matcher names `Bash`,
+  `PowerShell` and `Monitor`; a REPL tool that runs model-written code
+  directly is not judged. A Monitor command gets no read-only exemption, so
+  a log watcher that names a send endpoint is refused.
 - Shell code in a string another program runs (`sh -c`, `bash -c`,
   `env -S`, `eval`, `trap`, `find -exec`, `xargs`), fed to a shell through a
   pipe, heredoc, here-string or process substitution, or written to a file

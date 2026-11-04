@@ -480,9 +480,10 @@ function looksLikeSender(text, config) {
   return config.providers.some((h) => text.includes(h)) && hasSendVerb(text);
 }
 
-// The longest file name a filesystem holds: 255 UTF-8 bytes on Linux and macOS, 255 UTF-16 units on Windows.
-const NAME_MAX = 255;
-const nameLength = process.platform === "win32" ? (part) => part.length : (part) => Buffer.byteLength(part);
+// Linux fails a pathname of PATH_MAX bytes or more with ENAMETOOLONG before any lookup. Under that length the error
+// can only come from a filesystem refusing a component, and then bash cannot open the name either. Name length alone
+// proves nothing: exFAT and NTFS hold names of 255 UTF-16 units, FUSE of up to 1024 bytes.
+const PATH_MAX = 4096;
 
 /** Whether `fp` is a file. A stat that fails for any reason but a path to nothing throws: a script behind a directory
  *  the hook cannot search, or on a path too long to stat whole, may still be one bash opens. */
@@ -491,7 +492,7 @@ function isFile(fp) {
     return fs.statSync(fp).isFile();
   } catch (err) {
     if (err.code === "ENOENT" || err.code === "ENOTDIR") return false;
-    if (err.code === "ENAMETOOLONG" && fp.split(/[\\/]/).some((part) => nameLength(part) > NAME_MAX)) return false;
+    if (err.code === "ENAMETOOLONG" && process.platform === "linux" && Buffer.byteLength(fp) < PATH_MAX) return false;
     throw err;
   }
 }

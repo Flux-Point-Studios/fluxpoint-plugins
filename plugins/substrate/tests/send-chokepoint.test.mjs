@@ -217,7 +217,7 @@ test("PowerShell is covered too, not just Bash", () => {
 
 // Monitor runs its `command` in the same shell as Bash. A matcher that names only Bash and PowerShell lets a sender
 // run through Monitor with no judgment at all.
-test("every tool that runs a shell command is routed to the chokepoint", () => {
+test("Bash, PowerShell and Monitor are routed to the chokepoint", () => {
   const entry = HOOKS.hooks.PreToolUse.find((e) => e.hooks.some((h) => h.command.includes("send-chokepoint.mjs")));
   const matcher = new RegExp(`^(?:${entry.matcher})$`);
   for (const tool of ["Bash", "PowerShell", "Monitor"]) assert.ok(matcher.test(tool), tool);
@@ -811,18 +811,28 @@ test("a script whose resolved path is too long to stat is BLOCKED", () => {
   assert.match(r.stderr, /could not finish judging this command: ENAMETOOLONG/);
 });
 
+test("a wide script name past PATH_MAX is BLOCKED, since exFAT and NTFS hold names over 255 bytes", () => {
+  // A 300-byte name is legal on exFAT and NTFS (255 UTF-16 units), so the name's length proves nothing once the
+  // joined path itself passes PATH_MAX: bash may still open it from the shorter relative path.
+  const dir = repo();
+  const deep = Array.from({ length: 21 }, () => "d".repeat(199)).join("/");
+  const r = hook(`cd ${deep} && sh "${"漢".repeat(100)}.sh"`, dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr.slice(0, 300)}`);
+  assert.match(r.stderr, /could not finish judging this command: ENAMETOOLONG/);
+});
+
 test("a path that cannot name a file is not taken for a script", () => {
-  // No file name is longer than its filesystem allows (255 UTF-8 bytes on Linux and macOS, 255 UTF-16 units on
-  // Windows), and no file sits inside another, so neither bash nor the gate finds a script at such a path.
+  // No file sits inside another. On Linux a name the filesystem refuses, in a path under PATH_MAX, fails for bash as it
+  // does for the gate; elsewhere the gate cannot tell that from a path too long to stat, so it blocks.
   const dir = repo();
   file(dir, "notes.txt", "");
-  const wide = process.platform === "win32" ? "😀".repeat(130) : "😀".repeat(90);
+  const r = hook("python3 notes.txt/send.py", dir);
+  assert.equal(r.status, 0, r.stderr.slice(0, 300));
   for (const command of [`git commit -m "${"x".repeat(300)} in send.py"`,
                          `gh pr comment 1 --body "${"y".repeat(300)} see scripts/send.py"`,
-                         `git commit -m "${wide} in send.py"`,
-                         "python3 notes.txt/send.py"]) {
-    const r = hook(command, dir);
-    assert.equal(r.status, 0, `${command.slice(0, 40)}: ${r.stderr.slice(0, 300)}`);
+                         `git commit -m "${"😀".repeat(90)} in send.py"`]) {
+    const long = hook(command, dir);
+    assert.equal(long.status, process.platform === "linux" ? 0 : 2, `${command.slice(0, 40)}: ${long.stderr.slice(0, 300)}`);
   }
 });
 
