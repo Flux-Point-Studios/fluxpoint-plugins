@@ -522,7 +522,10 @@ function main() {
 // Measured 2026-09-11 against the deployed 1.6.0: scan() returned the expected
 // HIGH finding while the CLI exited 0, and 18 of this file's own 28 tests were
 // red. fileURLToPath is the only correct URL-to-path conversion.
+//
+// The loader also names this module by its realpath, while argv[1] keeps any
+// symlink or junction in CLAUDE_PLUGIN_ROOT, so both sides are resolved first.
 if (process.argv[1]
-    && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+    && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))) {
   main();
 }

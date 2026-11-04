@@ -10,6 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { linkedPluginRoot } from "./helpers.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../scripts/prose-smell.mjs", import.meta.url));
 
@@ -21,9 +22,9 @@ function runOnText(text, args = []) {
   return { ...r, file, dir };
 }
 
-function runHook(toolInput, toolName = "Write") {
+function runHook(toolInput, toolName = "Write", script = SCRIPT) {
   const payload = JSON.stringify({ tool_name: toolName, tool_input: toolInput });
-  return spawnSync("node", [SCRIPT, "--hook"], { input: payload, encoding: "utf8" });
+  return spawnSync("node", [script, "--hook"], { input: payload, encoding: "utf8" });
 }
 
 // ---------------------------------------------------------------- high rules
@@ -296,6 +297,15 @@ test("hook mode scans prose writes and feeds findings back on exit 2", () => {
   fs.writeFileSync(file, "This isn't just about OCR — it's about capacity.");
   const r = runHook({ file_path: file });
   assert.equal(r.status, 2);
+  assert.match(r.stderr, /negation-contrast/);
+});
+
+test("hook mode reached through a symlinked plugin root still feeds findings back", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "smell-hook-"));
+  const file = path.join(dir, "reply-draft.md");
+  fs.writeFileSync(file, "This isn't just about OCR — it's about capacity.");
+  const r = runHook({ file_path: file }, "Write", path.join(linkedPluginRoot(t), "scripts", "prose-smell.mjs"));
+  assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /negation-contrast/);
 });
 

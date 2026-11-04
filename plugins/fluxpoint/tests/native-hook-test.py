@@ -27,8 +27,8 @@ class NativeHooks(unittest.TestCase):
         self.env['FPL_CLAUDE_BINARY'] = os.environ.get('FPL_CLAUDE_BINARY') or shutil.which('claude') or ''
         subprocess.run(['git','init','-q',str(self.root)],check=True)
 
-    def invoke(self, mode, payload=None, **kwargs):
-        return subprocess.run(['node',str(ENTRY),mode], input=json.dumps(payload or {}), cwd=self.root,
+    def invoke(self, mode, payload=None, entry=ENTRY, **kwargs):
+        return subprocess.run(['node',str(entry),mode], input=json.dumps(payload or {}), cwd=self.root,
                               env=kwargs.pop('env',self.env), capture_output=True,text=True,timeout=15,**kwargs)
 
     def test_manifest_native_claude_and_explicit_codex_legacy(self):
@@ -51,6 +51,19 @@ class NativeHooks(unittest.TestCase):
         self.assertIn('deny',native.stdout)
         bad=self.invoke('guard',payload,env=dict(self.env,FPL_PY=str(self.root/'missing-python')))
         self.assertEqual(bad.returncode,2);self.assertIn('interpreter',bad.stderr)
+
+    def test_guard_reached_through_a_linked_plugin_root_still_judges(self):
+        # A dotfiles-managed ~/.claude or a linked --plugin-dir puts a symlink or junction in CLAUDE_PLUGIN_ROOT.
+        (self.root/'.fluxpoint-secrets.json').write_text(json.dumps([{'id':'wallet','paths':['wallet.txt'],'why':'fixture private wallet'}]))
+        payload={'cwd':str(self.root),'tool_name':'Bash','tool_input':{'command':'cat wallet.txt'}}
+        link=self.root/'linked-plugin'
+        if os.name=='nt':
+            import _winapi;_winapi.CreateJunction(str(PLUGIN),str(link))
+        else:os.symlink(PLUGIN,link,target_is_directory=True)
+        self.addCleanup(os.unlink,link)
+        linked=self.invoke('guard',payload,entry=link/'scripts/native-hook.mjs');real=self.invoke('guard',payload)
+        self.assertIn('deny',linked.stdout,linked.stderr)
+        self.assertEqual((linked.returncode,linked.stdout),(real.returncode,real.stdout))
 
     def test_input_limit_and_open_stdin_are_bounded(self):
         huge=subprocess.run(['node',str(ENTRY),'guard'],input='x'*(4*1024*1024+1),cwd=self.root,env=self.env,capture_output=True,text=True,timeout=10)

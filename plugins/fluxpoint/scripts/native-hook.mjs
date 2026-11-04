@@ -161,6 +161,7 @@ async function main() {
     else warning(raw, error);
   } finally { clearTimeout(absoluteDeadline); process.stdin.destroy(); }
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// The loader names this module by its realpath, while argv[1] keeps any symlink or junction in CLAUDE_PLUGIN_ROOT.
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))) {
   main().catch(error => { console.error(error.message); process.exitCode = 2; });
 }

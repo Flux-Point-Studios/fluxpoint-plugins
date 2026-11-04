@@ -10,13 +10,20 @@
 // repo declares in .send-chokepoint.json. With no config it does nothing.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PATH_TOKEN, PY_IMPORT, hasSendVerb } from "../scripts/send-chokepoint.mjs";
+import { linkedPluginRoot } from "./helpers.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../scripts/send-chokepoint.mjs", import.meta.url));
+// Claude Code runs the command when its hook outlives the timeout hooks.json gives it, so every run here gets the same
+// limit: a hook killed at it (status null) is a hook that let the command through.
+const HOOKS = JSON.parse(fs.readFileSync(fileURLToPath(new URL("../hooks/hooks.json", import.meta.url)), "utf8"));
+const HOOK_TIMEOUT_MS = HOOKS.hooks.PreToolUse.flatMap((entry) => entry.hooks)
+  .find((h) => h.command.includes("send-chokepoint.mjs")).timeout * 1000;
 
 // A real sender: talks to a provider host AND uses a send verb.
 const SENDER_BODY = `
@@ -40,11 +47,21 @@ function repo(config = { sender: "outbound_mail.py" }) {
   return dir;
 }
 
+/** An opted-in repo removed when test `t` ends, for fixtures measured in megabytes. */
+function largeRepo(t) {
+  const dir = repo();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
 function hook(command, cwd, toolName = "Bash") {
-  const payload = JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd });
+  return hookRaw(JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd }), cwd);
+}
+
+function hookRaw(input, cwd, script = SCRIPT) {
   // Claude Code runs the hook in the session's directory, so the hook here runs in the test's own repo, never in
   // whatever tree the suite was started from.
-  return spawnSync("node", [SCRIPT, "--hook"], { input: payload, encoding: "utf8", cwd });
+  return spawnSync("node", [script, "--hook"], { input, encoding: "utf8", cwd, timeout: HOOK_TIMEOUT_MS });
 }
 
 function file(dir, name, body) {
@@ -178,15 +195,47 @@ test("a path in the command that does not exist is not a reason to block", () =>
   assert.equal(hook("python /nope/does-not-exist.py", dir).status, 0);
 });
 
-test("a malformed payload never blocks the session", () => {
-  const r = spawnSync("node", [SCRIPT, "--hook"], { input: "not json", encoding: "utf8" });
-  assert.equal(r.status, 0, "a broken hook must fail open on its own input");
+test("a payload the hook cannot read is allowed where no repo opted in", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "choke-noconf-"));
+  assert.equal(hookRaw("not json", dir).status, 0, "without a config the hook has nothing to enforce");
+});
+
+test("a payload the hook cannot read is BLOCKED in a repo that opted in", () => {
+  const dir = repo();
+  for (const input of ["not json", "null", JSON.stringify({ tool_name: "Bash", tool_input: {} })]) {
+    const r = hookRaw(input, dir);
+    assert.equal(r.status, 2, `${input}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /could not finish judging/);
+  }
 });
 
 test("PowerShell is covered too, not just Bash", () => {
   const dir = repo();
   const p = file(dir, "blast.py", SENDER_BODY);
   assert.equal(hook(`python "${p}"`, dir, "PowerShell").status, 2);
+});
+
+// Monitor runs its `command` in the same shell as Bash. A matcher that names only Bash and PowerShell lets a sender
+// run through Monitor with no judgment at all.
+test("Bash, PowerShell and Monitor are routed to the chokepoint", () => {
+  const entry = HOOKS.hooks.PreToolUse.find((e) => e.hooks.some((h) => h.command.includes("send-chokepoint.mjs")));
+  const matcher = new RegExp(`^(?:${entry.matcher})$`);
+  for (const tool of ["Bash", "PowerShell", "Monitor"]) assert.ok(matcher.test(tool), tool);
+});
+
+test("a Monitor command is judged like a Bash one", () => {
+  const dir = repo();
+  const p = file(dir, "blast.py", SENDER_BODY);
+  assert.equal(hook(`python "${p}"`, dir, "Monitor").status, 2);
+});
+
+test("a Monitor WebSocket source runs no shell and is allowed", () => {
+  const dir = repo();
+  const ws = { tool_name: "Monitor", tool_input: { ws: { url: "wss://events.example.com/stream" }, description: "d", timeout_ms: 1000 }, cwd: dir };
+  const r = hookRaw(JSON.stringify(ws), dir);
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+  const neither = { tool_name: "Monitor", tool_input: { description: "d", timeout_ms: 1000 }, cwd: dir };
+  assert.equal(hookRaw(JSON.stringify(neither), dir).status, 2);
 });
 
 // ------------------------------------------------------------- relative paths
@@ -334,8 +383,8 @@ expectEach(2, "a command that can run the sender keeps the full judgment", [
   "&>cat python3 blast.py",
 ]);
 
-// A word the reader looks up must not reach an Object method: the hook fails open on its own errors, so a lookup
-// that throws would allow the whole line, sender and all.
+// A word the reader looks up must not reach an Object method: a lookup that throws would exempt or refuse the line
+// for the wrong reason.
 expectEach(2, "a word named like an Object method does not open the gate", [
   "toString blast.py && python3 blast.py",
   "valueOf x; python3 blast.py",
@@ -640,15 +689,270 @@ expectEach(2, "a line from a payload that names no tool is judged on its full te
 expectEach(0, "under Bash the same line is one echo", ONE_ECHO_IN_BASH);
 
 test("a line too deep for the reader is judged, not exempted", () => {
-  // The hook allows a command when its own code throws; the reader's failure must land on the judged side.
+  // The reader's failure must land on the judged side, where the sender itself is found.
   const dir = repo();
   file(dir, "blast.py", SENDER_BODY);
   const deep = `echo ${'"$(echo '.repeat(20000)}true${')"'.repeat(20000)}; python3 blast.py`;
-  assert.equal(hook(deep, dir).status, 2);
+  const r = hook(deep, dir);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /reaches a mail-send endpoint/);
 });
 
 test("an inline send is still BLOCKED when it rides with a read-only command", () => {
   const dir = repo();
   const r = hook("cat notes.txt; curl -X POST https://graph.microsoft.com/v1.0/me/sendMail", dir);
   assert.equal(r.status, 2);
+});
+
+// ------------------------------------------------- what it cannot judge does not run
+// Claude Code runs a command whose hook crashes, exits with any status but 2, or outlives the timeout hooks.json gives
+// it. In a repo that opted in, a judgment that cannot finish must end in a block.
+test("a hook reached through a symlinked plugin root still judges", (t) => {
+  // A ~/.claude a dotfiles manager links in, or a --plugin-dir reached through a link, puts one in CLAUDE_PLUGIN_ROOT.
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  const script = path.join(linkedPluginRoot(t), "scripts", "send-chokepoint.mjs");
+  const r = hookRaw(JSON.stringify({ tool_name: "Bash", tool_input: { command: "python3 blast.py" }, cwd: dir }),
+    dir, script);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /blast\.py/);
+});
+
+test("a judgment still running at the deadline is BLOCKED before the hook timeout",
+  { skip: process.platform === "win32" && "mkfifo is POSIX" }, () => {
+    // Reading a FIFO waits for a writer that never comes, here inside the config lookup.
+    const dir = repo();
+    file(dir, "blast.py", SENDER_BODY);
+    fs.mkdirSync(path.join(dir, "sub"));
+    execFileSync("mkfifo", [path.join(dir, "sub", ".send-chokepoint.json")]);
+    const r = hook("cd sub && python3 ../blast.py", dir);
+    assert.equal(r.status, 2, `signal=${r.signal} ${r.stderr}`);
+    assert.match(r.stderr, /could not finish judging.*still running after \d+ s/);
+  });
+
+test("a judgment that exhausts its heap is BLOCKED", () => {
+  // The reader holds every word of a command until the command ends; twelve million of them outgrow the judgment's
+  // heap, which kills it. A host slow enough to reach the deadline first refuses it there.
+  const dir = repo();
+  const r = hook(`echo ${"a ".repeat(12_000_000)}`, dir);
+  assert.equal(r.status, 2, `signal=${r.signal} ${r.stderr.slice(-300)}`);
+  assert.match(r.stderr, /could not finish judging this command: it was (stopped by SIG[A-Z]+|still running after)/);
+});
+
+test("an error while judging BLOCKS the command", () => {
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  fs.mkdirSync(path.join(dir, "sub"));
+  fs.writeFileSync(path.join(dir, "sub", ".send-chokepoint.json"), "null");
+  const r = hook("cd sub && python3 ../blast.py", dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /could not finish judging/);
+});
+
+test("a config path the hook cannot read BLOCKS rather than switching the gate off", () => {
+  // The session runs in work/, under the repo's real config, and work/.send-chokepoint.json is a directory.
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  fs.mkdirSync(path.join(dir, "work", ".send-chokepoint.json"), { recursive: true });
+  const r = hook("python3 ../blast.py", path.join(dir, "work"));
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /could not finish judging/);
+});
+
+test("a script the gate cannot read is BLOCKED", () => {
+  // Run as root, the file stays readable and is blocked as the sender it is.
+  const dir = repo();
+  fs.chmodSync(file(dir, "blast.py", SENDER_BODY), 0o000);
+  const r = hook("python3 blast.py", dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+});
+
+/** `dir`/`name`, made unsearchable until test `t` ends. */
+function lockedDir(t, dir, name) {
+  const locked = path.join(dir, name);
+  fs.mkdirSync(locked);
+  t.after(() => fs.chmodSync(locked, 0o700));
+  return locked;
+}
+
+test("a script in a directory the gate cannot search is BLOCKED", (t) => {
+  // Run as root, the directory stays searchable and the script is blocked as the sender it is. Otherwise its stat
+  // fails with EACCES, which the gate must not read as "no such file": the line can open the directory before it runs.
+  const dir = repo();
+  const locked = lockedDir(t, dir, "locked");
+  file(locked, "blast.py", SENDER_BODY);
+  fs.chmodSync(locked, 0o000);
+  for (const command of ["python3 locked/blast.py", `python3 "${path.join(locked, "blast.py")}"`,
+                         "chmod 700 locked && python3 locked/blast.py"]) {
+    const r = hook(command, dir);
+    assert.equal(r.status, 2, `${command}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /could not finish judging this command: EACCES|reaches a mail-send endpoint/);
+  }
+});
+
+test("an imported module behind a directory the gate cannot search is BLOCKED", (t) => {
+  const dir = repo();
+  const vault = lockedDir(t, dir, "vault");
+  fs.symlinkSync(file(vault, "mailer.py", SENDER_BODY), path.join(dir, "mailer.py"));
+  file(dir, "thin.py", "import mailer\n");
+  fs.chmodSync(vault, 0o000);
+  const r = hook("chmod 700 vault && python3 thin.py", dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /could not finish judging this command: EACCES|thin\.py imports mailer\.py/);
+});
+
+// Windows stats through \\?\ paths, which have no PATH_MAX, so neither ENAMETOOLONG shape below arises there.
+const NO_PATH_MAX = process.platform === "win32" && "Windows long paths have no PATH_MAX";
+
+test("a script whose resolved path is too long to stat is BLOCKED", { skip: NO_PATH_MAX }, () => {
+  // bash enters the directory relatively and opens blast.py there; the gate resolves the whole path, which passes
+  // PATH_MAX while every component stays short enough to exist.
+  const dir = repo();
+  const deep = Array.from({ length: 21 }, () => "d".repeat(199)).join("/");
+  const r = hook(`cd ${deep} && python3 blast.py`, dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr.slice(0, 300)}`);
+  assert.match(r.stderr, /could not finish judging this command: ENAMETOOLONG/);
+});
+
+test("a wide script name past PATH_MAX is BLOCKED, since exFAT and NTFS hold names over 255 bytes", { skip: NO_PATH_MAX }, () => {
+  // A 300-byte name is legal on exFAT and NTFS (255 UTF-16 units), so the name's length proves nothing once the
+  // joined path itself passes PATH_MAX: bash may still open it from the shorter relative path.
+  const dir = repo();
+  const deep = Array.from({ length: 21 }, () => "d".repeat(199)).join("/");
+  const r = hook(`cd ${deep} && sh "${"漢".repeat(100)}.sh"`, dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr.slice(0, 300)}`);
+  assert.match(r.stderr, /could not finish judging this command: ENAMETOOLONG/);
+});
+
+test("a path that cannot name a file is not taken for a script", () => {
+  // No file sits inside another. On Linux a name the filesystem refuses, in a path under PATH_MAX, fails for bash as it
+  // does for the gate. Windows reports a name NTFS cannot hold as a missing file. macOS raises ENAMETOOLONG, which the
+  // gate cannot tell from a path too long to stat, so it blocks.
+  const dir = repo();
+  file(dir, "notes.txt", "");
+  const r = hook("python3 notes.txt/send.py", dir);
+  assert.equal(r.status, 0, r.stderr.slice(0, 300));
+  for (const command of [`git commit -m "${"x".repeat(300)} in send.py"`,
+                         `gh pr comment 1 --body "${"y".repeat(300)} see scripts/send.py"`,
+                         `git commit -m "${"😀".repeat(90)} in send.py"`]) {
+    const long = hook(command, dir);
+    assert.equal(long.status, process.platform === "darwin" ? 2 : 0, `${command.slice(0, 40)}: ${long.stderr.slice(0, 300)}`);
+  }
+});
+
+// The gate reads a script of up to 16 MiB; one byte more cannot be judged.
+const OVER_BUDGET_SENDER = `#${"x".repeat(16 * 1024 * 1024)}\n${SENDER_BODY}`;
+
+test("a script larger than the gate reads is BLOCKED, not skipped", (t) => {
+  const dir = largeRepo(t);
+  file(dir, "big.py", OVER_BUDGET_SENDER);
+  const r = hook("python3 big.py", dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /larger than the 16 MiB the gate reads \(.*big\.py\)/);
+});
+
+test("an imported module larger than the gate reads is BLOCKED", (t) => {
+  const dir = largeRepo(t);
+  file(dir, "mailer.py", OVER_BUDGET_SENDER);
+  const r = hook(`python3 "${file(dir, "notify.py", "import mailer\n")}"`, dir);
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /notify\.py imports mailer\.py, which is larger than/);
+});
+
+test("the declared sender is allowed at any size", (t) => {
+  const dir = largeRepo(t);
+  file(dir, "outbound_mail.py", OVER_BUDGET_SENDER);
+  assert.equal(hook("python3 outbound_mail.py", dir).status, 0);
+});
+
+// ------------------------------------------------- the scans run in linear time
+// A pattern that backtracks over text the agent writes stalls the judgment until the deadline refuses a line that
+// should have been answered at once, and for the wrong reason. main's patterns ran each of these past the hook timeout.
+test("a long run of path characters is judged at once", () => {
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  const r = hook(`python3 blast.py # ${"a".repeat(200_000)}`, dir);
+  assert.equal(r.status, 2, `signal=${r.signal}`);
+  assert.match(r.stderr, /this script reaches a mail-send endpoint \(.*blast\.py\)/);
+});
+
+test("a sender padded with /messages/ runs is judged at once", (t) => {
+  const dir = largeRepo(t);
+  file(dir, "padded.py", `# ${"/messages/".repeat(150_000)}\n${SENDER_BODY}`);
+  const r = hook("python3 padded.py", dir);
+  assert.equal(r.status, 2, `signal=${r.signal}`);
+  assert.match(r.stderr, /this script reaches a mail-send endpoint \(.*padded\.py\)/);
+});
+
+test("a thin script padded with line ends is judged at once", (t) => {
+  const dir = largeRepo(t);
+  file(dir, "blast.py", SENDER_BODY);
+  file(dir, "thin.py", `import blast\n${"\n\r\u2028\u2029".repeat(400_000)}`);
+  const r = hook("python3 thin.py", dir);
+  assert.equal(r.status, 2, `signal=${r.signal}`);
+  assert.match(r.stderr, /thin\.py imports blast\.py, which reaches a mail-send endpoint/);
+});
+
+// The backtracking forms of those scans, kept as their specification and run only on short text, where backtracking
+// costs nothing.
+const SPEC_PATH_TOKEN = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))'|([A-Za-z0-9_.:\\/~-]+\.(?:py|mjs|js|ts|ps1|sh|rb))\b/g;
+const SPEC_MESSAGES_SEND = /\/messages\/[^"'\s]*\/send\b/i;
+const SPEC_SEND_VERB = /\/sendMail\b|\/messages\/[^"'\s]*\/send\b|%s\/send\b|\{\}\/send\b|\/send["']|createReply|\/mail\.send\b|\/v3\/mail\/send\b|\/messages\.json\b/i;
+const SPEC_PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))/gm;
+
+/** `count` strings of up to `maxPieces` pieces of `alphabet`, drawn by a seeded mulberry32 generator. */
+function randomTexts(alphabet, count, maxPieces, seed) {
+  let state = seed;
+  const next = () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32;
+  };
+  return Array.from({ length: count }, () => {
+    let text = "";
+    for (let n = Math.floor(next() * (maxPieces + 1)); n > 0; n -= 1) {
+      text += alphabet[Math.floor(next() * alphabet.length)];
+    }
+    return text;
+  });
+}
+
+test("the bare-path scan finds exactly what the backtracking pattern found", () => {
+  const alphabet = ["a", "Z", "_", "1", ".", "p", "y", "s", "h", "/", "\\", ":", "~", "-", ".py", ".js", ".mjs", ".ts",
+    ".ps1", ".sh", ".rb", ".json", " ", "\n", '"', "'", "$", "é", "x.py"];
+  let tokens = 0;
+  for (const text of randomTexts(alphabet, 40_000, 24, 1)) {
+    const matches = (re) => [...text.matchAll(re)].map((m) => [m.index, ...m]);
+    const want = matches(SPEC_PATH_TOKEN);
+    assert.deepEqual(matches(PATH_TOKEN), want, JSON.stringify(text));
+    tokens += want.length;
+  }
+  assert.ok(tokens > 10_000, `only ${tokens} tokens: the alphabet no longer exercises the pattern`);
+});
+
+test("the send-verb scan decides exactly as the backtracking pattern did", () => {
+  const alphabet = ["/messages/", "/MESSAGES/", "/Messages", "/send", "/SEND", "/sendx", "send", "/", "d", "x", "_", "-",
+    ".", " ", "\t", "\n", '"', "'", "\u00a0", "\u2028"];
+  const seen = { messagesSend: 0, messagesWithoutSend: 0 };
+  for (const text of randomTexts(alphabet, 40_000, 16, 2)) {
+    assert.equal(hasSendVerb(text), SPEC_SEND_VERB.test(text), JSON.stringify(text));
+    if (SPEC_MESSAGES_SEND.test(text)) seen.messagesSend += 1;
+    else if (/\/messages\//i.test(text) && /\/send\b/i.test(text)) seen.messagesWithoutSend += 1;
+  }
+  assert.ok(seen.messagesSend > 2_000 && seen.messagesWithoutSend > 2_000, JSON.stringify(seen));
+});
+
+test("the import scan finds exactly the modules the backtracking pattern found", () => {
+  const alphabet = ["import", "from", "import ", "from ", " ", "\t", "\v", "\f", "\n", "\r", "\r\n", "\u2028",
+    "\u2029", "\u00a0", "\ufeff", "x", "a.b", "_m", ".", "#", "1"];
+  let modules = 0;
+  for (const text of randomTexts(alphabet, 40_000, 16, 3)) {
+    const found = (re) => [...text.matchAll(re)].map((m) => [m[1], m[2]]);
+    const want = found(SPEC_PY_IMPORT);
+    assert.deepEqual(found(PY_IMPORT), want, JSON.stringify(text));
+    modules += want.length;
+  }
+  assert.ok(modules > 2_000, `only ${modules} imports: the alphabet no longer exercises the pattern`);
 });

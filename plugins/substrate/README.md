@@ -29,7 +29,7 @@ sweep-before-build doctrine has something deterministic to sweep.
   statements only, and a stale manifest is reported, never commanded. A
   second `SessionStart` hook runs `memory-lint.mjs` over the workspace's
   memory files, and a `PostToolUse` hook on file writes runs the
-  prose-smell gate (both below). A `PreToolUse` hook on `Bash|PowerShell`
+  prose-smell gate (both below). A `PreToolUse` hook on `Bash|PowerShell|Monitor`
   runs the opt-in mail-sender check described below.
 - `scripts/send-chokepoint.mjs` — detects recognized mail-send paths outside
   the repository's declared sender. Dormant without `.send-chokepoint.json`.
@@ -295,6 +295,12 @@ what a config is for.
 
 ## Mail-sender gate
 
+The gate is a tripwire. It is not a security boundary. It stops a script or
+an agent reaching a mail provider by an ordinary route outside the declared
+sender, and a command written to evade it gets through. Keep provider
+credentials where only the sender can use them, and treat this hook as the
+alarm in front of that.
+
 Opt in with `.send-chokepoint.json` in the project or a parent directory:
 
 ```json
@@ -305,7 +311,8 @@ Opt in with `.send-chokepoint.json` in the project or a parent directory:
 }
 ```
 
-The `Bash|PowerShell` pre-tool hook checks inline commands, readable referenced
+The `Bash|PowerShell|Monitor` pre-tool hook (a Monitor `command` runs in the same
+shell as Bash; a Monitor WebSocket source runs none and passes) checks inline commands, readable referenced
 scripts and their supported local imports for both a watched provider host and
 a recognized send verb. A detected send outside the declared paths exits 2
 before execution. `sender` is an exact path; each `exempt` entry also permits
@@ -377,10 +384,56 @@ Omit `providers` to use the built-in Microsoft Graph, Gmail, SendGrid, Mailgun,
 Postmark and Resend hosts. This is a static routing check: it does not send
 mail, grant authorization, verify recipients or prove that the approved
 sender enforces its own checks. Dynamic URLs and unsupported imports can
-escape detection. Missing configuration, malformed payloads and unreadable
-files allow execution; configuration problems are reported when observed.
-Do not treat it as an egress sandbox. Its tests use local fixture files and
-never contact mail providers.
+escape detection. Do not treat it as an egress sandbox. Its tests use local
+fixture files and never contact mail providers.
+
+Missing configuration allows execution. Configuration problems are reported
+when observed, and a config that is not valid JSON is ignored. In a repo that
+opted in, a command the hook cannot finish judging is blocked: a payload
+with no shell command, a config or script it cannot read, a script or
+imported module it cannot stat (one behind a directory it cannot search, or
+on a path longer than the system allows) or one over 16 MiB (the declared
+sender and exempt paths aside), an error in the hook, or no answer after 8
+seconds. Claude Code runs a command whose hook crashes or outlives the 15
+seconds `hooks.json` allows, so the judgment runs in a child process with a
+512 MB heap that the hook kills at its 8-second deadline.
+
+These shapes are not resolved, and a sender reached through one of them
+runs:
+
+- A script name the line builds instead of spelling it as one plain word:
+  quotes or escapes inside it (`bl''ast.py`), variables, brace lists, globs,
+  `~`, command output, or a directory entered other than by one `cd DIR`. An
+  unquoted name with a non-ASCII character (`envoi_relancé.py`) is not read
+  as a word at all.
+- Code run by a tool the hook is not routed to. The matcher names `Bash`,
+  `PowerShell` and `Monitor`; a REPL tool that runs model-written code
+  directly is not judged.
+- A path the line enters through a symlink and then leaves with `..`, or
+  reaches through `/proc/self`. The gate resolves `..` as text and bash
+  through the filesystem. The sanctioned-sender match also ignores case, so
+  on a case-sensitive filesystem a differently cased path passes as the
+  sanctioned one.
+- Shell code in a string another program runs (`sh -c`, `bash -c`,
+  `env -S`, `eval`, `trap`, `find -exec`, `xargs`), fed to a shell through a
+  pipe, heredoc, here-string or process substitution, or written to a file
+  by the same line that runs it.
+- Code an interpreter finds itself: `python3 -m mod`, `-c 'import mod'`,
+  `perl -Mmod`, a script without an extension or with one other than `.py`,
+  `.mjs`, `.js`, `.ts`, `.ps1`, `.sh` or `.rb`, and any import but a Python
+  `import` of a module beside the script.
+- A provider host or send verb assembled at run time, so the two never
+  appear together as text.
+- A nearer `.send-chokepoint.json`, or an edit to this one: the config sits
+  in a tree the agent can write.
+- A config in a directory the hook cannot search. The hook sees no opt-in
+  there, so a line that opens the directory and runs a sender inside it is
+  allowed unless a config above the directory applies.
+- Any route but a watched host with a recognized verb: SMTP, a relay, or
+  another provider's API.
+
+A Monitor command gets no read-only exemption, so a log watcher whose filter
+names a send endpoint is refused where the same line under Bash is allowed.
 
 ## Honest limitations
 
