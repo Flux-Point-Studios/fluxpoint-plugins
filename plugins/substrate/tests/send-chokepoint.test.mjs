@@ -15,6 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PATH_TOKEN, PY_IMPORT, hasSendVerb } from "../scripts/send-chokepoint.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../scripts/send-chokepoint.mjs", import.meta.url));
 // Claude Code runs the command when its hook outlives the timeout hooks.json gives it, so every run here gets the same
@@ -747,4 +748,96 @@ test("the declared sender is allowed at any size", () => {
   const dir = repo();
   file(dir, "outbound_mail.py", OVER_BUDGET_SENDER);
   assert.equal(hook("python3 outbound_mail.py", dir).status, 0);
+});
+
+// ------------------------------------------------- the scans run in linear time
+// A pattern that backtracks over text the agent writes stalls the judgment until the deadline refuses a line that
+// should have been answered at once, and for the wrong reason. main's patterns ran each of these past the hook timeout.
+test("a long run of path characters is judged at once", () => {
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  const r = hook(`python3 blast.py # ${"a".repeat(200_000)}`, dir);
+  assert.equal(r.status, 2, `signal=${r.signal}`);
+  assert.match(r.stderr, /this script reaches a mail-send endpoint \(.*blast\.py\)/);
+});
+
+test("a sender padded with /messages/ runs is judged at once", () => {
+  const dir = repo();
+  file(dir, "padded.py", `# ${"/messages/".repeat(150_000)}\n${SENDER_BODY}`);
+  const r = hook("python3 padded.py", dir);
+  assert.equal(r.status, 2, `signal=${r.signal}`);
+  assert.match(r.stderr, /this script reaches a mail-send endpoint \(.*padded\.py\)/);
+});
+
+test("a thin script padded with line ends is judged at once", () => {
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  file(dir, "thin.py", `import blast\n${"\n\r\u2028\u2029".repeat(400_000)}`);
+  const r = hook("python3 thin.py", dir);
+  assert.equal(r.status, 2, `signal=${r.signal}`);
+  assert.match(r.stderr, /thin\.py imports blast\.py, which reaches a mail-send endpoint/);
+});
+
+// The backtracking forms of those scans, kept as their specification and run only on short text, where backtracking
+// costs nothing.
+const SPEC_PATH_TOKEN = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))'|([A-Za-z0-9_.:\\/~-]+\.(?:py|mjs|js|ts|ps1|sh|rb))\b/g;
+const SPEC_MESSAGES_SEND = /\/messages\/[^"'\s]*\/send\b/i;
+const SPEC_SEND_VERB = /\/sendMail\b|\/messages\/[^"'\s]*\/send\b|%s\/send\b|\{\}\/send\b|\/send["']|createReply|\/mail\.send\b|\/v3\/mail\/send\b|\/messages\.json\b/i;
+const SPEC_PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))/gm;
+
+/** `count` strings of up to `maxPieces` pieces of `alphabet`, drawn by a seeded mulberry32 generator. */
+function randomTexts(alphabet, count, maxPieces, seed) {
+  let state = seed;
+  const next = () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32;
+  };
+  return Array.from({ length: count }, () => {
+    let text = "";
+    for (let n = Math.floor(next() * (maxPieces + 1)); n > 0; n -= 1) {
+      text += alphabet[Math.floor(next() * alphabet.length)];
+    }
+    return text;
+  });
+}
+
+test("the bare-path scan finds exactly what the backtracking pattern found", () => {
+  const alphabet = ["a", "Z", "_", "1", ".", "p", "y", "s", "h", "/", "\\", ":", "~", "-", ".py", ".js", ".mjs", ".ts",
+    ".ps1", ".sh", ".rb", ".json", " ", "\n", '"', "'", "$", "é", "x.py"];
+  let tokens = 0;
+  for (const text of randomTexts(alphabet, 40_000, 24, 1)) {
+    const matches = (re) => [...text.matchAll(re)].map((m) => [m.index, ...m]);
+    const want = matches(SPEC_PATH_TOKEN);
+    assert.deepEqual(matches(PATH_TOKEN), want, JSON.stringify(text));
+    tokens += want.length;
+  }
+  assert.ok(tokens > 10_000, `only ${tokens} tokens: the alphabet no longer exercises the pattern`);
+});
+
+test("the send-verb scan decides exactly as the backtracking pattern did", () => {
+  const alphabet = ["/messages/", "/MESSAGES/", "/Messages", "/send", "/SEND", "/sendx", "send", "/", "d", "x", "_", "-",
+    ".", " ", "\t", "\n", '"', "'", "\u00a0", "\u2028"];
+  const seen = { messagesSend: 0, messagesWithoutSend: 0 };
+  for (const text of randomTexts(alphabet, 40_000, 16, 2)) {
+    assert.equal(hasSendVerb(text), SPEC_SEND_VERB.test(text), JSON.stringify(text));
+    if (SPEC_MESSAGES_SEND.test(text)) seen.messagesSend += 1;
+    else if (/\/messages\//i.test(text) && /\/send\b/i.test(text)) seen.messagesWithoutSend += 1;
+  }
+  assert.ok(seen.messagesSend > 2_000 && seen.messagesWithoutSend > 2_000, JSON.stringify(seen));
+});
+
+test("the import scan finds exactly the modules the backtracking pattern found", () => {
+  const alphabet = ["import", "from", "import ", "from ", " ", "\t", "\v", "\f", "\n", "\r", "\r\n", "\u2028",
+    "\u2029", "\u00a0", "\ufeff", "x", "a.b", "_m", ".", "#", "1"];
+  let modules = 0;
+  for (const text of randomTexts(alphabet, 40_000, 16, 3)) {
+    const found = (re) => [...text.matchAll(re)].map((m) => [m[1], m[2]]);
+    const want = found(SPEC_PY_IMPORT);
+    assert.deepEqual(found(PY_IMPORT), want, JSON.stringify(text));
+    modules += want.length;
+  }
+  assert.ok(modules > 2_000, `only ${modules} imports: the alphabet no longer exercises the pattern`);
 });

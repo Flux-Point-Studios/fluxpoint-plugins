@@ -67,18 +67,29 @@ const DEFAULT_PROVIDERS = [
   "api.postmarkapp.com",
   "api.resend.com",
 ];
-// The verbs that mean "this one SENDS", as opposed to reading a mailbox.
-const SEND_VERB = /\/sendMail\b|\/messages\/[^"'\s]*\/send\b|%s\/send\b|\{\}\/send\b|\/send["']|createReply|\/mail\.send\b|\/v3\/mail\/send\b|\/messages\.json\b/i;
+// The verbs that mean "this one SENDS", as opposed to reading a mailbox. Every pattern that reads text the agent
+// writes runs in linear time: one that backtracks stalls the judgment until the deadline refuses the line.
+const SEND_VERB = /\/sendMail\b|%s\/send\b|\{\}\/send\b|\/send["']|createReply|\/mail\.send\b|\/v3\/mail\/send\b|\/messages\.json\b/i;
+// `/messages/{id}/send`: a /send after a /messages/ in one run of characters that are neither quotes nor whitespace.
+// The run's first /messages/ reaches every /send a later one does, so one search from it decides the run.
+const MESSAGES = /\/messages\//i;
+const UNQUOTED_RUN = /[^"'\s]+/g;
+const SEND_SEGMENT = /\/send\b/i;
 
 const MAX_READ_BYTES = 16 * 1024 * 1024;
 // Bare tokens, plus quoted runs that may contain spaces. Without the quoted
 // forms, `python "space dir/blast.py"` matches only the tail after the space,
 // which resolves to nothing and lets an unsanctioned sender run — and Windows
-// user directories contain spaces as a matter of course.
-const PATH_TOKEN = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))'|([A-Za-z0-9_.:\\/~-]+\.(?:py|mjs|js|ts|ps1|sh|rb))\b/g;
+// user directories contain spaces as a matter of course. A bare token starts
+// only where a run of path characters starts: a later start in the same run
+// matches nothing the first does not, and trying each one would backtrack
+// quadratically over a long run.
+export const PATH_TOKEN = /"([^"\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))"|'([^'\n]+\.(?:py|mjs|js|ts|ps1|sh|rb))'|(?<![A-Za-z0-9_.:\\/~-])([A-Za-z0-9_.:\\/~-]+\.(?:py|mjs|js|ts|ps1|sh|rb))\b/g;
 // A leading `cd <dir> &&` sets the directory the rest of the command runs in.
 const CD_PREFIX = /(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
-const PY_IMPORT = /^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))/gm;
+// Leading blanks stop at the end of their line. Blanks that crossed line ends would restart a scan to the next
+// statement at every blank line; the statement's own line start finds the same import.
+export const PY_IMPORT = /^[^\S\n\r\u2028\u2029]*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))/gm;
 
 // Tools that print, search, hash, compare or list a file. A command made only of these, named bare, is never judged:
 // the operator must be able to read and hash the very files this gate protects. Tools that can run code are not
@@ -454,8 +465,18 @@ function isAllowedPath(fp, config) {
   });
 }
 
+export function hasSendVerb(text) {
+  if (SEND_VERB.test(text)) return true;
+  if (!MESSAGES.test(text)) return false;
+  for (const [run] of text.matchAll(UNQUOTED_RUN)) {
+    const at = run.search(MESSAGES);
+    if (at >= 0 && SEND_SEGMENT.test(run.slice(at + "/messages/".length))) return true;
+  }
+  return false;
+}
+
 function looksLikeSender(text, config) {
-  return config.providers.some((h) => text.includes(h)) && SEND_VERB.test(text);
+  return config.providers.some((h) => text.includes(h)) && hasSendVerb(text);
 }
 
 function searchDirs(command, cwd) {
