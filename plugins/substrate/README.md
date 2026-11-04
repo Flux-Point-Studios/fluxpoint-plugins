@@ -409,6 +409,15 @@ the raw text and from every word as bash builds it:
   rest on a value (which word names a shell) are made again with every
   value the line gives, until a reading of the line finds no new one, so
   neither a loop nor the order of the line's commands hides one;
+- a positional parameter (`$0`, `$1`, `${10}`, `$@`) given each word the
+  line passes as one, since `shift` and `set` move them: the words after
+  a shell's `-c` string, the words `set` takes after its options (`--`
+  or `-` ends them, `-o` or `+o` takes a name), and the arguments of a
+  call to a function the line defines. When the line reads `$*`, it also
+  takes each run of a list's words to the last, joined by a blank or by
+  nothing (what an empty IFS joins with). `$@`, or `$*` unquoted, at the
+  head of a command is read as no words and as each list passed, from
+  any of its words on;
 - brace lists and sequences expanded as bash expands them: only braces
   it reads unquoted, found by bash's own matching rules, in the word as
   written and before its variables, so `$x{a,b}` is `$xa` and `$xb` and
@@ -526,17 +535,18 @@ cannot read:
   one for each letter of a short-option cluster read for a path;
 - variable values that spend more than 4096 units of their own while
   they are built from each other between readings of the line, or that
-  still grow after four readings;
+  still grow after four readings, and runs of positional parameters
+  joined for `$*` that hold more than 4 MiB of text in all;
 - a line that may run in more than 64 directories.
 
 Shell code is read with bash's grammar, whichever of those shells runs it.
 Not resolved: a value computed while the line runs (command output,
 arithmetic, the other `${...}` operators (a substring, a length,
 indirection, and those that cut, replace or change the case of a
-value), `read`, `printf -v`, arrays, positional parameters from
-`set --` or a function's arguments, and a value a loop builds from its
+value), `read`, `printf -v`, arrays, and a value a loop builds from its
 own earlier value over more passes than the line assigns distinct
-variables), a name
+variables), the positional parameters a script file or `source`
+passes, a name
 another program supplies (`find -exec ... {}`, the input of `xargs`), a
 value or an alias an earlier command set that the hook does not see,
 `~user`,

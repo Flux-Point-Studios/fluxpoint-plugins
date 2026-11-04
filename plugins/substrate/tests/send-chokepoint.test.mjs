@@ -951,6 +951,33 @@ expectEach(0, "a variable the line gives harmless values is not refused", [
   "OLD=$PATH; export PATH=$HOME/bin:$PATH; PATH=/usr/local/bin:$PATH; make -n >/dev/null 2>&1 || true; PATH=$OLD",
 ]);
 
+// A shell's -c string takes its positional parameters from the words after it, `set` gives new ones, and a function
+// takes its call's arguments; `shift` moves them, so each parameter may be any of those words, and `"$*"` joins them.
+expectEach(2, "a positional parameter takes the words the line passes", [
+  "bash -c 'python3 $0$1' bl ast.py",
+  "sh -c 'python3 $1$2' _ bl ast.py",
+  "bash -c 'python3 ${1}ast.py' _ bl",
+  "set -- bl ast.py; python3 $1$2",
+  "set -- x bl ast.py; shift; python3 $1$2",
+  "set -e -- bl ast.py; python3 $1$2",
+  "f() { python3 $1$2; }; f bl ast.py",
+  'function g { python3 "$1$2"; }; g bl ast.py',
+  "bash -c 'IFS=; python3 \"$*\"' _ bl ast.py",
+  "sh -c 'python3 \"${@}\"ast.py' _ bl",
+  "set -- bl; bash -c 'python3 ${1}ast.py' _ \"$1\"",
+  "for i in 1 2; do f bl ast.py; f() { python3 $1$2; }; done",
+  "bash -c 'python3 $1$2 $3' _ bl ast.py x",
+]);
+
+expectEach(0, "a positional parameter of harmless words is not refused", [
+  "bash -c 'echo $1 $2' _ ot her.py",
+  "find . -name '*.txt' -exec sh -c 'wc -l \"$1\"' _ {} \\;",
+  "set -euo pipefail; python3 other.py",
+  'f() { echo "$1"; }; f x',
+  "set -- a b; shift; echo $1",
+  "run() { \"$@\"; }; run sh -c 'echo hi'; run bash run.sh; run make -n >/dev/null 2>&1 || true",
+]);
+
 // Braces, globs and variables can make more paths than any check could try; padding a line with them must not push a
 // sender past the gate's reach.
 expectEach(2, "a line that makes more paths than the gate resolves is refused", [
@@ -1033,6 +1060,7 @@ expectEach(2, "a command named by an expansion is read as each command it may ma
   `X="nohup bash"; $X <<< ${BUILT}`,
   `X="bash -c"; $X ${BUILT}`,
   `F=-c; find . -maxdepth 0 -exec bash $F ${BUILT} \\;`,
+  `f() { "$@"; }; printf %s ${BUILT} | f bash`,
 ]);
 
 expectEach(0, "a command named by an expansion of harmless values is not refused", [

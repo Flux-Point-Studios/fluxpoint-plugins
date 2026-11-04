@@ -330,13 +330,13 @@ function requireReadOnlyCommand(words, cwd) {
  *  continuation that joins an operator or an expansion, and an unquoted heredoc body bash would expand. The full
  *  judgment reads with `full` true: it follows those too, decodes `$'...'`, gives a variable its value in this
  *  process's environment, and throws only at what bash cannot parse or where a heredoc's end cannot be known. It hands
- *  `onText` the inside of an arithmetic command `((...))`, which a POSIX shell reads as two subshells, and
- *  `onAssign(name, parts)` the word a `${NAME:=word}` or `${NAME=word}` assigns. With `text` it reads `src` as an
- *  unquoted heredoc body, following only its expansions; with `single` it reads one word and returns it. Past
- *  `deadline` it throws OUT_OF_TIME. */
-function readShell(src, { cwd, onCommand, onText, onAssign, full = false, text = false, single = false,
+ *  `onText` the inside of an arithmetic command `((...))`, which a POSIX shell reads as two subshells,
+ *  `onAssign(name, parts)` the word a `${NAME:=word}` or `${NAME=word}` assigns, and `onFunction(name)` the name of
+ *  each function the line defines. With `text` it reads `src` as an unquoted heredoc body, following only its
+ *  expansions; with `single` it reads one word and returns it. Past `deadline` it throws OUT_OF_TIME. */
+function readShell(src, { cwd, onCommand, onText, onAssign, onFunction, full = false, text = false, single = false,
                           deadline = Infinity }) {
-  const nested = { cwd, onCommand, onText, onAssign, full, deadline };
+  const nested = { cwd, onCommand, onText, onAssign, onFunction, full, deadline };
   let i = 0;
   let piped = false;
   const heredocs = [];
@@ -813,7 +813,7 @@ function readShell(src, { cwd, onCommand, onText, onAssign, full = false, text =
         } else if (FUNCTION_PARENS.test(src)) {
           // `NAME ()` defines a function: the name runs nothing, and the command after it starts a command.
           i = FUNCTION_PARENS.lastIndex;
-          if (words.length > opener) words.pop();
+          if (words.length > opener) onFunction?.(words.pop().text);
         } else if (src[i + 1] === "(" && arithmetic()) {
           // dash and other POSIX shells read `((` as two subshells.
           onText?.(src.slice(from + 2, i - 2));
@@ -873,6 +873,7 @@ function readShell(src, { cwd, onCommand, onText, onAssign, full = false, text =
         if (full && words[opener]?.bare === "function" && words.length === opener + 1) {
           // `function NAME` defines a function: neither word runs anything.
           words.pop();
+          onFunction?.(w.text);
           continue;
         }
         words.push(w);
@@ -1032,30 +1033,32 @@ function closeValues(values, sources, budget) {
  *  `deadline` it throws OUT_OF_TIME.
  *
  *  A decision the reader makes while reading may rest on a value the line gives a variable later, in a loop or
- *  through another variable, so the line is read again with every value the last reading found, until a reading finds
+ *  through another variable, or on a function it defines later or the arguments it passes one, so the line is read
+ *  again with every value, function and list of positional parameters the last reading found, until a reading finds
  *  no new one. A line whose values still grow after MAX_READINGS readings, or that gives its variables more values
  *  than the budget allows, is marked `exhausted`. `values` holds each value as its assignment was read, and `sources`
  *  the assignments themselves, from which `closeValues` builds the rest. */
 function readLine(command, cwd, tool, deadline = Infinity) {
-  let known = new Map();
+  let known = { values: new Map(), functions: new Set(), lists: [] };
   for (let reading = 1; ; reading += 1) {
     const found = readOnce(command, cwd, tool, deadline, known);
-    const closed = copyValues(found.values);
+    const values = copyValues(found.values);
     const budget = { left: EXPANSION_LIMIT, deadline };
-    closeValues(closed, found.sources, budget);
-    const settled = sameValues(closed, known);
+    closeValues(values, found.sources, budget);
+    const settled = sameValues(values, known.values) && found.functions.size === known.functions.size
+      && found.lists.length === known.lists.length;
     if (budget.left <= 0 || (!settled && reading === MAX_READINGS)) found.exhausted = true;
     if (settled || found.exhausted) return found;
-    known = closed;
+    known = { values, functions: found.functions, lists: found.lists };
   }
 }
 
-/** One reading of a line, whose decisions take each variable's values from `known` as well as from the line read so
- *  far. */
+/** One reading of a line, whose decisions take each variable's values, the functions defined and the lists of
+ *  positional parameters passed from `known` as well as from the line read so far. */
 function readOnce(command, cwd, tool, deadline, known) {
-  const found = { texts: [], words: [], values: new Map(), sources: [], moves: [], finds: [], options: new Set(),
-                  unreadable: null, exhausted: false };
-  const seen = copyValues(known);
+  const found = { texts: [], words: [], values: new Map(), sources: [], functions: new Set(known.functions),
+                  lists: [], moves: [], finds: [], options: new Set(), unreadable: null, exhausted: false };
+  const seen = copyValues(known.values);
   // `w` gives `name` a value: all of its text or, with `cut`, what follows its first `=`.
   const assign = (name, w, cut = false) => {
     const key = name.replace(/\+$|\[.*$/, "");
@@ -1066,13 +1069,40 @@ function readOnce(command, cwd, tool, deadline, known) {
     }
     found.sources.push({ key, parts: w.parts ?? [{ text: w.text }], cut });
   };
+  // The words a shell's -c string, `set` or a function call takes as positional parameters, passed after `from`: each
+  // is a value of every one of them.
+  const passedAfter = new WeakSet();
+  const positional = (from, list) => {
+    if (passedAfter.has(from)) return;
+    passedAfter.add(from);
+    for (const w of list) assign("@", w);
+    found.lists.push(list);
+  };
+  // When the line reads `$*`, each run of every list to its last word, joined by a blank or by nothing, is a value of
+  // it. Joins longer in all than the budget allows exhaust the line.
+  const joinLists = () => {
+    let joined = 0;
+    for (const list of found.lists) {
+      for (let k = 0; k < list.length && !found.exhausted; k += 1) {
+        const run = list.slice(k);
+        for (const blank of [" ", ""]) {
+          const text = run.map((w) => w.text).join(blank);
+          joined += text.length;
+          if (joined > EXPANSION_LIMIT << 10) found.exhausted = true;
+          const parts = run.flatMap((w, n) => [...(n ? [{ text: blank }] : []), ...(w.parts ?? [{ text: w.text }])]);
+          assign("*", { text, parts });
+        }
+      }
+    }
+  };
   // Inside a string read only for the paths it names, nothing is refused.
   let lenient = 0;
   const unreadable = (where) => {
     if (!lenient) found.unreadable ??= where;
   };
   const read = (code) => readShell(code, { cwd, onCommand: inspect, onText: readLeniently, full: true, deadline,
-    onAssign: (name, parts) => assign(name, { text: parts.map((p) => p.text).join(""), parts }) });
+    onAssign: (name, parts) => assign(name, { text: parts.map((p) => p.text).join(""), parts }),
+    onFunction: (name) => found.functions.add(name) });
   const readCode = (code, what) => {
     try {
       read(code);
@@ -1154,6 +1184,12 @@ function readOnce(command, cwd, tool, deadline, known) {
   // Whether a word built from an expansion may be an option: a value starts with `-` or `+`, or it has too many.
   const mayBeOption = (w) => (possibleTexts(w, seen) ?? ["-"]).some((t) => /^[-+]/.test(t));
 
+  // The -c string at words[k], and the words after it, which are its positional parameters from $0 on.
+  const commandString = (words, k, who) => {
+    if (words[k]) positional(words[k], words.slice(k + 1));
+    readWord(words[k], `the -c string of ${who}`);
+  };
+
   // A shell named at words[j]. Its -c string is code. At the head of the command so is its standard input, when it has
   // no script operand, and an expansion among its options may be -c.
   const shell = (words, j, redirects, head, piped) => {
@@ -1167,7 +1203,7 @@ function readOnce(command, cwd, tool, deadline, known) {
         if (c || w.process || !(mayBeOption(w) || (head && w.opensDynamic))) break;
         if (w.splits) return unreadable(`the options of ${who} are built from an expansion`);
         // This may be -c, and the next word its string, or it may be the script.
-        if (words[k + 1]) readWord(words[k + 1], `the -c string of ${who}`);
+        if (words[k + 1]) commandString(words, k + 1, who);
         break;
       }
       const option = w.text;
@@ -1185,7 +1221,7 @@ function readOnce(command, cwd, tool, deadline, known) {
       }
       k += (option.match(/[oO]/g) ?? []).length;
     }
-    if (c) return readWord(words[k], `the -c string of ${who}`);
+    if (c) return commandString(words, k, who);
     if (!head) return;
     if (words[k] && !s) return script(words[k], redirects, who, piped);
     input(redirects, who);
@@ -1236,15 +1272,21 @@ function readOnce(command, cwd, tool, deadline, known) {
     }
   };
 
-  // The lists of words an expansion at the start of a command may make: one for each text it may take, split at blanks
-  // where it is unquoted, so that an empty value leaves no word. Null when it has more values than the gate follows.
+  // The lists of words an expansion at the start of a command may make: `$@`, and `$*` unquoted, make none or each
+  // list of positional parameters passed, from any word on as `shift` leaves it; any other expansion one for each text
+  // it may take, split at blanks where it is unquoted, so that an empty value leaves no word. Null when it has more
+  // values than the gate follows.
   const commandWords = (w) => {
+    const [part, ...rest] = w.parts ?? [];
+    if (!rest.length && (part?.name === "@" || (part?.name === "*" && !part.quoted))) {
+      return [[], ...known.lists.flatMap((list) => list.map((_, k) => list.slice(k)))];
+    }
     const texts = possibleTexts(w, seen);
     if (!texts) return null;
     const lists = new Map();
     for (const text of texts) {
       const fields = w.splits && !w.quoted ? text.split(/[ \t\n]+/).filter(Boolean) : [text];
-      lists.set(fields.join("\0"), fields);
+      lists.set(fields.join("\0"), fields.map(literalWord));
     }
     return [...lists.values()];
   };
@@ -1275,6 +1317,17 @@ function readOnce(command, cwd, tool, deadline, known) {
       if (ASSIGNMENT.test(w.bare)) assign(w.text.slice(0, w.text.indexOf("=")), w, true);
     }
     if (name === "for" && args[1]?.bare === "in") for (const w of args.slice(2)) assign(args[0].text, w);
+    // A function's arguments and the words `set` takes after its options are positional parameters; `--` or `-` ends
+    // set's options, and `-o` or `+o` takes a name.
+    if (found.functions.has(name)) positional(words[head], args);
+    if (name === "set") {
+      let k = 0;
+      for (; args[k] && /^[-+]/.test(args[k].text) && !/^--?$/.test(args[k].text); k += 1) {
+        if (/^[-+][^-+]*o/.test(args[k].text)) k += 1;
+      }
+      if (/^--?$/.test(args[k]?.text ?? "")) k += 1;
+      positional(words[head], args.slice(k));
+    }
     // An option shopt, a shell's -O or BASHOPTS takes from an expansion may be any of them.
     if ((name === "shopt" && args.some((w) => !w.literal))
         || words.some((w, k) => !w.literal
@@ -1336,14 +1389,15 @@ function readOnce(command, cwd, tool, deadline, known) {
     if ((name === "source" || name === ".") && operand) script(operand, redirects, name, piped);
     // A command named by an expansion and given -c may be a shell.
     if (words[head] && !words[head].literal && args[0]?.literal && /^-[A-Za-z]*c[A-Za-z]*$/.test(args[0].text)) {
-      readWord(args[1], "the -c string of a command named by an expansion");
+      commandString(args, 1, "a command named by an expansion");
     }
     for (let j = 0; j < words.length; j += 1) {
       const w = words[j];
       if (w.literal && !ASSIGNMENT.test(w.bare) && path.posix.basename(w.text) === "env") {
         env(words, j, redirects, chain.includes(j), piped);
       }
-      if (shellNamed(w)) shell(words, j, redirects, j === head, piped);
+      // An expansion at the head is read below as each command it may make, with the words it brings.
+      if ((j !== head || w.literal) && shellNamed(w)) shell(words, j, redirects, j === head, piped);
     }
     for (const w of novel) if (!readAsCode.has(w)) readLeniently(w.text);
     for (const r of redirects) if (r.doc) r.doc.onBody ??= readLeniently;
@@ -1356,8 +1410,8 @@ function readOnce(command, cwd, tool, deadline, known) {
       return;
     }
     spare.left -= lists.length;
-    for (const fields of lists) {
-      inspect([...words.slice(0, head), ...fields.map(literalWord), ...words.slice(head + 1)], redirects, piped, spare);
+    for (const made of lists) {
+      inspect([...words.slice(0, head), ...made, ...words.slice(head + 1)], redirects, piped, spare);
     }
   };
 
@@ -1373,7 +1427,13 @@ function readOnce(command, cwd, tool, deadline, known) {
       unreadable("the line cannot be read to its end, and it names a shell, env, eval, trap or source");
     }
   }
+  if (found.words.some(({ word }) => readsAllParameters(word.parts ?? []))) joinLists();
   return found;
+}
+
+/** Whether a word's pieces read `$*`, alternatives included. */
+function readsAllParameters(parts) {
+  return parts.some((part) => part.name === "*" || (part.alternatives ?? []).some(readsAllParameters));
 }
 
 /** The nearest `.send-chokepoint.json` at or above `from`, validated.
@@ -1561,13 +1621,20 @@ function braceWords(word, budget, reread) {
 const GLOB_SPECIAL = /[\\*?[\]@!+()|^-]/g;
 const patternOf = (text, part) => (part.quoted ? text.replace(GLOB_SPECIAL, "\\$&") : text);
 
+/** The values the line gives a parameter. Every positional parameter, `$0` included, and `$@` take each word the line
+ *  passes as one, since `shift` and `set` move them; `$*` takes those and each run of them joined. */
+function valuesOf(values, name) {
+  if (name === "*") return [...(values.get("@") ?? []), ...(values.get("*") ?? [])];
+  return values.get(/^\d+$/.test(name) ? "@" : name) ?? [];
+}
+
 /** The texts a word can take, each with its pattern, when each variable in it takes, besides the value it was read
  *  with, each value the line assigns it, and a `${NAME:-word}` each text its word can take. With the budget spent,
  *  only the word as read. */
 function substitutions(parts, values, budget) {
   let out = [{ text: "", pattern: "" }];
   for (const part of parts) {
-    const choices = new Set([part.text, ...(part.name ? values.get(part.name) ?? [] : []),
+    const choices = new Set([part.text, ...(part.name ? valuesOf(values, part.name) : []),
       ...(part.alternatives ?? []).flatMap((alternative) => substitutions(alternative, values, budget)
         .map(({ text }) => text))]);
     out = out.flatMap((head) => [...choices].map((choice) => ({ text: head.text + choice,
