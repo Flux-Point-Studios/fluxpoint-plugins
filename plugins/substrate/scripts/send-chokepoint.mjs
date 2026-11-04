@@ -1870,9 +1870,10 @@ function parameterOperator(parts) {
   if (op[0] === "@") return (value) => [TRANSFORMS[op[1]]?.(value) ?? value, value];
   if ("^,~".includes(op[0])) {
     return (value, values, budget) => patterns(words, values, budget).map((pattern) => {
-      const re = pattern ? globSegment(pattern, false) : /^/;
+      const matcher = pattern ? globMatcher(pattern, false) : { test: () => true };
       const chars = [...value];
-      return chars.map((c, k) => (re.test(c) && (op.length === 2 || k === 0) ? caseChange[op[0]](c) : c)).join("");
+      return chars.map((c, k) => (matcher.test(c) && (op.length === 2 || k === 0) ? caseChange[op[0]](c) : c))
+        .join("");
     });
   }
   if (op === ":") {
@@ -1901,57 +1902,60 @@ function parameterOperator(parts) {
       return patterns(words, values, budget).map((pattern) => removeMatch(value, pattern, op));
     };
   }
+  // bash leaves some values a pattern matches as they were (an empty one, depending on how the pattern starts, and a
+  // few that a pattern ending in an escaped character matches), so the value itself is also one a replacement makes.
   const [patternParts, replacementParts] = splitParts(words, "/");
   return (value, values, budget) => {
     if (value.length > SEARCHED >> 4) budget.left = 0;
     if (budget.left <= 0) return [value];
     const replacements = replacementParts ? substitutions(replacementParts, values, budget).map((s) => s.text) : [""];
-    return patterns(patternParts, values, budget)
-      .flatMap((pattern) => replacements.map((replacement) => replaceMatch(value, pattern, op, replacement)));
+    return [value, ...patterns(patternParts, values, budget)
+      .flatMap((pattern) => replacements.map((replacement) => replaceMatch(value, pattern, op, replacement)))];
   };
+}
+
+/** The length of the shortest (`#`, `%`) or longest (`##`, `%%`) start (`#`) or end (`%`) of `value` that matches
+ *  `pattern`, or -1 when none does. */
+function matchedEnd(value, pattern, op) {
+  const chars = value.split("");
+  const matched = op[0] === "#" ? globMatcher(pattern, false).prefixes(chars)
+    : globMatcher(pattern, false, true).prefixes(chars.reverse());
+  return op.length === 1 ? matched.indexOf(true) : matched.lastIndexOf(true);
 }
 
 /** `value` without the shortest (`#`, `%`) or longest (`##`, `%%`) prefix (`#`) or suffix (`%`) that matches. */
 function removeMatch(value, pattern, op) {
-  const re = globSegment(pattern, false);
-  const n = value.length;
-  const cuts = [...Array(n + 1).keys()];
-  if ((op === "##") !== (op === "%")) cuts.reverse();
-  for (const k of cuts) {
-    if (op[0] === "#" && re.test(value.slice(0, k))) return value.slice(k);
-    if (op[0] === "%" && re.test(value.slice(k))) return value.slice(0, k);
-  }
-  return value;
+  const length = matchedEnd(value, pattern, op);
+  if (length < 0) return value;
+  return op[0] === "#" ? value.slice(length) : value.slice(0, value.length - length);
 }
 
-/** `value` with the longest match of `pattern` at the first place it matches replaced (`/`), at every place (`//`),
- *  only at the start (`/#`) or only at the end (`/%`). */
+/** `value` with the longest match of `pattern` at the first place it matches replaced (`/`), at every place before its
+ *  end (`//`), only at the start (`/#`) or only at the end (`/%`). */
 function replaceMatch(value, pattern, op, replacement) {
   if (!pattern) return value;
-  const re = globSegment(pattern, false);
+  const matcher = globMatcher(pattern, false);
+  if (!value) return matcher.test("") ? replacement : value;
   const n = value.length;
   const longest = (i) => {
-    for (let j = n; j >= i; j -= 1) if (re.test(value.slice(i, j))) return j;
-    return -1;
+    const length = matcher.prefixes(value.slice(i).split("")).lastIndexOf(true);
+    return length < 0 ? -1 : i + length;
   };
-  if (op === "/#") {
-    const j = longest(0);
-    return j < 0 ? value : replacement + value.slice(j);
-  }
-  if (op === "/%") {
-    for (let i = 0; i <= n; i += 1) if (re.test(value.slice(i))) return value.slice(0, i) + replacement;
-    return value;
+  if (op === "/#" || op === "/%") {
+    const length = matchedEnd(value, pattern, op === "/#" ? "##" : "%%");
+    if (length < 0) return value;
+    return op === "/#" ? replacement + value.slice(length) : value.slice(0, n - length) + replacement;
   }
   let out = "";
-  for (let i = 0; i <= n;) {
+  for (let i = 0; i < n;) {
     const j = longest(i);
     if (j < 0) {
-      out += value[i] ?? "";
+      out += value[i];
       i += 1;
     } else if (op === "/") {
       return out + replacement + value.slice(j);
     } else {
-      out += replacement + (j === i ? value[i] ?? "" : "");
+      out += replacement + (j === i ? value[i] : "");
       i = j === i ? i + 1 : j;
     }
   }
@@ -1989,73 +1993,154 @@ function hasGlob(pattern) {
 }
 
 const unescape = (pattern) => pattern.replace(/\\([\s\S])/g, "$1");
-const regexText = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+// A character as a regular expression's bracket set holds it literally.
+const inSet = (c) => c.replace(/[\\\]^-]/, "\\$&");
+// The POSIX character classes of the C locale, as the contents of a bracket set.
+const POSIX_CLASSES = { alpha: "A-Za-z", digit: "0-9", alnum: "A-Za-z0-9", upper: "A-Z", lower: "a-z",
+  xdigit: "0-9A-Fa-f", space: " \\t\\n\\r\\f\\v", blank: " \\t", punct: "!-\\/:-@\\[-`{-~", print: " -~", graph: "!-~",
+  cntrl: "\\x00-\\x1f\\x7f", word: "A-Za-z0-9_" };
 
-/** A RegExp for one path segment of a glob: `*`, `?`, bracket sets and the extglob groups `@(...)`, `?(...)`,
- *  `*(...)`, `+(...)` and `!(...)`, which bash cannot parse unless extglob is on. A POSIX class matches any character,
- *  and `!(...)` any text. `nocase` is nocaseglob. */
-function globSegment(segment, nocase) {
+/** A matcher for a glob pattern: `*`, `?`, bracket sets and the extglob groups `@(...)`, `?(...)`, `*(...)`,
+ *  `+(...)` and `!(...)`, which bash cannot parse unless extglob is on. A POSIX class matches any character, and
+ *  `!(...)` any text. `nocase` is nocaseglob; `reversed` matches the pattern read backwards, against a text read
+ *  backwards. The pattern becomes an automaton that follows every place in it at once, so a match costs no more than
+ *  the text's length times the pattern's, however its groups nest: a regular expression that backtracks takes
+ *  exponential time on a short name, and the hook allows a line it has not judged in time. `test(text)` says whether
+ *  the whole text matches; `prefixes(chars)` says, for each length, whether that many of the first characters do. */
+function globMatcher(pattern, nocase, reversed = false) {
   let k = 0;
+  const literal = (c) => (nocase ? (x) => x.toLowerCase() === c.toLowerCase() : (x) => x === c);
   const bracket = () => {
     let j = k + 1;
-    const negate = segment[j] === "!" || segment[j] === "^";
+    const negate = pattern[j] === "!" || pattern[j] === "^";
     if (negate) j += 1;
     let set = "";
     let anyChar = false;
-    for (let first = true; j < segment.length && (first || segment[j] !== "]"); first = false) {
-      if (segment[j] === "[" && ":=.".includes(segment[j + 1] ?? "x")) {
-        const end = segment.indexOf(`${segment[j + 1]}]`, j + 2);
+    for (let first = true; j < pattern.length && (first || pattern[j] !== "]"); first = false) {
+      if (pattern[j] === "[" && ":=.".includes(pattern[j + 1] ?? "x")) {
+        const end = pattern.indexOf(`${pattern[j + 1]}]`, j + 2);
         if (end < 0) return null;
-        anyChar = true;
+        const inner = pattern.slice(j + 2, end);
+        // A class names its characters; `[=c=]` and `[.c.]` stand for c. A class this does not know may be any.
+        const posix = Object.hasOwn(POSIX_CLASSES, inner) ? POSIX_CLASSES[inner] : undefined;
+        const known = pattern[j + 1] === ":" ? posix : [...inner].length === 1 ? inSet(inner) : undefined;
+        if (known === undefined) anyChar = true;
+        else set += known;
         j = end + 2;
-      } else if (segment[j] === "\\") {
-        set += `\\${segment[j + 1] ?? "\\"}`;
+      } else if (pattern[j] === "\\") {
+        set += inSet(pattern[j + 1] ?? "\\");
         j += 2;
       } else {
-        set += segment[j] === "-" ? "-" : regexText(segment[j]);
+        set += pattern[j] === "-" ? "-" : inSet(pattern[j]);
         j += 1;
       }
     }
-    if (j >= segment.length) return null;
+    if (j >= pattern.length) return null;
     k = j + 1;
-    return anyChar ? "." : `[${negate ? "^" : ""}${set}]`;
+    if (anyChar) return () => true;
+    try {
+      const re = new RegExp(`^[${negate ? "^" : ""}${set}]$`, nocase ? "si" : "s");
+      return (x) => re.test(x);
+    } catch {
+      // A set bash would read differently, such as a reversed range: any character may match.
+      return () => true;
+    }
   };
+  // The pattern as a list of nodes: one character, any text, or a group of alternative lists.
   const sequence = (inGroup) => {
-    let re = "";
-    while (k < segment.length && !(inGroup && (segment[k] === "|" || segment[k] === ")"))) {
-      const c = segment[k];
+    const nodes = [];
+    while (k < pattern.length && !(inGroup && (pattern[k] === "|" || pattern[k] === ")"))) {
+      const c = pattern[k];
       if (c === "\\") {
-        re += regexText(segment[k + 1] ?? "\\");
+        nodes.push({ test: literal(pattern[k + 1] ?? "\\") });
         k += 2;
-      } else if ("@!+*?".includes(c) && segment[k + 1] === "(") {
+      } else if ("@!+*?".includes(c) && pattern[k + 1] === "(") {
         k += 2;
         const alternatives = [sequence(true)];
-        while (segment[k] === "|") {
+        while (pattern[k] === "|") {
           k += 1;
           alternatives.push(sequence(true));
         }
         k += 1;
-        re += c === "!" ? ".*" : `(?:${alternatives.join("|")})${{ "@": "", "?": "?", "*": "*", "+": "+" }[c]}`;
+        nodes.push(c === "!" ? { any: true } : { group: c, alternatives });
       } else if (c === "*" || c === "?") {
-        re += c === "*" ? ".*" : ".";
+        nodes.push(c === "*" ? { any: true } : { test: () => true });
         k += 1;
       } else if (c === "[") {
-        const set = bracket();
-        re += set ?? "\\[";
-        if (set === null) k += 1;
+        const test = bracket();
+        nodes.push({ test: test ?? literal("[") });
+        if (!test) k += 1;
       } else {
-        re += regexText(c);
+        nodes.push({ test: literal(c) });
         k += 1;
       }
     }
-    return re;
+    return nodes;
   };
-  try {
-    return new RegExp(`^${sequence(false)}$`, nocase ? "si" : "s");
-  } catch {
-    // A set bash would read differently, such as a reversed range: any name may match.
-    return /^/;
-  }
+  const backwards = (nodes) => nodes.map((node) => (node.group
+    ? { ...node, alternatives: node.alternatives.map(backwards) } : node)).reverse();
+  const nodes = sequence(false);
+
+  // States either read one character that passes `test` or lead on without reading one.
+  const states = [];
+  const add = (test = null) => states.push({ test, to: [] }) - 1;
+  const link = (from, to) => states[from].to.push(to);
+  const build = (list, from) => list.reduce((at, node) => {
+    if (node.test) {
+      const read = add(node.test);
+      const after = add();
+      link(at, read);
+      link(read, after);
+      return after;
+    }
+    if (node.any) {
+      const loop = add();
+      const read = add(() => true);
+      link(at, loop);
+      link(loop, read);
+      link(read, loop);
+      return loop;
+    }
+    const entry = add();
+    const exit = add();
+    link(at, entry);
+    if (node.group === "?" || node.group === "*") link(entry, exit);
+    for (const alternative of node.alternatives) {
+      const end = build(alternative, entry);
+      link(end, exit);
+      if (node.group === "*" || node.group === "+") link(end, entry);
+    }
+    return exit;
+  }, from);
+  const start = add();
+  const accept = build(reversed ? backwards(nodes) : nodes, start);
+  const close = (active) => {
+    for (const stack = [...active]; stack.length;) {
+      const s = stack.pop();
+      if (states[s].test) continue;
+      for (const t of states[s].to) {
+        if (!active.has(t)) {
+          active.add(t);
+          stack.push(t);
+        }
+      }
+    }
+    return active;
+  };
+  const prefixes = (chars) => {
+    let active = close(new Set([start]));
+    const out = [active.has(accept)];
+    for (const c of chars) {
+      if (!active.size) break;
+      const next = new Set();
+      for (const s of active) if (states[s].test?.(c)) for (const t of states[s].to) next.add(t);
+      active = close(next);
+      out.push(active.has(accept));
+    }
+    while (out.length <= chars.length) out.push(false);
+    return out;
+  };
+  return { prefixes, test: (text) => prefixes(text.split("")).at(-1) };
 }
 
 /** The paths a glob names from each of `dirs`, as bash expands it with the glob `options` on: a name starting with `.`
@@ -2096,9 +2181,9 @@ function globFiles(pattern, dirs, budget, options = new Set()) {
     } else if (!hasGlob(segment)) {
       walk(`${dir}/${unescape(segment)}`, k + 1);
     } else {
-      const re = globSegment(segment, options.has("nocaseglob"));
+      const matcher = globMatcher(segment, options.has("nocaseglob"));
       for (const { name } of listing(dir)) {
-        if ((dots || name[0] !== ".") && re.test(name)) walk(`${dir}/${name}`, k + 1);
+        if ((dots || name[0] !== ".") && matcher.test(name)) walk(`${dir}/${name}`, k + 1);
       }
     }
   };

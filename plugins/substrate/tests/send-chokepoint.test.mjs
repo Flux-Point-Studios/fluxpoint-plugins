@@ -690,6 +690,18 @@ for (const [shape, line] of Object.entries(SLOW)) {
   });
 }
 
+// A pattern is matched by following every place in it at once, so however its extglob groups nest it costs no more
+// than the text times the pattern; a matcher that backtracks takes exponential time on a name of forty letters, the
+// hook outlives its timeout, and the line runs.
+test("a nested extglob pattern is matched within the hook's timeout", () => {
+  const dir = repo();
+  file(dir, "blast.py", SENDER_BODY);
+  file(dir, "a".repeat(40), "x");
+  assert.equal(hook("shopt -s extglob; ls +(+(a))b; python3 bl''ast.py", dir).status, 2);
+  assert.equal(hook(`X=${"a".repeat(40)}; echo \${X%%+(+(a))b}; python3 bl''ast.py`, dir).status, 2);
+  assert.equal(hook(`X=${"a".repeat(200)}; echo \${X//*a*a*a*a*b/}; python3 bl''ast.py`, dir).status, 2);
+});
+
 test("a sender padded to slow its scan is judged within the hook's timeout", () => {
   const dir = repo();
   file(dir, "padded.py", `# ${"/messages/".repeat(100000)}\n${SENDER_BODY}`);

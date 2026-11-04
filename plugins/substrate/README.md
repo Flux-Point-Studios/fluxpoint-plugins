@@ -424,7 +424,9 @@ the raw text and from every word as bash builds it:
   change case (`^`, `^^`, `,`, `,,`, `~`, `~~`, each limited to what its
   pattern matches) or transform (`@U`, `@L`, `@u`, `@E`, `@Q`) apply to
   every value, with each text their pattern and replacement may take, as
-  bash applies them; `${#NAME}` is each value's length, `${!NAME}` each
+  bash applies them (a replacement also gives the value unchanged, since
+  bash leaves some values a pattern matches as they were);
+  `${#NAME}` is each value's length, `${!NAME}` each
   value of each variable a value of NAME names, and `${!PREFIX*}` each
   variable name starting with PREFIX. The decisions that
   rest on a value (which word names a shell) are made again with every
@@ -454,6 +456,11 @@ the raw text and from every word as bash builds it:
   Extglob groups (`@(...)`, `?(...)`, `*(...)`, `+(...)`, `!(...)`) are
   read into their word and matched as patterns always, since bash refuses
   a line holding one while extglob is off; `!(...)` matches as `*` does.
+  A POSIX class matches the characters it names in the C locale, `[=c=]`
+  and `[.c.]` match c, and a class it does not know any character. A
+  pattern is matched by following every place in it at once, so no
+  pattern, however its groups nest, costs more than the text's length
+  times its own; this matcher also serves the parameter operators below.
   `nocaseglob`, `globstar` and `dotglob` count as on for the whole line
   when any word it reads names one of them (as `shopt -s` or a shell's
   `-O` would), `GLOBIGNORE` turns `dotglob` on the same way, and all
