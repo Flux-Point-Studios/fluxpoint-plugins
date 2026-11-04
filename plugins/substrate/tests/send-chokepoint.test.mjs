@@ -801,7 +801,10 @@ test("an imported module behind a directory the gate cannot search is BLOCKED", 
   assert.match(r.stderr, /could not finish judging this command: EACCES|thin\.py imports mailer\.py/);
 });
 
-test("a script whose resolved path is too long to stat is BLOCKED", () => {
+// Windows stats through \\?\ paths, which have no PATH_MAX, so neither ENAMETOOLONG shape below arises there.
+const NO_PATH_MAX = process.platform === "win32" && "Windows long paths have no PATH_MAX";
+
+test("a script whose resolved path is too long to stat is BLOCKED", { skip: NO_PATH_MAX }, () => {
   // bash enters the directory relatively and opens blast.py there; the gate resolves the whole path, which passes
   // PATH_MAX while every component stays short enough to exist.
   const dir = repo();
@@ -811,7 +814,7 @@ test("a script whose resolved path is too long to stat is BLOCKED", () => {
   assert.match(r.stderr, /could not finish judging this command: ENAMETOOLONG/);
 });
 
-test("a wide script name past PATH_MAX is BLOCKED, since exFAT and NTFS hold names over 255 bytes", () => {
+test("a wide script name past PATH_MAX is BLOCKED, since exFAT and NTFS hold names over 255 bytes", { skip: NO_PATH_MAX }, () => {
   // A 300-byte name is legal on exFAT and NTFS (255 UTF-16 units), so the name's length proves nothing once the
   // joined path itself passes PATH_MAX: bash may still open it from the shorter relative path.
   const dir = repo();
@@ -823,7 +826,8 @@ test("a wide script name past PATH_MAX is BLOCKED, since exFAT and NTFS hold nam
 
 test("a path that cannot name a file is not taken for a script", () => {
   // No file sits inside another. On Linux a name the filesystem refuses, in a path under PATH_MAX, fails for bash as it
-  // does for the gate; elsewhere the gate cannot tell that from a path too long to stat, so it blocks.
+  // does for the gate. Windows reports a name NTFS cannot hold as a missing file. macOS raises ENAMETOOLONG, which the
+  // gate cannot tell from a path too long to stat, so it blocks.
   const dir = repo();
   file(dir, "notes.txt", "");
   const r = hook("python3 notes.txt/send.py", dir);
@@ -832,7 +836,7 @@ test("a path that cannot name a file is not taken for a script", () => {
                          `gh pr comment 1 --body "${"y".repeat(300)} see scripts/send.py"`,
                          `git commit -m "${"😀".repeat(90)} in send.py"`]) {
     const long = hook(command, dir);
-    assert.equal(long.status, process.platform === "linux" ? 0 : 2, `${command.slice(0, 40)}: ${long.stderr.slice(0, 300)}`);
+    assert.equal(long.status, process.platform === "darwin" ? 2 : 0, `${command.slice(0, 40)}: ${long.stderr.slice(0, 300)}`);
   }
 });
 

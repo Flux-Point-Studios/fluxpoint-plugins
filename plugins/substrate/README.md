@@ -408,8 +408,12 @@ runs:
   as a word at all.
 - Code run by a tool the hook is not routed to. The matcher names `Bash`,
   `PowerShell` and `Monitor`; a REPL tool that runs model-written code
-  directly is not judged. A Monitor command gets no read-only exemption, so
-  a log watcher that names a send endpoint is refused.
+  directly is not judged.
+- A path the line enters through a symlink and then leaves with `..`, or
+  reaches through `/proc/self`. The gate resolves `..` as text and bash
+  through the filesystem. The sanctioned-sender match also ignores case, so
+  on a case-sensitive filesystem a differently cased path passes as the
+  sanctioned one.
 - Shell code in a string another program runs (`sh -c`, `bash -c`,
   `env -S`, `eval`, `trap`, `find -exec`, `xargs`), fed to a shell through a
   pipe, heredoc, here-string or process substitution, or written to a file
@@ -427,6 +431,9 @@ runs:
   allowed unless a config above the directory applies.
 - Any route but a watched host with a recognized verb: SMTP, a relay, or
   another provider's API.
+
+A Monitor command gets no read-only exemption, so a log watcher whose filter
+names a send endpoint is refused where the same line under Bash is allowed.
 
 ## Honest limitations
 
