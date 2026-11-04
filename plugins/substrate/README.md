@@ -29,7 +29,7 @@ sweep-before-build doctrine has something deterministic to sweep.
   statements only, and a stale manifest is reported, never commanded. A
   second `SessionStart` hook runs `memory-lint.mjs` over the workspace's
   memory files, and a `PostToolUse` hook on file writes runs the
-  prose-smell gate (both below). A `PreToolUse` hook on `Bash|PowerShell`
+  prose-smell gate (both below). A `PreToolUse` hook on `Bash|PowerShell|Monitor`
   runs the opt-in mail-sender check described below.
 - `scripts/send-chokepoint.mjs` — detects recognized mail-send paths outside
   the repository's declared sender. Dormant without `.send-chokepoint.json`.
@@ -311,7 +311,8 @@ Opt in with `.send-chokepoint.json` in the project or a parent directory:
 }
 ```
 
-The `Bash|PowerShell` pre-tool hook checks inline commands, readable referenced
+The `Bash|PowerShell|Monitor` pre-tool hook (a Monitor `command` runs in the same
+shell as Bash; a Monitor WebSocket source runs none and passes) checks inline commands, readable referenced
 scripts and their supported local imports for both a watched provider host and
 a recognized send verb. A detected send outside the declared paths exits 2
 before execution. `sender` is an exact path; each `exempt` entry also permits

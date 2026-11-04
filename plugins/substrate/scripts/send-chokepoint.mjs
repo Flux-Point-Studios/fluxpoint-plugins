@@ -616,6 +616,10 @@ function answer() {
   }
   const command = payload?.tool_input?.command;
   const cwd = payload?.cwd;
+  // A Monitor WebSocket source opens a socket and runs no shell; Monitor refuses `ws` and `command` together.
+  if (payload?.tool_name === "Monitor" && command === undefined && payload?.tool_input?.ws !== undefined) {
+    return { problems: [], refusal: null };
+  }
   if (typeof command !== "string" || !(cwd === undefined || typeof cwd === "string")) {
     return withoutPayload("its payload holds no shell command");
   }

@@ -215,6 +215,29 @@ test("PowerShell is covered too, not just Bash", () => {
   assert.equal(hook(`python "${p}"`, dir, "PowerShell").status, 2);
 });
 
+// Monitor runs its `command` in the same shell as Bash. A matcher that names only Bash and PowerShell lets a sender
+// run through Monitor with no judgment at all.
+test("every tool that runs a shell command is routed to the chokepoint", () => {
+  const entry = HOOKS.hooks.PreToolUse.find((e) => e.hooks.some((h) => h.command.includes("send-chokepoint.mjs")));
+  const matcher = new RegExp(`^(?:${entry.matcher})$`);
+  for (const tool of ["Bash", "PowerShell", "Monitor"]) assert.ok(matcher.test(tool), tool);
+});
+
+test("a Monitor command is judged like a Bash one", () => {
+  const dir = repo();
+  const p = file(dir, "blast.py", SENDER_BODY);
+  assert.equal(hook(`python "${p}"`, dir, "Monitor").status, 2);
+});
+
+test("a Monitor WebSocket source runs no shell and is allowed", () => {
+  const dir = repo();
+  const ws = { tool_name: "Monitor", tool_input: { ws: { url: "wss://events.example.com/stream" }, description: "d", timeout_ms: 1000 }, cwd: dir };
+  const r = hookRaw(JSON.stringify(ws), dir);
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+  const neither = { tool_name: "Monitor", tool_input: { description: "d", timeout_ms: 1000 }, cwd: dir };
+  assert.equal(hookRaw(JSON.stringify(neither), dir).status, 2);
+});
+
 // ------------------------------------------------------------- relative paths
 // The shape people actually type. A bare token resolved against the HOOK's cwd
 // instead of the command's finds nothing and lets the send through.
