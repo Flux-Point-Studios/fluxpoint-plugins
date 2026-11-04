@@ -1019,6 +1019,30 @@ expectEach(2, "a shell is found through every value the line gives, in any order
   `for i in 1 2 3; do printf %s ${BUILT} | $T; T=$S; S=bash; done`,
 ]);
 
+// An expansion at the start of a command may come out empty, name a program that runs the next word, or split into
+// several words, so the command is read as each list of words it may make.
+expectEach(2, "a command named by an expansion is read as each command it may make", [
+  `X=; $X bash <<< ${BUILT}`,
+  `X=; printf %s ${BUILT} | $X bash`,
+  `X=" "; printf %s ${BUILT} | $X sh -s`,
+  `R=nohup; $R bash <<< ${BUILT}`,
+  `R=command; printf %s ${BUILT} | $R bash`,
+  `R=exec; printf %s ${BUILT} | $R bash`,
+  `R=timeout; $R 5 bash <<< ${BUILT}`,
+  `for R in "" x; do printf %s ${BUILT} | $R bash; done`,
+  `X="nohup bash"; $X <<< ${BUILT}`,
+  `X="bash -c"; $X ${BUILT}`,
+  `F=-c; find . -maxdepth 0 -exec bash $F ${BUILT} \\;`,
+]);
+
+expectEach(0, "a command named by an expansion of harmless values is not refused", [
+  "CC=gcc; $CC --version >/dev/null 2>&1 || true",
+  'X="ls -la"; $X',
+  "PY=python3; $PY other.py",
+  "SUDO=; $SUDO apt-get --version >/dev/null 2>&1 || true",
+  '"$EDITOR" --version >/dev/null 2>&1 || true',
+]);
+
 test("a shell named by a variable from the environment is judged", () => {
   const dir = repo();
   assert.equal(hook(`printf %s ${BUILT} | "$SHELL"`, dir, "Bash", { SHELL: "/bin/bash" }).status, 2);

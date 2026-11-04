@@ -465,11 +465,18 @@ arguments; a `trap` action; an alias value, set by `alias NAME=VALUE`
 or `BASH_ALIASES[NAME]=VALUE` (the Claude Code shell expands aliases,
 reading the value in place of the name); and the commands a shell at the
 head of a command reads from a heredoc or here-string. A shell is at the head of a
-command when only assignments, reserved words, unquoted expansions that
-come out empty, and `sudo`, `doas`, `env`, `exec`, `time`, `nice`,
-`timeout`, `nohup`, `setsid`, `stdbuf`, `xargs`, `command` or `builtin`
-with their options come before it. A word names a shell through its text, its value
-in the hook's environment or a value the line assigns it. Every other word,
+command when only assignments, reserved words, and `sudo`, `doas`,
+`env`, `exec`, `time`, `nice`, `timeout`, `nohup`, `setsid`, `stdbuf`,
+`xargs`, `command` or `builtin` with their options come before it. A
+command whose word in that place is built from an expansion is also read
+as each list of words the expansion may make, one for each value it may
+take, split at blanks where it is unquoted, so an empty value leaves no
+word and `X="nohup bash"; $X` puts `bash` at the head; a command whose
+expansions there make more than 64 such lists is refused. A word names a
+shell through its text, its value in the hook's environment or a value
+the line assigns it, and a word with more than 64 values may name one;
+an expansion among a shell's or `env`'s options may be an option when
+one of its values starts with `-` or `+`. Every other word,
 every heredoc body and the inside of `((...))`, which POSIX shells read as
 two subshells, is also read as a command line for the script names in it,
 since it may run as code: written to a file and run, handed to `su`,
@@ -486,9 +493,16 @@ cannot read:
   that the reader cannot follow; an alias value that ends in a
   backslash, which joins it to the line after it; and a write to
   `BASH_ALIASES` other than `BASH_ALIASES[NAME]=VALUE` written out;
-- an expansion among the options of a shell or `env` at the head of a
-  command, where it may be `-c` or `-S`, or a command named by an
-  expansion and given `-c`;
+- an expansion among the options of a shell or `env` that may be an
+  option, where it may be `-c` or `-S`: at the head of a command one
+  that may supply the word's first character, and anywhere one with a
+  value starting with `-` or `+` or with more than 64 values. For `env`
+  that blocks the line; for a shell an unquoted one does, and a quoted
+  one makes the word after it a `-c` string, read as above. A command
+  named by an expansion and given `-c` has its next word read the same
+  way;
+- a command whose head is built from expansions that make more than 64
+  lists of words;
 - a shell at the head of a command that reads its commands from standard
   input (it has no script operand, or `-s`, or `/dev/stdin` or one of its
   aliases as its script), unless a heredoc or here-string written out in

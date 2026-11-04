@@ -958,15 +958,14 @@ function splitEnvString(s) {
 const literalWord = (text) => ({ text, literal: true, quoted: true, bare: text, opensDynamic: false, splits: false });
 
 /** The indexes of the words that run a simple command: each program in RUNNERS and, last, the command it runs, past
- *  assignments, reserved words and unquoted expansions that come out empty, which leave no word behind; `values` are
- *  those the line assigns. The chain ends early at an env -S, whose words env splits, and at command -v. */
-function commandChain(words, values) {
+ *  assignments and reserved words. A word built from an expansion ends the chain, since only its values say what it
+ *  runs. The chain ends early at an env -S, whose words env splits, and at command -v. */
+function commandChain(words) {
   const chain = [];
   let k = 0;
   while (k < words.length) {
     const w = words[k];
-    const empty = w.splits && !w.quoted && w.text === "" && !w.parts?.some((p) => values.has(p.name));
-    if (RESERVED.has(w.bare) || ASSIGNMENT.test(w.bare) || empty) {
+    if (RESERVED.has(w.bare) || ASSIGNMENT.test(w.bare)) {
       k += 1;
       continue;
     }
@@ -988,6 +987,14 @@ function commandChain(words, values) {
     if (runner === "timeout") k += 1;
   }
   return chain;
+}
+
+/** The texts a word may take with `values`, or null when they are more than 64. */
+function possibleTexts(w, values) {
+  if (w.literal) return [w.text];
+  const budget = { left: 64 };
+  const texts = substitutions(w.parts ?? [{ text: w.text }], values, budget).map(({ text }) => text);
+  return budget.left > 0 ? texts : null;
 }
 
 const copyValues = (values) => new Map([...values].map(([key, set]) => [key, new Set(set)]));
@@ -1075,9 +1082,15 @@ function readOnce(command, cwd, tool, deadline, known) {
     }
   };
   const readAsCode = new WeakSet();
-  // A word that holds code must be in the line and written out.
+  const wordsRead = new WeakSet();
+  // A word that holds code must be in the line and written out. A command read once for each list of words an
+  // expansion may make hands the same word here more than once; it is read once.
   const readWord = (w, what) => {
-    if (w) readAsCode.add(w);
+    if (w && wordsRead.has(w)) return;
+    if (w) {
+      readAsCode.add(w);
+      wordsRead.add(w);
+    }
     if (!w) unreadable(`${what} is not in the line`);
     else if (!w.literal) unreadable(`${what} is built from an expansion`);
     else readCode(w.text, what);
@@ -1130,12 +1143,16 @@ function readOnce(command, cwd, tool, deadline, known) {
     }
   };
 
-  // The shell a word names, if any: literally, by its value in the environment, or by a value the line assigns.
+  // The shell a word names, if any: literally, by its value in the environment, or by a value the line assigns. A word
+  // with more values than the gate follows may name one.
   const shellNamed = (w) => {
     if (ASSIGNMENT.test(w.bare)) return null;
-    const texts = w.literal ? [w.text] : substitutions(w.parts ?? [], seen, { left: 64 }).map((s) => s.text);
+    const texts = possibleTexts(w, seen);
+    if (!texts) return "a command named by an expansion";
     return texts.map((t) => path.posix.basename(t)).find((name) => SHELLS.has(name)) ?? null;
   };
+  // Whether a word built from an expansion may be an option: a value starts with `-` or `+`, or it has too many.
+  const mayBeOption = (w) => (possibleTexts(w, seen) ?? ["-"]).some((t) => /^[-+]/.test(t));
 
   // A shell named at words[j]. Its -c string is code. At the head of the command so is its standard input, when it has
   // no script operand, and an expansion among its options may be -c.
@@ -1147,7 +1164,7 @@ function readOnce(command, cwd, tool, deadline, known) {
     for (; k < words.length; k += 1) {
       const w = words[k];
       if (!w.literal) {
-        if (c || w.process || !(/^[-+]/.test(w.text) || (head && w.opensDynamic))) break;
+        if (c || w.process || !(mayBeOption(w) || (head && w.opensDynamic))) break;
         if (w.splits) return unreadable(`the options of ${who} are built from an expansion`);
         // This may be -c, and the next word its string, or it may be the script.
         if (words[k + 1]) readWord(words[k + 1], `the -c string of ${who}`);
@@ -1180,9 +1197,7 @@ function readOnce(command, cwd, tool, deadline, known) {
     for (let k = j + 1; k < words.length; k += 1) {
       const w = words[k];
       if (!w.literal) {
-        if (w.text.startsWith("-") || (head && w.opensDynamic)) {
-          unreadable("the options of env are built from an expansion");
-        }
+        if (mayBeOption(w) || (head && w.opensDynamic)) unreadable("the options of env are built from an expansion");
         return;
       }
       const option = w.text;
@@ -1221,12 +1236,30 @@ function readOnce(command, cwd, tool, deadline, known) {
     }
   };
 
-  const inspect = (words, redirects, piped = false) => {
-    const chain = commandChain(words, seen);
+  // The lists of words an expansion at the start of a command may make: one for each text it may take, split at blanks
+  // where it is unquoted, so that an empty value leaves no word. Null when it has more values than the gate follows.
+  const commandWords = (w) => {
+    const texts = possibleTexts(w, seen);
+    if (!texts) return null;
+    const lists = new Map();
+    for (const text of texts) {
+      const fields = w.splits && !w.quoted ? text.split(/[ \t\n]+/).filter(Boolean) : [text];
+      lists.set(fields.join("\0"), fields);
+    }
+    return [...lists.values()];
+  };
+
+  const recorded = new WeakSet();
+  // `spare` bounds how many lists of words the expansions at the start of one command may make.
+  const inspect = (words, redirects, piped = false, spare = { left: 64 }) => {
+    const chain = commandChain(words);
     const head = chain.at(-1) ?? -1;
-    // An unquoted pattern character or expansion makes a word a glob, except in a case pattern or a [[ test.
+    // An unquoted pattern character or expansion makes a word a glob, except in a case pattern or a [[ test. A word
+    // seen in an earlier reading of the same command is not recorded again.
     const tested = words[head]?.bare === "[[";
-    for (const w of [...words, ...redirects.map((r) => r.target).filter(Boolean)]) {
+    const novel = [...words, ...redirects.map((r) => r.target).filter(Boolean)]
+      .filter((w) => !recorded.has(w) && recorded.add(w));
+    for (const w of novel) {
       found.texts.push(w.text);
       found.words.push({ word: w, glob: w.splits && !w.pattern && !tested, lenient: lenient > 0 });
       // A word that names a glob option may turn it on for the rest of the line, through shopt, a shell's -O or
@@ -1312,10 +1345,19 @@ function readOnce(command, cwd, tool, deadline, known) {
       }
       if (shellNamed(w)) shell(words, j, redirects, j === head, piped);
     }
-    for (const w of words) if (!readAsCode.has(w)) readLeniently(w.text);
-    for (const r of redirects) {
-      if (r.target && !readAsCode.has(r.target)) readLeniently(r.target.text);
-      if (r.doc) r.doc.onBody ??= readLeniently;
+    for (const w of novel) if (!readAsCode.has(w)) readLeniently(w.text);
+    for (const r of redirects) if (r.doc) r.doc.onBody ??= readLeniently;
+    // An expansion at the start of the command may come out empty, name a program that runs the next word, or split
+    // into a program and its arguments: the command is read again as each list of words it may make.
+    if (head < 0 || words[head].literal) return;
+    const lists = commandWords(words[head]);
+    if (!lists || lists.length > spare.left) {
+      unreadable("a command is named by an expansion with more values than the gate follows");
+      return;
+    }
+    spare.left -= lists.length;
+    for (const fields of lists) {
+      inspect([...words.slice(0, head), ...fields.map(literalWord), ...words.slice(head + 1)], redirects, piped, spare);
     }
   };
 
