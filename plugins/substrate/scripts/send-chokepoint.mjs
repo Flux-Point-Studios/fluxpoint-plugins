@@ -990,6 +990,19 @@ function commandChain(words) {
   return chain;
 }
 
+/** Where bash may split an unquoted expansion into words: at blanks, and at each character of each value the line
+ *  gives IFS. A shell takes no IFS from its environment. */
+function fieldBreaks(values) {
+  const characters = new Set([" ", "\t", "\n", ...[...(values.get("IFS") ?? [])].join("")]);
+  return new RegExp(`[${[...characters].map((c) => `\\u{${c.codePointAt(0).toString(16)}}`).join("")}]+`, "u");
+}
+
+/** A text and, when it has more than one, the fields `breaks` cuts it into. */
+function withFields(text, breaks) {
+  const fields = text.split(breaks).filter(Boolean);
+  return fields.length > 1 ? [text, ...fields] : [text];
+}
+
 /** The texts a word may take with `values`, or null when they are more than 64. */
 function possibleTexts(w, values) {
   if (w.literal) return [w.text];
@@ -1078,14 +1091,16 @@ function readOnce(command, cwd, tool, deadline, known) {
     for (const w of list) assign("@", w);
     found.lists.push(list);
   };
-  // When the line reads `$*`, each run of every list to its last word, joined by a blank or by nothing, is a value of
-  // it. Joins longer in all than the budget allows exhaust the line.
+  // When the line reads `$*`, each run of every list to its last word, joined by a blank, by nothing or by the first
+  // character of a value the line gives IFS, is a value of it. Joins longer in all than the budget allows exhaust the
+  // line.
   const joinLists = () => {
     let joined = 0;
+    const blanks = new Set([" ", "", ...[...(seen.get("IFS") ?? [])].map((ifs) => [...ifs][0] ?? "")]);
     for (const list of found.lists) {
       for (let k = 0; k < list.length && !found.exhausted; k += 1) {
         const run = list.slice(k);
-        for (const blank of [" ", ""]) {
+        for (const blank of blanks) {
           const text = run.map((w) => w.text).join(blank);
           joined += text.length;
           if (joined > EXPANSION_LIMIT << 10) found.exhausted = true;
@@ -1284,8 +1299,9 @@ function readOnce(command, cwd, tool, deadline, known) {
     const texts = possibleTexts(w, seen);
     if (!texts) return null;
     const lists = new Map();
+    const breaks = fieldBreaks(seen);
     for (const text of texts) {
-      const fields = w.splits && !w.quoted ? text.split(/[ \t\n]+/).filter(Boolean) : [text];
+      const fields = w.splits && !w.quoted ? text.split(breaks).filter(Boolean) : [text];
       lists.set(fields.join("\0"), fields.map(literalWord));
     }
     return [...lists.values()];
@@ -1929,7 +1945,9 @@ function referencedFiles(command, cwd, reading, budget) {
   const out = new Set();
   const texts = [];
   const tokens = new Set([...command.matchAll(QUOTED_PATH)].map((m) => m[1] || m[2]));
-  for (const name of scriptPaths(command)) tokens.add(name);
+  // Where the line gives IFS a value, an expansion of any text may split there.
+  const breaks = fieldBreaks(scope);
+  for (const field of withFields(command, breaks)) for (const name of scriptPaths(field)) tokens.add(name);
   const lenientBudget = { left: EXPANSION_LIMIT, listings: budget.listings };
   const reread = (source) => readShell(source, { cwd, onCommand: () => {}, full: true, single: true,
                                                  deadline: budget.deadline });
@@ -1940,10 +1958,11 @@ function referencedFiles(command, cwd, reading, budget) {
     for (const w of braceWords(word, spend, reread)) {
       for (const { text, pattern } of built(w, spend)) {
         texts.push(text);
-        for (const name of namesIn(text)) tokens.add(name);
+        for (const field of withFields(text, breaks)) for (const name of namesIn(field)) tokens.add(name);
         if (!glob || !hasGlob(pattern)) continue;
         // An assigned value is not a glob yet, but an unquoted expansion of it later is.
-        for (const part of new Set([pattern, pattern.slice(pattern.indexOf("=") + 1)])) {
+        const parts = [pattern, pattern.slice(pattern.indexOf("=") + 1), ...withFields(pattern, breaks).filter(hasGlob)];
+        for (const part of new Set(parts)) {
           for (const form of tildeForms(part, scope)) {
             for (const fp of globFiles(form, places, spend, reading.options)) if (SCRIPT_NAME.test(fp)) tokens.add(fp);
           }

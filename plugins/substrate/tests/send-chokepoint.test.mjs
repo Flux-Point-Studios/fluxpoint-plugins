@@ -978,6 +978,29 @@ expectEach(0, "a positional parameter of harmless words is not refused", [
   "run() { \"$@\"; }; run sh -c 'echo hi'; run bash run.sh; run make -n >/dev/null 2>&1 || true",
 ]);
 
+// bash splits an unquoted expansion at each character of IFS, and `"$*"` joins with its first, so a value the line
+// gives IFS can cut a script path out of a run of text that holds none.
+expectEach(2, "an expansion splits where the line's IFS splits it", [
+  "IFS=:; x=-u:blast.py; python3 $x",
+  "IFS=-; x=u-blast.py; python3 -$x",
+  "IFS=/; x=a/blast.py; python3 $x",
+  "IFS=Q; x=aQblast.py; python3 $x",
+  "IFS=Q; python3 $(echo aQblast.py)",
+  "IFS=: x=-u:blast.py; python3 $x",
+  "export IFS=:; x=-u:blast.py; python3 $x",
+  "S=:; IFS=$S; x=-u:blast.py; python3 $x",
+  "bash -c 'IFS=:; x=-u:blast.py; python3 $x'",
+  "bash -c 'IFS=.; python3 \"$*\"' _ blast py",
+  "IFS=:; set -- -u:blast.py; python3 $1",
+  "IFS=:; for f in x:blast.py; do python3 $f; done",
+]);
+
+expectEach(0, "a line that sets IFS to read its input is not refused", [
+  "while IFS= read -r line; do echo \"$line\"; done < a.txt",
+  "IFS=, read -r a b <<< 'x,y'; echo $a",
+  "IFS=:; for d in $PATH; do ls \"$d\" >/dev/null 2>&1; done; python3 other.py",
+]);
+
 // Braces, globs and variables can make more paths than any check could try; padding a line with them must not push a
 // sender past the gate's reach.
 expectEach(2, "a line that makes more paths than the gate resolves is refused", [
@@ -1061,6 +1084,7 @@ expectEach(2, "a command named by an expansion is read as each command it may ma
   `X="bash -c"; $X ${BUILT}`,
   `F=-c; find . -maxdepth 0 -exec bash $F ${BUILT} \\;`,
   `f() { "$@"; }; printf %s ${BUILT} | f bash`,
+  `IFS=:; X=nohup:bash; $X <<< ${BUILT}`,
 ]);
 
 expectEach(0, "a command named by an expansion of harmless values is not refused", [

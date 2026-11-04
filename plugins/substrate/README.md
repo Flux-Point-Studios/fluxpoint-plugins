@@ -418,6 +418,12 @@ the raw text and from every word as bash builds it:
   nothing (what an empty IFS joins with). `$@`, or `$*` unquoted, at the
   head of a command is read as no words and as each list passed, from
   any of its words on;
+- where the line gives IFS a value (a shell takes none from its
+  environment), each word's text and the raw text also cut at every
+  character of every such value, as bash splits an unquoted expansion,
+  so `IFS=:; x=-u:sender.py; python3 $x` names `sender.py`; `$*` also
+  joined with the first character of each value, and an expansion at
+  the head of a command split there too;
 - brace lists and sequences expanded as bash expands them: only braces
   it reads unquoted, found by bash's own matching rules, in the word as
   written and before its variables, so `$x{a,b}` is `$xa` and `$xb` and
@@ -479,8 +485,10 @@ command when only assignments, reserved words, and `sudo`, `doas`,
 `xargs`, `command` or `builtin` with their options come before it. A
 command whose word in that place is built from an expansion is also read
 as each list of words the expansion may make, one for each value it may
-take, split at blanks where it is unquoted, so an empty value leaves no
-word and `X="nohup bash"; $X` puts `bash` at the head; a command whose
+take, split at blanks and at the line's IFS characters where it is
+unquoted, so an empty value leaves no word and `X="nohup bash"; $X`
+puts `bash` at the head (`$@` makes each list of positional parameters
+passed, as above); a command whose
 expansions there make more than 64 such lists is refused. A word names a
 shell through its text, its value in the hook's environment or a value
 the line assigns it, and a word with more than 64 values may name one;
