@@ -118,6 +118,7 @@ const PREFIXES = new Map([
 // An assignment can change what a later word runs (PATH, LD_PRELOAD, LESSOPEN, GIT_*), so any one is judged. `{name}>`
 // assigns the new descriptor's number to name.
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+?=)/;
+const ARRAY_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=$/;
 const NAMED_FD = /^\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 const ENDS_WORD = new Set([" ", "\t", "\n", ";", "&", "|", "(", ")", "<", ">"]);
 const REDIRECT_OP = /&>>?|<<<|<<-?|<>|[<>]&|>>|>\||[<>]/y;
@@ -493,14 +494,16 @@ function readShell(src, { cwd, onCommand, onText, onAssign, onFunction, full = f
     const value = variable(name, cwd);
     const op = /^:?[-=+?]/.exec(tail.text);
     if (!op) {
-      // A subscript selects from an array, which takes every value; `${!PREFIX*}` names variables.
+      // A subscript selects from an array, which takes every value; `[@]` and `[*]` select them all, and stay in the
+      // name. `${!PREFIX*}` names variables.
       const subscript = /^\[[^\]]*\]/.exec(tail.text)?.[0] ?? "";
+      const keyed = subscript === "[@]" || subscript === "[*]" ? name + subscript : name;
       const rest = tail.text.slice(subscript.length);
-      if (!rest) return { text: value ?? "", dynamic: true, name };
+      if (!rest) return { text: value ?? "", dynamic: true, name: keyed };
       if (/^![A-Za-z_]\w*$/.test(name) && (rest === "*" || rest === "@")) return { ...DYNAMIC, name: name + rest };
       const transform = parameterOperator(withoutPrefix(tail.parts, subscript.length));
       if (!transform) return { text: value ?? "", dynamic: true };
-      return { text: transform(value ?? "", new Map(), { left: 64 })[0] ?? "", dynamic: true, name, transform };
+      return { text: transform(value ?? "", new Map(), { left: 64 })[0] ?? "", dynamic: true, name: keyed, transform };
     }
     const set = value !== null && (value !== "" || !op[0].startsWith(":"));
     const word = tail.text.slice(op[0].length);
@@ -818,6 +821,10 @@ function readShell(src, { cwd, onCommand, onText, onAssign, onFunction, full = f
         FUNCTION_PARENS.lastIndex = i;
         if (patterns && (!words.length || words.at(-1).bare === "in")) {
           i += 1;
+        } else if (src[i - 1] === "=" && ARRAY_ASSIGNMENT.test(words.at(-1)?.bare ?? "")) {
+          // `NAME=(...)` assigns the words inside to an array.
+          i += 1;
+          words.at(-1).elements = elements();
         } else if (FUNCTION_PARENS.test(src)) {
           // `NAME ()` defines a function: the name runs nothing, and the command after it starts a command.
           i = FUNCTION_PARENS.lastIndex;
@@ -886,6 +893,25 @@ function readShell(src, { cwd, onCommand, onText, onAssign, onFunction, full = f
         }
         words.push(w);
         if (opener === words.length - 1 && leadsCommand(w, words.at(-2))) opener += 1;
+      }
+    }
+  };
+
+  // After the `(` of `NAME=(...)`: the words up to the `)`, across newlines and comments.
+  const elements = () => {
+    const out = [];
+    for (;;) {
+      late(deadline);
+      while (src[i] === " " || src[i] === "\t" || src[i] === "\n" || continued(i)) i += continued(i) ? 2 : 1;
+      if (src[i] === "#") {
+        while (i < src.length && src[i] !== "\n") i += 1;
+      } else if (src[i] === ")") {
+        i += 1;
+        return out;
+      } else {
+        const w = word();
+        if (!w.bare) cannotRead();
+        out.push(w);
       }
     }
   };
@@ -1054,31 +1080,32 @@ function closeValues(values, sources, budget) {
  *  `deadline` it throws OUT_OF_TIME.
  *
  *  A decision the reader makes while reading may rest on a value the line gives a variable later, in a loop or
- *  through another variable, or on a function it defines later or the arguments it passes one, so the line is read
- *  again with every value, function and list of positional parameters the last reading found, until a reading finds
- *  no new one. A line whose values still grow after MAX_READINGS readings, or that gives its variables more values
- *  than the budget allows, is marked `exhausted`. `values` holds each value as its assignment was read, and `sources`
- *  the assignments themselves, from which `closeValues` builds the rest. */
+ *  through another variable, or on a function it defines later, the arguments it passes one or the words it gives an
+ *  array, so the line is read again with every value, function and list of words the last reading found, until a
+ *  reading finds no new one. A line whose values still grow after MAX_READINGS readings, or that gives its variables
+ *  more values than the budget allows, is marked `exhausted`. `values` holds each value as its assignment was read,
+ *  and `sources` the assignments themselves, from which `closeValues` builds the rest. */
 function readLine(command, cwd, tool, deadline = Infinity) {
-  let known = { values: new Map(), functions: new Set(), lists: [] };
+  let known = { values: new Map(), functions: new Set(), lists: [], arrays: [] };
   for (let reading = 1; ; reading += 1) {
     const found = readOnce(command, cwd, tool, deadline, known);
     const values = copyValues(found.values);
     const budget = { left: EXPANSION_LIMIT, deadline };
     closeValues(values, found.sources, budget);
     const settled = sameValues(values, known.values) && found.functions.size === known.functions.size
-      && found.lists.length === known.lists.length;
+      && found.lists.length === known.lists.length && found.arrays.length === known.arrays.length;
     if (budget.left <= 0 || (!settled && reading === MAX_READINGS)) found.exhausted = true;
     if (settled || found.exhausted) return found;
-    known = { values, functions: found.functions, lists: found.lists };
+    known = { values, functions: found.functions, lists: found.lists, arrays: found.arrays };
   }
 }
 
-/** One reading of a line, whose decisions take each variable's values, the functions defined and the lists of
- *  positional parameters passed from `known` as well as from the line read so far. */
+/** One reading of a line, whose decisions take each variable's values, the functions defined and the lists of words
+ *  passed as positional parameters or given an array from `known` as well as from the line read so far. */
 function readOnce(command, cwd, tool, deadline, known) {
   const found = { texts: [], words: [], values: new Map(), sources: [], functions: new Set(known.functions),
-                  lists: [], moves: [], finds: [], options: new Set(), unreadable: null, exhausted: false };
+                  lists: [], arrays: [], moves: [], finds: [], options: new Set(), unreadable: null,
+                  exhausted: false };
   const seen = copyValues(known.values);
   // `w` gives `name` a value: all of its text or, with `cut`, what follows its first `=`.
   const assign = (name, w, cut = false) => {
@@ -1099,13 +1126,23 @@ function readOnce(command, cwd, tool, deadline, known) {
     for (const w of list) assign("@", w);
     found.lists.push(list);
   };
-  // When the line reads `$*`, each run of every list to its last word, joined by a blank, by nothing or by the first
-  // character of a value the line gives IFS, is a value of it. Joins longer in all than the budget allows exhaust the
-  // line.
+  // The words an array literal, `read -a` or `mapfile` gives an array: each is one of its values.
+  const array = (name, list) => {
+    for (const w of list) {
+      assign(name, w);
+      if (/^\[[^\]]*\]\+?=/.test(w.bare)) assign(name, w, true);
+    }
+    found.arrays.push({ name: name.replace(/\+$/, ""), list });
+  };
+  // When the line reads `$*` or `${NAME[*]}`, each run of every list of positional parameters or of NAME's words to
+  // its last word, joined by a blank, by nothing or by the first character of a value the line gives IFS, is a value
+  // of it. Joins longer in all than the budget allows exhaust the line.
   const joinLists = () => {
     let joined = 0;
     const blanks = new Set([" ", "", ...[...(seen.get("IFS") ?? [])].map((ifs) => [...ifs][0] ?? "")]);
-    for (const list of found.lists) {
+    const lists = [...found.lists.map((list) => ({ key: "*", list })),
+      ...found.arrays.map(({ name, list }) => ({ key: `${name}[*]`, list }))];
+    for (const { key, list } of lists) {
       for (let k = 0; k < list.length && !found.exhausted; k += 1) {
         const run = list.slice(k);
         for (const blank of blanks) {
@@ -1113,9 +1150,38 @@ function readOnce(command, cwd, tool, deadline, known) {
           joined += text.length;
           if (joined > EXPANSION_LIMIT << 10) found.exhausted = true;
           const parts = run.flatMap((w, n) => [...(n ? [{ text: blank }] : []), ...(w.parts ?? [{ text: w.text }])]);
-          assign("*", { text, parts });
+          assign(key, { text, parts });
         }
       }
+    }
+  };
+  // The texts `printf FORMAT ARGUMENTS` may print, each word taking each value the line gives it. More than 64
+  // combinations exhaust the line.
+  const printed = (words) => {
+    let combinations = [[]];
+    for (const w of words) {
+      late(deadline);
+      const texts = possibleTexts(w, seen);
+      if (!texts || combinations.length * texts.length > 64) {
+        found.exhausted = true;
+        return [];
+      }
+      if (texts.length === 1) for (const c of combinations) c.push(texts[0]);
+      else combinations = combinations.flatMap((c) => texts.map((t) => [...c, t]));
+    }
+    return combinations.map(([format, ...rest]) => printfText(format, rest));
+  };
+  // The values input gives `names` as `read` splits a line of it at the line's IFS: each line whole, each name any of
+  // the first fields, and the last name what follows any of them.
+  const readInput = (names, text) => {
+    const breaks = fieldBreaks(seen);
+    const every = new RegExp(breaks.source, "gu");
+    for (const line of new Set([text, ...text.split("\n")])) {
+      late(deadline);
+      const fields = line.split(breaks).slice(0, names.length + 1);
+      const rests = [...line.matchAll(every)].slice(0, names.length).map((m) => line.slice(m.index + m[0].length));
+      for (const name of names) for (const piece of new Set([line, ...fields])) assign(name, literalWord(piece));
+      for (const rest of rests) assign(names.at(-1), literalWord(rest));
     }
   };
   // Inside a string read only for the paths it names, nothing is refused.
@@ -1296,13 +1362,23 @@ function readOnce(command, cwd, tool, deadline, known) {
   };
 
   // The lists of words an expansion at the start of a command may make: `$@`, and `$*` unquoted, make none or each
-  // list of positional parameters passed, from any word on as `shift` leaves it; any other expansion one for each text
-  // it may take, split at blanks where it is unquoted, so that an empty value leaves no word. Null when it has more
-  // values than the gate follows.
+  // list of positional parameters passed, from any word on as `shift` leaves it; `${NAME[@]}`, and `${NAME[*]}`
+  // unquoted, none, each list of words given NAME and all of them in order, and each of its other values alone; any
+  // other expansion one for each text it may take, split at blanks where it is unquoted, so that an empty value leaves
+  // no word. Null when it has more values than the gate follows.
   const commandWords = (w) => {
     const [part, ...rest] = w.parts ?? [];
-    if (!rest.length && (part?.name === "@" || (part?.name === "*" && !part.quoted))) {
+    const every = !rest.length && /^(?:[@*]|\w+\[[@*]\])$/.test(part?.name ?? "")
+      && (part.name.includes("@") || !part.quoted);
+    if (every && /^[@*]$/.test(part.name)) {
       return [[], ...known.lists.flatMap((list) => list.map((_, k) => list.slice(k)))];
+    }
+    if (every && /^\w+\[[@*]\]$/.test(part.name)) {
+      const base = part.name.slice(0, part.name.indexOf("["));
+      const lists = known.arrays.filter(({ name }) => name === base).map(({ list }) => list);
+      const listed = new Set(lists.flat().map((element) => element.text));
+      const others = valuesOf(seen, base).filter((value) => !listed.has(value)).map((value) => [literalWord(value)]);
+      return [[], ...lists, lists.flat(), ...others];
     }
     const texts = possibleTexts(w, seen);
     if (!texts) return null;
@@ -1323,8 +1399,8 @@ function readOnce(command, cwd, tool, deadline, known) {
     // An unquoted pattern character or expansion makes a word a glob, except in a case pattern or a [[ test. A word
     // seen in an earlier reading of the same command is not recorded again.
     const tested = words[head]?.bare === "[[";
-    const novel = [...words, ...redirects.map((r) => r.target).filter(Boolean)]
-      .filter((w) => !recorded.has(w) && recorded.add(w));
+    const novel = [...words, ...words.flatMap((w) => w.elements ?? []),
+      ...redirects.map((r) => r.target).filter(Boolean)].filter((w) => !recorded.has(w) && recorded.add(w));
     for (const w of novel) {
       found.texts.push(w.text);
       found.words.push({ word: w, glob: w.splits && !w.pattern && !tested, lenient: lenient > 0 });
@@ -1336,11 +1412,63 @@ function readOnce(command, cwd, tool, deadline, known) {
     const name = words[head]?.literal ? words[head].text : null;
     const args = words.slice(head + 1);
     // The values the line gives a variable: in a command made only of assignments, before a command's name (env's
-    // included), in a declaration's arguments, and as a for loop's words.
+    // included), in a declaration's arguments, and as a for loop's words. A nameref (`declare -n R=A`) and the variable
+    // it names share their values.
+    const nameref = DECLARATIONS.has(name) && args.some((w) => w.literal && /^-[A-Za-z]*n/.test(w.text));
     for (const w of [...words.slice(0, head < 0 ? words.length : head), ...(DECLARATIONS.has(name) ? args : [])]) {
-      if (ASSIGNMENT.test(w.bare)) assign(w.text.slice(0, w.text.indexOf("=")), w, true);
+      if (!ASSIGNMENT.test(w.bare)) continue;
+      const variableName = w.text.slice(0, w.text.indexOf("="));
+      if (w.elements) array(variableName, w.elements);
+      else assign(variableName, w, true);
+      if (nameref) {
+        const target = w.text.slice(w.text.indexOf("=") + 1);
+        assign(variableName, { text: "", parts: [{ text: "", name: target }] });
+        assign(target, { text: "", parts: [{ text: "", name: variableName }] });
+      }
     }
     if (name === "for" && args[1]?.bare === "in") for (const w of args.slice(2)) assign(args[0].text, w);
+    // `read`, `mapfile` and `readarray` give their variables the input a here-string or heredoc writes out; `read -a`
+    // and `mapfile` give an array its fields or lines.
+    if (name === "read" || name === "mapfile" || name === "readarray") {
+      const takes = name === "read" ? "adinNptu" : "dnOsuCc";
+      let arrayName = name === "read" ? null : "MAPFILE";
+      let k = 0;
+      for (; args[k]?.literal && /^-./.test(args[k].text) && args[k].text !== "--"; k += 1) {
+        const option = args[k].text;
+        const at = [...option.slice(1)].findIndex((letter) => takes.includes(letter));
+        if (at < 0) continue;
+        const attached = option.slice(at + 2);
+        if (!attached) k += 1;
+        if (name === "read" && option[at + 1] === "a") arrayName = attached || args[k]?.text || null;
+      }
+      if (args[k]?.text === "--") k += 1;
+      const operands = args.slice(k).map((w) => w.text);
+      const names = name !== "read" ? [] : operands.length || arrayName ? operands : ["REPLY"];
+      if (name !== "read") arrayName = operands[0] ?? arrayName;
+      const give = (text) => {
+        readInput(arrayName ? [...names, arrayName] : names, text);
+        if (!arrayName) return;
+        const pieces = name === "read" ? text.split("\n")[0].split(fieldBreaks(seen)) : text.split("\n");
+        array(arrayName, pieces.filter(Boolean).map(literalWord));
+      };
+      for (const r of redirects) {
+        if (r.fd !== null && r.fd !== "0") continue;
+        if (r.op === "<<<") {
+          for (const n of arrayName ? [...names, arrayName] : names) assign(n, r.target);
+          give(r.target.text);
+        } else if (r.doc) {
+          r.doc.onBody = (body) => {
+            give(body);
+            readLeniently(body);
+          };
+        }
+      }
+    }
+    // `printf -v NAME FORMAT ARGUMENTS` gives NAME what printf would print.
+    if (name === "printf" && args[0]?.literal && args[0].text === "-v" && args[1]) {
+      const rest = args.slice(args[2]?.text === "--" ? 3 : 2);
+      if (rest.length) for (const text of printed(rest)) assign(args[1].text, literalWord(text));
+    }
     // A function's arguments and the words `set` takes after its options are positional parameters; `--` or `-` ends
     // set's options, and `-o` or `+o` takes a name.
     if (found.functions.has(name)) positional(words[head], args);
@@ -1455,9 +1583,43 @@ function readOnce(command, cwd, tool, deadline, known) {
   return found;
 }
 
-/** Whether a word's pieces read `$*`, alternatives included. */
+/** Whether a word's pieces read `$*` or `${NAME[*]}`, alternatives included. */
 function readsAllParameters(parts) {
-  return parts.some((part) => part.name === "*" || (part.alternatives ?? []).some(readsAllParameters));
+  return parts.some((part) => part.name === "*" || /\[\*\]$/.test(part.name ?? "")
+    || (part.alternatives ?? []).some(readsAllParameters));
+}
+
+const PRINTF_SPEC = /%([-+ #0]*)(\d+|\*)?(?:\.(\d*|\*))?([diouxXfFeEgGaAcsbq%])/g;
+
+/** What printf prints for a format and its arguments, less the blanks a width pads with: escapes in the format
+ *  decoded, `%s`, `%b` and `%c` given their arguments cut to any precision, any other conversion its argument as
+ *  written, and the format used again while arguments remain. */
+function printfText(format, args) {
+  let out = "";
+  let k = 0;
+  const take = () => args[k++] ?? "";
+  for (;;) {
+    const before = k;
+    let last = 0;
+    for (const m of format.matchAll(PRINTF_SPEC)) {
+      out += ansiC(format.slice(last, m.index));
+      last = m.index + m[0].length;
+      const [, , width, precision, conversion] = m;
+      if (conversion === "%") {
+        out += "%";
+        continue;
+      }
+      if (width === "*") take();
+      const cut = precision === "*" ? Number(take()) : precision === undefined ? null : Number(precision || 0);
+      let text = take();
+      if (conversion === "b") text = ansiC(text);
+      if (conversion === "c") text = text.charAt(0);
+      if ((conversion === "s" || conversion === "b") && cut !== null && cut >= 0) text = text.slice(0, cut);
+      out += text;
+    }
+    out += ansiC(format.slice(last));
+    if (k === before || k >= args.length) return out;
+  }
 }
 
 /** The nearest `.send-chokepoint.json` at or above `from`, validated.
@@ -1648,11 +1810,14 @@ const patternOf = (text, part) => (part.quoted ? text.replace(GLOB_SPECIAL, "\\$
 const environment = (name) => (Object.hasOwn(process.env, name) ? process.env[name] : "");
 
 /** The values the line gives a parameter. Every positional parameter, `$0` included, and `$@` take each word the line
- *  passes as one, since `shift` and `set` move them; `$*` takes those and each run of them joined. `${#NAME}` is the
+ *  passes as one, since `shift` and `set` move them; `$*` takes those and each run of them joined, and `${NAME[@]}`
+ *  and `${NAME[*]}` do the same for an array's values and words. `${#NAME}` is the
  *  length of each value, `${!NAME}` each value of each variable a value of NAME names, and `${!PREFIX*}` the name of
  *  each variable that starts with PREFIX. */
 function valuesOf(values, name) {
   if (name === "*") return [...(values.get("@") ?? []), ...(values.get("*") ?? [])];
+  const all = /^(\w+)\[([@*])\]$/.exec(name);
+  if (all) return [...valuesOf(values, all[1]), ...(all[2] === "*" ? values.get(name) ?? [] : [])];
   const prefix = /^!(\w+)[*@]$/.exec(name);
   if (prefix) {
     return [...new Set([...values.keys(), ...Object.keys(process.env)])].filter((key) => key.startsWith(prefix[1]));
@@ -2113,8 +2278,8 @@ function referencedFiles(command, cwd, reading, budget) {
         for (const field of withFields(text, breaks)) for (const name of namesIn(field)) tokens.add(name);
         if (!glob || !hasGlob(pattern)) continue;
         // An assigned value is not a glob yet, but an unquoted expansion of it later is.
-        const forms = [pattern, pattern.slice(pattern.indexOf("=") + 1), ...withFields(pattern, breaks).filter(hasGlob)];
-        for (const part of new Set(forms)) {
+        const value = pattern.slice(pattern.indexOf("=") + 1);
+        for (const part of new Set([pattern, value, ...withFields(pattern, breaks).filter(hasGlob)])) {
           for (const form of tildeForms(part, scope)) {
             for (const fp of globFiles(form, places, spend, reading.options)) if (SCRIPT_NAME.test(fp)) tokens.add(fp);
           }

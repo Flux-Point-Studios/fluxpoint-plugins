@@ -397,7 +397,19 @@ the raw text and from every word as bash builds it:
   command's own directory), and also each value the line assigns it: in
   a command made only of assignments, before a command's name (`env`'s
   included), in `export`, `declare`, `typeset`, `local` or `readonly`,
-  as a `for` loop's words, and by `${NAME:=word}` or `${NAME=word}`;
+  as a `for` loop's words, by `${NAME:=word}` or `${NAME=word}`, as an
+  array's words (`NAME=(...)`, `NAME+=(...)`, an element's `[i]=`
+  removed), by `printf -v NAME` (what it would print, `%s`, `%b` and
+  `%c` cut to any precision and other conversions as written, from each
+  value its words may take), and by `read`, `read -a`, `mapfile` or
+  `readarray` from a here-string or heredoc (each line, each field at
+  the line's IFS, and what follows each field); a nameref
+  (`declare -n R=A`) and the variable it names share their values. An
+  array element, whatever its index, takes every value of the array;
+  `${NAME[*]}` also takes each run of a list of its words joined as `$*`
+  is (below), and `${NAME[@]}`, or `${NAME[*]}` unquoted, at the head of
+  a command is read as no words, each list of words given NAME, all of
+  them in order, and each of its other values alone.
   `$PWD` and `$OLDPWD` also take every directory the line may be in. A
   value built from other variables takes each value they take: every
   assignment is built again, in line order, for as many rounds as the
@@ -557,13 +569,16 @@ cannot read:
 - a value longer than 4096 characters that an operator searches for a
   pattern to remove, or 256 for one to replace, and a slice whose
   offsets and lengths may make more than 4096 texts;
+- a `printf -v` whose format and arguments take more than 64
+  combinations of values;
 - a line that may run in more than 64 directories.
 
 Shell code is read with bash's grammar, whichever of those shells runs it.
 Not resolved: a value computed while the line runs (command output,
-arithmetic, `read`, `printf -v`, arrays, and a value a loop builds from its
-own earlier value over more passes than the line assigns distinct
-variables), the positional parameters a script file or `source`
+arithmetic, input `read` or `mapfile` takes from a file, a pipe or a
+descriptor, and a value a loop builds from its own earlier value over
+more passes than the line assigns distinct variables), the
+positional parameters a script file or `source`
 passes, a name
 another program supplies (`find -exec ... {}`, the input of `xargs`), a
 value or an alias an earlier command set that the hook does not see,

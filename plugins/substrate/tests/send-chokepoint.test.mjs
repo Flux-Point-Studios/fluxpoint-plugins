@@ -1022,6 +1022,35 @@ expectEach(2, "a parameter operator is applied to every value", [
   'X=xblast.py; python3 "${X#"x"}"',
 ]);
 
+// An array literal, `read` and `mapfile` from a here-string or heredoc, `printf -v` and a nameref give a variable its
+// values as plainly as an assignment does.
+expectEach(2, "every builtin that assigns gives a variable its values", [
+  "A=(bl ast.py); python3 ${A[0]}${A[1]}",
+  "A=(bl); python3 ${A}ast.py",
+  "declare -a A=(bl); python3 ${A[0]}ast.py",
+  "A+=(bl); python3 ${A[0]}ast.py",
+  "A=([1]=ast.py [0]=bl); python3 ${A[0]}${A[1]}",
+  "A=(bl ast.py); IFS=; python3 \"${A[*]}\"",
+  "read -r X <<< bl; python3 ${X}ast.py",
+  "read X Y <<< 'bl ast.py'; python3 $X$Y",
+  "IFS=: read X Y <<< 'bl:ast.py'; python3 $X$Y",
+  "read X <<EOF\nbl\nEOF\npython3 ${X}ast.py",
+  "read -a A <<< 'bl ast.py'; python3 ${A[0]}${A[1]}",
+  "mapfile -t A <<< bl; python3 ${A[0]}ast.py",
+  "printf -v X %s bl; python3 ${X}ast.py",
+  "printf -v X '%s%s' b l; python3 ${X}ast.py",
+  "printf -v X '%.2s' blah; python3 ${X}ast.py",
+  "declare -n R=A; R=bl; python3 ${A}ast.py",
+]);
+
+expectEach(0, "a builtin that assigns harmless values is not refused", [
+  'A=(a.txt b.txt); for f in "${A[@]}"; do wc -l "$f"; done',
+  "read -r name < a.txt; echo $name",
+  'printf -v pad "%-10s" x; echo "[$pad]"',
+  "mapfile -t lines < a.txt; echo ${#lines[@]}",
+  "cmd=(bash -c 'echo hi'); \"${cmd[@]}\"",
+]);
+
 expectEach(0, "a parameter operator on harmless values is not refused", [
   'for f in *.txt; do echo "${f%.txt}.md"; done',
   "X=other.py.bak; python3 ${X%.bak}",
@@ -1118,6 +1147,8 @@ expectEach(2, "a command named by an expansion is read as each command it may ma
   `F=-c; find . -maxdepth 0 -exec bash $F ${BUILT} \\;`,
   `f() { "$@"; }; printf %s ${BUILT} | f bash`,
   `IFS=:; X=nohup:bash; $X <<< ${BUILT}`,
+  `C=(bash -s); printf %s ${BUILT} | "\${C[@]}"`,
+  `C=(nohup bash); printf %s ${BUILT} | \${C[*]}`,
 ]);
 
 expectEach(0, "a command named by an expansion of harmless values is not refused", [
