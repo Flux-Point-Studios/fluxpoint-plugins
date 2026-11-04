@@ -378,7 +378,9 @@ The full judgment reads every line the exemption does not cover, and every
 subshells, `{ }` groups, functions (`NAME ()` and `function NAME`, before
 any compound command), `if`/`while`/`for`/`case` (with newlines before
 `in`), `time` and `time -p`, `$(...)`, backquotes, arithmetic, process
-substitution, `${...}` operators, bash 5.3's `${ list; }` and heredocs,
+substitution (part of its word wherever it stands in it, as bash reads
+it, so a `#` right after `<(...)` is text and not a comment),
+`${...}` operators, bash 5.3's `${ list; }` and heredocs,
 whose delimiter is the word with quotes removed and nothing expanded, so
 `<<$D` ends at a line `$D` (a delimiter holding a command substitution
 is not followed). A script is a name ending in `.py`,

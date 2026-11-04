@@ -333,6 +333,9 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
     while (src[i] === " " || src[i] === "\t" || continued(i)) i += continued(i) ? 2 : 1;
   };
 
+  // bash reads `<(` and `>(` as a process substitution inside a word as well as at its start.
+  const processAt = (j) => full && (src[j] === "<" || src[j] === ">") && src[j + 1] === "(";
+
   // A word's text built from its pieces, and whether a piece the line does not fix comes before any it does. `parts`
   // keeps each piece's text, whether it was quoted and, for a variable, its name; inside double quotes every piece is
   // quoted.
@@ -575,26 +578,32 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
 
   // One word after quote removal: its text, whether it holds no expansion or pattern, whether any of it is quoted or
   // escaped, its source without line continuations, whether an expansion may supply its first character, whether it
-  // may split, and where in that source each unquoted `{`, `,`, `}` and `.` is, from which bash finds the braces it
-  // expands. The full judgment reads an extglob group, `@(...)`, `?(...)`, `*(...)`, `+(...)` or `!(...)`, into the
-  // word, blanks and `|` included, as bash does with extglob on; with it off bash refuses the line. A `!(` that opens a
-  // word at the start of a command is `!` before a subshell either way.
+  // may split, whether it holds a process substitution, and where in that source each unquoted `{`, `,`, `}` and `.`
+  // is, from which bash finds the braces it expands. The full judgment reads an extglob group, `@(...)`, `?(...)`,
+  // `*(...)`, `+(...)` or `!(...)`, into the word, blanks and `|` included, as bash does with extglob on; with it off
+  // bash refuses the line. A `!(` that opens a word at the start of a command is `!` before a subshell either way.
   const word = (start = false) => {
     const b = builder();
     const begin = i;
     let bare = "";
     let quoted = false;
     let splits = false;
+    let process = false;
     let groups = 0;
     const braces = [];
-    while (i < src.length && (groups > 0 || !ENDS_WORD.has(src[i]))) {
+    while (i < src.length && (groups > 0 || !ENDS_WORD.has(src[i]) || processAt(i))) {
       const from = i;
       const c = src[i];
       if (continued(i)) {
         i += 2;
         continue;
       }
-      if (full && "@!+*?".includes(c) && src[i + 1] === "(" && !(c === "!" && start && i === begin)) {
+      if (groups === 0 && processAt(i)) {
+        i += 2;
+        list(true);
+        b.add("", true);
+        process = true;
+      } else if (full && "@!+*?".includes(c) && src[i + 1] === "(" && !(c === "!" && start && i === begin)) {
         b.add(src.slice(i, i + 2), false);
         i += 2;
         groups += 1;
@@ -645,17 +654,8 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
       bare += src.slice(from, i);
     }
     if (groups > 0) cannotRead();
-    return { text: b.text, literal: b.literal, quoted, bare, opensDynamic: b.opensDynamic, splits, parts: b.parts,
-             braces };
-  };
-
-  // At `<(` or `>(`: a word naming a pipe to the commands inside.
-  const processSubstitution = () => {
-    const from = i;
-    i += 2;
-    list(true);
-    return { text: "", literal: false, quoted: false, bare: src.slice(from, i), opensDynamic: true, splits: false,
-             process: true };
+    return { text: b.text, literal: b.literal, quoted, bare, opensDynamic: b.opensDynamic, splits, process,
+             parts: b.parts, braces };
   };
 
   // A redirection, and the descriptor `fd` it applies to when a number or {name} came before it.
@@ -669,9 +669,6 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
     if (dup && src[i] === "-") {
       i += 1;
       return { op, fd };
-    }
-    if (full && (src[i] === "<" || src[i] === ">") && src[i + 1] === "(") {
-      return { op, fd, target: processSubstitution() };
     }
     const target = word();
     if (!target.bare || target.bare.startsWith("#")) cannotRead();
@@ -808,9 +805,7 @@ function readShell(src, { cwd, onCommand, onText, full = false, text = false, si
         }
       } else if (c === "#") {
         while (i < src.length && src[i] !== "\n") i += 1;
-      } else if (full && (c === "<" || c === ">") && src[i + 1] === "(") {
-        words.push(processSubstitution());
-      } else if (c === "<" || c === ">" || c === "&") {
+      } else if ((c === "<" || c === ">" || c === "&") && !processAt(i)) {
         redirects.push(redirect(nested, fd));
         fd = null;
       } else {

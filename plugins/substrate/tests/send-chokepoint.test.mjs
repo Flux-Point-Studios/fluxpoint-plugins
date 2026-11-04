@@ -771,6 +771,22 @@ expectEach(0, "the constructs bash accepts there are read, not refused", [
   "function h() { echo h; }; h",
 ]);
 
+// bash reads `<(...)` and `>(...)` as part of a word, wherever in the word they stand, so a `#` right after one is text
+// rather than a comment, and the `;` after it still ends the command. A `#` after a subshell's `)` does start one.
+expectEach(2, "a process substitution is part of its word", [
+  "true <(:)#; python3 bl''ast.py",
+  "cat <(true)#; bash -c 'python3 bl\"\"ast.py'",
+  "cat <(:) <(:)#; python3 bl''ast.py",
+  "echo >(:)>(:)#; python3 bl''ast.py",
+  "cat < <(:)#; python3 bl''ast.py",
+  "echo x<(:)#; python3 bl''ast.py",
+]);
+
+expectEach(0, "a comment after a subshell or a word is a comment", [
+  "(:)# python3 bl''ast.py",
+  "diff <(sort a.txt) <(sort b.txt) # python3 bl''ast.py",
+]);
+
 // PowerShell is read with bash's grammar only for the names in it: a backtick escape there is no unterminated
 // substitution, and only a line that also names a shell, env, eval, trap or source is refused for it.
 expectEach(0, "a PowerShell line bash cannot read is not refused for that alone", [
