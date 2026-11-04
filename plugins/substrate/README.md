@@ -425,7 +425,12 @@ the raw text and from every word as bash builds it:
   counts;
 - for `find -execdir` or `-okdir`, the script names in its command
   resolved in every directory under find's starting points, walked as
-  find walks them.
+  find walks them;
+- for a name that starts with `-`, what follows its dashes (bash reads
+  `<&-x.py` as a descriptor close and the word `x.py`) and what follows
+  each letter or digit of a short-option cluster, since an option that
+  takes a value takes the rest of its word: `ruby -wr./x.rb` loads
+  `./x.rb`.
 
 A relative name is joined to each directory the line may be in without
 removing `..` first, as the kernel joins it, so `link/..` is the parent
@@ -492,8 +497,9 @@ cannot read:
   together spend more than 4096 units: one for each word a brace or a
   variable value makes, plus one for each further 1024 characters in
   it, one for each directory a glob reads and each path it visits, one
-  for each directory a `find -execdir` walk visits, and one for each
-  1024 unquoted `{`, `,`, `}` and `.` looked at while finding a pair;
+  for each directory a `find -execdir` walk visits, one for each 1024
+  unquoted `{`, `,`, `}` and `.` looked at while finding a pair, and
+  one for each letter of a short-option cluster read for a path;
 - a line that may run in more than 64 directories.
 
 Shell code is read with bash's grammar, whichever of those shells runs it.

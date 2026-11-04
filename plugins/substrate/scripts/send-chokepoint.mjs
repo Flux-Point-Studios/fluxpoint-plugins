@@ -1667,6 +1667,20 @@ function scriptPaths(text) {
   return out;
 }
 
+/** A name and, for one that starts with dashes, the paths an option word may carry: what follows the dashes, as after
+ *  `<&-`, and what follows each letter or digit of a short-option cluster, since an option that takes a value takes
+ *  the rest of its word (`ruby -wr./x.rb` loads `./x.rb`). Each letter spends one unit. */
+function optionValues(name, budget) {
+  const dashes = /^-*/.exec(name)[0].length;
+  if (!dashes) return [name];
+  const out = [name, name.slice(dashes)];
+  for (let k = dashes; k < name.length && /[A-Za-z0-9]/.test(name[k]) && budget.left > 0; k += 1) {
+    budget.left -= 1;
+    out.push(name.slice(k + 1));
+  }
+  return out;
+}
+
 /** The script names in a word's text: the paths inside it, and the whole text or what follows its `=`. */
 function namesIn(text) {
   const names = scriptPaths(text);
@@ -1764,8 +1778,7 @@ function referencedFiles(command, cwd, reading, budget) {
   const everywhere = [...places, ...searchPath];
   for (const token of tokens) {
     late(budget.deadline);
-    // bash reads `<&-sender.py` as a descriptor close and the word `sender.py`, so the path may start after the dashes.
-    for (const name of new Set([token, token.replace(/^-+/, "")])) {
+    for (const name of new Set(optionValues(token, budget))) {
       for (const fp of resolve(name, name.includes("/") ? places : everywhere)) out.add(fp);
     }
   }
@@ -1869,7 +1882,7 @@ function judgeLine(command, cwd, config, tool, deadline) {
   }
   if (budget.left <= 0) {
     return { reason: "this command makes more paths than the gate resolves",
-             where: "its braces, globs, variables and directories", unreadable: true };
+             where: "its braces, globs, variables, option clusters and directories", unreadable: true };
   }
   return null;
 }

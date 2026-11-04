@@ -680,6 +680,7 @@ const SLOW = {
   "60 000 script names": `git add ${Array.from({ length: 60000 }, (_, n) => `f${n}.py`).join(" ")}`,
   "80 000 reserved words in a row": "{ ".repeat(80000),
   "80 000 `if` in a row": "if ".repeat(80000),
+  "a 100 KB short-option cluster": `echo -${"a".repeat(100000)}.py -${"a".repeat(100000)}/x.py`,
 };
 for (const [shape, line] of Object.entries(SLOW)) {
   test(`a large line is judged within the hook's timeout: ${shape}`, () => {
@@ -817,6 +818,20 @@ expectEach(2, "braces expand in the word as written, before its variables", [
   'python3 "bl"{a,}st.py',
   "python3 'b'{l,x}{a,}st.py",
 ]);
+
+// A short option takes its value from the rest of its word: `ruby -r./x.rb` and `node -r./x.js` load the file glued to
+// the option letter, after any other letters in the cluster.
+for (const command of ["ruby -r./blast.rb -e 1", "node -r./blast.js -e 0", "ruby -wr./blast.rb -e 1",
+                       "ruby -I. -rblast.rb -e 1", "node -r./bl''ast.js -e 0",
+                       `ruby -${"w".repeat(5000)}r./blast.rb -e 1`]) {
+  test(`a path glued to a short option is resolved: ${command.slice(0, 40)}`, () => {
+    const dir = repo();
+    for (const name of ["blast.rb", "blast.js"]) file(dir, name, SENDER_BODY);
+    file(dir, "other.rb", READER_BODY);
+    assert.equal(hook(command, dir).status, 2);
+    assert.equal(hook("ruby -r./other.rb -e 1", dir).status, 0, "a reader glued to an option is not a reason to block");
+  });
+}
 
 // ------------------------------------------------- a quoted argument can hold a command line
 // `sh -c 'python3 sender.py'` runs the sender. The quoted run as a whole names no file, and the path inside it must
