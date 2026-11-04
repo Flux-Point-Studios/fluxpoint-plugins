@@ -399,11 +399,15 @@ the raw text and from every word as bash builds it:
   included), in `export`, `declare`, `typeset`, `local` or `readonly`,
   as a `for` loop's words, by `${NAME:=word}` or `${NAME=word}`, as an
   array's words (`NAME=(...)`, `NAME+=(...)`, an element's `[i]=`
-  removed), by `printf -v NAME` (what it would print, `%s`, `%b` and
-  `%c` cut to any precision and other conversions as written, from each
+  removed), by `printf -v NAME` (what it would print, less the blanks a
+  width pads with: escapes in the format decoded, `%s`, `%b` and `%c`
+  cut to any precision and other conversions as written, from each
   value its words may take), and by `read`, `read -a`, `mapfile` or
-  `readarray` from a here-string or heredoc (each line, each field at
-  the line's IFS, and what follows each field); a nameref
+  `readarray` from a here-string or heredoc (each name takes each line
+  whole and each of its first fields at the line's IFS, one more than
+  there are names, and the last name also what follows each of the
+  first separators, one for each name; `read -a`, `mapfile` and
+  `readarray` give the array the line's fields or the lines); a nameref
   (`declare -n R=A`) and the variable it names share their values. An
   array element, whatever its index, takes every value of the array;
   `${NAME[*]}` also takes each run of a list of its words joined as `$*`
@@ -444,9 +448,9 @@ the raw text and from every word as bash builds it:
 - where the line gives IFS a value (a shell takes none from its
   environment), each word's text and the raw text also cut at every
   character of every such value, as bash splits an unquoted expansion,
-  so `IFS=:; x=-u:sender.py; python3 $x` names `sender.py`; `$*` also
-  joined with the first character of each value, and an expansion at
-  the head of a command split there too;
+  so `IFS=:; x=-u:sender.py; python3 $x` names `sender.py`; `$*` and
+  `${NAME[*]}` also joined with the first character of each value, and
+  an expansion at the head of a command split there too;
 - brace lists and sequences expanded as bash expands them: only braces
   it reads unquoted, found by bash's own matching rules, in the word as
   written and before its variables, so `$x{a,b}` is `$xa` and `$xb` and
@@ -460,7 +464,7 @@ the raw text and from every word as bash builds it:
   and `[.c.]` match c, and a class it does not know any character. A
   pattern is matched by following every place in it at once, so no
   pattern, however its groups nest, costs more than the text's length
-  times its own; this matcher also serves the parameter operators below.
+  times its own; this matcher also serves the parameter operators above.
   `nocaseglob`, `globstar` and `dotglob` count as on for the whole line
   when any word it reads names one of them (as `shopt -s` or a shell's
   `-O` would), `GLOBIGNORE` turns `dotglob` on the same way, and all
@@ -594,7 +598,9 @@ a directory another program changes into (`git -C`, `make -C`, `sudo -D`),
 a script name without one of those extensions, code another interpreter
 assembles (`python3 -c`), syntax only `zsh` or another shell gives a
 meaning, a script operand built from an expansion in a loop body that reads
-a pipe, and the scripts a script file runs.
+a pipe, a shell that a program other than those listed above runs on
+the input it is given (`printf ... | ionice bash`), and the scripts a
+script file runs.
 
 Omit `providers` to use the built-in Microsoft Graph, Gmail, SendGrid, Mailgun,
 Postmark and Resend hosts. This is a static routing check: it does not send

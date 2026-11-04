@@ -1364,8 +1364,8 @@ function readOnce(command, cwd, tool, deadline, known) {
   // The lists of words an expansion at the start of a command may make: `$@`, and `$*` unquoted, make none or each
   // list of positional parameters passed, from any word on as `shift` leaves it; `${NAME[@]}`, and `${NAME[*]}`
   // unquoted, none, each list of words given NAME and all of them in order, and each of its other values alone; any
-  // other expansion one for each text it may take, split at blanks where it is unquoted, so that an empty value leaves
-  // no word. Null when it has more values than the gate follows.
+  // other expansion one for each text it may take, split at blanks and the line's IFS characters where it is
+  // unquoted, so that an empty value leaves no word. Null when it has more values than the gate follows.
   const commandWords = (w) => {
     const [part, ...rest] = w.parts ?? [];
     const every = !rest.length && /^(?:[@*]|\w+\[[@*]\])$/.test(part?.name ?? "")
@@ -2001,8 +2001,8 @@ const POSIX_CLASSES = { alpha: "A-Za-z", digit: "0-9", alnum: "A-Za-z0-9", upper
   cntrl: "\\x00-\\x1f\\x7f", word: "A-Za-z0-9_" };
 
 /** A matcher for a glob pattern: `*`, `?`, bracket sets and the extglob groups `@(...)`, `?(...)`, `*(...)`,
- *  `+(...)` and `!(...)`, which bash cannot parse unless extglob is on. A POSIX class matches any character, and
- *  `!(...)` any text. `nocase` is nocaseglob; `reversed` matches the pattern read backwards, against a text read
+ *  `+(...)` and `!(...)`, which bash cannot parse unless extglob is on. A POSIX class matches what it names in the C
+ *  locale, and `!(...)` any text. `nocase` is nocaseglob; `reversed` matches the pattern read backwards, against a text read
  *  backwards. The pattern becomes an automaton that follows every place in it at once, so a match costs no more than
  *  the text's length times the pattern's, however its groups nest: a regular expression that backtracks takes
  *  exponential time on a short name, and the hook allows a line it has not judged in time. `test(text)` says whether
