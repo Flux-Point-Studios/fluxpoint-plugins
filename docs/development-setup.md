@@ -80,6 +80,24 @@ Ubuntu 24.04 download URLs, SHA-256 checksums and exact commands. Use an artifac
 appropriate for your OS and verify it before extraction; the CI Z3 archive
 requires glibc 2.39. Other Lean/Z3 versions are not covered by this smoke test.
 
+## Optional Rust scanner comparison
+
+The default harness tests `rust_hatches.py` on fixtures and needs no Rust
+toolchain. After changing its lexer or its item walker, compare it with two
+tools that parse Rust. With cargo and access to crates.io:
+
+```bash
+python3 plugins/fluxpoint/tests/rust-hatches-live.py ~/.cargo/registry/src
+```
+
+It builds `tests/fixtures/rust-truth` into a temporary directory, then
+compares token-pattern counts with proc-macro2 and the end of every
+test-only item with syn, file by file. Any directory of Rust sources is a
+corpus; the registry cache of a machine that has built a few projects holds
+several thousand files. Exit 0 means both comparisons agreed on every file.
+[The Rust guide](../plugins/fluxpoint/references/rust.md#how-the-scanner-was-checked)
+records the corpus the shipped scanner was checked on.
+
 ## Optional native captured-prefix acceptance
 
 With Claude Code **2.1.312** installed, run:

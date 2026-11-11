@@ -56,6 +56,28 @@ flood each route while unrelated routes use the event loop, threadpool, cache
 and sqlite writer. A per-request cap alone does not bound sustained provider
 traffic; moving blocking work to a shared pool alone does not isolate routes.
 
+Rust has two more surfaces, each with its own taxonomy specified by Rust
+test names. A Rust service or off-chain crate answers for
+`attack_panic_on_hostile_input`, `attack_unbounded_allocation`,
+`attack_amount_overflow`, `attack_decode_encode_divergence`,
+`attack_error_swallowed`, `attack_blind_signing`, `attack_secret_in_output`,
+`attack_request_amplification`, `attack_blocked_executor` and
+`attack_shared_resource_exhaustion`. Feed every decoder truncated,
+oversized and deeply nested bytes and require a typed error; run the
+arithmetic under the release profile, where overflow wraps; and treat a
+transaction returned by a remote resolver as hostile until it has been
+decoded and compared with the request. A partner chain's pallets and
+runtime answer for the FRAME classes: `attack_weight_underestimate`,
+`attack_unbounded_iteration`, `attack_reachable_panic`,
+`attack_unsafe_math`, `attack_storage_exhaustion`,
+`attack_missing_origin_check`, `attack_unsigned_replay`,
+`attack_unchecked_inherent`, `attack_discarded_result`,
+`attack_insecure_randomness`, `attack_account_reference_counts` and
+`attack_runtime_upgrade_state`. Measure each call at the bounds it admits
+with storage full, dispatch it from every origin, and import a block whose
+inherent data disagrees with what the importing node observes. See
+[Rust and FRAME](rust.md).
+
 Method and taxonomy adapted from Flux Point Studios'
 [aiken-validator-redteam](https://github.com/Flux-Point-Studios/cardano-agent-skills/blob/c4dc5de6/skills/aiken-validator-redteam/SKILL.md)
 and [audit framework](https://github.com/Flux-Point-Studios/cardano-agent-skills/blob/c4dc5de6/skills/aiken-dex-security-audit/references/audit-framework.md).

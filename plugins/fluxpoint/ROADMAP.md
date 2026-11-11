@@ -356,6 +356,18 @@ how many commits ago, loud by default and fatal only under
 `failWhenStale`. Both flags were read off `aiken check --help` on a real
 v1.1.9 binary rather than assumed.
 
+*proptest landed in slice 26.* Rust property tests reach the ledger
+through `cargo test`. The failure message is matched by its own frame and
+not by libtest's blocks, so `--nocapture` output reads the same, and the
+pretty-printed input is folded onto one line with its string literals left
+as printed, for the reason fast-check's are: two spaces in a generated
+string are the failing case. The gate pins `PROPTEST_RNG_SEED` the way it
+pins Aiken's seed, and the sweep rotates it. The fixtures are captures of
+real runs under cargo 1.97.0 and proptest 1.12.0, and the capture corrected
+the first draft twice: the property written to fail at `amount = 0` passed,
+because 256 random cases never drew a zero, and `#[ignore = "reason"]`
+turned out to be a pin the Rust reader had been accepting since Kani.
+
 *Kani and Apalache landed in slice 21.* `cargo kani` output is read per
 harness — the FAILURE checks with their locations, the `Failed Checks`
 summary, and the concrete-playback block's interpreted values in harness
@@ -569,6 +581,35 @@ error it names is fixed, so it cannot rot in place, and counting it would
 push people toward the suppression that can. The rest of the off-chain
 surface is #80 (fast-check in the counterexample ledger) and #81 (the
 builder's own attack taxonomy).
+
+*Route 1 reaches Rust, shipped in slice 26.* The TypeScript argument
+holds for the language a backend is moving to. `cargo check` exits 0 on
+`todo!()`, which type-checks at any type, and `cargo clippy -- -D
+warnings` exits 0 on the lint an `#[allow]` just silenced. So production
+Rust ratchets `unsafe`, typed holes, panic sites, silenced lints and
+discarded results, and a FRAME pallet ratchets the opt-outs FRAME itself
+names: a weight no `WeightInfo` produced, storage without a bound, dev
+mode, a feeless call, a call admitted unsigned.
+
+Two decisions shaped it. Test code is left out, because a test that
+unwraps is asserting and a count that rose with every test would be
+re-baselined blind; and what makes code test code is the `cfg` the
+compiler reads, resolved through the files that declare each other, never
+a file name, because naming a production file `tests.rs` would otherwise
+take it out of the count while it still ships. The second decision
+leaves out whatever needs types: a numeric `as` cast loses something for
+some types and nothing for others, clippy knows which, and the `allow`
+that silences clippy is what the ratchet holds, while `#[expect]` goes
+uncounted because it fails the build once the lint it names stops firing.
+
+A line scan would not have been enough here, so the scanner reads tokens,
+and it was held to tools that parse Rust: its lexer agreed with
+proc-macro2 on every one of 13,292 files, and its judgment of where a
+test-only item ends agreed with syn at the character on all 30,809 items.
+Run against a Polkadot SDK partner chain workspace of 148 Rust files it
+left 43 out as test code, and what remained in production was a list short
+enough to read in one sitting: mostly discarded currency results and call
+weights that no benchmark produced.
 
 *The blueprint half, shipped in slice 23 (issue #79).* `plutus-budget.py`
 read `plutus.json` for exactly one field, `compiledCode`, and used it for
@@ -842,6 +883,7 @@ existing harness and each is independently shippable.
 | 22 | Route 1 reaches off-chain (#78): `proof-guard.py` counts TypeScript escape hatches (`ts.any`, `ts.double_cast`, `ts.non_null`, `ts.ts_ignore`, `flags.types_off`), with strings stripped before counting and the `@ts-` directives read from the raw line; `@ts-expect-error` deliberately uncounted; plain JavaScript does not arm the ratchet. Also fixes the latent defect that made every category this plugin ever added a red gate for repos that armed before it | **shipped** |
 | 23 | Blueprint conformance (#79): `blueprint-guard.py` decodes PlutusData and checks it against the CIP-57 schema `plutus.json` declares — `--scan` names every opaque schema, `--conform` checks hex against a purpose, `--check` runs the corpora in `.fluxpoint-blueprint.json` and reds on a refused value, a stale manifest or an unresolvable `$ref`. Stdlib-only CBOR reader verified against `cbor2` on 24 values; fixtures are real blueprints from the aiken compiler's own repository | **shipped** |
 | 24 | Off-chain properties in the ledger (#80) and the seed sweep (#82): `cex.py` parses fast-check failures out of a vitest run — shrunk counterexample, seed and replay path — with TypeScript pins refusing `.skip`/`.todo`/`.fails`, and a plain assertion failure deliberately not minted as a counterexample; `--sweep` runs a rotating seed window at a raised `--max-success` off-session and stamps what it covered, with `--check` reporting staleness | **shipped** |
+| 26 | Rust as a first-class language (v1.50.0): `rust_hatches.py` reads production Rust from tokens, with test code left out on the evidence of its `cfg`, and `proof-guard.py` ratchets `rust.unsafe`, `rust.todo`, `rust.panic`, `rust.lint_allow`, `rust.let_underscore`, `flags.lints_off` and the FRAME opt-outs `frame.unbenchmarked_weight`, `frame.unbounded_storage`, `frame.dev_mode`, `frame.feeless`, `frame.unsigned`; `#[expect]` deliberately uncounted and casts left to clippy; `spec-guard.py` gates `rust` and `frame` taxonomies from Rust test function names; `cex.py` parses proptest failures out of `cargo test` and sweeps `PROPTEST_RNG_SEED`; the scaffolded harness lints and tests with `--workspace` and finds Kani harnesses in every tracked crate; the lexer and item extents verified against proc-macro2 and syn over 13,292 files | **shipped** |
 | 25 | The builder's own attack taxonomy (#81): `.fluxpoint-attacks.json` carries one taxonomy per language, the 1.38.0 single-object shape still read as one; seven TypeScript classes specified by a test title carrying the class id, with an example noted as weaker than a fast-check property; each taxonomy dormant in a repo that does not track its language, and waivers scoped so an Aiken waiver cannot excuse a builder class | **shipped** |
 
 ## Part 6 — named absences

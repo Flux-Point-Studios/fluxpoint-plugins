@@ -144,6 +144,16 @@ Five rules, in order of how often they are broken:
    which is why it is gated rather than trusted. `@ts-expect-error` is
    deliberately uncounted: it fails the build once the error it names is
    fixed, so it cannot rot in place.
+   **Rust counts the same way.** `cargo check` exits 0 on `todo!()` and
+   `clippy -D warnings` exits 0 on the lint an `#[allow]` silenced, so
+   `unsafe`, `todo!`, panic sites (`.unwrap()`, `.expect("...")`, `panic!`,
+   `unreachable!`), each silenced lint and each `let _ =` ratchet as
+   `rust.*` categories in production code; test code is left out on the
+   evidence of its `cfg`, never its file name. A FRAME pallet ratchets the
+   opt-outs FRAME names as `frame.*`: a weight no `WeightInfo` produced,
+   unbounded storage, dev mode, a feeless call, a call admitted unsigned.
+   `#[expect]` is uncounted for the reason `@ts-expect-error` is. See
+   `references/rust.md`.
    **And the statements ratchet too.** An agent blocked from adding an
    `assume` has an easier move: weaken the theorem. `scripts/spec-guard.py`
    hashes what is being proved — Dafny `requires`/`ensures`/`invariant`
@@ -188,7 +198,9 @@ Five rules, in order of how often they are broken:
    each prover needs to print its input. Off-chain counts too: a
    fast-check failure under vitest carries a shrunk counterexample with
    the `seed` and `path` that replay it, and the scaffolded harness
-   captures the `test` script the same way. A plain assertion failure in
+   captures the `test` script the same way. A proptest failure under
+   `cargo test` carries its shrunk input, and the harness captures that
+   run under a pinned `PROPTEST_RNG_SEED`. A plain assertion failure in
    the same run is deliberately not recorded, because it carries no
    generated input and minting one would put a value in the ledger that
    no generator produced. Pin one

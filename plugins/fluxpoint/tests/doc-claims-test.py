@@ -234,5 +234,108 @@ for label, needle, promised in (
     report(f"{label} is described where it is claimed", promised in VERIFIED,
            "described" if promised in VERIFIED else f"SILENT on {promised!r}")
 
+# ============ Rust: the guides name what the scanner counts ===============
+# A category the guide does not name is one no reader arms, and a category
+# the guide names that the scanner dropped is a guarantee nobody provides.
+# Both directions are derived from the registry that decides them.
+sys.path.insert(0, os.path.join(PLUGIN, "scripts"))
+import rust_hatches  # noqa: E402
+
+RUST_GUIDE = read("references", "rust.md")
+PROOF = read("scripts", "proof-guard.py")
+PLUGIN_README = read("README.md")
+TEMPLATE = read("templates", "harness.sh")
+_cats = list(rust_hatches.CATEGORIES) + ["flags.lints_off"]
+for _where, _text in (("the Rust guide", RUST_GUIDE), ("proof-guard's own help", PROOF),
+                      ("the plugin README", PLUGIN_README)):
+    _missing = [c for c in _cats if c not in _text]
+    report(f"every Rust and FRAME category is named in {_where}", not _missing,
+           f"{len(_cats)} categories" if not _missing else f"MISSING {_missing}")
+_named = set(re.findall(r"`((?:rust|frame)\.[a-z_]+)`", RUST_GUIDE))
+_stale = sorted(_named - set(rust_hatches.CATEGORIES)
+                - {"rust.external_body", "rust.trusted", "rust.assume",
+                   "rust.mutants_skip", "rust.mutants_exclude"})
+report("and the guide names no category the scanner does not count", not _stale,
+       "none stale" if not _stale else f"STALE {_stale}")
+
+
+def _rust_counts(files):
+    out = {}
+    for _cat, _, _, _ in rust_hatches.scan_tree(files):
+        out[_cat] = out.get(_cat, 0) + 1
+    return out
+
+
+# The exclusions are promises too. Each is EXECUTED against the scanner, so
+# the sentence and the behaviour cannot part ways quietly.
+_GUIDE_FLAT = re.sub(r"\s+", " ", RUST_GUIDE)
+for _label, _needle, _files, _want in (
+        ("#[expect] is documented as uncounted, and is", "`#[expect(...)]` warns once the lint it names stops firing",
+         {"src/lib.rs": "#[expect(dead_code)]\nfn f() {}\n"}, {}),
+        ("numeric casts are documented as left to clippy, and are", "Numeric `as` casts, indexing and unchecked arithmetic",
+         {"src/lib.rs": "pub fn f(x: u64, v: &[u8]) -> u32 { (x as u32) + u32::from(v[0]) }\n"}, {}),
+        ("a propagated error is documented as uncounted, and is", "`let _ = f()?;` propagated the error",
+         {"src/lib.rs": "fn f() -> Result<(), E> { let _ = g()?; Ok(()) }\n"}, {}),
+        ("a module merely named tests is documented as counted, and is",
+         "A module merely named `tests` and declared without the cfg ships in production and is counted",
+         {"src/lib.rs": "mod tests;\n", "src/tests.rs": "pub fn f(x: Option<u8>) -> u8 { x.unwrap() }\n"},
+         {"rust.panic": 1}),
+        ("a declared test module is documented as left out, and is",
+         "`#[cfg(test)] mod tests;` makes `tests.rs` test code",
+         {"src/lib.rs": "#[cfg(test)]\nmod tests;\n", "src/tests.rs": "fn t() { x().unwrap(); }\n"}, {}),
+        ("a build script is documented as left out, and is", "and the `build.rs` beside it",
+         {"Cargo.toml": "[package]\nname = \"x\"\n", "build.rs": "fn main() { run().unwrap(); }\n",
+          "src/lib.rs": "pub fn f() {}\n"}, {}),
+        ("a vendored tree is documented as counted, and is", "Tracked `vendor/` trees are counted like any tracked source",
+         {"vendor/dep/src/lib.rs": "pub fn f(x: Option<u8>) -> u8 { x.unwrap() }\n",
+          "vendor/dep/.cargo-checksum.json": "{}\n"}, {"rust.panic": 1}),
+        ("a hand-written weight is documented as counted whatever it says, and is",
+         "The first is a guess and the second is an argument",
+         {"src/lib.rs": "#[pallet::weight(T::DbWeight::get().reads_writes(1, 1))]\nfn a() {}\n"
+                        "#[pallet::weight(T::WeightInfo::b())]\nfn b() {}\n"},
+         {"frame.unbenchmarked_weight": 1})):
+    _got = _rust_counts(_files)
+    report(_label, _needle in _GUIDE_FLAT and _got == _want,
+           "stated and executed" if _needle in _GUIDE_FLAT and _got == _want
+           else ("NOT STATED" if _needle not in _GUIDE_FLAT else f"scanner says {_got}, guide says {_want}"))
+
+# What the guide says the scaffold runs is what the template runs.
+for _line in ("cargo fmt --all -- --check",
+              "cargo clippy --workspace --all-targets --quiet -- -D warnings",
+              "cargo test --workspace --quiet"):
+    report(f"the guide's `{_line[:34]}` line is in the template",
+           _line in RUST_GUIDE and _line in TEMPLATE,
+           "both" if _line in RUST_GUIDE and _line in TEMPLATE else "DRIFTED")
+_seed = [n for n, t in (("template", TEMPLATE), ("guide", RUST_GUIDE), ("root README", ROOT_README),
+                        ("init", INIT)) if "FPL_PROPTEST_SEED" not in t]
+report("the proptest seed variable is documented wherever it is promised", not _seed,
+       "four places" if not _seed else f"MISSING in {_seed}")
+_frame = ("proptest >= 1.2 under rustc >= 1.73" in CEX
+          and "since 1.2 under the panic header rustc has printed since 1.73" in _GUIDE_FLAT)
+report("the guide and the parser agree on which proptest output is read", _frame,
+       "1.2 / 1.73" if _frame else "DRIFTED")
+
+# The attack classes: the shipped manifest is the list, and the documents
+# that enumerate it may not fall behind it.
+with open(os.path.join(PLUGIN, "templates", "attack-taxonomy.json"), encoding="utf-8") as _fh:
+    _taxonomies = {t["language"]: [c["id"] for c in t["classes"]] for t in json.load(_fh)["taxonomies"]}
+REDTEAM = read("references", "red-team-cardano.md")
+_words = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen"}
+for _lang in ("rust", "frame"):
+    _ids = _taxonomies.get(_lang, [])
+    _missing = [c for c in _ids if c not in REDTEAM]
+    report(f"every {_lang} attack class is named in the red-team reference", bool(_ids) and not _missing,
+           f"{len(_ids)} classes" if _ids and not _missing else f"MISSING {_missing or 'the taxonomy'}")
+    _word = _words.get(len(_ids), str(len(_ids)))
+    _lower = re.sub(r"\s+", " ", PLUGIN_README)
+    _claim = (f"holds {_word} classes" if _lang == "rust" else f"taxonomy {_word} for pallets")
+    report(f"the plugin README counts the {_lang} classes as the manifest does", _claim in _lower,
+           _word if _claim in _lower else f"manifest has {len(_ids)}; README does not say `{_claim}`")
+_known = re.search(r"^TAXONOMY_LANGUAGES = \((.*?)\)", SPEC, re.M)
+_known = re.findall(r'"(\w+)"', _known.group(1)) if _known else []
+_untold = [lang for lang in _known if f"**{lang}**" not in INIT]
+report("every taxonomy language spec-guard gates is introduced by init", bool(_known) and not _untold,
+       f"{len(_known)} languages" if _known and not _untold else f"MISSING {_untold}")
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

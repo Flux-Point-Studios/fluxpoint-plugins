@@ -1,0 +1,13 @@
+# Ground truth for plugins/fluxpoint/scripts/rust_hatches.py. Built and run
+# only by tests/rust-hatches-live.py, never by the harness.
+[package]
+name = "rust-truth"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", features = ["full", "visit"] }
+
+[workspace]

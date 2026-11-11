@@ -42,6 +42,11 @@ step; do not stop at copying files.
    requires (build, unit and property tests, lint, typecheck, formal
    checks, preview-net exercises). Then run `scripts/harness.sh --full` and
    iterate until it exits 0, or report precisely what is red and why.
+   The Rust block looks for `Cargo.toml` at the repository root. A
+   workspace in a subdirectory, which is how a partner chain usually sits
+   beside its tools, needs the block pointed at it
+   (`( cd partnerchain && cargo clippy --workspace ... )`); a Rust tree the
+   harness never enters reads green without having been built.
 
    **Then prove it once in a worktree.** A graph node marked `mutates: true`
    runs worktree-isolated, and green in the primary checkout is not green
@@ -133,7 +138,7 @@ step; do not stop at copying files.
    recording in each provider test, and compare derived IDs/hashes against
    recorded values independently of the code being tested.
    If the repo tracks proof-language files (`.ak`, `.dfy`, `.lean`, `.v`,
-   `.thy`, `.tla`, or verified Rust) **or TypeScript**, arm the hatch
+   `.thy`, `.tla`), **TypeScript or Rust**, arm the hatch
    ratchet; add the statement ratchet where a prover is involved:
    ```
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" proof-guard.py --baseline
@@ -147,6 +152,21 @@ step; do not stop at copying files.
    hundred existing `any`s baselines at a hundred and ratchets from there;
    arguing about the number is the wrong fight, and stopping the hundred
    and first is the right one.
+   Rust is in the list on the same argument. `cargo check` exits 0 on
+   `todo!()`, and `cargo clippy -- -D warnings` exits 0 on the lint an
+   `#[allow]` just silenced. The ratchet counts `unsafe`, `todo!` and
+   `unimplemented!`, panic sites (`.unwrap()`, `.expect("...")`, `panic!`,
+   `unreachable!`), each silenced lint and each `let _ =` in production
+   code, and leaves test code out on the evidence of its `cfg`. For a FRAME
+   pallet it also counts the opt-outs FRAME names: a call weight that no
+   `WeightInfo` produced, storage without a bound, dev mode, a feeless call
+   and a call admitted without a signature. Where a suppression is
+   justified, write `#[expect(lint, reason = "...")]`: it fails the build
+   once the lint stops firing, so it is not counted. Casts, indexing and
+   arithmetic need types the scan does not have, so turn clippy's lints for
+   them on in `[workspace.lints.clippy]` and let the ratchet count the
+   `allow` that would silence them. [Rust and FRAME](../references/rust.md)
+   has the categories, the test-code rule and the known misses.
    Each preserves the others' sections of the shared file. Commit it — it
    belongs in review, because a rise in the seam counts is someone walling
    a module off behind a mock, a rise in the hatch counts is someone
@@ -204,6 +224,28 @@ step; do not stop at copying files.
    classes). Comments, strings and non-test helper names do not count. Files
    importing Hypothesis are noted as properties; other matching tests are
    examples. Review the actual generators, assertions and documented bounds.
+   The **rust** taxonomy names what a Rust service or off-chain crate that
+   reads hostile bytes and moves value answers for: a panic on hostile
+   input, an allocation sized by the wire, amount overflow, a decoder that
+   disagrees with its encoder or with the other implementation, a swallowed
+   error, signing a transaction it did not build or check, a secret in a
+   log or an error, request amplification, a blocked async executor and
+   shared-resource exhaustion. The **frame** taxonomy names the pallet and
+   runtime classes, after Parity's Polkadot Top Ten: weight underestimate,
+   unbounded iteration, a reachable panic, unsafe math, storage exhaustion,
+   a missing origin check, unsigned replay, an unchecked inherent, a
+   discarded result, insecure randomness, account reference counts and
+   state across a runtime upgrade. Both are specified by a Rust test
+   function whose name carries the class id, a function under `#[test]` or
+   a sibling attribute, including the ones a `proptest!` block declares
+   (`fn attack_reachable_panic_submit_receipt()`). A helper no test build
+   collects, a comment and a string do not count, and a match in a file
+   with no proptest, quickcheck, bolero, arbtest or Kani is noted as an
+   example. The rust taxonomy gates a repo that tracks a Rust test; the
+   frame taxonomy gates one that declares a pallet or assembles a runtime.
+   A crate that builds Cardano transactions owes the builder classes as
+   well: copy them from the typescript taxonomy into the rust taxonomy's
+   `classes`, where Rust tests then specify them.
    The **compact** taxonomy gates tracked `.compact` sources and JS/TS
    builders importing `@midnight-ntwrk/*`. Its nine classes cover live-state
    transcript gas, concurrency, maintenance authority, verifier binding,
@@ -230,7 +272,7 @@ step; do not stop at copying files.
    the ratchets so their signatures are hashed. A class that genuinely
    cannot apply is waived in the committed file, where review sees it; it
    is never left unspecified.
-   Keep all three taxonomies unless the repo has a reason to drop one. When the
+   Keep every taxonomy unless the repo has a reason to drop one. When the
    repo tracks a language whose taxonomy is missing from the manifest,
    `spec-guard.py` prints a `NO TAXONOMY` line naming the language, how
    many classes the template holds for it and the first few ids. That line
@@ -271,7 +313,11 @@ step; do not stop at copying files.
    it writes is what gets recorded. A TypeScript repo's `test` script is
    captured the same way: a fast-check failure carries a shrunk
    counterexample with the `seed` and `path` that replay it, and only the
-   vitest reporter is parsed.
+   vitest reporter is parsed. A Rust repo's `cargo test` is captured too:
+   a proptest failure carries the shrunk input that broke the property,
+   the gate pins `PROPTEST_RNG_SEED` (to `FPL_PROPTEST_SEED`, default 1) so
+   it shrinks the same way each run, and a plain assertion failure is not
+   recorded. Commit `proptest-regressions/` beside the ledger.
    **Then buy back the exploration the gate gives up.** The gate pins
    `--seed 1` so a shrink is reproducible and the ledger can dedupe, which
    means every run explores the same cases at the tool's default iteration
@@ -280,7 +326,8 @@ step; do not stop at copying files.
    ```json
    {"version": 1, "tool": "aiken", "seeds": 25, "maxSuccess": 1000}
    ```
-   in `.fluxpoint-fuzz.json`, then
+   in `.fluxpoint-fuzz.json` (`"tool": "proptest"` for a Rust repo, where
+   the sweep rotates `PROPTEST_RNG_SEED` and raises `PROPTEST_CASES`), then
    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" cex.py --sweep`. Each sweep
    starts where the last one stopped, so the ground covered grows instead
    of repeating, and anything it finds lands in the same ledger under the

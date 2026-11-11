@@ -3,3 +3,4 @@
 __pycache__/
 .claude/worktrees/
 .claude/fluxpoint/
+plugins/fluxpoint/tests/fixtures/rust-truth/target/
