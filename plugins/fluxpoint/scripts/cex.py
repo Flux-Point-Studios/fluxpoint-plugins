@@ -96,6 +96,32 @@ the FIRST state — the initial-state block is the shrunk-input equivalent
 here as it is for Dafny, and a TLA+ regression is written as an `Init`
 constrained to it, not as a paste of the whole trace.
 
+### proptest
+
+Rust property tests reach the ledger through `cargo test`. A failing
+property panics with a message proptest has printed in one shape since 1.2,
+under the panic header rustc has printed since 1.73:
+
+    thread 'tests::fee_never_exceeds_amount' (19632) panicked at src/lib.rs:31:5:
+    Test failed: assertion failed: fee(amount, bps) <= amount at src/lib.rs:34.
+    minimal failing input: amount = 180, bps = 9050
+    \tsuccesses: 13
+
+The input is pretty Debug, so a vector or a struct spans lines; it is
+recorded folded onto one line, the way proptest itself writes it into
+`proptest-regressions/`, with string literals left exactly as printed. The
+message is read wherever libtest puts it, inside a `---- name stdout ----`
+block or bare on stderr under `--nocapture`. One row per failing property.
+A plain assertion failure in the same run carries no generated input and is
+not recorded, the rule fast-check already follows. A `minimal failing
+input:` line that sits in no frame this parser can read is drift, and files
+INGEST-FAILED with nothing half-read recorded; a build error ran no test
+and records nothing, said aloud. The seed proptest saved (`cc <hex>`) is
+kept beside the row when the run printed one. It replays a path through the
+generator and stops meaning this input when the strategy changes, which is
+why a pin is still a test carrying the literals. A `TestRunner` driven by
+hand and unwrapped prints Debug, not this message, and is not read.
+
 ## What a pin has to survive
 
 `--pin` cannot write the regression test itself: the recorded value does
@@ -106,8 +132,8 @@ this tool refuses to record it unless the recorded value is physically in
 it. Specifically, a pin is rejected when:
 
   * the file is untracked, outside a directory the prover compiles (Aiken:
-    `lib/`, `validators/`, `env/`; Dafny: any tracked `.dfy`; Kani: any
-    tracked `.rs`; Apalache: any tracked `.tla`), or under `.claude/`
+    `lib/`, `validators/`, `env/`; Dafny: any tracked `.dfy`; Kani and
+    proptest: any tracked `.rs`; Apalache: any tracked `.tla`), or under `.claude/`
     (where this tool writes its own draft — a tool must not mint the
     artifact that satisfies its own check),
   * the named test inverts or disables the oracle: an Aiken test annotated
@@ -240,7 +266,8 @@ RS_CALL = re.compile(
     r"\b(?!(?:if|while|for|match|let|return|loop|in|as|unsafe|else)\b)"
     r"[A-Za-z_][\w:]*!?\s*\(")
 RS_TEST_ATTR = re.compile(r"#\[\s*(?:[\w:]+::)?test\s*[\](]|kani::proof")
-RS_INVERTED_ATTR = re.compile(r"#\[\s*(?:should_panic|ignore)\s*[\](]")
+# `#[ignore = "reason"]` skips a test exactly as `#[ignore]` does.
+RS_INVERTED_ATTR = re.compile(r"#\[\s*(?:should_panic|ignore)\s*[\](=]")
 KANI_HARNESS_START = re.compile(r"^Checking harness (?P<name>\S+?)\.\.\.\s*$", re.M)
 KANI_VERDICT = re.compile(r"^VERIFICATION:-\s*(?P<v>FAILED|SUCCESSFUL)", re.M)
 KANI_CHECK = re.compile(
@@ -263,6 +290,24 @@ KANI_COMPLETE = re.compile(
     r"\d+ total", re.M)
 # rustc/cargo diagnostics: the run never reached a harness.
 RS_BUILD_ERROR = re.compile(r"^\s*error(?:\[E\d+\])?:", re.M)
+
+# ---- proptest (Rust property tests, through cargo test's libtest report) -----
+# proptest >= 1.2 under rustc >= 1.73. Neither part of the message may run
+# into the next thread's, or one unreadable failure would borrow the input
+# of the failure printed after it.
+PT_FAILURE = re.compile(
+    r"^thread '(?P<name>[^'\n]+)'(?: \(\d+\))? panicked at "
+    r"(?P<file>[^\n]+?):(?P<line>\d+):(?P<col>\d+):[ \t]*\n"
+    r"Test failed: (?P<why>(?:(?!^thread ')[\s\S])*?)\n"
+    r"minimal failing input: (?P<input>(?:(?!^thread ')[\s\S])*?)\n"
+    r"[ \t]+successes: (?P<successes>\d+)[ \t]*$", re.M)
+PT_INPUT = re.compile(r"^minimal failing input:", re.M)
+PT_RESULT = re.compile(
+    r"^test result: (?:ok|FAILED)\. \d+ passed; (?P<failed>\d+) failed", re.M)
+PT_SEED = re.compile(r"^cc (?P<seed>[0-9a-f]{64})[ \t]*$", re.M)
+# Pretty Debug, token by token: a literal is kept whole, the rest is layout.
+PT_TOKEN = re.compile(
+    r'"(?:[^"\\]|\\.)*"' r"|'(?:[^'\\]|\\.)'" r"|\s+|[\[\](){},]|[^\s\"'\[\](){},]+|[\"']")
 
 # ---- apalache ---------------------------------------------------------------
 TLA_COMMENT = re.compile(r"\\\*[^\n]*|\(\*.*?\*\)", re.S)
@@ -394,7 +439,7 @@ def strip_ts(text):
 
 def needle_for(nd, tool):
     """A recorded leaf in the form the stripped body would carry it."""
-    if tool in ("kani", "apalache", "fastcheck") and len(nd) >= 2 and nd[0] == nd[-1] == '"':
+    if tool in ("kani", "proptest", "apalache", "fastcheck") and len(nd) >= 2 and nd[0] == nd[-1] == '"':
         return '"' + sha(nd[1:-1])[:12] + '"'
     # fast-check prints strings in double quotes; a pin may legitimately write
     # the same string in single quotes or a template literal, and the digest
@@ -413,7 +458,7 @@ def leaves(value, tool="aiken"):
     make a legitimate pin impossible. The data inside it is still required.
     """
     vals, ctors = [], []
-    if tool in ("dafny", "kani"):
+    if tool in ("dafny", "kani", "proptest"):
         for m in (DFY_LEAF if tool == "dafny" else RS_LEAF).finditer(str(value or "")):
             string, char, number, keyword, ident = m.groups()
             if string or char or number or keyword:
@@ -684,7 +729,7 @@ def hollow(body, tool="aiken"):
         if DFY_VACUOUS.match(body):
             return f"the body is `{body}` — it proves nothing"
         return ""
-    if tool == "kani":
+    if tool in ("kani", "proptest"):
         if RS_VACUOUS.match(body):
             return f"the body is `{body}` — it cannot fail"
         if not re.search(r"\bassert|kani::", body) and not RS_CALL.search(body):
@@ -1418,6 +1463,108 @@ def parse_fastcheck(root, output, exit_code, source=None):
     return ("rows", rows, raw_for)
 
 
+def fold_debug(value):
+    """Rust pretty Debug on one line, with every literal left as printed.
+
+    `{:#?}` puts each element on its own line and adds a trailing comma;
+    `{:?}` would have written `[0]` and `Point { x: 1, y: 2 }`. Folding by
+    hand rather than collapsing whitespace matters for one reason: a string
+    is data here, and two spaces inside one are the failing case.
+    """
+    out, tokens = [], [t for t in PT_TOKEN.findall(str(value or "").strip())]
+    for n, token in enumerate(tokens):
+        if token.isspace():
+            before = out[-1] if out else ""
+            after = tokens[n + 1] if n + 1 < len(tokens) else ""
+            if before in ("[", "(", "") or after in ("]", ")", ",", ""):
+                continue
+            out.append(" ")
+        elif token == ",":
+            rest = [t for t in tokens[n + 1:n + 3] if not t.isspace()]
+            if rest and rest[0] in ("]", ")", "}"):
+                continue
+            out.append(token)
+        else:
+            out.append(token)
+    return "".join(out)
+
+
+def parse_proptest(root, output, exit_code, source=None):
+    """proptest failures out of a cargo test run.
+
+    A failing property carries its shrunk input; a plain assertion failure
+    in the same run carries none and is deliberately NOT recorded, for the
+    reason parse_fastcheck gives. The message is matched by its own frame
+    and not by libtest's blocks, so `--nocapture` output reads the same.
+    """
+    text = output.strip()
+    if exit_code == 0:
+        return ("nothing", None)
+    if not text:
+        return ("failed", f"cargo test exited {exit_code} and wrote nothing")
+    found = list(PT_FAILURE.finditer(text))
+    printed = len(PT_INPUT.findall(text))
+    if printed != len(found):
+        return ("failed", f"{printed} `minimal failing input:` line(s) were printed and "
+                          f"{len(found)} could be read as a proptest failure — this parser "
+                          f"reads the message of proptest >= 1.2 under rustc >= 1.73")
+    if not found:
+        results = list(PT_RESULT.finditer(text))
+        if results:
+            failed = sum(int(m.group("failed")) for m in results)
+            if failed:
+                print(f"cex: {failed} failing test(s), none of them a property "
+                      f"failure — nothing to record")
+            return ("nothing", None)
+        if RS_BUILD_ERROR.search(text):
+            print(f"cex: cargo test exited {exit_code} on a build error before any "
+                  f"test ran — nothing to record")
+            return ("nothing", None)
+        return ("failed", "no `test result:` line, no proptest failure and no rustc "
+                          "error — this is not cargo test output as this parser knows it")
+
+    seed = os.environ.get("PROPTEST_RNG_SEED", "")
+    version = tool_version("cargo")
+    rows, blocks, cursor = [], {}, 0
+    for m in found:
+        rel = m.group("file").strip().replace("\\", "/")
+        if os.path.isabs(rel):
+            inside = os.path.relpath(rel, os.path.abspath(root)).replace(os.sep, "/")
+            rel = rel if inside.startswith("..") else inside
+        name = m.group("name")
+        payload = fold_debug(m.group("input"))
+        why = norm(m.group("why"))
+        saved = None
+        for hit in PT_SEED.finditer(text, cursor, m.start()):
+            saved = "cc " + hit.group("seed")
+        cursor = m.end()
+        key = f"proptest|{rel}|{name}|{payload}"
+        row = {
+            "cexId": "cex_" + sha(key)[:12],
+            "dedupeKey": key,
+            "tool": "proptest",
+            "toolVersion": version,
+            "module": rel,
+            "title": name,
+            "selector": f"{rel}:{name}",
+            "kind": "property",
+            "input": payload or None,
+            "inputForm": "rust-debug" if payload else None,
+            "assertion": why[:-1] if why.endswith(".") else why,
+            "containment": payload,
+            "signature": "counterexample" if payload else "no-counterexample-found",
+            "iterations": int(m.group("successes")),
+            "seed": int(seed) if seed.isdigit() else None,
+            "persistedSeed": saved,
+            "status": "open",
+            "firstSeen": now(),
+            "headSha": head_sha(root),
+        }
+        rows.append(row)
+        blocks[row["cexId"]] = m.group(0)[:20000]
+    return ("rows", rows, lambda row: {"block": blocks.get(row["cexId"], "")})
+
+
 def parse_blaster(root, output, exit_code, source=None):
     """Structured adapter evidence; expected refutations are not open bugs."""
     import blaster
@@ -1483,6 +1630,23 @@ TOOLS = {
                  "not name them; they are in harness order) and assert the fixed result"),
         "call": lambda row: f"assert!(<property>({row.get('input') or ''}));",
     },
+    "proptest": {
+        "parse": parse_proptest,
+        "body": rust_test_body,
+        "roots": None,
+        "ext": ".rs",
+        "inverted": ("annotated `#[should_panic]` or `#[ignore]`: the first passes "
+                     "because the code still panics and goes red the day someone "
+                     "fixes it, the second never runs"),
+        "rerun": lambda row: (f"cargo test {row.get('title')}   (proptest replays the "
+                              f"seeds it saved under proptest-regressions/ before any "
+                              f"new case, so commit that directory; a saved seed stops "
+                              f"meaning this input once the strategy changes, which is "
+                              f"why the pin is a test carrying the values)"),
+        "head": lambda cexid: f"#[test]\nfn {cexid}() {{",
+        "hint": "// call the code under test with the recorded values and assert the fixed result",
+        "call": lambda row: f"assert!(<property>({', '.join(_rust_values(row))}));",
+    },
     "apalache": {
         "parse": parse_apalache,
         "body": tla_test_body,
@@ -1535,6 +1699,30 @@ def _tla_conj(state):
     if "".join(cur).strip():
         parts.append("".join(cur).strip())
     return " /\\ ".join(parts)
+
+
+def _rust_values(row):
+    """The values of a recorded `a = 1, b = [2, 3]` payload, names dropped."""
+    parts, cur, depth, quote, prev = [], [], 0, "", ""
+    for ch in str(row.get("input") or ""):
+        if quote:
+            if ch == quote and prev != "\\":
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0 and not quote:
+            parts.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+        prev = ch
+    if "".join(cur).strip():
+        parts.append("".join(cur).strip())
+    return [p.split(" = ", 1)[1] if " = " in p else p for p in parts]
 
 
 def _pairs(row):
@@ -1846,6 +2034,11 @@ SWEEP_TOOLS = {
     # `--max-success <UINT>` sets how many successful runs make a property
     # valid. Both are read here rather than assumed.
     "aiken": "aiken check --seed {seed} --max-success {max_success}",
+    # Read from proptest 1.12.0, src/test_runner/config.rs: `PROPTEST_RNG_SEED`
+    # (a u64) seeds the generator and `PROPTEST_CASES` sets how many cases a
+    # property must pass. Its changelog has `PROPTEST_` variables taking
+    # precedence over a test's own configuration since 1.2.0.
+    "proptest": "PROPTEST_RNG_SEED={seed} PROPTEST_CASES={max_success} cargo test --workspace --quiet",
 }
 
 

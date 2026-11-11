@@ -12,7 +12,8 @@ import sys
 import tokenize
 
 MARKER = re.compile(
-    r'TODO|FIXME|\bXXX\b|\.unwrap\(\)|\.(skip|only)\(|\bxit\(|#\[ignore\]'
+    r'TODO|FIXME|\bXXX\b|\.unwrap\(\)|\.(skip|only)\(|\bxit\(|#\[ignore(?:\s*=[^\]]*)?\]'
+    r'|\bunimplemented!'
     r'|\bsorry\b|\bAdmitted\b|\{:axiom\}|\{:verify false\}|verifier::external_body'
     r'|--skip-tests|--no-verify|catch\s*(\([^)]*\))?\s*\{\s*\}', re.I)
 HEDGE = re.compile(r'\bfor now\b', re.I)
