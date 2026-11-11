@@ -16,7 +16,17 @@
           "severity": { "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
           "finding": { "type": "string" },
           "exploit_path": { "type": "string" },
-          "minimal_fix": { "type": "string" }
+          "minimal_fix": { "type": "string" },
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional. Where the defect lives: a file and line, or a component and its entry point. With class it lets a graph key one defect that several reviewers word differently."
+          },
+          "class": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional. A short stable name for the kind of defect, such as authorization-bypass."
+          }
         }
       }
     },

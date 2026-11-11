@@ -70,6 +70,12 @@ command.
      `order` / `topK`) so the judge reads a shortlist, not a landfill —
      and where a consumer needs one field of its predecessor, project it
      with `{{prev.<field>}}` instead of pasting the contract.
+   - between red-team lenses and their refuter panel, the `reduce` is
+     also the claim key: the panel judges one claim per `dedupeBy` key
+     and shows the refuters every lens's wording of it. Key on
+     `target` and `class`. A key on `finding` or `exploit_path` merges
+     nothing two lenses word differently, and every lens that sees a
+     defect then costs its own panel out of `budget.maxNodes`.
 5. Compile-check until clean:
    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" compile-graph.py WORK.md --check`
    Its findings are structural. Fix the IR — never weaken a contract,

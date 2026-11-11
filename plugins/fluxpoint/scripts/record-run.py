@@ -150,7 +150,15 @@ def red_team_review_receipts(summary):
         return set(), ["invalid red-team stage/refutation receipts"]
     results = summary.get("results") or {}
     exempt, errors = set(), []
-    key = lambda f: tuple(f.get(k) for k in ("severity", "finding", "exploit_path", "minimal_fix"))
+    prose = ("severity", "finding", "exploit_path", "minimal_fix")
+    text = lambda f: tuple(f.get(k) for k in prose)
+
+    def key(f, by):
+        # The compiled panel's rule, re-derived: the graph's declared
+        # dedupe key when the claim carries every field of it, and the
+        # claim's exact text otherwise, so an absent field merges nothing.
+        keyed = by is not None and all(f.get(k) is not None and str(f.get(k)).strip() != "" for k in by)
+        return ("key" if keyed else "text",) + tuple(f.get(k) for k in (by if keyed else prose))
     identity = lambda c: sorted(tuple(s[k] for k in ("repository", "base", "head", "files", "additions", "deletions")) for s in c["subject"])
     for terminal, info in meta["terminals"].items():
         final = results.get(terminal)
@@ -211,7 +219,9 @@ def red_team_review_receipts(summary):
                         claims.extend(row["findings"])
                     elif "severity" in row:
                         claims.append(row)
-            checked = set()
+            # checked[(key fields, class)] holds every wording the refuters
+            # of that class were shown.
+            checked = {}
             for check in meta["checks"].values():
                 if not isinstance(check, dict) or not isinstance(check.get("ids"), list):
                     raise ValueError("invalid independent-refuter binding")
@@ -224,6 +234,15 @@ def red_team_review_receipts(summary):
                 requested, rows = check.get("requested"), check.get("rows")
                 if type(requested) is not int or requested < 1 or not isinstance(rows, list):
                     raise ValueError("invalid requested refuter count")
+                by = check.get("keyBy")
+                if by is not None and (not isinstance(by, list) or not by
+                                       or not all(isinstance(k, str) and k for k in by)):
+                    raise ValueError("invalid claim key in refuter receipt")
+                by = tuple(by) if by is not None else None
+                dropped = check.get("dropped")
+                if dropped is not None and (not isinstance(dropped, list)
+                                            or not all(isinstance(x, dict) for x in dropped)):
+                    raise ValueError("invalid unjudged-collector-claim receipt")
                 for row in rows:
                     votes = row.get("votes") if isinstance(row, dict) else None
                     if (not isinstance(votes, list) or len(votes) != requested
@@ -233,10 +252,21 @@ def red_team_review_receipts(summary):
                             or any(not isinstance(v, dict) or v.get("refuted") is not True
                                    or not isinstance(v.get("reason"), str) or not v["reason"].strip() for v in votes)):
                         raise ValueError("missing, divided or unresolved independent refuters")
-                    if row.get("severity") in ("MEDIUM", "HIGH", "CRITICAL") and requested < 3:
+                    restated = row.get("restatements", [])
+                    if not isinstance(restated, list) or not all(isinstance(x, dict) for x in restated):
+                        raise ValueError("invalid restatements in refuter receipt")
+                    # A merged class is as severe as its worst wording.
+                    if any(x.get("severity") in ("MEDIUM", "HIGH", "CRITICAL")
+                           for x in [row] + restated) and requested < 3:
                         raise ValueError("MEDIUM+ claim needs three independent refuters")
-                    checked.add(key(row))
-            if any(key(claim) not in checked for claim in claims):
+                    if any(key(x, by) != key(row, by) for x in restated):
+                        raise ValueError("refuter receipt merges claims with different keys")
+                    checked.setdefault((by, key(row, by)), set()).update(text(x) for x in [row] + restated)
+            # A claim is refuted when some panel's class holds its exact
+            # wording: sharing a key with a refuted claim is not enough,
+            # because the refuters never read a wording that is not there.
+            keys = {by for by, _ in checked}
+            if any(not any(text(claim) in checked.get((by, key(claim, by)), ()) for by in keys) for claim in claims):
                 raise ValueError("source/intermediate claim has no unanimous refutation receipt")
             exempt.update(stages)
         except (ValueError, TypeError, KeyError) as e:

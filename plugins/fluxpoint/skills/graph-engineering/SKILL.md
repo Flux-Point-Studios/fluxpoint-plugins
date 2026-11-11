@@ -487,6 +487,20 @@ review with `panel:3` on every finding is ~30 agent calls. Tier down and
 the same campaign costs a fraction with the same guarantees where they
 matter.
 
+A `RedTeamV1` panel node that sits after lens producers judges the lenses'
+claims, which the compiled graph reads from their results. The node's own
+output adds no claim and is not judged, so its prompt need not read
+`{{prev}}`. Whatever it returns that no lens claimed is kept in the run's
+receipt as `dropped`. Put a `reduce` with `dedupeBy` between the lenses and
+the panel to say when two findings are one defect. The panel then judges
+one claim per key, at the worst severity any lens gave it, and shows the
+refuters every wording; they refute it only by contradicting all of them.
+A finding missing a key field is judged on its own. Key on structure:
+`RedTeamV1` findings carry an optional `target` and `class` for this. A key
+on prose merges nothing that two lenses word differently, so one defect
+costs a panel per lens, and `--check` warns with the worst case against
+`budget.maxNodes`.
+
 ## Never trust a self-report
 
 A node that writes to the tree may not certify its own work. Mark it

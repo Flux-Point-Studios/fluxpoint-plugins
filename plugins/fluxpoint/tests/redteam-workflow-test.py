@@ -295,7 +295,7 @@ class CompilerReviewTests(unittest.TestCase):
         spec.loader.exec_module(cls.cg)
         cls.contracts = cls.cg.load_contracts(str(PLUGIN / 'contracts'))
 
-    def compiled(self, mode='refuted'):
+    def shipped(self, mode='refuted'):
         ir = self.cg.extract_ir((PLUGIN / 'templates' / 'WORK.feature.md').read_text())
         ir['nodes'] = ir['nodes'][-4:]
         ir['nodes'][0].pop('after', None)
@@ -306,30 +306,49 @@ class CompilerReviewTests(unittest.TestCase):
             ir['nodes'][2]['verify'] = 'panel:1'
         ir['treeGuard'] = False
         ir['requiredArgs'] = []
+        return ir
+
+    def compiled(self, mode='refuted', shape=None):
+        ir = self.shipped(mode)
+        if shape:
+            shape(ir)
         # Keep the exact six-lens/reduce/panel:3/terminal shape and role binding.
         js = self.cg.emit(ir, self.contracts).replace('export const meta', 'const meta')
         prefix = r"""
 import {writeFileSync} from 'node:fs';
-const mode=MODE,scope=SCOPE,lenses=LENSES,calls=[];
-const args={},log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
+const mode=MODE,scope=SCOPE,lenses=LENSES,calls=[],prompts=[],logs=[];
+const args={},log=s=>logs.push(String(s)),phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};
 const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const claim={severity:mode==='unknown-source'?'URGENT':mode==='medium'?'MEDIUM':'HIGH',finding:'reachable review boundary bypass',exploit_path:'valid control and attack at pinned subject',minimal_fix:'Enforce the guard at that boundary'};
 const coverage=(lens)=>({subject:structuredClone(scope),attackers:lens?1:lenses.length,lenses:lens?[lens]:lenses,sampled:false});
-const agent=async(p,o)=>{const label=String(o.label);calls.push(label);
+// Two lenses word one defect differently and agree on where it is and what kind it is.
+const worded=['two-wordings','missing-class','worse-restatement'].includes(mode);
+const placed={target:'src/gate.py:40',class:'authorization-bypass'};
+const second={severity:mode==='worse-restatement'?'HIGH':'MEDIUM',finding:'the review boundary can be bypassed',exploit_path:'attack from the pinned subject with its valid control',minimal_fix:'Check the caller at the boundary',...placed};
+if(mode==='missing-class')delete second.class;
+const first=worded?{...claim,severity:mode==='worse-restatement'?'MEDIUM':'HIGH',...placed}:claim;
+const rank=f=>f.severity==='MEDIUM'?2:3;
+const agent=async(p,o)=>{const label=String(o.label);calls.push(label);prompts.push({label,p});
  if(label.startsWith('red-team-lenses:')){
   const lens=label.split(':')[1];
   if(mode==='dead-attacker'&&lens==='authority')return null;
-  const raised=lens==='authority'; const c=coverage(lens);
-  if(mode==='sampled'&&raised)c.sampled=true;
-  return {verdict:raised?'BLOCK':'SHIP',findings:raised?[claim]:[],coverage:c,
-   worstSeverity:raised?claim.severity:'NONE',worstSeverityRank:raised?(claim.severity==='MEDIUM'?2:3):0};
+  const mine=lens==='authority'?first:(worded&&lens==='value')?second:null; const c=coverage(lens);
+  if(mode==='sampled'&&mine)c.sampled=true;
+  return {verdict:mine?'BLOCK':'SHIP',findings:mine?[mine]:[],coverage:c,
+   worstSeverity:mine?mine.severity:'NONE',worstSeverityRank:mine?rank(mine):0};
  }
- if(label==='red-team-refute')return {verdict:'BLOCK',findings:mode==='collector-drop'?[]:[mode==='collector-unknown'?{...claim,severity:'URGENT'}:claim],
-  worstSeverity:mode==='collector-drop'?'NONE':claim.severity,worstSeverityRank:mode==='collector-drop'?0:(claim.severity==='MEDIUM'?2:3),...(mode==='collector-blocker'?{review:{blockers:['Missing control execution']}}:{})};
+ if(label==='red-team-refute'){
+  const returned=mode==='collector-drop'||mode==='no-prev'||worded?[]:mode==='collector-unknown'?[{...claim,severity:'URGENT'}]
+   :mode==='collector-reworded'?[{...claim,finding:claim.finding+', restated by the collector'}]
+   :mode==='collector-novel'?[claim,{severity:'HIGH',finding:'a claim only the collector makes',exploit_path:'no lens reported it',minimal_fix:'none'}]:[claim];
+  return {verdict:'BLOCK',findings:returned,worstSeverity:returned.length?claim.severity:'NONE',worstSeverityRank:returned.length?rank(claim):0,
+   ...(mode==='collector-blocker'?{review:{blockers:['Missing control execution']}}:{})};
+ }
  if(label.includes(':refute')){
   if(mode==='missing-vote'&&label.endsWith('3'))return null;
   return {refuted:mode==='invalid-vote'?'false':mode==='majority'? !label.endsWith('3'):
-    ['refuted','sampled','dead-attacker','missing-vote','underverified','collector-blocker'].includes(mode),reason:'Contradictory executable case and passing valid control'};
+    ['refuted','sampled','dead-attacker','missing-vote','underverified','collector-blocker','collector-reworded','collector-novel',
+     'two-wordings','missing-class','worse-restatement','no-prev'].includes(mode),reason:'Contradictory executable case and passing valid control'};
  }
  return {verdict:'SHIP',findings:[],worstSeverity:'NONE',worstSeverityRank:0,coverage:coverage(),
   ...(mode==='terminal-blocker'?{review:{blockers:['Missing deployment configuration']}}:{})};
@@ -338,7 +357,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push(label);
         with tempfile.TemporaryDirectory() as tmp:
             script, out = Path(tmp) / 'run.mjs', Path(tmp) / 'out.json'
             script.write_text(prefix + '\n(async()=>{\n' + js + '\n})().then(r=>writeFileSync(' + json.dumps(str(out))
-                              + ',JSON.stringify({r,calls}))).catch(e=>writeFileSync(' + json.dumps(str(out))
+                              + ',JSON.stringify({r,calls,prompts,logs}))).catch(e=>writeFileSync(' + json.dumps(str(out))
                               + ',JSON.stringify({error:String(e)})));')
             result = subprocess.run(['node', str(script)], capture_output=True, text=True, timeout=30)
             self.assertTrue(out.exists(), result.stderr)
@@ -365,6 +384,146 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push(label);
                 self.assertEqual(doc['r']['outcome'], 'HALTED', doc)
                 if mode == 'collector-drop':
                     self.assertEqual(len([label for label in doc['calls'] if ':refute' in label]), 3)
+
+    def refutes(self, doc):
+        return [label for label in doc['calls'] if ':refute' in label]
+
+    def test_a_collector_adds_no_claim_to_the_panel(self):
+        # The panel node reads the lenses' output and reviews nothing itself.
+        # A reworded copy of a lens claim used to be judged as a second
+        # claim, at three refuters out of the node ceiling.
+        for mode, text in (('collector-reworded', 'restated by the collector'), ('collector-novel', 'only the collector makes')):
+            with self.subTest(mode=mode):
+                doc = self.compiled(mode)
+                self.assertEqual(doc['r']['outcome'], 'COMPLETE', doc)
+                self.assertEqual(len(self.refutes(doc)), 3)
+                receipt = doc['r']['redTeamReviews']['checks']['red-team-refute']
+                self.assertEqual((len(receipt['rows']), len(receipt['dropped'])), (1, 1))
+                self.assertIn(text, receipt['dropped'][0]['finding'])
+                self.assertTrue(any('red-team-refute' in line and 'not judged' in line for line in doc['logs']), doc['logs'])
+                art, _, err = record({}, summary=doc['r'])
+                self.assertEqual((art['outcome'], art['redTeam']), ('COMPLETE', 'SHIP'), err)
+                # What the collector returned and nobody judged stays in the record.
+                kept = art['summary']['redTeamReviews']['checks']['red-team-refute']['dropped']
+                self.assertEqual([f['finding'] for f in kept], [receipt['dropped'][0]['finding']])
+        # A collector that copies a lens claim exactly drops nothing.
+        self.assertEqual(self.compiled()['r']['redTeamReviews']['checks']['red-team-refute']['dropped'], [])
+
+    def test_the_record_refuses_a_malformed_receipt_of_unjudged_claims(self):
+        valid = self.compiled('collector-novel')['r']
+        for mutate in (lambda s: s['redTeamReviews']['checks']['red-team-refute'].update(dropped=1),
+                       lambda s: s['redTeamReviews']['checks']['red-team-refute'].update(dropped=['a claim']),
+                       lambda s: s['redTeamReviews']['checks']['red-team-refute']['rows'][0].update(restatements='two')):
+            data = copy.deepcopy(valid)
+            mutate(data)
+            art, _, _ = record({}, summary=data)
+            self.assertEqual((art['outcome'], art['redTeam']), ('BLOCKED-REDTEAM', 'BLOCK'))
+
+    def test_a_panel_node_over_lens_sources_need_not_read_prev(self):
+        # Its output is fixed, so pasting every lens result into its prompt
+        # buys nothing. Any other node that names `after` still has to use it.
+        def errors(ir):
+            return [e for e in self.cg.validate(ir, self.contracts) if '{{prev}}' in e]
+        ir = self.shipped()
+        self.assertEqual(errors(ir), [])
+        ir['nodes'][2]['prompt'] = 'Start the refuter panel over the lens claims. Return BLOCK and no findings.'
+        self.assertEqual(errors(ir), [])
+        ir['nodes'][3]['prompt'] = 'Bind the final verdict.'
+        self.assertEqual(len(errors(ir)), 1)
+        doc = self.compiled('no-prev', lambda ir: ir['nodes'][2].update(
+            prompt='Start the refuter panel over the lens claims. Return BLOCK and no findings.'))
+        self.assertEqual((doc['r']['outcome'], len(self.refutes(doc))), ('COMPLETE', 3))
+        trigger = next(row['p'] for row in doc['prompts'] if row['label'] == 'red-team-refute')
+        self.assertNotIn('reachable review boundary bypass', trigger)
+
+    def test_the_declared_dedupe_key_is_the_panels_claim_key(self):
+        coarse = lambda ir: ir['nodes'][1]['reduce'].update(dedupeBy=['target', 'class'])
+        prose = lambda ir: ir['nodes'][1]['reduce'].update(dedupeBy=['finding', 'exploit_path'])
+        doc = self.compiled('two-wordings', coarse)
+        self.assertEqual((doc['r']['outcome'], len(self.refutes(doc))), ('COMPLETE', 3), doc)
+        receipt = doc['r']['redTeamReviews']['checks']['red-team-refute']
+        self.assertEqual(receipt['keyBy'], ['target', 'class'])
+        self.assertEqual(len(receipt['rows']), 1)
+        row = receipt['rows'][0]
+        # One class, the worst severity either lens gave it, and every wording kept.
+        self.assertEqual((row['severity'], len(row['restatements'])), ('HIGH', 1))
+        self.assertEqual(row['restatements'][0]['finding'], 'the review boundary can be bypassed')
+        for prompt in (r['p'] for r in doc['prompts'] if ':refute' in r['label']):
+            self.assertIn('reachable review boundary bypass', prompt)
+            self.assertIn('the review boundary can be bypassed', prompt)
+            self.assertIn('every one of them', prompt)
+        art, _, err = record({}, summary=doc['r'])
+        self.assertEqual((art['outcome'], art['redTeam']), ('COMPLETE', 'SHIP'), err)
+        # The worse wording decides the class, whichever lens wrote it.
+        worse = self.compiled('worse-restatement', coarse)['r']['redTeamReviews']['checks']['red-team-refute']['rows']
+        self.assertEqual([(r['severity'], r['restatements'][0]['severity']) for r in worse], [('HIGH', 'MEDIUM')])
+        # A key on prose merges nothing that is worded differently, and a
+        # claim missing a key field is never merged into another.
+        self.assertEqual(len(self.refutes(self.compiled('two-wordings', prose))), 6)
+        self.assertEqual(len(self.refutes(self.compiled('missing-class', coarse))), 6)
+
+    def test_the_record_rechecks_a_merged_class_by_its_key(self):
+        coarse = lambda ir: ir['nodes'][1]['reduce'].update(dedupeBy=['target', 'class'])
+        valid = self.compiled('two-wordings', coarse)['r']
+        self.assertEqual(record({}, summary=copy.deepcopy(valid))[0]['redTeam'], 'SHIP')
+        for mutate in (lambda s: s['results']['red-team-lenses'][1]['findings'][0].update({'class': 'another-defect'}),
+                       lambda s: s['results']['red-team-lenses'][1]['findings'][0].pop('target'),
+                       # The same key is not enough: the refuters never read this wording.
+                       lambda s: s['results']['red-team-lenses'][1]['findings'][0].update(finding='a wording no refuter saw'),
+                       lambda s: s['redTeamReviews']['checks']['red-team-refute']['rows'][0].pop('restatements'),
+                       lambda s: s['redTeamReviews']['checks']['red-team-refute']['rows'][0]['restatements'][0].update({'class': 'smuggled'}),
+                       lambda s: s['redTeamReviews']['checks']['red-team-refute'].update(keyBy=['severity']),
+                       lambda s: s['redTeamReviews']['checks']['red-team-refute'].update(keyBy=[]),
+                       lambda s: s['redTeamReviews']['checks']['red-team-refute'].update(keyBy='target')):
+            data = copy.deepcopy(valid)
+            mutate(data)
+            art, _, _ = record({}, summary=data)
+            self.assertEqual((art['outcome'], art['redTeam']), ('BLOCKED-REDTEAM', 'BLOCK'))
+
+    def test_check_names_the_worst_case_of_lenses_keyed_on_prose(self):
+        def about(ir):
+            return [w for w in self.cg.warnings(ir) if 'red-team-refute' in w and 'lenses' in w]
+        ir = self.shipped()
+        ir['nodes'][1]['reduce']['dedupeBy'] = ['finding', 'exploit_path']
+        found = about(ir)
+        self.assertEqual(len(found), 1, self.cg.warnings(ir))
+        # Six lenses, twelve expected claims, three refuters each, against a ceiling of 100.
+        for part in ('6 lenses', '216', 'maxNodes 100', 'dedupeBy'):
+            self.assertIn(part, found[0])
+        ir['nodes'][1]['reduce']['dedupeBy'] = ['target', 'class']
+        self.assertEqual(about(ir), [])
+        ir['nodes'][1]['reduce']['dedupeBy'] = ['finding', 'exploit_path']
+        ir['budget'].pop('maxNodes')
+        self.assertEqual(about(ir), [])
+        # The shipped templates key their claims on structure.
+        for name in ('WORK.feature.md', 'WORK.verified.md'):
+            shipped = self.cg.extract_ir((PLUGIN / 'templates' / name).read_text())
+            self.assertEqual([w for w in self.cg.warnings(shipped) if 'lenses' in w and 'dedupeBy' in w], [], name)
+
+    def test_a_reduce_keeps_an_item_that_lacks_a_key_field(self):
+        # A field the contract declares can be absent from an item. Keyed as
+        # String(undefined), every such item collapsed into one and the note
+        # filed the loss as deduplication.
+        ir = {'version': 1, 'campaign': 'reduce', 'treeGuard': False, 'budget': {'maxNodes': 5},
+              'nodes': [{'id': 'find', 'prompt': 'find', 'contract': 'RedTeamV1'},
+                        {'id': 'distinct', 'reduce': {'from': 'find', 'over': 'findings', 'dedupeBy': ['target', 'class']}}]}
+        self.assertEqual(self.cg.validate(ir, self.contracts), [])
+        f = lambda text, **where: dict({'severity': 'LOW', 'finding': text, 'exploit_path': 'p', 'minimal_fix': 'm'}, **where)
+        found = [f('one', target='a.py:1', **{'class': 'leak'}), f('one again', target='a.py:1', **{'class': 'leak'}),
+                 f('no class', target='a.py:1'), f('no class either', target='a.py:1'), f('nothing')]
+        js = self.cg.emit(ir, self.contracts).replace('export const meta', 'const meta')
+        with tempfile.TemporaryDirectory() as tmp:
+            script, out = Path(tmp) / 'run.mjs', Path(tmp) / 'out.json'
+            script.write_text("import {writeFileSync} from 'node:fs';\n"
+                              "const args={},log=()=>{},phase=()=>{},budget={total:null,remaining:()=>1e9,spent:()=>0};\n"
+                              "const parallel=async(xs)=>Promise.all(xs.map(f=>f()));\n"
+                              "const agent=async()=>({verdict:'BLOCK',findings:" + json.dumps(found)
+                              + ",worstSeverity:'LOW',worstSeverityRank:1});\n(async()=>{\n" + js
+                              + "\n})().then(r=>writeFileSync(" + json.dumps(str(out)) + ",JSON.stringify(r)))"
+                              ".catch(e=>writeFileSync(" + json.dumps(str(out)) + ",JSON.stringify({error:String(e)})));")
+            subprocess.run(['node', str(script)], capture_output=True, text=True, timeout=30)
+            doc = json.loads(out.read_text())
+        self.assertEqual([x['finding'] for x in doc['results']['distinct']], ['one', 'no class', 'no class either', 'nothing'], doc)
 
     def test_recorder_rechecks_vote_source_and_snapshot_receipts(self):
         valid = self.compiled()['r']

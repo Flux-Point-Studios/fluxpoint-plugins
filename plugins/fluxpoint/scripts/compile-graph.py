@@ -1280,10 +1280,14 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
                     f.append(f"{where}: after join '{dep}' is never consumed; use {{{{prev.{dep}}}}} or {{{{prev.{dep}.<field>}}}}")
             if 'prev' in tokens:
                 f.append(f"{where}: a list after requires named {{{{prev.<id>}}}} projections, not an ambiguous whole prev")
-        elif after and not (_uses_prev(n.get("prompt", "")) or uses_winner):
+        elif after and not (_uses_prev(n.get("prompt", "")) or uses_winner) and not panel_over_sources(n, ir):
             # Nodes already run in declaration order, so an `after` whose
             # output is never consumed is a phantom edge: it reads as a
             # dependency in the spec and constrains nothing in the run.
+            # The exception is a red-team panel node over lens producers:
+            # the emitted code reads its sources through this edge, the
+            # node's own output is fixed, and making it paste every lens
+            # result into its prompt bought the largest prompt in the graph.
             f.append(
                 f"{where}: after '{after}' but the prompt never uses {{{{prev}}}} — "
                 f"declaration order already sequences nodes, so `after` means "
@@ -1944,11 +1948,68 @@ def red_team_sources(n, ir):
     return found
 
 
+# The four fields a shipped RedTeamV1 finding always carries. All prose but
+# the severity: two reviewers who see one defect word it twice.
+RED_TEAM_PROSE_KEY = ("severity", "finding", "exploit_path", "minimal_fix")
+
+
+def red_team_key(n, ir):
+    """The claim identity a red-team panel judges by, or None for exact text.
+
+    A `reduce` with `dedupeBy` between the lenses and the panel is the
+    graph author's statement of when two findings are one defect. The
+    panel used to ignore it and key every raw lens claim on its exact
+    text, so the reduce changed what the collector read and nothing about
+    what was refuted.
+    """
+    by_id = {x.get("id"): x for x in ir.get("nodes", [])}
+    seen, pending = set(), [n]
+    while pending:
+        current = pending.pop(0)
+        for dep in after_ids(current) + ([(current.get("reduce") or {}).get("from")] if is_reduce(current) else []):
+            producer = by_id.get(dep)
+            if not producer or dep in seen:
+                continue
+            seen.add(dep)
+            keys = (producer.get("reduce") or {}).get("dedupeBy") if is_reduce(producer) else None
+            if isinstance(keys, list) and keys and all(isinstance(k, str) and k for k in keys):
+                return list(keys)
+            pending.append(producer)
+    return None
+
+
+def panel_over_sources(n, ir):
+    """A RedTeamV1 panel node whose claims come from lens producers upstream."""
+    return bool(not is_reduce(n) and n.get("contract") == "RedTeamV1" and panel_size(n)
+                and n.get("verifyOver") and not n.get("foreach") and red_team_sources(n, ir))
+
+
 def warnings(ir, agents=None, specification=None, gates=None):
     """Non-blocking findings: shapes that compile but will predictably
     disappoint. Returned separately from validate() so they inform without
     refusing to build."""
     w = []
+    by_id = {x.get("id"): x for x in ir.get("nodes") or [] if isinstance(x, dict)}
+    ceiling = (ir.get("budget") or {}).get("maxNodes")
+    for node in ir.get("nodes") or []:
+        if not isinstance(ceiling, int) or isinstance(ceiling, bool) or not panel_over_sources(node, ir):
+            continue
+        lenses = sum(len((ir.get("lists") or {}).get((by_id.get(sid) or {}).get("foreach"), []))
+                     for sid in red_team_sources(node, ir))
+        key = red_team_key(node, ir)
+        if lenses < 2 or (key and not set(key) & set(RED_TEAM_PROSE_KEY[1:])):
+            continue
+        refuters, expected = panel_size(node), node.get("expectItems")
+        worst = (f"at expectItems {expected} that is {lenses * expected * refuters} refuter calls "
+                 if isinstance(expected, int) and not isinstance(expected, bool)
+                 else f"each defect is {lenses * refuters} refuter calls ")
+        w.append(
+            f"node '{node.get('id', '?')}': {lenses} lenses feed a panel:{refuters} whose claims are keyed on "
+            f"{'prose (dedupeBy ' + ', '.join(key) + ')' if key else 'their exact text'}, so one defect every lens "
+            f"words differently is {lenses} claims; {worst}against budget.maxNodes {ceiling}, and a run that "
+            f"spends the ceiling ends BUDGET-EXHAUSTED before the verdict. Put a reduce between the lenses and "
+            f"the panel whose dedupeBy names structured fields (RedTeamV1 findings carry target and class for "
+            f"this), or size maxNodes for lenses times defects.")
     for node in ir.get('nodes') or []:
         if SUBST.findall(str(node.get("prompt", ""))).count("prev") > 1:
             w.append(f"node '{node.get('id', '?')}': whole {{{{prev}}}} expands more than once; project only the needed fields")
@@ -3222,7 +3283,14 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             terminals[gate["id"]] = {"sources": sources, "stages": stages}
         a("const RED_TEAM_TERMINALS = " + json.dumps(terminals))
 
-        a("const redTeamClaimKey = f => JSON.stringify(['severity','finding','exploit_path','minimal_fix'].map(k => f && f[k]))")
+        a("// A claim's identity for the panel. `by` is the dedupeBy of a reduce the graph put between the")
+        a("// lenses and the panel. A claim missing any of those fields keeps its exact text as its key, so")
+        a("// an absent field never merges two claims.")
+        a(f"const RED_TEAM_PROSE_KEY = {json.dumps(list(RED_TEAM_PROSE_KEY))}")
+        a("const redTeamClaimKey = (f, by) => {")
+        a("  const keyed = Array.isArray(by) && by.length && by.every(k => f && f[k] !== undefined && f[k] !== null && String(f[k]).trim() !== '')")
+        a("  return JSON.stringify([keyed ? 'key' : 'text', ...(keyed ? by : RED_TEAM_PROSE_KEY).map(k => f && f[k])])")
+        a("}")
         a("function redTeamClaims(ids) { return ids.flatMap(id => (Array.isArray(RESULTS[id]) ? RESULTS[id] : []).flatMap(r => Array.isArray(r && r.findings) ? r.findings : [])) }")
 
         a("function redTeamPreamble(ids) { return 'RAW LENS COVERAGE — bind the final verdict to these completed source reviews. Missing coverage, blockers, mismatched snapshots or incomplete sampling must be stated and cannot silently become full coverage.\\n' + JSON.stringify(ids.map(id => ({ node: id, reviews: (Array.isArray(RESULTS[id]) ? RESULTS[id] : [RESULTS[id]]).filter(Boolean).map(r => ({ verdict: r.verdict, findingCount: (r.findings || []).length, coverage: r.coverage || null, blockers: (r.review || {}).blockers || [] })) }))) + '\\n'; }")
@@ -3232,7 +3300,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  if (checks.some(c => c.unresolved || c.rows.some(v => v.unverified || v.cast !== c.requested || v.kills !== c.requested))) return 'final verdict drops a surviving or unverified claim'")
         a("  if (checks.some(c => c.rows.some(v => ['MEDIUM','HIGH','CRITICAL'].includes(v.severity) && c.requested < 3))) return 'MEDIUM+ claim requires three independent refuters'")
         a("  for (const claim of redTeamClaims(ids)) {")
-        a("    const votes = checks.flatMap(c => c.rows).filter(v => redTeamClaimKey(v) === redTeamClaimKey(claim))")
+        a("    const votes = checks.flatMap(c => c.rows.filter(v => redTeamClaimKey(v, c.keyBy) === redTeamClaimKey(claim, c.keyBy)))")
         a("    if (!votes.length || votes.some(v => v.unverified || v.kills < v.cast)) return 'final verdict drops an unchecked, surviving or unverified claim'")
         a("  }")
         a("  for (const id of ids) {")
@@ -3611,7 +3679,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     if needs_panel:
         a("// --- verification: refuters attack the claim; majority kills it ---")
         a(f"const VERIFY_FLOOR = {int(floor)}")
-        a("async function refute(claimText, label, phase, n, priors, codeReview = false) {")
+        a("async function refute(claimText, label, phase, n, priors, codeReview = false, restated = 0) {")
         a("  if (budget.total && budget.remaining() < VERIFY_FLOOR) {")
         a("    log(`budget floor reached — ${label} left UNVERIFIED (no silent caps)`)")
         a("    return { kills: 0, cast: 0, unverified: true }")
@@ -3625,7 +3693,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("      `Attempt to REFUTE this claim. ${claimText}\\n\\n` + (priors || '') +")
         a("        `Re-read the underlying code or evidence YOURSELF; do not trust the claim's own summary. ` +")
         a("        `Hunt for the reason it is wrong: a guard upstream, a type that forbids the state, a test that pins it. ` +")
-        a("        (codeReview ? `Your independent lens is ${['reproduce the minimal case and valid control', 'establish attacker reachability and impact', 'check scope and severity'][i % 3]}. Return refuted=true only with contradictory executable evidence; default refuted=false when uncertain, the fixture breaks or tools are missing.` : `Default to refuted=true when uncertain.`),")
+        a("        (codeReview ? `Your independent lens is ${['reproduce the minimal case and valid control', 'establish attacker reachability and impact', 'check scope and severity'][i % 3]}. Return refuted=true only with contradictory executable evidence; default refuted=false when uncertain, the fixture breaks or tools are missing.` + (restated ? ` This claim carries ${restated} restatement(s): other reviewers' wordings that the graph keys as the same defect. Return refuted=true only when your evidence contradicts every one of them; if any wording describes a defect that stands, the claim stands.` : '') : `Default to refuted=true when uncertain.`),")
         a("      { label: `${label}:refute${i + 1}`, phase, schema: C.VerdictV1, effort: 'low' }")
         a("    )")
         a("  ))")
@@ -3648,15 +3716,38 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("")
         a("// Applies a node's declared tier to every item it produced. Used by")
         a("// fan-out and single nodes alike, so a declared tier always runs.")
-        a("async function verifyItems(result, field, label, phase, n, need, sink, codeReview = false, sourceIds = []) {")
+        a("async function verifyItems(result, field, label, phase, n, need, sink, codeReview = false, sourceIds = [], keyBy = null) {")
         a("  if (!result) return []")
-        a("  const produced = codeReview && sourceIds.length ? [...new Map([...redTeamClaims(sourceIds), ...(result[field] || [])].map(f => [redTeamClaimKey(f), f])).values()] : result[field] || []")
+        a("  let produced = result[field] || [], dropped = []")
+        if any(n.get("contract") == "RedTeamV1" for n in nodes):
+            a("  if (codeReview && sourceIds.length) {")
+            a("    // The panel judges what the source lenses claimed, one class per key. This node read the")
+            a("    // lenses' output and reviewed nothing itself, so what it returns adds no claim: a reworded")
+            a("    // copy used to become a second claim at n refuters out of the node ceiling. Whatever it")
+            a("    // returned that no lens claimed is kept in the receipt, unjudged, for a reader to see.")
+            a("    const classes = new Map()")
+            a("    for (const claim of redTeamClaims(sourceIds)) {")
+            a("      const k = redTeamClaimKey(claim, keyBy)")
+            a("      if (!classes.has(k)) classes.set(k, [])")
+            a("      classes.get(k).push(claim)")
+            a("    }")
+            a("    dropped = (Array.isArray(result[field]) ? result[field] : []).filter(f => !classes.has(redTeamClaimKey(f, keyBy)))")
+            a("    if (dropped.length) log(`${label}: ${dropped.length} finding(s) of its own not judged — the panel judges the source lenses' claims, and a collector adds none`)")
+            a("    // A class takes the worst severity any reviewer gave it and keeps every other wording, so")
+            a("    // the refuters see them all and the record shows what was merged.")
+            a("    produced = [...classes.values()].map(group => {")
+            a("      const worst = group.reduce((x, y) => (SEVERITY_RANK[y.severity] || 0) > (SEVERITY_RANK[x.severity] || 0) ? y : x)")
+            a("      const texts = new Set([redTeamClaimKey(worst)])")
+            a("      const restatements = group.filter(c => { const t = redTeamClaimKey(c); if (texts.has(t)) return false; texts.add(t); return true })")
+            a("      return restatements.length ? { ...worst, restatements } : worst")
+            a("    })")
+            a("  }")
         a("  const judged = await parallel(produced.map((it, i) => () =>")
-        a("    refute(JSON.stringify(it), `${label}:${i}`, phase, n, undefined, codeReview).then(v => ({ ...it, ...v }))")
+        a("    refute(JSON.stringify(it), `${label}:${i}`, phase, n, undefined, codeReview, Array.isArray(it && it.restatements) ? it.restatements.length : 0).then(v => ({ ...it, ...v }))")
         a("  ))")
         a("  const all = judged.filter(Boolean)")
         if any(n.get("contract") == "RedTeamV1" for n in nodes):
-            a("  if (codeReview) RED_TEAM_CHECKS[label] = { ids: sourceIds, requested: n, rows: all, unresolved: redTeamUnresolved(result) }")
+            a("  if (codeReview) RED_TEAM_CHECKS[label] = { ids: sourceIds, requested: n, rows: all, unresolved: redTeamUnresolved(result), ...(sourceIds.length ? { dropped } : {}), ...(sourceIds.length && keyBy ? { keyBy } : {}) }")
 
         a("  // The sink sees every verdict, including the kills the filter")
         a("  // below drops: what a panel rejected, and why, is the half a")
@@ -4058,9 +4149,15 @@ def emit_reduce(n, ir):
     if red.get("dedupeBy"):
         keyexpr = " + '|' + ".join(
             f"String(it[{js_str(k)}])" for k in red["dedupeBy"])
+        # A field the contract declares can still be absent from an item.
+        # Keyed as String(undefined), every such item would collapse into
+        # one and the note would file the loss as deduplication, so an item
+        # missing any key field is kept as its own.
+        present = " && ".join(
+            f"it[{js_str(k)}] !== undefined && it[{js_str(k)}] !== null" for k in red["dedupeBy"])
         a("{")
         a("  const seen = new Set()")
-        a(f"  {var} = {var}.filter(it => {{ const k = {keyexpr}; "
+        a(f"  {var} = {var}.filter(it => {{ if (!(it && {present})) return true; const k = {keyexpr}; "
           f"if (seen.has(k)) return false; seen.add(k); return true }})")
         a("}")
     if red.get("sortBy"):
@@ -4365,7 +4462,8 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
             sink = (", " + lesson_sink(n, need)
                     if (n.get("memory") or {}).get("emit") else "")
             if n.get("contract") == "RedTeamV1":
-                sink = (sink or ", undefined") + ", true, " + json.dumps(red_team_sources(n, ir))
+                sink = ((sink or ", undefined") + ", true, " + json.dumps(red_team_sources(n, ir))
+                        + ", " + json.dumps(red_team_key(n, ir)))
             a(f"const {var} = await verifyItems({raw}, {js_str(over)}, "
               f"{js_str(nid)}, {js_str(phase)}, {panel}, {need}{sink})")
             a(f"log(`{nid}: ${{{var}.length}} item(s) survived {tier}`)")

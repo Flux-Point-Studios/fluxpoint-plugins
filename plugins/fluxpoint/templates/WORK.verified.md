@@ -137,7 +137,7 @@ Campaign section to use it.
       "phase": "Gate",
       "role": "red-team",
       "after": "proof-audit",
-      "prompt": "Review only this adversarial lens: {{item.brief}}. Pin the campaign branch and default-branch base to exact commits before attacking, measure changed files/additions/deletions with git, and report top-level coverage for your actual lens id {{item.key}}, attackers 1 and sampled explicitly. Apply your full checklist within that lens and independent skeptical reproduction. The composition lens attacks sequences across components. Keep findings executable and include minimal-case artifact paths. Put missing work and unresolved claims in review.blockers. Prior proof verdict: {{prev}}. Return RedTeamV1. A lens may BLOCK with findings for independent refutation; never claim complete coverage for work you sampled.",
+      "prompt": "Review only this adversarial lens: {{item.brief}}. Pin the campaign branch and default-branch base to exact commits before attacking, measure changed files/additions/deletions with git, and report top-level coverage for your actual lens id {{item.key}}, attackers 1 and sampled explicitly. Apply your full checklist within that lens and independent skeptical reproduction. The composition lens attacks sequences across components. Keep findings executable and include minimal-case artifact paths. Give each finding a target (the file and line, or the component and entry point, where the defect lives) and a class (a short stable name for the kind of defect, such as authorization-bypass), so two lenses that see one defect name it alike. Put missing work and unresolved claims in review.blockers. Prior proof verdict: {{prev}}. Return RedTeamV1. A lens may BLOCK with findings for independent refutation; never claim complete coverage for work you sampled.",
       "contract": "RedTeamV1",
       "verify": "schema-only",
       "onRed": "halt",
@@ -153,8 +153,8 @@ Campaign section to use it.
         "from": "red-team-lenses",
         "over": "findings",
         "dedupeBy": [
-          "finding",
-          "exploit_path"
+          "target",
+          "class"
         ]
       }
     },
@@ -162,7 +162,7 @@ Campaign section to use it.
       "id": "red-team-refute",
       "phase": "Gate",
       "after": "red-team-distinct",
-      "prompt": "Read these distinct executable claims: {{prev}}. Return them without dropping unresolved claims in findings so three independent refuters can test reproduction, reachability and scope. Preserve exact snapshot, minimal-case paths and valid controls in each exploit_path. Return BLOCK while claims remain; this is an intermediate collection, not the final gate.",
+      "prompt": "Start the refuter panel. The compiled graph takes every claim from the lens results itself, merges the ones that share a target and a class, and sends each to three independent refuters for reproduction, reachability and scope. Return BLOCK with an empty findings array: nothing returned here is judged. This is an intermediate step, not the final gate.",
       "contract": "RedTeamV1",
       "verify": "panel:3",
       "verifyOver": "findings",
@@ -230,8 +230,9 @@ Campaign section to use it.
   UNPROVEN files the run INCOMPLETE; a SOUND with an empty surface is
   reported as vacuous by `record-run.py`.
 - `red-team-lenses` covers six independent surfaces, including composition;
-  `red-team-distinct` deduplicates; `red-team-refute` runs three refuters per
-  claim; the separate `red-team` gate binds their results and raw coverage.
+  `red-team-distinct` keys one defect on its `target` and `class`;
+  `red-team-refute` runs three refuters per defect over every lens's wording
+  of it; the separate `red-team` gate binds their results and raw coverage.
   BLOCK, incomplete coverage and unverified claims stop the campaign.
 
 ## Failure policy
