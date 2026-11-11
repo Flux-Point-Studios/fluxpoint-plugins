@@ -43,7 +43,7 @@ CODE = 'RESUME-PAST-NO-RESUME-NODE: lenses'
 DESIGN = {'summary': 's', 'plan': [], 'files': [], 'risks': []}
 
 
-def graph(flag=True, max_nodes=12, parked=False):
+def graph(flag=True, max_nodes=12, parked=False, reduced=False):
     """Build, three review lenses, then a verdict over them. The lenses are the review."""
     lenses = {'id': 'lenses', 'after': 'build', 'foreach': 'lens', 'prompt': 'review {{item.key}} of {{prev}}',
               'contract': 'FindingsV1', 'onRed': 'halt'}
@@ -51,6 +51,11 @@ def graph(flag=True, max_nodes=12, parked=False):
         lenses['resume'] = 'never'
     nodes = [{'id': 'build', 'prompt': 'build it', 'contract': 'DesignV1'}, lenses,
              {'id': 'verdict', 'after': 'lenses', 'prompt': 'judge {{prev}}', 'contract': 'DesignV1'}]
+    if reduced:
+        # The lenses drop what the budget declines and a reduce sits between them and the verdict.
+        lenses['onRed'] = 'drop+log'
+        nodes.insert(2, {'id': 'distinct', 'reduce': {'from': 'lenses', 'over': 'findings', 'dedupeBy': ['claim']}})
+        nodes[3]['after'] = 'distinct'
     if parked:
         # A person signs before the review, and work that does not wait for them goes on.
         nodes.insert(1, {'id': 'sign-off', 'after': 'build', 'actor': 'human', 'prompt': 'approve {{prev}}',
@@ -194,6 +199,20 @@ class RecordedRun(unittest.TestCase):
         found = self.refusal(partly, graph(max_nodes=2))
         self.assertTrue(found and found.startswith(CODE), found)
 
+    def test_a_reduce_over_lenses_that_never_ran_is_not_a_start(self):
+        # Every lens was declined and dropped, and the reduce after them still
+        # files OK over nothing: it is code, it spawns no one, and no review ran.
+        ir = graph(max_nodes=1, reduced=True)
+        summary = recorded(ir)
+        self.assertEqual(summary['results']['distinct'], [])
+        self.assertIn(('distinct', 'OK'), [(row['node'], row['status']) for row in summary['provenance']])
+        self.assertIsNone(self.refusal(summary, ir))
+        # Once a lens has returned, the reduce holds what it found.
+        ran = recorded(graph(reduced=True), dead={'verdict'})
+        self.assertTrue(ran['results']['distinct'])
+        found = self.refusal(ran, graph(reduced=True))
+        self.assertTrue(found and found.startswith(CODE), found)
+
     def test_a_record_from_before_the_field_is_read_by_what_it_holds(self):
         # Compiled before the node declared the field, so the record names no declaration.
         old = recorded(graph(flag=False), dead={'lenses:b'})
@@ -206,7 +225,8 @@ class RecordedRun(unittest.TestCase):
                       {'results': {'verdict': DESIGN}},
                       {'results': {'lenses': []}, 'provenance': [{'node': 'lenses', 'status': 'DEAD', 'detail': '0/3 returned'}]},
                       {'provenance': [{'node': 'lenses:b', 'status': 'WRONG-BASE', 'detail': ''}]},
-                      {'callRecords': [{'opts': {'label': 'lenses:a'}, 'mode': 'live'}]}):
+                      {'callRecords': [{'opts': {'label': 'lenses:a'}, 'mode': 'live'}]},
+                      {'callRecords': [{'opts': {'label': 'verdict'}, 'mode': 'live'}]}):
             with self.subTest(holds=holds):
                 found = self.refusal(dict({'results': {}, 'provenance': []}, **holds))
                 self.assertTrue(found and found.startswith(CODE), found)
@@ -214,6 +234,7 @@ class RecordedRun(unittest.TestCase):
                       {'results': {'lenses': None, 'verdict': None}},
                       {'results': {'lenses': []}, 'provenance': [{'node': 'lenses', 'status': 'SKIPPED', 'detail': 'budget floor'}]},
                       {'provenance': [{'node': 'lenses', 'status': 'BLOCKED', 'detail': 'blocked on sign-off'}]},
+                      {'provenance': [{'node': 'verdict', 'status': 'DEAD', 'detail': 'node returned nothing'}]},
                       {'callRecords': [{'opts': {'label': 'tree-check:before lenses'}, 'mode': 'live'}]}):
             with self.subTest(holds=holds):
                 self.assertIsNone(self.refusal(dict({'results': {}, 'provenance': []}, **holds)))
@@ -411,8 +432,8 @@ class Launcher(unittest.TestCase):
         workflow = resume.assemble(self.args)
         self.assertEqual(self.compiled, ['plan', 'compile', 'compile'])
         self.assertEqual(workflow['args']['_resumeFromRunId'], 'wf_previous')
-        # The build started and died, and nothing after it ran.
-        self.assertEqual(workflow['args']['_resumeReach'], ['build'])
+        # The build died without a result, so the source run holds nothing the node waits on.
+        self.assertEqual(workflow['args']['_resumeReach'], [])
         # The compiled script accepts exactly what the launcher assembled.
         doc = run(graph(), args={key: workflow['args'][key] for key in ('_resumeFromRunId', '_resumeReach')})
         self.assertEqual((doc.get('r') or {}).get('outcome'), 'COMPLETE', doc)

@@ -710,14 +710,20 @@ def no_resume_reach(ir):
             for target in declared}
 
 
-def run_started(summary, labels=()):
+def run_started(summary, labels=(), declared=()):
     """Ids of the nodes a recorded run started, read from its own record.
 
-    Any one kind of evidence is enough: a result the node produced, a
-    provenance row that is neither a wait nor a decline, or a call under
-    the node's label, in the summary's call records or in `labels` read
+    A node started when the record holds a result it produced, or a call
+    under its label in the summary's call records or in `labels` read
     from the runtime journal. An advisor call belongs to a parked node
     that is still waiting, so it starts nothing.
+
+    For the ids in `declared`, the "resume": "never" nodes themselves, a
+    provenance row that is neither a wait nor a decline counts as well: a
+    fan-out whose workers all died produced nothing and still ran. That
+    row is not enough for any other node. A reduce is code and files OK
+    over a source that never ran, so a bare row from a dependent says
+    nothing about whether the review started.
     """
     started = set()
     results = summary.get("results")
@@ -727,7 +733,9 @@ def run_started(summary, labels=()):
     rows = summary.get("provenance")
     for row in rows if isinstance(rows, list) else ():
         if isinstance(row, dict) and isinstance(row.get("node"), str) and row.get("status") not in NOT_STARTED:
-            started.add(row["node"].split(":")[0])
+            owner = row["node"].split(":")[0]
+            if owner in declared:
+                started.add(owner)
     calls = summary.get("callRecords")
     seen = [((call.get("opts") or {}).get("label") if isinstance(call.get("opts"), dict) else None)
             for call in (calls if isinstance(calls, list) else ()) if isinstance(call, dict)]
@@ -759,7 +767,7 @@ def resume_refusal(ir, summary, labels=()):
     reach = held_no_resume(ir, summary)
     if not reach:
         return None
-    started = run_started(summary, labels)
+    started = run_started(summary, labels, reach)
     for node, after in reach.items():
         hit = [nid for nid in after if nid in started]
         if hit:
@@ -778,13 +786,14 @@ def resume_reach(ir, summary, run_id, projects=None):
     as well as the record, because it also holds an attempt that reached
     further than the last one anybody recorded.
     """
-    if not held_no_resume(ir, summary):
+    held = held_no_resume(ir, summary)
+    if not held:
         return None
     labels = journal_labels(run_id, projects)
     refusal = resume_refusal(ir, summary, labels)
     if refusal:
         raise ValueError(refusal)
-    return sorted(run_started(summary, labels))
+    return sorted(run_started(summary, labels, held))
 
 
 def journal_labels(run_id, projects=None):

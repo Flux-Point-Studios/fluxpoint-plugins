@@ -176,7 +176,9 @@ depends on it, is not resumed: `resume.py --run` and `compile-graph.py
 anything is planned or compiled, and the compiled script refuses before
 its first call. Started means the record shows the node ran: a result it
 produced, a provenance row that is neither a wait nor a decline, or a call
-under its label in the summary or the runtime journal. A node that was
+under its label in the summary or the runtime journal. A node that depends
+on it counts by a result or a call only, because a reduce is code and
+files OK over lenses that never ran. A node that was
 blocked behind a park, or that the budget declined before any call, did not
 start, so a resume that stops before the node is still allowed. The
 declaration rides out in the summary as `noResume`, and a later resume is

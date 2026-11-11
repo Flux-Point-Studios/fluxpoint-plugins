@@ -590,7 +590,7 @@ def resumed_past(root, run_id, summary):
         # Held to what either attempt was compiled with: the field may have
         # been added to the graph, or deleted from it, between the two.
         held = dict(compiler.held_no_resume({}, summary), **compiler.held_no_resume({}, prior))
-        started = compiler.run_started(prior)
+        started = compiler.run_started(prior, (), held)
         for node, after in held.items():
             hit = [nid for nid in after if nid in started]
             if hit:
