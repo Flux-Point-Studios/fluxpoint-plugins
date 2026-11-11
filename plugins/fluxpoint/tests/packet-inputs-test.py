@@ -779,6 +779,20 @@ class PacketInputsTests(unittest.TestCase):
                 self.save()
                 self.assertEqual(self.cli('--lock').returncode, code)
 
+    def test_tracked_file_in_the_state_store_is_not_expanded_from_a_directory_input(self):
+        self.store_checkout()
+        self.write('.claude/fluxpoint/decisions.jsonl', '{"id": "first"}\n')
+        self.write('.claude/settings.json', '{}')
+        # init ignores the store, yet a file in it can still be committed by force.
+        self.git('add', '-f', '.claude/fluxpoint/decisions.jsonl', '.claude/settings.json')
+        self.doc['harnessInputs'] = ['.claude']
+        self.save()
+        harness = self.lock()['harness']
+        self.assertIn('.claude/settings.json', harness)
+        self.assertEqual([p for p in harness if p.startswith('.claude/fluxpoint')], [])
+        self.write('.claude/fluxpoint/decisions.jsonl', '{"id": "first"}\n{"id": "second"}\n')
+        self.assertEqual(self.cli('--check', '--strict-harness').returncode, 0)
+
     def test_store_path_frozen_by_an_older_lock_leaves_at_the_next_lock(self):
         self.store_checkout()
         self.write('.fluxpoint-gates.json', json.dumps({'version': 1, 'gates': {

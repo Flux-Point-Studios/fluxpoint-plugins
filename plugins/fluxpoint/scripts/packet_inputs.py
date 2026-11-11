@@ -234,7 +234,7 @@ class Inputs:
         self.rel(path)
         if path.is_dir():
             prefix = '' if path == self.root else self.rel(path).rstrip('/') + '/'
-            names = sorted(p for p in self.tracked() if p.startswith(prefix))
+            names = sorted(p for p in self.tracked() if p.startswith(prefix) and not self.store(self.root / p))
             if not names:
                 raise ValueError('packet input directory has no tracked files: ' + self.rel(path))
             return [self.path(p) for p in names]
