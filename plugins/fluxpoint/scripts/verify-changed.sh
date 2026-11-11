@@ -59,8 +59,7 @@ $edits
 EOF
 [ "$arm" -eq 1 ] || exit 0
 
-sid="$(printf '%s' "$input" | fpl_json_get session_id)"
-sid="${sid:-nosession}"
+sid="$(fpl_sid "$(printf '%s' "$input" | fpl_json_get session_id)")"
 sd="$(fpl_state_dir)"
 mkdir -p "$sd"
 : >"$sd/$sid.dirty"
