@@ -605,7 +605,13 @@ uncounted because it fails the build once the lint it names stops firing.
 A line scan would not have been enough here, so the scanner reads tokens,
 and it was held to tools that parse Rust: its lexer agreed with
 proc-macro2 on every one of 13,292 files, and its judgment of where a
-test-only item ends agreed with syn at the character on all 30,809 items.
+test-only item ends agreed with syn at the character on all 30,818 items
+and blocks. Agreement on a corpus is not the absence of a hole, and two
+reviews of the scanner found holes the corpus did not have: a crate root
+that only a test declared left the count, and a test-only attribute on the
+last generic parameter took the function body with it. Both are closed
+with the rest of what the reviews confirmed, each as a case in the suite,
+and the comparison with syn now covers parameters as well.
 Run against a Polkadot SDK partner chain workspace of 148 Rust files it
 left 43 out as test code, and what remained in production was a list short
 enough to read in one sitting: mostly discarded currency results and call

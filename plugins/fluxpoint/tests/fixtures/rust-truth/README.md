@@ -7,7 +7,8 @@ What two real Rust front ends say about a source file, printed in a form
   tokenizer outside the compiler, and counts eight token patterns over the
   whole file.
 - `rust-truth extents FILE...` parses each file with `syn` and prints where
-  every item under a test-only attribute ends, as `line:column:kind`.
+  every item, block, field, variant, arm and parameter under a test-only
+  attribute ends, as `line:column:kind`.
 
 Neither mode shares code with the scanner. The cfg predicate and the list
 of test attributes are written out again here on purpose, so a mistake in

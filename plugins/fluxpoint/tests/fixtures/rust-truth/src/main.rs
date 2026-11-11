@@ -251,6 +251,54 @@ impl<'ast> Visit<'ast> for Extents {
         self.note(&arm.attrs, arm, "other");
         visit::visit_arm(self, arm);
     }
+    // A parameter ends where its list does, and two of the three lists
+    // close with a token that pairs with nothing: `>` and `|`.
+    fn visit_generic_param(&mut self, param: &'ast syn::GenericParam) {
+        use syn::GenericParam::*;
+        let attributes: &[Attribute] = match param {
+            Lifetime(x) => &x.attrs,
+            Type(x) => &x.attrs,
+            Const(x) => &x.attrs,
+        };
+        self.note(attributes, param, "other");
+        visit::visit_generic_param(self, param);
+    }
+    fn visit_fn_arg(&mut self, argument: &'ast syn::FnArg) {
+        let attributes: &[Attribute] = match argument {
+            syn::FnArg::Receiver(x) => &x.attrs,
+            syn::FnArg::Typed(x) => &x.attrs,
+        };
+        self.note(attributes, argument, "other");
+        visit::visit_fn_arg(self, argument);
+    }
+    fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+        for input in &closure.inputs {
+            let attributes: &[Attribute] = match input {
+                syn::Pat::Ident(x) => &x.attrs,
+                syn::Pat::Type(x) => &x.attrs,
+                syn::Pat::Wild(x) => &x.attrs,
+                syn::Pat::Reference(x) => &x.attrs,
+                syn::Pat::Tuple(x) => &x.attrs,
+                _ => &[],
+            };
+            self.note(attributes, input, "other");
+        }
+        visit::visit_expr_closure(self, closure);
+    }
+    // A block written as a statement ends at its brace, `const { .. }`
+    // included, which opens with the word that also opens an item.
+    fn visit_expr_block(&mut self, block: &'ast syn::ExprBlock) {
+        self.note(&block.attrs, block, "item");
+        visit::visit_expr_block(self, block);
+    }
+    fn visit_expr_unsafe(&mut self, block: &'ast syn::ExprUnsafe) {
+        self.note(&block.attrs, block, "item");
+        visit::visit_expr_unsafe(self, block);
+    }
+    fn visit_expr_const(&mut self, block: &'ast syn::ExprConst) {
+        self.note(&block.attrs, block, "item");
+        visit::visit_expr_const(self, block);
+    }
 }
 
 fn extents(path: &str) {

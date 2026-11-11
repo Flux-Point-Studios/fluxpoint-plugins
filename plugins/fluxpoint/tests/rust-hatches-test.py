@@ -124,6 +124,78 @@ fn f(p: &mut P, o: Option<u8>, k: &str) -> Result<u8, E> {
         self.assertEqual(tally('#!/usr/bin/env run-cargo-script\nfn main() { todo!() }\n')['rust.todo'], 1)
 
 
+    def test_the_first_line_is_dropped_only_when_rustc_drops_it(self):
+        # rustc strips a byte order mark, then takes `#!` for a shebang unless
+        # what follows it, comments aside, is the `[` of an attribute.
+        self.assertEqual(tally('﻿#!/*\npub fn f(x: Option<u8>) -> u8 { x.unwrap() }\n'), {'rust.panic': 1})
+        self.assertEqual(tally('#!/**/[allow(unused)] pub fn f(x: Option<u8>) -> u8 { x.unwrap() }\n'),
+                         {'rust.lint_allow': 1, 'rust.panic': 1})
+        self.assertEqual(tally('﻿#![allow(unused)]\nfn f() { todo!() }\n'), {'rust.lint_allow': 1, 'rust.todo': 1})
+        self.assertEqual(tally('#! // not a script\n[allow(unused)]\nfn f() { todo!() }\n'),
+                         {'rust.lint_allow': 1, 'rust.todo': 1})
+
+    def test_what_rustc_reads_as_whitespace_separates_tokens_here_too(self):
+        # U+200E and U+200F are whitespace to rustc and to little else, so a
+        # call split by one compiles, ships, and shows nothing in a diff.
+        found = tally('#‎[allow(unused_variables)]\n'
+                      'pub fn f(x: Option<u8>) -> u8 { let unused = 1; if false { todo‏!() } x.‎unwrap() }\n')
+        self.assertEqual(found, {'rust.lint_allow': 1, 'rust.todo': 1, 'rust.panic': 1})
+
+    def test_a_raw_identifier_is_the_identifier_it_spells(self):
+        found = tally('''
+impl Config for Runtime { type r#WeightInfo = (); }
+#[r#allow(unused_variables)]
+pub fn f(x: Option<u8>) -> u8 {
+    if false { r#todo!() }
+    if false { r#panic!("x") }
+    x.r#expect("m") + x.r#unwrap() + x.unwrap::<>() + x.expect::<>("m")
+}
+''')
+        self.assertEqual(found, {'frame.unbenchmarked_weight': 1, 'rust.lint_allow': 1, 'rust.todo': 1, 'rust.panic': 5})
+
+    def test_a_raw_keyword_stays_a_name(self):
+        # `r#type` is a field and `r#mod` a function. Neither starts an item,
+        # and an exclusion that took one for the keyword would run on.
+        found = tally('''
+struct S {
+    #[cfg(test)]
+    r#type: u8,
+    live: Option<u8>,
+}
+fn r#mod(s: S) -> u8 { s.live.unwrap() }
+#[cfg(test)]
+fn probe(r#union: u8) -> u8 { r#union }
+fn after(x: Option<u8>) -> u8 { let r#unsafe = x; r#unsafe.unwrap() }
+''')
+        self.assertEqual(found, {'rust.panic': 2})
+
+    def test_the_source_line_is_the_line_the_number_names(self):
+        from rust_hatches import scan_tree
+        text = '// page one\x0c\n// sep here\npub fn f(x: Option<u8>) -> u8 {\n    x.unwrap()\n}\n'
+        self.assertEqual(list(scan_tree({'src/lib.rs': text})), [('rust.panic', 'src/lib.rs', 4, '    x.unwrap()')])
+
+    def test_deep_nesting_is_read_without_recursion(self):
+        # rustc compiles both. A scanner that raised on either would red a
+        # gate over a file nobody could fix by reading the message.
+        deep = '#[cfg(' + 'not(' * 1000 + 'test' + ')' * 1000 + ')]\nfn f(x: Option<u8>) -> u8 { x.unwrap() }\n'
+        self.assertEqual(tally(deep), {'rust.panic': 1})
+        nested = '#[' + 'cfg_attr(all(), ' * 1000 + 'allow(dead_code)' + ')' * 1000 + ']\nfn f() {}\n'
+        self.assertEqual(tally(nested), {'rust.lint_allow': 1})
+
+    def test_odd_input_is_read_in_linear_time(self):
+        import time
+        from rust_hatches import _Source
+        for label, text in (('a run of test-only attributes', 'm! { ' + '#[cfg(test)] x ' * 16000 + '}\n'),
+                            ('a run of plain attributes', 'm! { ' + '#[a] x ' * 16000 + '}\n'),
+                            ('mismatched brackets', '(' * 40000 + ']' * 40000),
+                            ('discards that never end', '{ let _ = a ' * 20000),
+                            ('nested test-only blocks', '{ #![cfg(test)] ' * 20000 + '}' * 20000)):
+            with self.subTest(label):
+                started = time.time()
+                _Source('x.rs', text).hits()
+                self.assertLess(time.time() - started, 10)
+
+
 class TestCode(unittest.TestCase):
     """Code that only a test build compiles discharges nothing in production."""
 
@@ -352,6 +424,119 @@ pub fn decode(b: &[u8]) -> Option<u64> { Some(read(b).unwrap()) }
 ''')
         self.assertEqual(found, {'rust.panic': 1})
 
+    def test_a_test_only_parameter_ends_where_its_list_ends(self):
+        # A generic or closure parameter has no terminator of its own before
+        # the body, so the exclusion has to stop at the `>` or the `|`.
+        self.assertEqual(tally("pub fn f<#[cfg(test)] 'a>(x: Option<u8>) -> u8 { x.unwrap() }\n"), {'rust.panic': 1})
+        self.assertEqual(tally('pub fn f<#[cfg(test)] const N: usize>(x: Option<u8>) -> u8 { x.unwrap() }\n'
+                               'pub fn g(x: Option<u8>) -> u8 { x.unwrap() }\npub fn h() { todo!() }\nstatic X: u8 = 1;\n'),
+                         {'rust.panic': 2, 'rust.todo': 1})
+        # The shape frame-support uses, with the benchmark variant last.
+        self.assertEqual(tally('''
+impl<
+        #[cfg(not(feature = "runtime-benchmarks"))] F: Inspect,
+        #[cfg(feature = "runtime-benchmarks")] F: Inspect + Mutate<Balance = u64>
+    > Freeze<F>
+{
+    pub fn amount() -> u8 { F::get().unwrap() }
+    pub fn later() -> u8 { todo!() }
+}
+'''), {'rust.panic': 1, 'rust.todo': 1})
+        self.assertEqual(tally('fn main() {\n    let x: Option<u8> = None;\n'
+                               '    let f = |a: u8, #[cfg(test)] _t: ()| x.unwrap();\n    f(1);\n}\n'), {'rust.panic': 1})
+        self.assertEqual(tally('fn main() { let f = |#[cfg(test)] _t: ()| x.unwrap(); }\n'), {'rust.panic': 1})
+
+    def test_a_test_only_const_block_ends_at_its_brace(self):
+        found = tally('pub fn f(x: Option<u8>) -> u8 {\n    #[cfg(test)]\n    const { assert!(true) }\n'
+                      '    let y = x.unwrap();\n    y\n}\n')
+        self.assertEqual(found, {'rust.panic': 1})
+
+    def test_an_inner_attribute_counts_only_where_one_can_stand(self):
+        # `#![cfg(test)]` handed to a macro is tokens, and the file around
+        # it ships.
+        files = {'src/lib.rs': ('mod a;\nconst _: &str = stringify!(#![cfg(test)]);\n'
+                                'pub fn f(x: Option<u8>) -> u8 { x.unwrap() }\n'),
+                 'src/a.rs': 'pub fn g(x: Option<u8>) -> u8 { x.unwrap() }\n'}
+        self.assertEqual(tally(files), {'rust.panic': 2})
+        self.assertEqual(tally('pub fn f(x: Option<u8>) -> u8 { let _s = stringify!(#![cfg(test)]); x.unwrap() }\n'),
+                         {'rust.panic': 1})
+        self.assertEqual(tally('pub fn f(x: Option<u8>) -> u8 { let y = x.unwrap(); #![cfg(test)] y }\n'), {'rust.panic': 1})
+        # Where one can stand it still decides: after other inner attributes
+        # at the top of a file, and first in a module or a function body.
+        self.assertEqual(tally('#![allow(unused)]\n#![cfg(test)]\nfn t() { x().unwrap(); }\n'), {})
+        self.assertEqual(tally('mod tests {\n    #![allow(unused)]\n    #![cfg(test)]\n    fn t() { x().unwrap(); }\n}\n'
+                               'fn real(x: Option<u8>) -> u8 { x.unwrap() }\n'), {'rust.panic': 1})
+
+    def test_a_production_declaration_is_followed_however_it_is_spelled(self):
+        hidden = 'pub fn hidden(x: Option<u8>) -> u8 { x.unwrap() }\n'
+        for label, source in (
+                ('cfg_attr path', '#[cfg_attr(all(), path = "../tests/hidden.rs")]\nmod h;\n'),
+                ('raw string path', '#[path = r"../tests/hidden.rs"]\nmod h;\n'),
+                ('path on an inline module', '#[path = "../tests"]\nmod t { pub mod hidden; }\n'),
+                ('raw string include', 'include!(r"../tests/hidden.rs");\n'),
+                ('include with a trailing comma', 'include!("../tests/hidden.rs",);\n'),
+                ('raw identifier include', 'r#include!("../tests/hidden.rs");\n')):
+            with self.subTest(label):
+                files = {'Cargo.toml': '[package]\nname = "x"\n', 'tests/hidden.rs': hidden, 'src/main.rs': source}
+                self.assertEqual(tally(files), {'rust.panic': 1})
+
+    def test_a_path_under_a_test_only_cfg_attr_is_a_test_only_declaration(self):
+        files = {
+            'src/lib.rs': ('#[cfg_attr(test, path = "mock_clock.rs")]\nmod clock;\n'
+                           '#[cfg_attr(feature = "sim", path = "sim_net.rs")]\nmod net;\n'),
+            'src/clock.rs': 'pub fn now(x: Option<u64>) -> u64 { x.unwrap() }\n',
+            'src/mock_clock.rs': 'pub fn now(x: Option<u64>) -> u64 { todo!() }\n',
+            'src/net.rs': 'pub fn send() { unimplemented!() }\n',
+            'src/sim_net.rs': 'pub fn send() { let _ = drop_it(); }\n',
+        }
+        # The mock is compiled for tests alone. The simulator ships whenever
+        # its feature is on, and so does the file it stands in for.
+        self.assertEqual(tally(files), {'rust.panic': 1, 'rust.todo': 1, 'rust.let_underscore': 1})
+
+    def test_path_on_an_inline_module_names_the_directory_of_its_children(self):
+        # As rustc resolves it: relative to the file's own directory at the
+        # top of a file, and to the enclosing inline module below that.
+        files = {
+            'src/lib.rs': 'mod outer;\n',
+            'src/outer.rs': ('#[cfg(test)]\n#[path = "fixtures"]\nmod checks { mod cases; }\n'
+                             'mod live { #[path = "impl.rs"] pub mod imp; #[cfg(test)] #[path = "t"] mod more { mod deep; } }\n'),
+            'src/fixtures/cases.rs': 'pub fn c() { todo!() }\n',
+            'src/outer/checks/cases.rs': 'pub fn stale(x: Option<u8>) -> u8 { x.unwrap() }\n',
+            'src/outer/live/impl.rs': 'pub fn i(x: Option<u8>) -> u8 { x.unwrap() }\n',
+            'src/outer/live/t/deep.rs': 'pub fn d() { unimplemented!() }\n',
+        }
+        # cases.rs under fixtures/ and deep.rs are what the test-only modules
+        # declare. The file under outer/checks/ is declared by nothing.
+        self.assertEqual(tally(files), {'rust.panic': 2})
+
+    def test_a_build_script_the_manifest_also_ships_is_counted(self):
+        files = {'Cargo.toml': '[package]\nname = "x"\n\n[lib]\npath = "build.rs"\n',
+                 'build.rs': 'mod part;\npub fn api(x: Option<u8>) -> u8 { part::p(x) }\nfn main() {}\n',
+                 'part.rs': 'pub fn p(x: Option<u8>) -> u8 { x.unwrap() }\n'}
+        self.assertEqual(tally(files), {'rust.panic': 1})
+
+    def test_test_bench_and_build_targets_a_manifest_names(self):
+        files = {
+            'Cargo.toml': ('[package]\nname = "x"\nbuild = "build/main.rs"\n\n[[test]]\nname = "it"\npath = "checks/it.rs"\n\n'
+                           '[[bench]]\nname = "b"\npath = "perf/b.rs"\nharness = false\n'),
+            'src/lib.rs': 'pub fn f() {}\n',
+            'build/main.rs': 'fn main() { std::env::var("OUT_DIR").unwrap(); }\n',
+            'checks/it.rs': 'mod common;\n#[test]\nfn t() { a().unwrap(); }\nfn helper() { b().unwrap(); }\n',
+            'checks/common.rs': 'pub fn setup() { c().unwrap(); }\n',
+            'perf/b.rs': 'fn main() { d().unwrap(); }\n',
+        }
+        self.assertEqual(tally(files), {})
+
+    def test_naming_a_shipping_target_as_a_test_does_not_hide_it(self):
+        files = {
+            'Cargo.toml': ('[package]\nname = "x"\nbuild = "src/bin/tool.rs"\n\n[[test]]\nname = "t"\npath = "src/main.rs"\n\n'
+                           '[[bench]]\nname = "b"\npath = "src/engine.rs"\n'),
+            'src/main.rs': 'mod engine;\nfn main() { run().unwrap(); }\n',
+            'src/engine.rs': 'pub fn e(x: Option<u8>) -> u8 { x.unwrap() }\n',
+            'src/bin/tool.rs': 'fn main() { run().unwrap(); }\n',
+        }
+        self.assertEqual(tally(files), {'rust.panic': 3})
+
     def test_no_marker_file_takes_tracked_code_out_of_the_count(self):
         # A `cargo vendor` checksum beside a crate is a file anyone can add,
         # so honouring it would be an off switch that costs nothing.
@@ -412,6 +597,44 @@ class Suppressions(unittest.TestCase):
         self.assertEqual(n('[dependencies]\nallow = "1"\n[package.metadata.x]\nlevel = "allow"\n'), 0)
         self.assertEqual(n('[lints.clippy]\nunwrap_used = "allow"\n', 'crates/a/Cargo.toml'), 1)
         self.assertEqual(n('[lints.clippy]\nunwrap_used = "allow"\n', 'pyproject.toml'), 0)
+
+
+    def test_a_lint_allowed_in_any_manifest_spelling_counts(self):
+        from rust_hatches import manifest_hits
+        for label, text in (
+                ('dotted key under [workspace]', '[workspace]\nlints.rust.unused_variables = "allow"\n'),
+                ('inline table under [workspace]', '[workspace]\nlints = { rust = { unused_variables = "allow" } }\n'),
+                ('inline table at the root', 'lints = { rust = { unused_variables = "allow" } }\n\n[package]\nname = "x"\n'),
+                ('multi-line string quotes', '[lints.rust]\nunused_variables = """allow"""\n'),
+                ('literal multi-line quotes', "[lints.rust]\nunused_variables = '''allow'''\n")):
+            with self.subTest(label):
+                self.assertEqual([category for category, _ in manifest_hits(text)], ['rust.lint_allow'])
+        # A key that merely starts with the word is not the lints table.
+        self.assertEqual(manifest_hits('[workspace]\nlints_dir = "allow"\n[package]\nlints-extra = "allow"\n'), [])
+
+    def test_a_select_branch_is_not_a_discard(self):
+        # `tokio::select!` writes each branch `pattern = future => body`. A
+        # service loop is full of `_ = shutdown.cancelled() => break`, and
+        # nothing there is thrown away.
+        found = tally('''
+pub async fn serve(mut rx: Receiver<Job>, shutdown: CancellationToken) {
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = tick.tick() => { flush().await; }
+            _ = tokio::signal::ctrl_c() => { break }
+            Some(job) = rx.recv() => handle(job).await,
+        }
+    }
+    _ = flush_all();
+    _ = match last() { Some(v) => v, None => 0 };
+}
+''')
+        self.assertEqual(found, {'rust.let_underscore': 2})
+
+    def test_a_discard_inside_a_macro_repetition_counts(self):
+        found = tally('macro_rules! ignore { ($($e:expr),*) => { $( let _ = $e; )* $( _ = $e; )* }; }\n')
+        self.assertEqual(found, {'rust.let_underscore': 2})
 
 
 class Frame(unittest.TestCase):

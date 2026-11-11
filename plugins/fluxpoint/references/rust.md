@@ -42,7 +42,13 @@ then reports success.
 purpose. They are the same act in different spellings, and an `unwrap`
 rewritten as an `expect` with a reason should not read as a rise. Lints are
 counted by name, not by attribute, so adding a lint to an existing
-`#[allow(...)]` list is a rise.
+`#[allow(...)]` list is a rise. A manifest's lint counts in every spelling
+Cargo honours: a `[lints.rust]` table, a dotted key or an inline table at
+the root or under `[workspace]`, and a level written `{ level = "allow" }`.
+
+A call is counted however its name is written. `x.r#unwrap()` and
+`x.unwrap::<>()` are `x.unwrap()`, and so is a call split by U+200E or
+U+200F, which rustc reads as whitespace and a diff does not show.
 
 FRAME states its safety obligations as attributes, and its opt-outs the
 same way.
@@ -81,11 +87,21 @@ name:
 - a file every declaration of which is such a module: `#[cfg(test)] mod
   tests;` makes `tests.rs` test code, and whatever `tests.rs` declares in
   turn. `#[path = "..."]` is followed, and so is `include!("file.rs")`;
-- a file that opens with `#![cfg(test)]`;
+- a file or a block that opens with `#![cfg(test)]`. An inner attribute
+  counts where one can stand, at the head of a file or a block. Handed to
+  a macro, as in `stringify!(#![cfg(test)])`, it is tokens, and the file
+  around it ships;
 - Cargo's own `tests/` and `benches/` targets beside a tracked `Cargo.toml`,
-  and the `build.rs` beside it. A build script runs at build time, and when
-  it panics the build fails, which is the opposite of a hatch that passes
-  in silence.
+  and the `build.rs` beside it, together with the `path` a manifest gives
+  a `[[test]]`, a `[[bench]]` or its `build` key. A build script runs at
+  build time, and when it panics the build fails, which is the opposite of
+  a hatch that passes in silence.
+
+A test-only attribute covers what it is on and nothing after it. On a
+generic or a closure parameter that is the parameter, up to the `>` or the
+`|` that closes its list, so `impl<#[cfg(feature = "runtime-benchmarks")]
+F: Mutate> ...` leaves the `impl` block counted. On `const { .. }` it is
+the block.
 
 A module merely named `tests` and declared without the cfg ships in
 production and is counted. A file ships when anything that ships compiles
@@ -101,12 +117,15 @@ it, so two more rules keep code in the count:
   `#[path = "../src/main.rs"]` declares it and does not take the program
   out of the count.
 
-A declaration the scan cannot follow falls on the counted side: the file
-it names stays production, which costs a false rise and hides nothing.
+The declarations followed are `mod name;`, `#[path = "..."]` on it or on
+the inline module around it, as a plain or a raw string and under
+`cfg_attr` too, and `include!("...")`. A declaration the scan cannot
+follow leaves the file it names where its place puts it: counted, unless
+it sits under `tests/` or `benches/` or is a build script.
 
 ## What is deliberately not counted
 
-A ratchet that cries wolf is re-baselined blind, so three things are left
+A ratchet that cries wolf is re-baselined blind, so four things are left
 out and one is handed to a tool with better information.
 
 - `#[expect(...)]` warns once the lint it names stops firing, which the
@@ -116,6 +135,9 @@ out and one is handed to a tool with better information.
 - `.expect(` counts only with a message: a string literal, `format!` or
   `concat!`. A parser's own `self.expect(Token::Comma)?` is another method.
 - `let _ = f()?;` propagated the error and dropped only the `Ok` payload.
+- `_ = shutdown.cancelled() => break` is a branch of `tokio::select!`,
+  which writes each one `pattern = future => body`. Nothing is discarded
+  there, and a service loop is full of them.
 - Numeric `as` casts, indexing and unchecked arithmetic lose something for
   some types and nothing for others, and a token scan has no types. Clippy
   does. Turn its lints on in the manifest and the `allow` that silences
@@ -135,16 +157,32 @@ that took a crate out of the count would be a file anyone could add. The
 baseline absorbs vendored code, and a dependency bump that moves a count is
 re-recorded in the diff that made it.
 
-Known misses: code a macro generates (a macro definition is counted once,
-where it is written), an `include!` whose path is computed, a target
-`path` a manifest spreads over several lines of an inline table, a crate
-root in a tree that tracks no `Cargo.toml` (nothing there tells it from a
-module, so one that only test code declares is left out),
-`Option::unwrap(x)` written as a path, a message passed to `.expect` in a
-variable, `.ok();` used to discard a result, `if cfg!(test)` branches, a
-`WeightInfo` whose own implementation was written by hand, and the opt-outs
-of the benchmarks themselves (`#[benchmark(skip_meta)]`, `pov_mode =
-Ignored`), which sit in code the scan leaves out as benchmark-only.
+Known misses:
+
+- code a macro generates. A macro definition is counted once, where it is
+  written, and that includes a `let _ = $e;` inside a `$( ... )*`;
+- what a macro does with the tokens it is handed. They are read as the
+  code they look like, so a macro that strips `#[cfg(test)]` from its
+  input hides what follows it;
+- a release build that turns a test-only cfg on, by naming
+  `runtime-benchmarks` in a `default` feature list or printing
+  `cargo:rustc-cfg=fuzzing` from a build script;
+- an `include!` whose path is computed, a `#[path]` or `include!` literal
+  that carries an escape, and a target `path` a manifest spreads over
+  several lines of an inline table;
+- a crate root in a tree that tracks no `Cargo.toml`. Nothing there tells
+  it from a module, so one that only test code declares is left out;
+- `Option::unwrap(x)` written as a path, a message passed to `.expect` in a
+  variable, `.ok();` used to discard a result, and `if cfg!(test)` branches;
+- a `WeightInfo` whose own implementation was written by hand, and the
+  opt-outs of the benchmarks themselves (`#[benchmark(skip_meta)]`,
+  `pov_mode = Ignored`), which sit in code the scan leaves out as
+  benchmark-only.
+
+One thing is counted although it never ships: a cargo-fuzz crate, whose
+targets are binaries with nothing in their source to say otherwise. The
+baseline absorbs it.
+
 `/fluxpoint:proof-audit` is the pass for what a count cannot see.
 
 ## Attack classes
@@ -278,7 +316,18 @@ tools that do parse Rust. Its lexer was run beside `proc-macro2` over
 their dependencies, plus a partner chain workspace) and the per-file
 counts of eight token patterns agreed on every file. Its judgment of where
 a test-only item ends was run beside `syn` over the same corpus and agreed
-at the exact character on all 30,809 items.
+at the exact character on all 30,818 items and blocks, and to within the
+trailing comma on the 14 fields, variants, arms and parameters.
+
+The scanner was then given to an independent reviewer whose job was to
+make a hatch disappear from the count with an edit that still compiles and
+ships. Thirteen findings were confirmed. Twelve are fixed, each with a
+case in `tests/rust-hatches-test.py`. What tokens cannot settle is listed
+with the known misses above: a release build that turns a test-only cfg
+on, and a cargo-fuzz crate, which is counted. The comparison with `syn`
+was widened to the shapes it had not covered, parameters and blocks
+written as statements, and run against the scanner as it was it reports
+the over-run.
 
 `tests/rust-hatches-live.py` repeats both comparisons. It needs a Rust
 toolchain and a corpus, so it runs by hand and not in the harness:

@@ -17,7 +17,7 @@
     "ink!, Solana, CosmWasm and other Rust contract platforms",
     "Registering every Rust test as a statement obligation",
     "Pebble and other Cardano contract languages, which need their own verified parsers",
-    "Macro expansion, code a build script generates, and an include! whose path is computed"
+    "Macro expansion and what a macro does with the tokens it is handed, code a build script generates, an include! whose path is computed, and a release build that turns a test-only cfg on"
   ],
   "harnessInputs": [
     "plugins/fluxpoint/scripts/spec-guard.py",
@@ -335,7 +335,7 @@
   "requirements": [
     {
       "id": "rust-hatches-counted",
-      "statement": "In production Rust each unsafe keyword, typed hole, panic site, allowed lint and discarded value is counted once in its category, and the same words in comments, strings, raw strings, char literals, lifetimes, longer identifiers and self-retiring #[expect] attributes are not",
+      "statement": "In production Rust each unsafe keyword, typed hole, panic site, allowed lint and discarded value is counted once in its category however its name is written (a raw identifier, an empty turbofish, whitespace only rustc reads as whitespace), and the same words in comments, strings, raw strings, char literals, lifetimes, longer identifiers, self-retiring #[expect] attributes and select! branches written pattern = future => body are not",
       "decisions": [
         "rust-scan-method",
         "rust-categories"
@@ -343,18 +343,18 @@
       "checks": [
         "rust-hatches-tests"
       ],
-      "counterexample": "A message reading \"do not .unwrap() here\" raises rust.panic, or self.0.unwrap() is lexed as a number and missed"
+      "counterexample": "A message reading \"do not .unwrap() here\" raises rust.panic, or self.0.unwrap() is lexed as a number and missed, or x.r#unwrap() is missed, or every _ = shutdown.cancelled() => break in a service loop raises rust.let_underscore"
     },
     {
       "id": "rust-test-code-excluded",
-      "statement": "Code no shipped build compiles (tests, benchmarks, verification harnesses and the Cargo build script) is left out on the evidence of its cfg, its test attribute or its place beside a manifest, including out-of-line modules and included files resolved through the code that names them and Cargo test and bench targets, while a module merely named tests is counted, and so is a crate root or a file that production code names, whatever tests also declare it and wherever it sits",
+      "statement": "Code no shipped build compiles (tests, benchmarks, verification harnesses and the Cargo build script) is left out on the evidence of its cfg, its test attribute or its place beside a manifest, including out-of-line modules and included files resolved through the code that names them and Cargo test and bench targets, while a module merely named tests is counted, and so is a crate root or a file that production code names, whatever tests also declare it and wherever it sits; a test-only attribute covers the item, block or parameter it is on and nothing after it, and an inner attribute counts only at the head of a file or a block",
       "decisions": [
         "rust-test-scope"
       ],
       "checks": [
         "rust-hatches-tests"
       ],
-      "counterexample": "Adding a test that calls unwrap turns the gate red, or renaming a production file to tests.rs removes its hatches from the count, or an integration test that declares src/main.rs with #[path] removes the binary from the count"
+      "counterexample": "Adding a test that calls unwrap turns the gate red, or renaming a production file to tests.rs removes its hatches from the count, or an integration test that declares src/main.rs with #[path] removes the binary from the count, or #[cfg(test)] on the last generic parameter of a function removes its body from the count, or stringify!(#![cfg(test)]) removes the file around it"
     },
     {
       "id": "frame-opt-outs-counted",
@@ -369,7 +369,7 @@
     },
     {
       "id": "rust-lint-gate-held",
-      "statement": "A lint allowed in a Cargo manifest's lints table counts with the source attributes, and a lint gate switched off from a command line in a tracked script, workflow or Cargo config is its own category",
+      "statement": "A lint allowed in a Cargo manifest counts with the source attributes in every spelling Cargo honours (a lints table, a dotted key or an inline table at the root or under [workspace]), and a lint gate switched off from a command line in a tracked script, workflow or Cargo config is its own category",
       "decisions": [
         "rust-categories"
       ],
@@ -537,6 +537,10 @@
     {
       "claim": "A file that only test code declares is test code, so resolving declarations is enough.",
       "resolution": "Not for a file Cargo builds on its own. A crate root has no declaration in production, so an integration test that pulls the binary in with #[path], or a stray #[cfg(test)] mod main, would be its only declaration and the whole program would leave the count. The first version of the scanner had this gap and it was found on review, before any repository armed on it. A target root found where Cargo looks, or named by path in its own manifest, is now never test code by declaration; one production mod or include! line keeps a file counted even under tests/; and a file does not become test code by declaring itself. Across the 13,288 Rust files of the comparison corpus the correction moved no file into the count and three out, each a file that only tests or a build script include."
+    },
+    {
+      "claim": "The lexer agrees with proc-macro2 and the item walker with syn on thirteen thousand files, so the scanner reads Rust as the compiler does.",
+      "resolution": "Agreement on a corpus shows the corpus holds no counterexample, and the comparison only covered the shapes it was written for. An independent reviewer was given the scanner and the brief of hiding a shipped hatch with an edit that still compiles. Thirteen findings were confirmed and reproduced. Twelve are fixed test-first: a test-only attribute on the last generic or closure parameter or on a const block running the exclusion over shipping code, an inner attribute read out of a macro's arguments, U+200E and U+200F not read as whitespace, a byte order mark and a shebang read differently from rustc, raw identifiers and an empty turbofish, path and include! spellings that were not followed, manifest lint spellings, a build script named as the library, test, bench and build targets a manifest names, a discard inside a macro repetition, select! branches counted as discards, and a RecursionError and three quadratic scans on hostile input. One is a limit and is listed with the known misses: a release build that turns a test-only cfg on. A cargo-fuzz crate stays counted. The comparison with syn now covers parameters and statement blocks, and reports the old scanner's over-run on them."
     },
     {
       "claim": "A scanner without macro expansion misses hatches that macros generate.",

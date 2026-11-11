@@ -1,15 +1,15 @@
 {
   "version": 1,
-  "sha256": "9e96a37aaba16e35bc003e946880a27f8529fc310f9d41dca4fd0d1c3296ac4e",
+  "sha256": "1003957c966986e2269b4e35e112384a56b683aef579d3417e2a81aea3232b6b",
   "proofBaselineSha256": null,
   "harness": {
     "plugins/fluxpoint/scripts/spec-guard.py": "1009587af67497530d583600ae7087cce75cdca1d76e4ba4802551e34e7cb15a",
     "plugins/fluxpoint/scripts/specification.py": "18a75078bdf5e81a30f3a47a4eec32ce293822d38fbe088b653c5bf92d1887d4",
     "plugins/fluxpoint/templates/attack-taxonomy.json": "019e64c0cb65ca0ce59f630eb0e589ca18fe0fb91d0c00bba6c221f119f0cdd7",
     "plugins/fluxpoint/tests/cex-test.sh": "6c62a83e1990d1c4ea5903545aa306caad8e39317dd90596d8ebaf267814c437",
-    "plugins/fluxpoint/tests/doc-claims-test.py": "d395ce1dabd09e1d928af6b0ab5532cadd045c6a69fdd8680ab64366674a85fe",
+    "plugins/fluxpoint/tests/doc-claims-test.py": "dea396d7b971b83e474718e27b71388cf2f4c5c6c52ea07896b251e08a4e4c34",
     "plugins/fluxpoint/tests/proof-guard-test.sh": "d1846e5fcc921cad12d0bf157846498bea63938cfcad3db3531c2a9b6f0a3ba7",
-    "plugins/fluxpoint/tests/rust-hatches-test.py": "095080621fd67261a1a0c5b0b8c595e9ff285170275f826c167e8187fa481a56",
+    "plugins/fluxpoint/tests/rust-hatches-test.py": "e79a749e75dcde54cdedc64b8d0c1d0c183af7d9a288bab7a735fcda50645ec7",
     "plugins/fluxpoint/tests/rust-scaffold-test.py": "4dd469a14e889f5343435ba2f1636f99e95cecac1e58c2e6b182afd198bed421",
     "plugins/fluxpoint/tests/rust-taxonomy-test.py": "68ae4c4e26f7f4b6f68ad8613feac78bd3e86725df0e0fb454e2822dd81d4919"
   },

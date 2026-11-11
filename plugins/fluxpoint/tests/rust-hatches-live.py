@@ -9,9 +9,10 @@ everything else rests on are checked against tools that do parse Rust:
             pattern, over each whole file.
   extents   where an item under a test-only attribute ends. Compared with
             syn, to the character, for every item, impl item, trait item,
-            foreign item and `let`; to within one column for a field, a
-            variant and a match arm, where owning the trailing comma is a
-            matter of taste.
+            foreign item, `let` and block written as a statement; to within
+            one column for a field, a variant, a match arm and a generic,
+            function or closure parameter, where owning the trailing comma
+            is a matter of taste.
 
 Not in the harness: it needs a Rust toolchain, crates.io and a corpus, none
 of which the gate may assume. Run it by hand after touching the lexer or
@@ -189,7 +190,7 @@ def main():
     for name in sorted(totals):
         print(f'             {name:<20} {totals[name]}')
     print(f'  extents  {len(parsed)} compared with syn ({len(unparsed)} it could not parse): '
-          f'{items} item(s) and {others} field/variant/arm(s), {misplaced} ended elsewhere, '
+          f'{items} item(s) and {others} field/variant/arm/parameter(s), {misplaced} ended elsewhere, '
           f'{flags} whole-file disagreement(s)')
     print(f'           {scanner_only} region(s) only the scanner reports (macro bodies, expression attributes)')
     return 1 if differing or misplaced or flags else 0
