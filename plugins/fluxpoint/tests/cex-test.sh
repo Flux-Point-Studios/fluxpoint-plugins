@@ -1827,6 +1827,432 @@ check "a tool with no sweep command is RED" 1 "$(rc_of --check)"
 case "$(cex --check 2>&1 >/dev/null)" in *"explicit 'command'"*) ok "  and says what to give it" "said" ;;
   *) bad "  and says what to give it" "silent" ;; esac
 
+# ================= 14. a sixth prover: proptest, Rust property tests ======
+# Captured from a real run, 2026-11-11: proptest 1.12.0 under cargo 1.97.0
+# on the crate below, `PROPTEST_RNG_SEED=2 cargo test --workspace --quiet`,
+# exit 101, with RUST_BACKTRACE=0. Three property failures, one plain
+# assertion failure and one passing property; thread ids and the crate path
+# (edited to /work/ledger) aside, nothing is changed. The replay, plain,
+# green, --nocapture and build-error fixtures are runs of the same crate.
+#
+# Like vitest, a cargo test run mixes property failures with ordinary ones,
+# and only the first kind carries a shrunk input. proptest prints that input
+# with pretty Debug, so a vector spans lines; and it is the second tool
+# whose strings are data, so two spaces must stay two.
+mkpt() {
+  mkrepo proptest
+  mkdir -p "$R/src" "$R/tests"
+  printf '[package]\nname = "ledger"\nversion = "0.1.0"\nedition = "2021"\n\n[dev-dependencies]\nproptest = "1"\n' >"$R/Cargo.toml"
+  cat >"$R/src/lib.rs" <<'EOF'
+pub fn fee(amount: u64, bps: u64) -> u64 {
+    // Bug: the divisor should be 10_000.
+    amount * bps / 9_000
+}
+
+pub fn encode(name: &str, tags: &[u8]) -> Vec<u8> {
+    let mut out = vec![name.len() as u8];
+    out.extend_from_slice(name.as_bytes());
+    out.extend_from_slice(tags);
+    out
+}
+
+pub fn decode(bytes: &[u8]) -> (String, Vec<u8>) {
+    let n = bytes[0] as usize;
+    let name = String::from_utf8_lossy(&bytes[1..1 + n]).into_owned();
+    // Bug: a tag byte of 0 ends the list.
+    let tags = bytes[1 + n..].iter().copied().take_while(|b| *b != 0).collect();
+    (name, tags)
+}
+
+pub fn normalise(name: &str) -> String {
+    // Bug: runs of spaces are kept.
+    name.trim_start().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn fee_never_exceeds_amount(amount in 0u64..1_000_000, bps in 0u64..=10_000) {
+            prop_assert!(fee(amount, bps) <= amount);
+        }
+
+        #[test]
+        fn name_roundtrips(name in "[a-z]{0,8}", tags in proptest::collection::vec(any::<u8>(), 0..4)) {
+            prop_assert_eq!(decode(&encode(&name, &tags)), (name.clone(), tags.clone()));
+        }
+
+        #[test]
+        fn no_run_of_spaces_survives(name in "[a-z ]{0,8}") {
+            prop_assert!(!normalise(&name).contains("  "), "a run of spaces survived");
+        }
+
+        #[test]
+        fn widening_is_lossless(x in any::<u8>()) {
+            prop_assert!(u16::from(x) < 256);
+        }
+    }
+
+    #[test]
+    fn full_rate_is_the_whole_amount() {
+        assert_eq!(fee(9_000, 10_000), 9_000);
+    }
+}
+EOF
+  git -C "$R" add -A; git -C "$R" -c user.email=t@t -c user.name=t commit -qm proptest
+}
+pt_fail() {
+  cat <<'EOF'
+
+running 5 tests
+tests::full_rate_is_the_whole_amount --- FAILED
+tests::fee_never_exceeds_amount --- FAILED
+tests::no_run_of_spaces_survives --- FAILED
+tests::name_roundtrips --- FAILED
+.
+failures:
+
+---- tests::full_rate_is_the_whole_amount stdout ----
+
+thread 'tests::full_rate_is_the_whole_amount' (19633) panicked at src/lib.rs:55:9:
+assertion `left == right` failed
+  left: 10000
+ right: 9000
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::fee_never_exceeds_amount stdout ----
+proptest: Saving this and future failures in /work/ledger/proptest-regressions/lib.txt
+proptest: If this test was run on a CI system, you may wish to add the following line to your copy of the file. (You may need to create it.)
+cc 53a42655cb4af2951240af1a0272c9b27ec4835ae438aaa2248c6885102423b6
+
+thread 'tests::fee_never_exceeds_amount' (19632) panicked at src/lib.rs:31:5:
+Test failed: assertion failed: fee(amount, bps) <= amount at src/lib.rs:34.
+minimal failing input: amount = 180, bps = 9050
+	successes: 13
+	local rejects: 0
+	global rejects: 0
+
+
+---- tests::no_run_of_spaces_survives stdout ----
+proptest: Saving this and future failures in /work/ledger/proptest-regressions/lib.txt
+proptest: If this test was run on a CI system, you may wish to add the following line to your copy of the file.
+cc c7afbae06dc2d03e8eaa5809f97c8645aebfa0eb5f0ae360ce0f75edbc0f821e
+
+thread 'tests::no_run_of_spaces_survives' (19635) panicked at src/lib.rs:31:5:
+Test failed: a run of spaces survived at src/lib.rs:44.
+minimal failing input: name = "a  "
+	successes: 3
+	local rejects: 0
+	global rejects: 0
+
+
+---- tests::name_roundtrips stdout ----
+proptest: Saving this and future failures in /work/ledger/proptest-regressions/lib.txt
+proptest: If this test was run on a CI system, you may wish to add the following line to your copy of the file.
+cc 4519e5b1b7b0e51957e4bc3a95e41e71f84c4063899060dca8751fa2ae6303d9
+
+thread 'tests::name_roundtrips' (19634) panicked at src/lib.rs:31:5:
+Test failed: assertion failed: `(left == right)` 
+  left: `("", [])`,
+ right: `("", [0])` at src/lib.rs:39.
+minimal failing input: name = "", tags = [
+    0,
+]
+	successes: 52
+	local rejects: 0
+	global rejects: 0
+
+
+
+failures:
+    tests::fee_never_exceeds_amount
+    tests::full_rate_is_the_whole_amount
+    tests::name_roundtrips
+    tests::no_run_of_spaces_survives
+
+test result: FAILED. 1 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`
+EOF
+}
+# The second run of the same tree: proptest replays the seeds it saved, so
+# the three "Saving" lines are gone and every `successes` is 0. That is the
+# only difference in the real capture, and the recorded input is the same.
+pt_replay() { pt_fail | sed -e '/^proptest: /d' -e '/^cc [0-9a-f]\{64\}$/d' -e 's/successes: [0-9]*/successes: 0/'; }
+# `cargo test --workspace --quiet full_rate`: the one plain failure alone.
+pt_plain() {
+  cat <<'EOF'
+
+running 1 test
+tests::full_rate_is_the_whole_amount --- FAILED
+
+failures:
+
+---- tests::full_rate_is_the_whole_amount stdout ----
+
+thread 'tests::full_rate_is_the_whole_amount' (19284) panicked at src/lib.rs:55:9:
+assertion `left == right` failed
+  left: 10000
+ right: 9000
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::full_rate_is_the_whole_amount
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+EOF
+}
+# `cargo test --workspace --quiet widening`: the one passing property alone.
+pt_green() {
+  cat <<'EOF'
+
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.01s
+
+EOF
+}
+# `-- --nocapture --test-threads=1`: libtest prints no `---- name stdout ----`
+# blocks, and each panic goes straight to stderr. Stderr first, then stdout.
+pt_nocapture() {
+  cat <<'EOF'
+proptest: Saving this and future failures in /work/ledger/proptest-regressions/lib.txt
+proptest: If this test was run on a CI system, you may wish to add the following line to your copy of the file. (You may need to create it.)
+cc 53a42655cb4af2951240af1a0272c9b27ec4835ae438aaa2248c6885102423b6
+
+thread 'tests::fee_never_exceeds_amount' (19659) panicked at src/lib.rs:31:5:
+Test failed: assertion failed: fee(amount, bps) <= amount at src/lib.rs:34.
+minimal failing input: amount = 180, bps = 9050
+	successes: 13
+	local rejects: 0
+	global rejects: 0
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'tests::full_rate_is_the_whole_amount' (19660) panicked at src/lib.rs:55:9:
+assertion `left == right` failed
+  left: 10000
+ right: 9000
+proptest: Saving this and future failures in /work/ledger/proptest-regressions/lib.txt
+proptest: If this test was run on a CI system, you may wish to add the following line to your copy of the file.
+cc 4519e5b1b7b0e51957e4bc3a95e41e71f84c4063899060dca8751fa2ae6303d9
+
+thread 'tests::name_roundtrips' (19661) panicked at src/lib.rs:31:5:
+Test failed: assertion failed: `(left == right)` 
+  left: `("", [])`,
+ right: `("", [0])` at src/lib.rs:39.
+minimal failing input: name = "", tags = [
+    0,
+]
+	successes: 52
+	local rejects: 0
+	global rejects: 0
+
+
+thread 'tests::no_run_of_spaces_survives' (19662) panicked at src/lib.rs:31:5:
+Test failed: a run of spaces survived at src/lib.rs:44.
+minimal failing input: name = "a  "
+	successes: 0
+	local rejects: 0
+	global rejects: 0
+
+error: test failed, to rerun pass `--lib`
+
+running 5 tests
+tests::fee_never_exceeds_amount --- FAILED
+tests::full_rate_is_the_whole_amount --- FAILED
+tests::name_roundtrips --- FAILED
+tests::no_run_of_spaces_survives --- FAILED
+.
+failures:
+
+failures:
+    tests::fee_never_exceeds_amount
+    tests::full_rate_is_the_whole_amount
+    tests::name_roundtrips
+    tests::no_run_of_spaces_survives
+
+test result: FAILED. 1 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+EOF
+}
+# The same crate with one line that does not type-check appended.
+pt_build() {
+  cat <<'EOF'
+error[E0308]: mismatched types
+  --> src/lib.rs:58:25
+   |
+58 | pub fn broken() -> u8 { "x" }
+   |                    --   ^^^ expected `u8`, found `&str`
+   |                    |
+   |                    expected `u8` because of return type
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `ledger` (lib test) due to 1 previous error
+EOF
+}
+ptcex() { cex --ingest --tool proptest "$@"; }
+ptid() { # $1 = a substring of the test path
+  "$FPL_PY" - "$R/.fluxpoint-cex.jsonl" "$1" <<'PY2'
+import json, sys
+for l in open(sys.argv[1]):
+    r = json.loads(l)
+    if r["tool"] == "proptest" and sys.argv[2] in r["title"]: print(r["cexId"]); break
+PY2
+}
+
+mkpt
+pt_green | ptcex --exit 0 >/dev/null 2>&1
+check "a green cargo test run records nothing" 0 "$(rows)"
+pt_fail | ptcex --exit 0 >/dev/null 2>&1
+check "exit 0 records nothing whatever was printed" 0 "$(rows)"
+pt_fail | ptcex --exit 101 >/dev/null 2>&1
+check "three property failures record three counterexamples" 3 "$(rows)"
+out="$(cex --list)"
+case "$out" in *"[proptest] src/lib.rs:tests::fee_never_exceeds_amount"*)
+  ok "a row names the tool, the file and the test path" "selector" ;;
+  *) bad "a row names the tool, the file and the test path" "${out:0:80}" ;; esac
+case "$out" in *full_rate_is_the_whole_amount*) bad "the plain assertion failure is not in the ledger" "recorded" ;;
+  *) ok "the plain assertion failure is not in the ledger" "absent" ;; esac
+
+"$FPL_PY" - "$R/.fluxpoint-cex.jsonl" <<'PY2' && ok "the shrunk input, the reason and the saved seed are recorded" "verbatim" \
+  || bad "the shrunk input, the reason and the saved seed are recorded" "wrong payload"
+import json, sys
+rows = {json.loads(l)["title"]: json.loads(l) for l in open(sys.argv[1])}
+f = rows["tests::fee_never_exceeds_amount"]
+n = rows["tests::name_roundtrips"]
+s = rows["tests::no_run_of_spaces_survives"]
+assert f["input"] == "amount = 180, bps = 9050", f["input"]
+assert f["kind"] == "property" and f["inputForm"] == "rust-debug" and f["signature"] == "counterexample", f
+assert f["iterations"] == 13, f["iterations"]
+assert "fee(amount, bps) <= amount" in f["assertion"] and "src/lib.rs:34" in f["assertion"], f["assertion"]
+assert f["persistedSeed"] == "cc 53a42655cb4af2951240af1a0272c9b27ec4835ae438aaa2248c6885102423b6", f.get("persistedSeed")
+assert f["module"] == "src/lib.rs" and f["selector"] == "src/lib.rs:tests::fee_never_exceeds_amount", f
+# Pretty Debug spans lines; the recorded value is the one-line form proptest
+# itself writes into proptest-regressions.
+assert n["input"] == 'name = "", tags = [0]', repr(n["input"])
+assert "left == right" in n["assertion"] and "src/lib.rs:39" in n["assertion"], n["assertion"]
+# NOT whitespace-collapsed inside the string: two spaces are the failing case.
+assert s["input"] == 'name = "a  "', repr(s["input"])
+assert s["assertion"].startswith("a run of spaces survived"), s["assertion"]
+PY2
+pt_fail | ptcex --exit 101 >/dev/null 2>&1
+check "re-ingesting the same run appends nothing" 3 "$(rows)"
+# The replay prints no seed and counts no successes. If either were part of
+# the identity, the same bug would be a new row on every run after the first.
+pt_replay | ptcex --exit 101 >/dev/null 2>&1
+check "the replayed run of the same failures appends nothing" 3 "$(rows)"
+
+mkpt
+pt_plain | ptcex --exit 101 >/dev/null 2>&1
+check "a plain assertion failure is not a counterexample" 0 "$(rows)"
+check "and files nothing" 0 "$("$FPL_PY" "$INBOX" --root "$R" --count)"
+
+mkpt
+pt_nocapture | ptcex --exit 101 >/dev/null 2>&1
+check "uncaptured output carries the same three counterexamples" 3 "$(rows)"
+
+# ----- what a proptest pin has to survive
+ptpin() { # $1 = attribute lines above #[test] (may be empty), $2 = body
+  printf 'use ledger::*;\n\n%s#[test]\nfn %s() {\n  %s\n}\n' "$1" "$PID" "$2" >"$R/tests/reg.rs"
+  commit p >/dev/null
+}
+mkpt; pt_fail | ptcex --exit 101 >/dev/null 2>&1; PID="$(ptid fee_never)"
+cex --pin "$PID" >/dev/null 2>&1
+[ -f "$R/.claude/fluxpoint/cex/$PID.rs.draft" ] \
+  && ok "the draft is a Rust test" "rs" || bad "the draft is a Rust test" "missing"
+case "$(cat "$R/.claude/fluxpoint/cex/$PID.rs.draft" 2>/dev/null)" in *"in order: 180, 9050"*"proptest-regressions"*|*"proptest-regressions"*"in order: 180, 9050"*)
+  ok "and names the literals and where proptest keeps its own seeds" "named" ;;
+  *) bad "and names the literals and where proptest keeps its own seeds" "silent" ;; esac
+ptpin '' 'assert!(fee(180, 9050) <= 180);'
+check "a tracked #[test] carrying both values in order pins" 0 \
+  "$(rc_of --pin "$PID" --file tests/reg.rs --test-name "$PID")"
+check "and --check is green" 0 "$(rc_of --check)"
+
+mkpt; pt_fail | ptcex --exit 101 >/dev/null 2>&1; PID="$(ptid fee_never)"
+ptpin '' 'assert!(fee(181, 9050) <= 181);'
+check "a retyped value is refused" 1 "$(rc_of --pin "$PID" --file tests/reg.rs --test-name "$PID")"
+ptpin '' 'assert!(fee(9050, 180) <= 180);'
+check "the values out of order are refused" 1 "$(rc_of --pin "$PID" --file tests/reg.rs --test-name "$PID")"
+ptpin $'#[ignore = "slow"]\n' 'assert!(fee(180, 9050) <= 180);'
+check "#[ignore] with a reason is refused (it never runs)" 1 \
+  "$(rc_of --pin "$PID" --file tests/reg.rs --test-name "$PID")"
+ptpin $'#[should_panic]\n' 'assert!(fee(180, 9050) <= 180);'
+check "#[should_panic] is refused (it inverts the oracle)" 1 \
+  "$(rc_of --pin "$PID" --file tests/reg.rs --test-name "$PID")"
+printf 'use ledger::*;\n\nfn %s() {\n  assert!(fee(180, 9050) <= 180);\n}\n' "$PID" >"$R/tests/reg.rs"; commit plain >/dev/null
+check "a plain fn that no test build collects is refused" 1 \
+  "$(rc_of --pin "$PID" --file tests/reg.rs --test-name "$PID")"
+ptpin '' 'assert!(true);'
+check "an assert!(true) body is refused" 1 "$(rc_of --pin "$PID" --file tests/reg.rs --test-name "$PID")"
+ptpin '' '// fee(180, 9050)
+  assert!(fee(1, 1) <= 1);'
+check "the values in a COMMENT are refused" 1 "$(rc_of --pin "$PID" --file tests/reg.rs --test-name "$PID")"
+printf 'it("%s regression", () => { expect(fee(180, 9050)).toBe(180); });\n' "$PID" >"$R/tests/reg.test.ts"; commit ts >/dev/null
+check "a pin in another tool's language is refused" 1 \
+  "$(rc_of --pin "$PID" --file tests/reg.test.ts --test-name "$PID")"
+
+# A string is data: the failing name has two spaces, and one is another value.
+mkpt; pt_fail | ptcex --exit 101 >/dev/null 2>&1; PID="$(ptid no_run_of_spaces)"
+ptpin '' 'assert!(!normalise("a  ").contains("  "));'
+check "a test carrying the exact string pins" 0 "$(rc_of --pin "$PID" --file tests/reg.rs --test-name "$PID")"
+mkpt; pt_fail | ptcex --exit 101 >/dev/null 2>&1; PID="$(ptid no_run_of_spaces)"
+ptpin '' 'assert!(!normalise("a ").contains("  "));'
+check "the same string retyped shorter is refused" 1 "$(rc_of --pin "$PID" --file tests/reg.rs --test-name "$PID")"
+
+# ----- --check: red on real weakening
+mkpt; pt_fail | ptcex --exit 101 >/dev/null 2>&1; PID="$(ptid fee_never)"
+ptpin '' 'assert!(fee(180, 9050) <= 180);'
+cex --pin "$PID" --file tests/reg.rs --test-name "$PID" >/dev/null 2>&1
+git -C "$R" rm -q tests/reg.rs; commit rm >/dev/null
+check "a deleted proptest regression is red" 1 "$(rc_of --check)"
+
+# ----- drift is loud and never red
+# A failure the parser cannot attach to a test: the input line is there and
+# the frame around it is not the one proptest 1.2+ prints under rustc 1.73+.
+mkpt
+check "a failing input in a frame this parser does not know exits 0" 0 \
+  "$(pt_fail | sed '0,/^Test failed: /s//Test falsified: /' | ptcex --exit 101 >/dev/null 2>&1; echo $?)"
+check "and files INGEST-FAILED" 1 "$("$FPL_PY" "$INBOX" --root "$R" --count)"
+out="$("$FPL_PY" "$INBOX" --root "$R" --list 2>/dev/null || cat "$R/.claude/fluxpoint/inbox.jsonl")"
+case "$out" in *"proptest"*) ok "the inbox row names the tool that drifted" "named" ;;
+  *) bad "the inbox row names the tool that drifted" "${out:0:60}" ;; esac
+check "and nothing half-read is recorded" 0 "$(rows)"
+mkpt
+pt_build | ptcex --exit 101 >/dev/null 2>&1
+check "a build error records nothing" 0 "$(rows)"
+check "and files nothing: no test ran" 0 "$("$FPL_PY" "$INBOX" --root "$R" --count)"
+mkpt
+printf 'some other runner said something else entirely\n' | ptcex --exit 1 >/dev/null 2>&1
+check "output this parser does not know is a parser break" 1 \
+  "$("$FPL_PY" "$INBOX" --root "$R" --count)"
+mkpt
+: | ptcex --exit 101 >/dev/null 2>&1
+check "a failing run that printed nothing is a parser break" 1 \
+  "$("$FPL_PY" "$INBOX" --root "$R" --count)"
+
+# ----- the wide sweep rotates proptest's own seed and case count
+mkpt
+mkdir -p "$R/bin"
+cat >"$R/bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+printf '%s %s %s\n' "${PROPTEST_RNG_SEED:-unset}" "${PROPTEST_CASES:-unset}" "$*" >>"$(dirname "$0")/calls"
+exit 0
+EOF
+chmod +x "$R/bin/cargo"
+printf '{ "version": 1, "tool": "proptest" }\n' >"$R/.fluxpoint-fuzz.json"
+commit fuzz >/dev/null
+check "a proptest sweep runs and exits 0" 0 \
+  "$( ( cd "$R" && PATH="$R/bin:$PATH" "$FPL_PY" "$CEX" --root "$R" --sweep --seeds 2 --max-success 500 ) >/dev/null 2>&1; echo $?)"
+check "each run gets the next seed and the raised case count" \
+  "2 500 test --workspace --quiet|3 500 test --workspace --quiet" "$(paste -sd'|' "$R/bin/calls")"
+
 cd /; rm -rf "$ROOT"
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

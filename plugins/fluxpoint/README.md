@@ -66,9 +66,10 @@ rows; own reruns name the claim under test. See
     bind their executable checks and inputs.
   - Gates and ratchets: `exec-attest.sh` with `attest.py` (hook-minted exit
     codes for declared gates), `secret-guard.py` (credential gate),
-    `proof-guard.py` (escape hatches), `spec-guard.py` (statements),
-    `cex.py` (counterexample ledger for Aiken, Dafny, Kani, Apalache and
-    fast-check and Blaster, plus the off-session seed sweep),
+    `proof-guard.py` (escape hatches, with `rust_hatches.py` reading
+    production Rust and FRAME pallets), `spec-guard.py` (statements),
+    `cex.py` (counterexample ledger for Aiken, Dafny, Kani, Apalache,
+    fast-check, proptest and Blaster, plus the off-session seed sweep),
     `blaster.py` (opt-in Lean/SMT checks and retained replay receipts),
     `mutation-guard.py` (mutation score), `seam-guard.py` (module/Python/HTTP doubles and provider recordings),
     `guard-guard.py` (named guards, their tests and
@@ -127,7 +128,8 @@ rows; own reruns name the claim under test. See
   `WORK.verified.md` (opt-in: a `prover` node beside the builder),
   `WORK.repair.md` (independent repair checks),
   `WORK_PROMPT.md`, `loop.sh`, `attack-taxonomy.json` (the attack classes
-  a repo must specify for Aiken, TypeScript, Python and Compact/Midnight, enforced by spec-guard
+  a repo must specify for Aiken, TypeScript, Python, Compact/Midnight, Rust
+  services and FRAME pallets, enforced by spec-guard
   once copied to `.fluxpoint-attacks.json`), `settings.snippet.json` for Claude Code
   and `codex.config.snippet.toml` for Codex, `tighten-baselines.yml` for
   scheduled review PRs, and `blaster/` for the bridge, manifest and model starter.
@@ -140,6 +142,8 @@ rows; own reruns name the claim under test. See
   workflow under stub agents, and the documented claims the code has to
   keep. The native Lean/Z3 smoke test `blaster-live.py` runs separately in
   CI; Windows CI runs a selected platform suite and a real health sample.
+  `rust-hatches-live.py` compares the Rust scanner with proc-macro2 and syn
+  over a corpus; it needs a Rust toolchain and is run by hand.
 
 ## The two contracts
 
@@ -434,6 +438,19 @@ proved one.
   token and AST parsing. Checker off switches in mypy and pyright configs
   count too. Imports, docstrings, `assert_type` and `noqa` do not count.
   Python alone stays dormant until `--baseline` explicitly arms the ratchet.
+  Production Rust ratchets on the TypeScript argument, read by
+  `rust_hatches.py` from tokens with test code left out: `rust.unsafe`,
+  `rust.todo` (`todo!()` is Rust's `sorry`), `rust.panic` (`.unwrap()`,
+  `.expect("...")`, `panic!`, `unreachable!`), `rust.lint_allow` (each lint
+  an `#[allow]` or a Cargo `[lints]` table switches off), `rust.let_underscore`
+  and `flags.lints_off` (`-A warnings` and `--cap-lints` on a command line).
+  FRAME pallets are counted by the opt-outs FRAME names:
+  `frame.unbenchmarked_weight`, `frame.unbounded_storage`, `frame.dev_mode`,
+  `frame.feeless` and `frame.unsigned`. Test code is decided from the `cfg`
+  or test attribute and from the files that declare each other, never from a
+  file name. `#[expect]` is uncounted for the reason `@ts-expect-error` is,
+  and numeric `as` casts are left to clippy, whose suppressions are counted.
+  See [Rust and FRAME](references/rust.md) for the rules and known misses.
   A category this plugin adds after a repo armed is reported as new and
   left unratcheted until the next `--baseline`, so an upgrade never reds a
   diff nobody wrote.
@@ -461,6 +478,11 @@ proved one.
   The Compact/Midnight taxonomy requires generator-backed tests or waivers
   for nine contract and transaction classes, including gas against growing
   state and witness egress. Compact source or Midnight builder imports activate it.
+  The Rust taxonomy holds ten classes for services that read hostile bytes
+  and move value, and the FRAME taxonomy twelve for pallets and runtimes,
+  after Parity's Polkadot Top Ten. Both are specified by a Rust test
+  function whose name carries the class id; a tracked Rust test activates
+  the first and a pallet or a runtime the second.
   A tracked language whose taxonomy is missing from the manifest is named `NO TAXONOMY` with the classes the
   template holds for it; that is a note until the manifest sets
   `"requireAllLanguages": true`, and a `"languages"` list names the halves

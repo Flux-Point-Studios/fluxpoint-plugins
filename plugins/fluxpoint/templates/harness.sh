@@ -321,21 +321,54 @@ full() {
   if [ -f Cargo.toml ]; then
     has cargo || { echo "harness: Rust project requires cargo; checks did not run" >&2; return 1; }
     cargo fmt --all -- --check
+    # --workspace on the lint and the tests. At a manifest that is both a
+    # package and a workspace, cargo lints and tests the root package alone
+    # and exits 0 over members it never built; on a single crate the flag
+    # changes nothing.
     if cargo clippy --version >/dev/null 2>&1; then
-      cargo clippy --all-targets --quiet -- -D warnings
+      cargo clippy --workspace --all-targets --quiet -- -D warnings
     fi
-    cargo test --quiet
-    # Kani proof harnesses, when the crate declares any. Same shape as the
-    # aiken and dafny blocks: capture,
-    # record, re-raise, with the prover's exit code staying the gate and
-    # the recorder never getting a vote. Put `-Z concrete-playback
+    # The test run is captured the way the provers are. A proptest failure
+    # prints the shrunk input that broke the property, and that is the most
+    # reusable thing a property test produces. Capture, echo, record,
+    # re-raise: cargo's exit code stays the gate and the recorder never gets
+    # a vote. A plain assertion failure carries no generated input and is
+    # not recorded.
+    #
+    # The seed is fixed for the reason aiken's is: proptest draws a new one
+    # per run otherwise, so the same bug shrinks to a different value each
+    # time and files a new counterexample per run. The exploration this
+    # gives up is bought back off-session by `cex.py --sweep`.
+    rust_out="$(mktemp)"
+    rust_rc=0
+    PROPTEST_RNG_SEED="${FPL_PROPTEST_SEED:-1}" cargo test --workspace --quiet >"$rust_out" 2>&1 || rust_rc=$?
+    cat "$rust_out"
+    cx="$(plugin_script cex.py)"
+    if [ -n "$cx" ]; then
+      PROPTEST_RNG_SEED="${FPL_PROPTEST_SEED:-1}" "$FPL_PY" "$cx" --ingest --tool proptest \
+        --from "$rust_out" --exit "$rust_rc" || true
+    fi
+    rm -f "$rust_out"
+    if [ "$rust_rc" -ne 0 ]; then return "$rust_rc"; fi
+    # Kani proof harnesses, when any tracked crate declares one. Same shape
+    # as the aiken and dafny blocks: capture, record, re-raise, with the
+    # prover's exit code staying the gate and the recorder never getting a
+    # vote. Put `-Z concrete-playback
     # --concrete-playback=print` (and whatever else these proofs need) in
     # FPL_KANI_ARGS so the ledger gets the interpreted input values and not
     # only the failed check; `=inplace` writes that playback test into the
     # source instead, where — renamed to carry the cexId and tracked — it is
     # a legal pin target. The output is echoed unconditionally: without the
     # plugin it is the only record of what failed.
-    if grep -rqs 'kani::proof' src; then
+    #
+    # Tracked files across the workspace, not `src` alone: a harness in
+    # crates/*/src was never looked for, so its proofs never ran and the
+    # run read green. The attribute has to open a line, so prose that names
+    # it does not demand the prover; `src` is still searched for a harness
+    # that is not tracked yet.
+    kani_attr='^[[:space:]]*#\[(cfg_attr\([^)]*,[[:space:]]*)?kani::proof'
+    if git grep -qE "$kani_attr" -- '*.rs' 2>/dev/null \
+       || grep -rqsE --include='*.rs' "$kani_attr" src 2>/dev/null; then
       has cargo-kani || { echo "harness: Kani proofs require cargo-kani; verification did not run" >&2; return 1; }
       kani_out="$(mktemp)"
       kani_rc=0

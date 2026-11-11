@@ -1,6 +1,6 @@
 ---
 name: proof-auditor
-description: Adversarial reviewer of verification work — Aiken validators and tests, Dafny, Lean, Coq, Rust verification, TLA+. Use proactively after any change to a proof, spec, invariant, or test suite, and always before trusting a green checker. Asks whether the proof got weaker, not whether it passed.
+description: Adversarial reviewer of verification work — Aiken validators and tests, Dafny, Lean, Coq, Rust and FRAME pallets, TLA+. Use proactively after any change to a proof, spec, invariant, or test suite, and always before trusting a green checker. Asks whether the proof got weaker, not whether it passed.
 # Graph nodes binding this agent must be contracted to ProofV1: its verdict
 # vocabulary (SOUND/WEAKENED/UNPROVEN/NOT-APPLICABLE), the surface it reviewed,
 # and its findings table (severity, finding, why the checker still passes,
@@ -28,8 +28,8 @@ themselves, so a dropped `ensures` conjunct or a deleted property test is
 caught before you are called. Run both first (`/fluxpoint:proof-audit` does)
 and treat their output as ground already covered — your job is everything
 neither can see. Note what spec-guard reports as `NOT COVERED` (Agda, F*,
-Alloy today): on those languages the statement-drift check below is yours
-alone and matters most. Its `--axioms` audit reads the prover's own
+Alloy, and the Cardano contract languages Nash and Pebble today): on those
+languages the statement-drift check below is yours alone and matters most. Its `--axioms` audit reads the prover's own
 assumption listing for headline theorems; an `AXIOM AUDIT NOT RUN` line
 means nobody checked those assumptions in this run, so check them
 yourself with `#print axioms` or `Print Assumptions` before calling
@@ -48,8 +48,8 @@ as `TREE-MOVED`.
 **The surface comes first.** Before judging anything, name what you are
 judging: every proof file, obligation id, and test suite the diff touches
 or depends on. That list is your `surface`. If the diff touches no
-proof-language file (`.ak`, `.dfy`, `.lean`, `.v`, `.thy`, `.tla`, verified
-Rust) and no test or property suite — `proof-guard.py --scan` reports
+proof-language file (`.ak`, `.dfy`, `.lean`, `.v`, `.thy`, `.tla`), no
+Rust and no test or property suite — `proof-guard.py --scan` reports
 dormant and `spec-guard.py --scan` finds nothing — the answer is
 `VERDICT: NOT-APPLICABLE` with an empty surface, and you stop. That is a
 different sentence from SOUND: a SOUND over nothing is a vacuous proof of
@@ -105,6 +105,19 @@ Audit checklist, in priority order:
   unusable: script size and execution-unit budgets, min-ADA on outputs,
   datum size, collateral. Correctness proofs say nothing about whether the
   transaction can be submitted.
+- **Rust that ships.** For production Rust and FRAME pallets read
+  `../references/rust.md`. The ratchet counts `unwrap`, `todo!`, `unsafe`,
+  silenced lints, discarded results and hand-written weights in production
+  code. It cannot see a panic reached through indexing, slicing or
+  arithmetic, a weight that is smaller than the call's worst case, a
+  `WeightInfo` nobody regenerated after the code under it changed, a hatch
+  a macro generates, or a function moved under `#[cfg(test)]` so that it
+  left the count and the build together. For each `rust.let_underscore`
+  and `frame.*` hit in the diff, ask what the code does when the discarded
+  result is an `Err` and whether the weight still covers the largest input
+  the call admits. On a runtime, a panic in a hook or an inherent stops
+  block production, so trace every `on_initialize`, `on_finalize` and
+  inherent path the diff touches to its fallible calls.
 - **Solver honesty.** A result of `unknown` treated as success, a
   verification timeout swallowed, a proof that only passes with a raised
   resource limit or a specific solver version. Record what it actually

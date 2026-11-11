@@ -252,6 +252,20 @@ out="$(sg --check)"
 case "$out" in *"NOT covered"*Agda*) ok "a tracked Agda file is named as uncovered" "named" ;;
   *) bad "a tracked Agda file is named as uncovered" "${out:0:50}" ;; esac
 check "and does not fail the gate on its own" 0 "$(rc_of --check)"
+# Two Cardano contract languages this guard has no parser for. A validator
+# in either is unguarded, and silence would read as the Aiken coverage a
+# repository had before it switched.
+mkrepo; write_aiken
+mkdir -p src
+printf 'module Vault exposing (spend)\n' >src/Vault.nash
+printf 'contract Vault { spend unlock() { fail; } }\n' >src/index.pebble
+commit; sg --baseline >/dev/null
+out="$(sg --check)"
+case "$out" in *"NOT covered"*Nash*Pebble*) ok "tracked Nash and Pebble files are named as uncovered" "named" ;;
+  *) bad "tracked Nash and Pebble files are named as uncovered" "${out:0:60}" ;; esac
+check "and neither fails the gate on its own" 0 "$(rc_of --check)"
+case "$(sg --scan)" in *"NOT COVERED: Nash"*"NOT COVERED: Pebble"*) ok "the scan lists each by name" "listed" ;;
+  *) bad "the scan lists each by name" "silent" ;; esac
 
 # ================= 6. Lean, Coq, Isabelle, TLA+ and Kani are covered =====
 # Each language gets the same four probes the Aiken and Dafny sections use:
@@ -761,11 +775,11 @@ case "$(sg --check)" in *"gates nothing"*) ok "    with the note that it gates n
 base_state
 printf '{"version": 1, "taxonomies": []}\n' >.fluxpoint-attacks.json
 check "an empty taxonomies list is red" 1 "$(rc_of --check)"
-printf '{"version": 1, "taxonomies": [{"language": "rust", "classes": []}]}\n' >.fluxpoint-attacks.json
+printf '{"version": 1, "taxonomies": [{"language": "solidity", "classes": []}]}\n' >.fluxpoint-attacks.json
 # A language with no rule is NOT a malformed manifest; see 9b. The shape of
 # the entry is still checked, which is what the cases around this one cover.
 check "a taxonomy in a language with no rule is uncovered, not red" 0 "$(rc_of --check)"
-case "$(sg --check 2>&1)" in *"NOT COVERED"*rust*) ok "  naming the language" "named" ;;
+case "$(sg --check 2>&1)" in *"NOT COVERED"*solidity*) ok "  naming the language" "named" ;;
   *) bad "  naming the language" "silent" ;; esac
 printf '{"version": 1, "taxonomies": [{"language": "typescript", "classes": [{"nope": 1}]}]}\n' \
   >.fluxpoint-attacks.json
@@ -800,21 +814,24 @@ PY
   commit
 }
 
-unknown_lang rust
+# Rust and FRAME were the examples here until this guard learned them, which
+# is the case working as written: the manifest ran ahead, and the script
+# caught up without anyone having had to delete a class in the meantime.
+unknown_lang solidity
 check "a language this guard has not learned does not fail the gate" 0 "$(rc_of --check)"
 out="$(sg --check 2>&1)"
-case "$out" in *"NOT COVERED: taxonomy 'rust'"*"2 class(es) unchecked"*)
+case "$out" in *"NOT COVERED: taxonomy 'solidity'"*"2 class(es) unchecked"*)
   ok "  it is named, with what it cost" "named" ;;
   *) bad "  it is named, with what it cost" "${out:0:70}" ;; esac
-case "$out" in *"aiken, typescript, python, compact only"*) ok "  and the known languages are listed beside it" "listed" ;;
+case "$out" in *"aiken, typescript, python, compact, rust, frame only"*) ok "  and the known languages are listed beside it" "listed" ;;
   *) bad "  and the known languages are listed beside it" "silent" ;; esac
-case "$out" in *"attack:rust:"*) bad "  its classes are not findings" "red" ;;
+case "$out" in *"attack:solidity:"*) bad "  its classes are not findings" "red" ;;
   *) ok "  its classes are not findings" "unchecked" ;; esac
 out="$(sg --scan)"
-case "$out" in *"attack class rust:attack_reentrancy: UNCHECKED"*)
+case "$out" in *"attack class solidity:attack_reentrancy: UNCHECKED"*)
   ok "  --scan calls them UNCHECKED, a state of their own" "UNCHECKED" ;;
   *) bad "  --scan calls them UNCHECKED, a state of their own" "${out:0:70}" ;; esac
-case "$out" in *"rust:attack_overflow: specified"*|*"rust:attack_overflow: UNSPECIFIED"*)
+case "$out" in *"solidity:attack_overflow: specified"*|*"solidity:attack_overflow: UNSPECIFIED"*)
   bad "  never folded into specified or unspecified" "folded" ;;
   *) ok "  never folded into specified or unspecified" "distinct" ;; esac
 # The language it DOES know keeps gating in the same manifest.
@@ -838,7 +855,7 @@ case "$(sg --check 2>&1)" in *"Did you mean"*) bad "a genuinely different langua
 
 # Shape is still a hard error: this change is about vocabulary, not rigour.
 mkrepo; write_aiken
-printf '{"version": 1, "taxonomies": [{"language": "rust", "classes": [{"nope": 1}]}]}\n' \
+printf '{"version": 1, "taxonomies": [{"language": "solidity", "classes": [{"nope": 1}]}]}\n' \
   >.fluxpoint-attacks.json
 commit
 check "an unknown language with a malformed class is still red" 1 "$(rc_of --check)"
@@ -939,11 +956,11 @@ case "$(sg --check 2>&1)" in *"NO TAXONOMY"*) bad "  with no gap named" "noted" 
 # A manifest carrying only a taxonomy this guard has not learned still owes
 # the language it has learned and the repo tracks.
 mkrepo; write_aiken
-printf '{"version": 1, "taxonomies": [{"language": "rust", "classes": [{"id": "attack_x"}]}]}\n' \
+printf '{"version": 1, "taxonomies": [{"language": "solidity", "classes": [{"id": "attack_x"}]}]}\n' \
   >.fluxpoint-attacks.json
 commit
 out="$(sg --check 2>&1)"
-case "$out" in *"NOT COVERED: taxonomy 'rust'"*"NO TAXONOMY: this repo tracks Aiken"*)
+case "$out" in *"NOT COVERED: taxonomy 'solidity'"*"NO TAXONOMY: this repo tracks Aiken"*)
   ok "an unlearned taxonomy alone still names the missing aiken one" "both named" ;;
   *) bad "an unlearned taxonomy alone still names the missing aiken one" "${out:0:70}" ;; esac
 
@@ -1010,7 +1027,7 @@ case "$(sg --check 2>&1)" in *UNREADABLE*"(did you mean 'typescript'?)"*)
 # one this guard has not learned: that taxonomy is reported NOT COVERED on
 # its own, and a forward-looking declaration is not a malformed one.
 mkrepo; write_aiken
-printf '{"version": 1, "languages": ["aiken", "rust"], "taxonomies": [{"language": "rust", "classes": [{"id": "attack_x"}]}]}\n' \
+printf '{"version": 1, "languages": ["aiken", "solidity"], "taxonomies": [{"language": "solidity", "classes": [{"id": "attack_x"}]}]}\n' \
   >.fluxpoint-attacks.json
 commit
 check "listing an unlearned language the manifest declares is not red" 0 "$(rc_of --check)"

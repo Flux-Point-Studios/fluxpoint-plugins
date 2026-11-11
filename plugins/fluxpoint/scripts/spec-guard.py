@@ -41,7 +41,10 @@ Coverage, stated rather than assumed:
 
 Anything else that looks like proof work (Agda, F*, Alloy) is named as NOT
 COVERED by `--scan` and `--check`, because a guard that silently covers
-nothing is worse than one that is absent.
+nothing is worse than one that is absent. So are two Cardano contract
+languages with test and property declarations of their own, Nash and
+Pebble: a validator written in either is not held by anything here yet,
+and a repository that adopts one is told so on every run.
 
 Three more checks ride on the same scan:
 
@@ -57,8 +60,10 @@ Three more checks ride on the same scan:
   taxonomy   `.fluxpoint-attacks.json` (from templates/attack-taxonomy.json)
              names the attack classes a repo must specify, one taxonomy
              per language: the eUTxO classes a validator answers for, the
-             builder classes the off-chain TypeScript answers for, and the
-             outsider-data and resource-budget classes Python services owe. A class
+             builder classes the off-chain TypeScript answers for, the
+             outsider-data and resource-budget classes Python services owe,
+             the hostile-input and value-moving classes Rust services owe,
+             and the pallet and runtime classes FRAME code owes. A class
              with neither a test of that name nor a waiver with a reason is
              red — route 0 of the escape routes, never specifying the
              property, gets a gate too. Each taxonomy gates only a repo
@@ -106,8 +111,14 @@ COVERED = {
     ".thy": "isabelle", ".tla": "tla", ".cfg": "tla", ".rs": "kani", ".compact": "compact",
 }
 # Proof languages this script recognises and does NOT parse. Reported by
-# name rather than passed over.
-UNCOVERED = {".agda": "Agda", ".fst": "F*", ".als": "Alloy"}
+# name rather than passed over. Nash (`src/**/*.nash`, orbistry/nash) and
+# Pebble (`./src/index.pebble`, HarmonicLabs/pebble) compile to UPLC as Aiken
+# does and declare tests and properties as Aiken does. Both are pre-1.0,
+# and every adapter here that was first written from documentation had to be
+# corrected against the real tool, so they are named until one is verified
+# against its compiler.
+UNCOVERED = {".agda": "Agda", ".fst": "F*", ".als": "Alloy",
+             ".nash": "Nash", ".pebble": "Pebble"}
 
 # `test name(params) fail {` — the signature is the obligation. The fuzzer
 # types in the params are part of it: narrowing a generator narrows what was
@@ -668,7 +679,7 @@ def dod_findings(root, now, recorded):
 # is reported by name: this script would have no rule for deciding whether a
 # class in it is specified, and a taxonomy nothing can be decided about
 # passes every class it holds.
-TAXONOMY_LANGUAGES = ("aiken", "typescript", "python", "compact")
+TAXONOMY_LANGUAGES = ("aiken", "typescript", "python", "compact", "rust", "frame")
 
 
 def _near(lang):
@@ -701,18 +712,24 @@ NAMED_BY = {
     "typescript": "no TypeScript test title or declaration names",
     "python": "no Python pytest test function names",
     "compact": "no generator-backed Midnight test names",
+    "rust": "no Rust test function names",
+    "frame": "no Rust test function names",
 }
 DORMANT_WHY = {
     "aiken": "no Aiken file is tracked",
     "typescript": "no TypeScript test file is tracked",
     "python": "no Python test file is tracked",
     "compact": "no Compact source or Midnight transaction builder is tracked",
+    "rust": "no Rust test function is tracked",
+    "frame": "no FRAME pallet or runtime is tracked",
 }
 # How a tracked language and its classes are named when the manifest has no
 # taxonomy for it. TypeScript is tracked by its test files, the same signal
 # its dormancy reads, so the line says tests rather than source.
-TRACKED_AS = {"aiken": "Aiken", "typescript": "TypeScript tests", "python": "Python tests", "compact": "Compact/Midnight sources"}
-CLASS_KIND = {"aiken": "eUTxO", "typescript": "off-chain builder", "python": "hosted service", "compact": "Midnight contract"}
+TRACKED_AS = {"aiken": "Aiken", "typescript": "TypeScript tests", "python": "Python tests", "compact": "Compact/Midnight sources",
+              "rust": "Rust tests", "frame": "FRAME pallets"}
+CLASS_KIND = {"aiken": "eUTxO", "typescript": "off-chain builder", "python": "hosted service", "compact": "Midnight contract",
+              "rust": "Rust service", "frame": "FRAME pallet"}
 # The shipped taxonomies, beside this script in the plugin. A missing
 # taxonomy is reported with what it leaves ungated, and the template is the
 # one place that list is written down.
@@ -947,6 +964,44 @@ def python_specified(root, files, ids):
     return hits
 
 
+def rust_tree(root, tracked):
+    """Every tracked Rust source and Cargo manifest, read as one tree, or None.
+
+    One tree, because the reader that knows which functions a test build
+    collects is the hatch scanner's, and it decides test code from the files
+    that declare each other. None when the repository tracks no Rust.
+    """
+    files = {}
+    for rel in tracked:
+        if rel.endswith('.rs') or os.path.basename(rel) == 'Cargo.toml':
+            try:
+                with open(os.path.join(root, rel), encoding='utf-8', errors='replace') as source:
+                    files[rel.replace(os.sep, '/')] = source.read()
+            except OSError:
+                continue
+    if not any(rel.endswith('.rs') for rel in files):
+        return None
+    from rust_hatches import Tree
+    return Tree(files)
+
+
+def rust_specified(tree, ids):
+    """{class id: [(file, the file uses a generator)]} from Rust test function names.
+
+    Only a function a test build collects counts: one under `#[test]` or a
+    sibling attribute, including those a `proptest!` block declares. The
+    scanner reads tokens, so an id in a comment or a string is not a name,
+    and a helper that merely carries the id is not a test.
+    """
+    hits = {}
+    for rel, names in sorted(tree.tests().items()):
+        fuzzed = tree.generated(rel)
+        for cid in ids:
+            if any(cid in name for name in names):
+                hits.setdefault(cid, []).append((rel, fuzzed))
+    return hits
+
+
 def midnight_sources(root, tracked):
     for rel in tracked:
         if rel.endswith('.compact'):
@@ -981,6 +1036,7 @@ def taxonomy_context(root, now, tracked=None):
             aiken.setdefault(o["name"], []).append(o)
     ts_files = typescript_test_files(tracked)
     py_files = python_test_files(tracked)
+    rust = rust_tree(root, tracked)
     return {
         "aiken": {"dormant": not aiken and not any(r.endswith(".ak") for r in tracked),
                   "tests": aiken},
@@ -989,6 +1045,8 @@ def taxonomy_context(root, now, tracked=None):
         "compact": {"dormant": not midnight_sources(root, tracked),
                     "files": ts_files + [r for r in tracked if r.endswith(('.test.js', '.spec.js', '.test.mjs', '.spec.mjs'))],
                     "python": py_files},
+        "rust": {"dormant": rust is None or not rust.tests(), "tree": rust},
+        "frame": {"dormant": rust is None or not rust.frame(), "tree": rust},
     }
 
 
@@ -1004,6 +1062,9 @@ def specified_in(root, tax, ctx):
         return {cid: tests[cid] for cid in ids if cid in tests}
     if tax['language'] == 'python':
         return python_specified(root, ctx['python']['files'], ids)
+    if tax['language'] in ('rust', 'frame'):
+        tree = ctx[tax['language']]['tree']
+        return rust_specified(tree, ids) if tree else {}
     if tax['language'] == 'compact':
         hits = typescript_specified(root, ctx['compact']['files'], ids)
         for cid, evidence in python_specified(root, ctx['compact']['python'], ids).items():
@@ -1171,6 +1232,11 @@ def class_findings(root, doc, ctx):
                              f"{where[0][0]}; that file imports no hypothesis, so it covers "
                              f"the cases the file lists. State it over a Hypothesis "
                              f"generator to cover the range.")
+            elif lang in ('rust', 'frame') and not any(fuzzed for _, fuzzed in where):
+                notes.append(f"attack class {lang}:{cid} is specified by an example in "
+                             f"{where[0][0]}; that file uses no proptest, quickcheck, bolero, "
+                             f"arbtest or Kani, so it covers the cases the file lists. State it "
+                             f"over a generator to cover the range.")
             elif lang == 'typescript' and not any(fuzzed for _, fuzzed in where):
                 notes.append(f"attack class {lang}:{cid} is specified by an example in "
                              f"{where[0][0]}; that file imports no fast-check and calls no "

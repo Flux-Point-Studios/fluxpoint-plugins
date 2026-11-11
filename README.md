@@ -91,9 +91,9 @@ the gate dormant.
 | Attestation | `PostToolUse` on `Bash`, or gate wrapper | Records observed exit codes for declared commands. Graph nodes using `prove:<gate>` must cite matching, fresh execution evidence; an agent's typed exit alone cannot satisfy that tier. |
 | Definition-of-Done gate | `Stop` | When code changed this session, runs `scripts/harness.sh --full` plus a hygiene scan for TODO, FIXME, skipped tests and similar markers. Red blocks the stop, up to `FPL_MAX_BLOCKS` times, then yields with a checkpoint notice. The gate records its own Evidence row. |
 | Compaction gate | `PreCompact` | Blocks one compaction when code changed and nothing durable was written, so the reasoning gets written down before the transcript is summarized. |
-| Ratchets | inside `--full` | Escape hatches in proof languages and in TypeScript, theorem statements, the assumption set each headline theorem depends on, mutation score, module mocks and named guards may only move in the safe direction against committed baselines. |
-| Counterexamples | inside `--full` | Failing inputs from `aiken check`, `dafny verify`, `cargo kani` (concrete playback), `apalache-mc` (ITF traces), fast-check (off-chain property tests) and optional Blaster checks are recorded for regression pins. Blaster scalar models require exact replay; its opaque models remain open. A wide sweep over rotating seeds runs off-session for the supported fuzzers. |
-| Specification floor | inside `--full` | A checked Definition-of-Done line citing an obligation id must name one that exists and still says what was recorded. On an Aiken repo, every eUTxO attack class in `.fluxpoint-attacks.json` needs a property test of that name or a waiver carrying a reason. A language the repo tracks that the manifest has no taxonomy for is named on every run, and fails once the manifest sets `requireAllLanguages`. |
+| Ratchets | inside `--full` | Escape hatches in proof languages, in TypeScript and in production Rust and FRAME pallets, theorem statements, the assumption set each headline theorem depends on, mutation score, module mocks and named guards may only move in the safe direction against committed baselines. |
+| Counterexamples | inside `--full` | Failing inputs from `aiken check`, `dafny verify`, `cargo kani` (concrete playback), `apalache-mc` (ITF traces), fast-check (off-chain property tests), proptest (Rust property tests under `cargo test`) and optional Blaster checks are recorded for regression pins. Blaster scalar models require exact replay; its opaque models remain open. A wide sweep over rotating seeds runs off-session for the supported fuzzers. |
+| Specification floor | inside `--full` | A checked Definition-of-Done line citing an obligation id must name one that exists and still says what was recorded. On an Aiken repo, every eUTxO attack class in `.fluxpoint-attacks.json` needs a property test of that name or a waiver carrying a reason; Rust services and FRAME pallets answer for their own classes through Rust test names. A language the repo tracks that the manifest has no taxonomy for is named on every run, and fails once the manifest sets `requireAllLanguages`. |
 | Relations | inside `--full` | Declared artifact pairs are checked for co-change, parity and differential agreement. |
 | Blueprint conformance | inside `--full` | PlutusData the off-chain builder produced is decoded and checked against the CIP-57 schema the validator declares in `plutus.json`, so a proof on one side of the wire is not read as a guarantee about the other. |
 | Review | agents and workflows | Red-team, proof and fix-check verdicts can gate graph progress through typed contracts. Graph audits run outside the campaign. In loop mode, the Stop hook does not independently consume semantic review verdicts; the ship pipeline must enforce them. |
@@ -214,6 +214,7 @@ differences.
 | `FPL_AIKEN_SEED` | 1 | Fuzzer seed for `aiken check` in the scaffolded harness, so a counterexample shrinks the same way each run. |
 | `FPL_DAFNY_ARGS` | empty | Extra arguments for `dafny verify`, such as `--extract-counterexample`. |
 | `FPL_KANI_ARGS` | empty | Extra arguments for `cargo kani`, including concrete playback when counterexample capture is needed. |
+| `FPL_PROPTEST_SEED` | 1 | Seed the scaffolded harness hands proptest as `PROPTEST_RNG_SEED`, so a counterexample shrinks the same way each run. |
 | `FPL_APALACHE_ARGS` | empty | Opt into an Apalache check with the model, invariant and trace arguments required by the repo. |
 | `FPL_PROTOCOL_PARAMS` | unset | A `cardano-cli query protocol-parameters` file for the on-chain budget gate. |
 | `FPL_PAIR_SEED`, `FPL_PAIR_CASES` | from the manifest | Seed and case count for a relation's differential generator. |
@@ -246,6 +247,12 @@ invariants a TLC config names), Kani and Compact. Escape hatches are counted in
 those languages and in TypeScript, where `as any` is the off-chain `sorry`: it
 discharges an obligation the type checker had, `tsc` exits 0 either way, and
 that layer is the one an autonomous caller actually reaches.
+Production Rust is counted on the same argument, with test code left out:
+`todo!()` is Rust's `sorry`, `.unwrap()` asserts what the types said to
+handle, and an `#[allow]` is how clippy's `-D warnings` gets satisfied
+without a fix. A FRAME pallet is counted by the opt-outs FRAME itself
+names, such as a call weight no benchmark produced. See
+[Rust and FRAME](plugins/fluxpoint/references/rust.md).
 The assumption sets come from the
 prover itself — `#print axioms`, `Print Assumptions`, `dafny audit` — so an
 axiom laundered in through a helper lemma is red while every hatch count

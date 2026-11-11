@@ -62,6 +62,43 @@ and .pyi stubs count. Python alone keeps the ratchet dormant until explicitly
 baselined; existing baselines report new categories as not yet ratcheted.
 This is static import resolution, not execution or a replacement for a checker.
 
+Rust is ratcheted twice over. The verification tools were always here
+(`#[verifier::external_body]`, `#[trusted]`, `kani::assume`, a skipped
+mutant). Production Rust is ratcheted on the TypeScript argument, by
+`rust_hatches.py`, which reads tokens and leaves out code only a test build
+compiles: a test that unwraps is asserting, and a count that rose with every
+new test would be re-recorded without being read.
+
+  rust.unsafe          the `unsafe` keyword, wherever a human vouches for
+                       what the borrow checker could not check
+  rust.todo            `todo!()` and `unimplemented!()`: Rust's `sorry`, a
+                       hole that type-checks at any type
+  rust.panic           `.unwrap()`, `.expect("...")`, `panic!`, `unreachable!`:
+                       the None, the Err or the branch the types said to handle
+  rust.lint_allow      each lint an `#[allow(...)]` names and each lint a
+                       Cargo manifest's `[lints]` table sets to "allow"
+  rust.let_underscore  `let _ = f();`, the documented way to silence must_use
+  flags.lints_off      `-A warnings`, `-A clippy::...` and `--cap-lints` in a
+                       tracked script, workflow or Cargo config
+
+and FRAME pallets by the opt-outs FRAME itself names:
+
+  frame.unbenchmarked_weight  a `#[pallet::weight(...)]` that names no
+                              `WeightInfo`; `type WeightInfo = ();` in a
+                              runtime; `#[pallet::whitelist_storage]`
+  frame.unbounded_storage     `#[pallet::without_storage_info]`, `#[pallet::unbounded]`
+  frame.dev_mode              `#[frame_support::pallet(dev_mode)]`
+  frame.feeless               `Pays::No`, `#[pallet::feeless_if(...)]`
+  frame.unsigned              `#[pallet::validate_unsigned]`, `#[pallet::authorize(...)]`,
+                              `ensure_none(origin)`
+
+`#[expect(...)]` is NOT counted, for the reason `@ts-expect-error` is not:
+it warns once the lint it names stops firing. Numeric `as` casts, indexing
+and arithmetic are not counted either, because whether they lose anything
+depends on types a token scan does not have; clippy has them, and the
+`allow` that silences clippy is counted. `rust_hatches.py` states the test
+code rule and the known misses in full.
+
 Two deliberate exclusions, because a ratchet that cries wolf gets
 re-baselined blind. `@ts-expect-error` is NOT counted: it fails the build
 once the error it names goes away, so it cannot rot in place, and counting
@@ -92,6 +129,7 @@ import subprocess
 import sys
 from python_hatches import CATEGORIES as PY_CATEGORIES, scan as scan_python
 from compact_native import CATEGORIES as COMPACT_CATEGORIES, hatches as compact_hatches
+from rust_hatches import CATEGORIES as RUST_CATEGORIES, scan_tree as scan_rust
 
 BASELINE = ".fluxpoint-proof-baseline.json"
 
@@ -153,6 +191,16 @@ PATTERNS = [
      r'"(?:strict|noImplicitAny|strictNullChecks|strictFunctionTypes|'
      r'strictBindCallApply|alwaysStrict|noUncheckedIndexedAccess|'
      r'useUnknownInCatchVariables)"\s*:\s*false'),
+    # --- A lint gate switched off from the command line --------------------
+    # The scaffolded harness fails on a clippy warning, so the bluntest way
+    # past it is to stop the warning being one: `-A` for the group or the
+    # lint, or a cap on every lint at once. `-A` is also `git add -A` and
+    # `ssh -A`, so it counts only before something that reads as a lint.
+    ("flags.lints_off",
+     (".sh", ".yml", ".yaml", ".toml", ".json", ".just", ".mk", "Makefile"),
+     r"(?<![\w-])(?:-A|--allow)[\s=\"',]*"
+     r"(?:(?:warnings|unused_must_use|unsafe_code|dead_code|unused)\b|[a-z_][a-z0-9_]*::[a-z_][a-z0-9_]*)"
+     r"|--cap-lints[\s=\"',]*(?:allow|warn)\b"),
     # --- Verification disabled from the command line ---------------------
     # A flag in a script or CI config that turns the checker off is the
     # bluntest escape hatch of all, and the easiest to miss in review.
@@ -213,7 +261,8 @@ def strip_source(line, suffix):
 
 # Categories that need structure rather than a line match, so they are
 # counted by a small parser instead of a regex.
-STRUCTURAL = ["aiken.vacuous_test", "aiken.constant_predicate", *PY_CATEGORIES, *COMPACT_CATEGORIES]
+STRUCTURAL = ["aiken.vacuous_test", "aiken.constant_predicate", *PY_CATEGORIES, *COMPACT_CATEGORIES,
+              *RUST_CATEGORIES]
 
 TEST_START = re.compile(r"^\s*test\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 # A body that proves nothing: a bare boolean, or a value compared to itself.
@@ -334,6 +383,9 @@ def scan(root):
     counts = {c: 0 for c, _, _ in PATTERNS} | {c: 0 for c in STRUCTURAL}
     hits = {c: [] for c, _, _ in PATTERNS} | {c: [] for c in STRUCTURAL}
     compiled = [(c, sfx, re.compile(rx)) for c, sfx, rx in PATTERNS]
+    # Rust is read as one tree after the walk: whether a file is test code
+    # is decided by the files that declare it.
+    rust = {}
     for rel in tracked_files(root):
         base = os.path.basename(rel)
         suffix = base if base in ("Makefile",) else os.path.splitext(rel)[1]
@@ -349,6 +401,8 @@ def scan(root):
                 lines = fh.readlines()
         except OSError:
             continue
+        if suffix == '.rs' or base == 'Cargo.toml':
+            rust[rel.replace(os.sep, '/')] = ''.join(lines)
         if suffix == '.compact':
             disclosure_path = os.path.join(root, '.fluxpoint-compact-disclosures.json')
             disclosures = {}
@@ -385,6 +439,10 @@ def scan(root):
                     hits["aiken.constant_predicate"].append(
                         f"{rel}:{lineno}: fn {name} always returns `{body}` — decides nothing"
                     )
+    for cat, rel, n, raw in scan_rust(rust):
+        counts[cat] += 1
+        if len(hits[cat]) < 20:
+            hits[cat].append(f"{rel}:{n}: {raw.strip()[:100]}")
     return counts, hits
 
 
