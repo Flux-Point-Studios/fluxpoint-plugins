@@ -115,7 +115,11 @@ supplies the target or attack focus.
    Evidence row names range/file counts, attackers, lenses and sampling.
    A SHIP without valid coverage, or with unresolved review blockers, is
    filed `BLOCKED-REDTEAM` even if schema validation was skipped; a CLI
-   `--red-team SHIP` flag cannot replace a coverage-bearing review result. The compiled
+   `--red-team SHIP` flag cannot replace a coverage-bearing review result.
+   `--red-team BLOCK` does not lower a recorded SHIP either: the flag is
+   ignored whenever the summary carries a verdict, and the recorder says so.
+   A refusal found after the run is filed with `--veto` and `--veto-evidence`,
+   as the recording step of `graph-run` describes. The compiled
    multi-lens path binds refutation to the original attacker claims; a reducer
    or collection agent cannot omit one. It records source/stage identities and
    the actual independent votes. `record-run.py` accepts a terminal SHIP over

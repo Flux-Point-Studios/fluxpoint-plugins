@@ -266,12 +266,32 @@ Workflow tool requires.
    something you remember to write:
    ```
    echo '<the workflow return value as JSON>' | bash "$ROOT/scripts/py.sh" record-run.py \
-     --run-id <runId> --graph <graph> [--evidence WORK.md] [--harness <exit>] [--red-team SHIP|BLOCK]
+     --run-id <runId> --graph <graph> [--evidence WORK.md] [--harness <exit>] [--red-team SHIP|BLOCK] \
+     [--veto "<reason>" --veto-evidence <file>]
    ```
    `--graph` is the file the run was compiled from (its `SPEC:` is the
    packet the run is checked against); `--evidence` is the file whose
    Evidence and Decisions tables receive the rows, `--graph` by default. A
    campaign in `GRAPH.<name>.md` with a packet of its own passes both.
+   `--red-team` is a fallback for a summary that carries no red-team node.
+   When the summary carries a red-team verdict, that verdict is recorded,
+   the flag is ignored, and the recorder prints the verdict it kept and the
+   flag it dropped. A check that runs after the run therefore cannot change
+   the record with `--red-team BLOCK`. Give such a check one of two forms.
+   The first is a `prove:` node after the verdict node, so the graph halts
+   before COMPLETE. The second is a veto: when the check refuses, record
+   with `--veto "<why it refused>" --veto-evidence <file holding its output>`.
+   A veto only lowers. The recorded verdict becomes BLOCK and the run is
+   filed `BLOCKED-REDTEAM`; the artifact keeps the derived verdict as
+   `redTeamDerived` and lists the reason with the evidence file's sha256
+   and size under `vetoes`; the bytes are kept under
+   `.claude/fluxpoint/runs/evidence/`. A veto over a BLOCK changes no
+   verdict, and no veto produces SHIP. `--veto` without `--veto-evidence`,
+   or with a file that is missing or empty, is refused with a `VETO-` code
+   and exit 2, and no artifact or Evidence row is written. A filed veto
+   stays on the run id: recording that run again, with or without the
+   flag, keeps the BLOCK and says so. A run that passes its check later is
+   a new launch with its own run id.
    Run artifacts always go to `<root>/.claude/fluxpoint/runs`, even when
    recording from a subdirectory; pass `--root <project-root>` explicitly.
    `--state-dir` may only name that canonical directory. Exit 3 retains the

@@ -7,14 +7,25 @@ JSON on stdin (or --result FILE).
 
 Usage:
   record-run.py --run-id wf_abc --graph WORK.md [--harness 0]
-                [--red-team SHIP] [--proof-audit SOUND] [--executor workflow] < result.json
+                [--red-team SHIP] [--proof-audit SOUND] [--executor workflow]
+                [--veto REASON --veto-evidence FILE] < result.json
+
+--red-team is a fallback for a summary that carries no red-team node. It is
+ignored whenever the summary carries a red-team verdict, and the recorder
+says so. A check that runs after the run cannot change the record through
+that flag. Make the check a prove: node in the graph, or file its refusal
+with --veto REASON --veto-evidence FILE. A veto lowers the recorded verdict
+to BLOCK and never raises one, and it stays on the run id when the run is
+recorded again.
 """
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
 import sys
+import tempfile
 
 # One Evidence discipline for both modes: loop slices write their own rows,
 # graph runs get theirs appended here.
@@ -419,6 +430,110 @@ def checked_commits(summary, graph):
     return repair_receipts(summary, graph)[1]
 
 
+# A post-run veto is the logged way to lower a recorded verdict after the
+# run. It can only lower, so nothing below ever yields SHIP.
+def veto_shape(entry):
+    """A veto entry this recorder wrote: a reason, and evidence it can name."""
+    evidence = entry.get("evidence") if isinstance(entry, dict) else None
+    return (isinstance(evidence, dict)
+            and isinstance(entry.get("reason"), str) and bool(entry["reason"].strip())
+            and isinstance(evidence.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"]) is not None
+            and type(evidence.get("bytes")) is int and evidence["bytes"] > 0)
+
+
+def veto_key(entry):
+    return entry["reason"], entry["evidence"]["sha256"]
+
+
+def filed_vetoes(root, run_id):
+    """Every veto already filed on this run id, oldest first.
+
+    Read from the latest record and from each retained attempt, so a veto
+    outlives a second record that was not given the flag and a latest
+    pointer that was replaced. A record that cannot be read adds nothing.
+    """
+    runs = os.path.join(root, ".claude", "fluxpoint", "runs")
+    history = os.path.join(runs, "history", run_id)
+    paths = [os.path.join(runs, run_id + ".json")]
+    if os.path.isdir(history):
+        paths += [os.path.join(history, name) for name in sorted(os.listdir(history))
+                  if name.endswith(".json")]
+    found = {}
+    for path in paths:
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            if b'"vetoes"' not in raw:
+                continue
+            row = json.loads(raw.decode("utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (not isinstance(row, dict) or row.get("runId") != run_id
+                or not isinstance(row.get("vetoes"), list)):
+            continue
+        for entry in row["vetoes"]:
+            if veto_shape(entry):
+                found.setdefault(veto_key(entry), entry)
+    return sorted(found.values(), key=lambda entry: str(entry.get("filedAt")))
+
+
+def read_veto(reason, evidence_path, when):
+    """One --veto, checked, with its evidence read once.
+
+    Raises ValueError naming the refusal. A veto nobody can account for is
+    not a record: it needs a reason and a file that holds something.
+    """
+    if reason is None or not reason.strip():
+        raise ValueError("VETO-REASON-REQUIRED: --veto-evidence needs --veto <reason>, "
+                         "and the reason cannot be blank")
+    if evidence_path is None:
+        raise ValueError("VETO-EVIDENCE-REQUIRED: --veto needs --veto-evidence <file> "
+                         "holding what the post-run check reported")
+    if not os.path.isfile(evidence_path):
+        raise ValueError(f"VETO-EVIDENCE-MISSING: {evidence_path} is not a file")
+    try:
+        with open(evidence_path, "rb") as fh:
+            data = fh.read()
+    except OSError as e:
+        raise ValueError(f"VETO-EVIDENCE-MISSING: {evidence_path} cannot be read ({e.strerror or e})")
+    if not data.strip():
+        raise ValueError(f"VETO-EVIDENCE-EMPTY: {evidence_path} holds no evidence")
+    return {"reason": reason.strip(), "filedAt": when,
+            "evidence": {"path": evidence_path, "sha256": hashlib.sha256(data).hexdigest(),
+                         "bytes": len(data)}}, data
+
+
+def file_veto_evidence(root, digest, data):
+    """Keep the bytes beside the run's attempts, named by their sha256.
+
+    The store and the discipline are repair_checks.retain_evidence's: one
+    immutable file per digest, never a link, never rewritten.
+    """
+    from pathlib import Path
+    base = Path(root).resolve() / ".claude/fluxpoint/runs/evidence"
+    base.mkdir(parents=True, exist_ok=True)
+    if base.resolve() != base:
+        raise ValueError("retained evidence directory must be canonical")
+    target = base / digest
+    if target.is_symlink():
+        raise ValueError("retained evidence cannot be a symlink")
+    if not target.exists():
+        fd, temporary = tempfile.mkstemp(prefix=".veto-", dir=str(base))
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+            try:
+                os.link(temporary, str(target))
+            except FileExistsError:
+                pass
+        finally:
+            os.unlink(temporary)
+    if target.read_bytes() != data:
+        raise ValueError("immutable retained evidence changed: " + digest)
+    return str(target)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-id", required=True)
@@ -431,7 +546,19 @@ def main():
                          "with a packet of its own files into WORK.md this way")
     ap.add_argument("--result", help="file holding the workflow's return value (default stdin)")
     ap.add_argument("--harness", default="n/a", help="independent harness exit code")
-    ap.add_argument("--red-team", default="n/a", help="SHIP | BLOCK | n/a")
+    ap.add_argument("--red-team", default="n/a",
+                    help="SHIP | BLOCK | n/a. A fallback for a summary with no red-team node; "
+                         "ignored, and reported as ignored, whenever the summary carries a "
+                         "red-team verdict. To lower a derived verdict after the run use --veto")
+    ap.add_argument("--veto", default=None, metavar="REASON",
+                    help="lower the recorded red-team verdict to BLOCK because a check that ran "
+                         "after the run refused it. Needs --veto-evidence. A veto only lowers: "
+                         "over a BLOCK it changes no verdict, and it never yields SHIP. It stays "
+                         "on the run id, so recording the run again keeps it")
+    ap.add_argument("--veto-evidence", default=None, metavar="FILE",
+                    help="the file holding what that check reported. It must exist and hold "
+                         "something. Its sha256 and size go into the run artifact and its bytes "
+                         "are kept under .claude/fluxpoint/runs/evidence")
     ap.add_argument("--proof-audit", default="n/a",
                     help="SOUND | WEAKENED | UNPROVEN | NOT-APPLICABLE | n/a")
     ap.add_argument("--executor", default="workflow", choices=("workflow", "degraded-subagents"))
@@ -475,6 +602,31 @@ def main():
             print(f"record-run: ledger recorded {r['node']} — {r['evidence']}")
     except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
         print(f"record-run: ledger append failed: {e}", file=sys.stderr)
+
+    # 0a. A post-run veto is checked here, and its evidence filed, before
+    # anything below writes. A veto that cannot be accounted for records
+    # nothing about the run: no artifact, no Evidence row, no inbox item.
+    # Refusing it must not drop the veto and file the run at its derived
+    # verdict either, so the whole record is refused. The ledger above is
+    # the one thing already written, for the reason it gives.
+    new_veto = None
+    if args.veto is not None or args.veto_evidence is not None:
+        try:
+            new_veto, evidence_bytes = read_veto(
+                args.veto, args.veto_evidence,
+                datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            try:
+                file_veto_evidence(args.root, new_veto["evidence"]["sha256"], evidence_bytes)
+            except (OSError, ValueError) as e:
+                raise ValueError(f"VETO-EVIDENCE-UNFILED: {e}")
+        except ValueError as e:
+            print(f"record-run: veto refused, no run artifact or Evidence row written: {e}",
+                  file=sys.stderr)
+            if ledger_written:
+                print(f"record-run: the once-only ledger still recorded "
+                      f"{len(ledger_written)} irreversible effect(s) from this run",
+                      file=sys.stderr)
+            return 2
 
     waits = summary.get("waits") or []
     wait_names = [wait_filename(summary.get("campaign", ""), w.get("node", "")) for w in waits]
@@ -574,6 +726,39 @@ def main():
         blocked, red_team = True, "BLOCK"
         print("record-run: a SHIP flag without a coverage-bearing result cannot "
               "establish a shippable review", file=sys.stderr)
+    # A veto filed on this run id, by this record or an earlier one, lowers
+    # the recorded verdict to BLOCK and takes the path a derived BLOCK takes
+    # from here on. It is never lifted by recording the run again.
+    derived_block, unvetoed = blocked, red_team
+    vetoes = filed_vetoes(args.root, args.run_id)
+    carried = list(vetoes)
+    if new_veto and veto_key(new_veto) not in [veto_key(v) for v in vetoes]:
+        # What the record would have said without this veto.
+        new_veto["over"] = "BLOCK" if vetoes else unvetoed
+        vetoes.append(new_veto)
+    else:
+        new_veto = None
+    if vetoes:
+        blocked, red_team = True, "BLOCK"
+    # The flag used to be dropped here without a word, and a run its own
+    # post-run check refused was filed SHIP. The precedence is unchanged. The
+    # recorder now names the verdict it kept and the flag it ignored.
+    if d_verdict is not None and args.red_team != "n/a":
+        print(f"record-run: --red-team {args.red_team} ignored: the summary carries a "
+              f"red-team verdict, {d_verdict}, and the flag never overrides a derived one",
+              file=sys.stderr)
+        if (d_verdict, args.red_team) == ("SHIP", "BLOCK") and not vetoes:
+            print("record-run: a check that ran after the run reaches the record with "
+                  "--veto <reason> --veto-evidence <file>, or as a prove: node in the graph",
+                  file=sys.stderr)
+    for v in carried:
+        print(f"record-run: the veto filed on {args.run_id} at {cell(v.get('filedAt'), 20)} "
+              f"still applies ({cell(v['reason'], 200)}); the run stays BLOCK, and "
+              f"recording it again never lifts a veto", file=sys.stderr)
+    if new_veto:
+        print(f"record-run: veto filed over red-team {new_veto['over']}: the run is recorded "
+              f"as BLOCK; evidence sha256 {new_veto['evidence']['sha256']} "
+              f"({new_veto['evidence']['bytes']} bytes) kept under .claude/fluxpoint/runs/evidence")
     proof_audit = d_proof if d_proof is not None else args.proof_audit
     if blocked and outcome in ("COMPLETE", "INCOMPLETE", "UNKNOWN"):
         # A campaign does not get to report COMPLETE over a blocking
@@ -851,6 +1036,11 @@ def main():
                 "attestation": attestation,
                 "summary": summary,
             }
+    if vetoes:
+        # Beside redTeam, so a reader sees what the run derived and that a
+        # veto, with its reason and evidence, is why the record says BLOCK.
+        artifact_data["redTeamDerived"] = d_verdict
+        artifact_data["vetoes"] = vetoes
     try:
         import run_artifacts as _attempts
         art, _artifact_sha256 = _attempts.write(args.root, args.run_id, artifact_data)
@@ -908,8 +1098,17 @@ def main():
     if incoherent:
         claim += ("; red-team findings or coverage contradict its verdict (" + "; ".join(incoherent[:2])
                   + ") — filed as BLOCK")
-    elif blocked:
+    elif derived_block:
         claim += "; red-team returned BLOCK — not shippable"
+    if vetoes:
+        if unvetoed == "BLOCK":
+            claim += "; post-run veto filed, red-team already BLOCK"
+        elif d_verdict is None:
+            claim += "; post-run veto filed BLOCK, the run carries no red-team verdict"
+        else:
+            claim += f"; post-run veto lowered red-team {unvetoed} to BLOCK"
+        for v in vetoes:
+            claim += f"; veto {cell(v.get('filedAt'), 20)}: {cell(v['reason'], 200)}"
     if weakened:
         claim += ("; proof-audit returned WEAKENED — verification got weaker while "
                   "the checker stayed green")
@@ -998,6 +1197,9 @@ def main():
         proof_cell = proof_audit
     proof = (f"harness exit {harness}; red-team {red_team}; proof-audit {proof_cell}; "
              f"executor {args.executor}")
+    for v in vetoes:
+        proof += (f"; veto evidence sha256 {v['evidence']['sha256']} "
+                  f"({v['evidence']['bytes']} bytes)")
     if specification_coverage and specification_coverage['references'] == 'uncovered-legacy':
         proof += '; LEGACY reference files not covered: ' + ', '.join(cell(p, 500) for p in specification_coverage['paths'])
     if repair_followups:
