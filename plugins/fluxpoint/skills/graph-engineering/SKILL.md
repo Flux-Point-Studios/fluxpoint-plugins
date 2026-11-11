@@ -961,6 +961,17 @@ deliberately no per-node retry knob: recovery is memoized resume plus the
 once-only ledger, because an in-run retry loop is a second failure policy
 hiding inside the first.
 
+What a run records is read from its summary. `record-run.py` takes the
+harness exit, the red-team verdict and the proof-audit verdict from the
+nodes that returned them, and reads `--harness`, `--red-team` and
+`--proof-audit` only when no node did. A step written into a graph file
+that records a post-run check with one of those flags therefore changes
+nothing, and `--check` warns about it and names the line. A check that
+must be able to refuse the run belongs in the graph, as a `prove:` node
+after the verdict. A refusal that arrives after the run is filed with
+`record-run.py --veto <reason> --veto-evidence <file>`, which lowers the
+recorded red-team verdict to BLOCK and never raises one.
+
 Two caches share a vocabulary and are different mechanisms. **Memoized
 resume** is the executor replaying completed `agent()` calls whose
 `(prompt, opts)` did not change — a journal lookup, valid for as long as

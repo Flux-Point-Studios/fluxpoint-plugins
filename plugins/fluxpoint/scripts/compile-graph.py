@@ -5411,6 +5411,68 @@ def prose_pin_findings(text, ir):
     return findings
 
 
+# record-run.py flags that are a fallback for a summary carrying no such
+# verdict, with the contracts whose results the recorder reads it from.
+RECORDER_FLAGS = (
+    ("--red-team", r"SHIP|BLOCK", ("RedTeamV1",), "red-team verdict"),
+    ("--harness", r"-?\d+|<[^>\s]+>", ("HarnessCheckV1", "FixCheckV1"), "harness exit"),
+    ("--proof-audit", r"SOUND|WEAKENED|UNPROVEN|NOT-APPLICABLE", ("ProofV1",), "proof-audit verdict"),
+)
+
+
+def recorder_flag_warnings(text, ir):
+    """Prose that records a verdict with a flag the recorder will ignore.
+
+    record-run.py takes the harness exit, the red-team verdict and the
+    proof-audit verdict from the run summary whenever a node returned one,
+    and reads its flags only when none did. A graph file whose prose tells
+    the operator to record a post-run check with one of those flags
+    therefore describes a step that changes nothing. Command blocks count
+    as prose; the IR block and the filed Evidence and Decisions rows do not.
+    """
+    lines, fence, in_ir, filed = [], None, False, None
+    for line in text.splitlines():
+        marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+        if fence is not None:
+            if marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence) and not marker.group(2).strip():
+                fence, in_ir = None, False
+                lines.append('')
+            else:
+                lines.append('' if in_ir else line)
+            continue
+        if marker:
+            fence, in_ir = marker.group(1), bool(re.match(r'json\s+graph-ir\s*$', marker.group(2).strip()))
+            lines.append('')
+            continue
+        heading = re.match(r'^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$', line)
+        if heading:
+            level, title = len(heading.group(1)), heading.group(2).strip().lower()
+            if filed is not None and level <= filed:
+                filed = None
+            if title in ('evidence', 'decisions'):
+                filed = level
+        lines.append('' if filed is not None else line)
+    found = []
+    for flag, values, contracts, what in RECORDER_FLAGS:
+        nodes = [n.get("id") for n in ir.get("nodes") or [] if isinstance(n, dict) and n.get("contract") in contracts]
+        if not nodes:
+            continue
+        pattern = re.compile(r'(?<![\w-])' + re.escape(flag) + r'(?:[ \t]+|=)(' + values + r')(?![\w-])')
+        hits = [(number, match.group(0)) for number, line in enumerate(lines, 1) for match in pattern.finditer(line)]
+        if not hits:
+            continue
+        numbers = sorted({number for number, _ in hits})
+        way_out = ("Make the check a prove: node after the verdict, or record its refusal with "
+                   "--veto <reason> --veto-evidence <file>." if flag == "--red-team"
+                   else "Make the check a prove: node in the graph.")
+        found.append(
+            f"prose line{'s' if len(numbers) > 1 else ''} {', '.join(map(str, numbers))}: `{hits[0][1]}` is named as a "
+            f"way to record the {what}. Node{'s' if len(nodes) > 1 else ''} {', '.join(repr(n) for n in nodes)} "
+            f"return{'' if len(nodes) > 1 else 's'} it in the run summary, and record-run.py takes the summary's and "
+            f"ignores the flag, so a check that runs after the run cannot change the record this way. {way_out}")
+    return found
+
+
 def archive_compiled(root, args, source):
     """Keep the exact executed source recoverable after the output is replaced."""
     import hashlib
@@ -5737,7 +5799,7 @@ def main():
     if args.check and any(worktree_base_node(n) for n in ir.get('nodes', [])):
         worktree_settings = _sibling('worktree_settings')
         print('graph-compile: ' + worktree_settings.describe(worktree_settings.report(args.gates_root)))
-    for w in warnings(ir, agents, specification, gates):
+    for w in warnings(ir, agents, specification, gates) + recorder_flag_warnings(text, ir):
         print(f"graph-compile: warning — {w}", file=sys.stderr)
     if _sibling("evidence_table").locate(text)[0] is None:
         print("graph-compile: warning — graph has no recognized Evidence table with a separator; "
