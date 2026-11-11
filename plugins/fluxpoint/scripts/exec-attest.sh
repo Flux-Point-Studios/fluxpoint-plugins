@@ -26,9 +26,9 @@ err="$(printf '%s' "$input" | "$FPL_PY" "$here/attest.py" --record 2>&1 >/dev/nu
 # are going unattested. Saying it once per session is the point: a layer that
 # disarms quietly is worse than one that was never installed. Saying it on
 # every Bash call would train people to ignore it.
-sid="$(printf '%s' "$input" | fpl_json_get session_id)"
+sid="$(fpl_sid "$(printf '%s' "$input" | fpl_json_get session_id)")"
 sd="$(fpl_state_dir)"
-marker="$sd/${sid:-nosession}.attest-warned"
+marker="$sd/$sid.attest-warned"
 if [ ! -f "$marker" ]; then
   mkdir -p "$sd" 2>/dev/null && : >"$marker"
   fpl_json_obj systemMessage "fluxpoint attest: ${err}"

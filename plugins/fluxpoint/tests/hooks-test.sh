@@ -403,6 +403,31 @@ check "non-git dir: PostToolUse exits cleanly" 0 "$?"
 printf '{"session_id":"s","cwd":"%s"}' "$ROOT/plain" | eval "$(hook_cmd Stop)" >/dev/null 2>&1
 check "non-git dir: Stop gate exits cleanly" 0 "$?"
 
+# --- 9. a session id is a path part only after fpl_sid ---
+# The runtime mints UUIDs, but both hooks below build a file name from the id, so an id with separators must stay inside the state dir.
+newrepo 0
+printf 'y = 3\n' >>src/app.py
+printf '{"session_id":"../escaped","cwd":"%s","tool_input":{"file_path":"src/app.py"}}' "$ROOT/r" \
+  | eval "$(hook_cmd PostToolUse)" >/dev/null 2>&1
+if [ ! -e .claude/escaped.dirty ] && [ -f .claude/fluxpoint/---escaped.dirty ]; then
+  ok "verify-changed: a hostile session id stays in the state dir" "---escaped.dirty"
+else
+  bad "verify-changed: a hostile session id stays in the state dir" "wrote outside, or no marker"
+fi
+newrepo 0
+printf '{' >.fluxpoint-gates.json
+# Run the script itself: the runtime's node wrapper cleans the id first, but the script must not rely on its caller.
+"$FPL_PY" - "$ROOT/r" <<'PY' | bash "$PLUGIN/scripts/exec-attest.sh" >/dev/null 2>&1
+import json, sys
+print(json.dumps({"session_id": "../escaped", "cwd": sys.argv[1], "tool_name": "Bash", "tool_use_id": "toolu_y",
+                  "tool_input": {"command": "scripts/harness.sh --full"}, "tool_response": {"stdout": "", "stderr": "", "interrupted": False}}))
+PY
+if [ ! -e .claude/escaped.attest-warned ] && [ -f .claude/fluxpoint/---escaped.attest-warned ]; then
+  ok "exec-attest: a hostile session id stays in the state dir" "---escaped.attest-warned"
+else
+  bad "exec-attest: a hostile session id stays in the state dir" "wrote outside, or no marker"
+fi
+
 cd /; rm -rf "$ROOT"
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
