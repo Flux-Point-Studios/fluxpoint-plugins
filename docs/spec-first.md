@@ -67,6 +67,9 @@ Costs above describe concrete work and risk, not measured time or price estimate
    use `--lock-harness --gate <name>` after an attested pass for that declared
    command at HEAD. This changes no spec identity or compiled bytes. Run records
    and Evidence name the current harness digest and paths differing from its lock.
+   A re-lock keeps every frozen path. A check file removed by a recorded
+   decision leaves through `--lock --retire <path> --because <decision id or
+   reason>`, which records the path, its last hash and the reason in the lock.
 7. Newly scaffolded WORK.md files declare `SPEC: .fluxpoint-spec.json`.
    The scaffolded harness requires the spec runner when this marker or either
    spec artifact exists. Existing loops without any marker remain legacy;

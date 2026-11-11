@@ -184,8 +184,21 @@ as code, so JSX text holding `/*` or an unpaired backtick can hide the imports
 after it. It takes a `/` after a postfix `++` or `--` or a TypeScript non-null
 `!` for the start of a regular expression when another `/` follows on that line.
 Every path in a previous harness map is retained as a closure root, even after
-an argv or import is removed. A missing retained file refuses re-locking; no
-path can silently leave the locked set.
+an argv or import is removed. A missing retained file refuses re-locking, and
+the refusal names each missing file and the command that retires it.
+`--lock --retire <path> --because <decision id or reason>` removes a frozen
+path that the packet no longer reaches. `--retire` may repeat, and the one
+`--because` applies to every path of that call. It refuses without `--because`,
+for a path the lock does not freeze, and for a path the argv or the closure
+still reaches. The lock records each retirement under `retired` as the path,
+the last SHA-256 the lock held for it and the reason. Later locks carry the
+record forward. `--check` and `--run` print every retired path, and `--inputs`
+lists them under `retired`. A retired path that the packet reaches again is
+frozen again as an ordinary input: the lock drops its record and says so.
+A lock that records a retirement is written with `lockFormat: 3`. Any other
+lock is still written with `lockFormat: 2`, so a lock without retirements is
+unchanged. No path leaves the locked set without a record, except a state
+store path that an older lock froze.
 The harness map stays outside the compared identity, so editing check code
 changes neither the graph's IR nor its compiled script and does not stale its
 specification. It remains reviewed code, with its own recorded identity.

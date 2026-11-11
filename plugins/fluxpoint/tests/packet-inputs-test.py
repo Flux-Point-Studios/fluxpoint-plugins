@@ -276,6 +276,186 @@ class PacketInputsTests(unittest.TestCase):
         self.assertEqual((self.root / specification.LOCK).read_bytes(), before)
         self.assertIsNone(specification.harness_record(self.root)['files']['tests/helper.py'])
 
+    GONE = ['tests/helper.py', 'tests/test_engine.py']
+    REASON = 'decision second-gate-removed'
+
+    def remove_gate(self):
+        """Lock, then let a recorded decision remove a gate: its two files are deleted
+        and the test that ran them stops importing them."""
+        lock = self.lock()
+        self.write('tests/test_landing.py', 'def test_sign():\n    assert True\n')
+        for rel in self.GONE:
+            (self.root / rel).unlink()
+        return lock
+
+    def retire_gate(self):
+        old = self.remove_gate()
+        result = self.cli('--lock', '--retire', self.GONE[0], '--retire', self.GONE[1], '--because', self.REASON)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return old, json.loads((self.root / specification.LOCK).read_text()), result
+
+    def test_missing_frozen_paths_refusal_names_each_one_and_the_retire_command(self):
+        self.remove_gate()
+        before = (self.root / specification.LOCK).read_bytes()
+        refused = self.cli('--lock')
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn('specification: frozen path no longer exists: tests/helper.py, tests/test_engine.py; '
+                      'restore it, or retire it with --lock --retire tests/helper.py --retire tests/test_engine.py '
+                      '--because <decision id or reason>\n', refused.stderr)
+        self.assertEqual((self.root / specification.LOCK).read_bytes(), before)
+
+    def test_retire_refuses_without_a_reason_an_unfrozen_path_or_a_reached_path(self):
+        self.remove_gate()
+        before = (self.root / specification.LOCK).read_bytes()
+        both = ('--retire', self.GONE[0], '--retire', self.GONE[1])
+        for args, needle in (
+                (('--lock', *both), '--retire requires --because <decision id or reason>'),
+                (('--lock', *both, '--because', '  '), '--retire requires --because <decision id or reason>'),
+                (('--lock', '--because', self.REASON), '--because is only for --retire'),
+                (('--check', *both, '--because', self.REASON), '--retire and --because are only for --lock'),
+                (('--lock-harness', '--gate', 'verify', *both, '--because', self.REASON),
+                 '--retire and --because are only for --lock'),
+                # Retiring one of two missing paths still leaves the other to be named.
+                (('--lock', '--retire', self.GONE[0], '--because', self.REASON),
+                 'frozen path no longer exists: tests/test_engine.py; restore it, or retire it with '
+                 '--lock --retire tests/test_engine.py --because'),
+                (('--lock', *both, '--retire', 'src/prod/signer.py', '--because', self.REASON),
+                 '--retire names a path the lock does not freeze: src/prod/signer.py'),
+                (('--lock', *both, '--retire', '../outside.py', '--because', self.REASON), 'inside the repository'),
+                # A conftest still imports the fixtures, so the packet still reaches them.
+                (('--lock', *both, '--retire', 'tests/fixtures.py', '--because', self.REASON),
+                 'cannot retire a path the packet still reaches: tests/fixtures.py (test-import via tests/conftest.py)'),
+                (('--lock', *both, '--retire', 'tests/test_landing.py', '--because', self.REASON),
+                 'cannot retire a path the packet still reaches: tests/test_landing.py (argv)')):
+            with self.subTest(args=args):
+                refused = self.cli(*args)
+                self.assertEqual(refused.returncode, 1, refused.stdout)
+                self.assertIn(needle, refused.stderr)
+                self.assertEqual((self.root / specification.LOCK).read_bytes(), before)
+
+    def test_retire_removes_only_the_named_paths_and_records_path_hash_and_reason(self):
+        old, lock, result = self.retire_gate()
+        records = {rel: {'sha256': old['harness'][rel], 'reason': self.REASON} for rel in self.GONE}
+        for rel in self.GONE:
+            self.assertIn('specification: retired ' + rel + ' ' + old['harness'][rel] + ': ' + self.REASON,
+                          result.stdout)
+        self.assertEqual(lock['retired'], records)
+        self.assertEqual(lock['lockFormat'], 3)
+        self.assertEqual(set(lock['harness']), set(old['harness']) - set(self.GONE))
+        self.assertNotEqual(lock['harness']['tests/test_landing.py'], old['harness']['tests/test_landing.py'])
+        # --check and --inputs show what left the lock and why, and neither treats it as drift.
+        for args in (('--check',), ('--check', '--strict-harness')):
+            with self.subTest(args=args):
+                checked = self.cli(*args)
+                self.assertEqual(checked.returncode, 0, checked.stderr)
+                for rel in self.GONE:
+                    self.assertIn('specification: retired ' + rel + ' ' + old['harness'][rel] + ': ' + self.REASON,
+                                  checked.stdout)
+        report = self.report('--inputs', '--closure')
+        self.assertEqual(report['retired'], [dict(path=rel, **records[rel]) for rel in self.GONE])
+        self.assertEqual([row['path'] for row in report['inputs'] if row['path'] in self.GONE], [])
+        self.assertEqual(self.cli('--touches', *self.GONE).returncode, 0)
+        self.assertEqual(specification.harness_record(self.root)['changedPaths'], [])
+        # The record is carried by every later lock, and a later retirement is added to it.
+        self.assertEqual(self.cli('--lock').returncode, 0)
+        self.assertEqual(json.loads((self.root / specification.LOCK).read_text())['retired'], records)
+        # A frozen file that stays on disk, unreached, and an archive the packet stops
+        # pointing into are retired the same way, each with the hash the lock last held.
+        self.write('tests/conftest.py', '# fixtures inlined\n')
+        self.doc['checks'][0]['scope'] = 'Signer behaviour, written out in the packet'
+        self.save()
+        later = self.cli('--lock', '--retire', './tests/fixtures.py', '--retire', 'archive.json',
+                         '--because', ' fixtures  inlined\tby decision ')
+        self.assertEqual(later.returncode, 0, later.stderr)
+        lock = json.loads((self.root / specification.LOCK).read_text())
+        records['tests/fixtures.py'] = {'sha256': old['harness']['tests/fixtures.py'],
+                                        'reason': 'fixtures inlined by decision'}
+        records['archive.json'] = {'sha256': old['references']['archive.json'],
+                                   'reason': 'fixtures inlined by decision'}
+        self.assertEqual(lock['retired'], records)
+        self.assertEqual(list(lock['retired']), sorted(records))
+        self.assertEqual([p for p in lock['harness'] if p in records], [])
+        self.assertNotIn('retired tests/helper.py', later.stdout)
+        self.assertTrue((self.root / 'tests/fixtures.py').is_file())
+        self.assertEqual(self.cli('--check', '--strict-harness').returncode, 0)
+
+    def test_retired_path_that_the_packet_reaches_again_is_frozen_again(self):
+        old, lock, _ = self.retire_gate()
+        # The helper comes back and the locked test imports it again.
+        self.write('tests/helper.py', 'def sign():\n    return True\n')
+        self.write('tests/test_landing.py', 'from tests import helper\n\ndef test_sign():\n    assert helper.sign()\n')
+        strict = self.cli('--check', '--strict-harness')
+        self.assertEqual(strict.returncode, 1)
+        self.assertIn('locked harness inputs changed: tests/helper.py', strict.stderr)
+        relocked = self.cli('--lock')
+        self.assertEqual(relocked.returncode, 0, relocked.stderr)
+        self.assertIn('specification: re-admitted tests/helper.py; it was retired because ' + self.REASON,
+                      relocked.stdout)
+        lock = json.loads((self.root / specification.LOCK).read_text())
+        self.assertEqual(lock['harness']['tests/helper.py'],
+                         hashlib.sha256(b'def sign():\n    return True\n').hexdigest())
+        self.assertEqual(lock['retired'], {'tests/test_engine.py': {'sha256': old['harness']['tests/test_engine.py'],
+                                                                   'reason': self.REASON}})
+        self.assertEqual(lock['lockFormat'], 3)
+        self.assertEqual(self.cli('--check', '--strict-harness').returncode, 0)
+        # The harness-only lock freezes a returning path the same way, and the last record goes with it.
+        self.write('tests/test_engine.py', 'def engine():\n    return True\n')
+        self.write('tests/helper.py', 'from tests import test_engine\n\ndef sign():\n    return test_engine.engine()\n')
+        self.gate()
+        relocked = self.cli('--lock-harness', '--gate', 'verify')
+        self.assertEqual(relocked.returncode, 0, relocked.stderr)
+        self.assertIn('specification: re-admitted tests/test_engine.py; it was retired because ' + self.REASON,
+                      relocked.stdout)
+        lock = json.loads((self.root / specification.LOCK).read_text())
+        self.assertNotIn('retired', lock)
+        self.assertEqual(lock['lockFormat'], 2)
+        self.assertTrue(set(self.GONE) <= set(lock['harness']))
+        checked = self.cli('--check', '--strict-harness')
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertNotIn('retired', checked.stdout)
+        self.assertEqual(self.report('--inputs')['retired'], [])
+
+    def test_lock_with_retirements_is_not_drift_and_an_older_lock_still_loads(self):
+        old, lock, _ = self.retire_gate()
+        # A lock written before retirement existed has neither the field nor the newer format.
+        self.assertNotIn('retired', old)
+        self.assertEqual(old['lockFormat'], 2)
+        identity = {k: v for k, v in lock.items() if k not in ('harness', 'lockFormat', 'retired')}
+        self.assertEqual(specification.load(self.root)[1], identity)
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        self.assertEqual(self.cli('--check', '--check-identity', digest).returncode, 0)
+        # A run compiled against this packet records against the lock that carries the retirements.
+        self.write('WORK.md', 'SPEC: .fluxpoint-spec.json\n\n## Evidence\n\n'
+                   '| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n')
+        self.write('result.json', json.dumps({'outcome': 'COMPLETE', 'specification': identity}))
+        recorded = subprocess.run([sys.executable, str(PLUGIN / 'scripts/record-run.py'), '--root', '.',
+                                   '--run-id', 'after-retirement', '--result', 'result.json'],
+                                  cwd=self.root, capture_output=True, text=True, encoding='utf-8', timeout=60,
+                                  env=dict(os.environ, PYTHONIOENCODING='utf-8', FPL_MEMORY_INDEX='0'))
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        artifact = json.loads((self.root / '.claude/fluxpoint/runs/after-retirement.json').read_text())
+        self.assertEqual(artifact['harness']['changedPaths'], [])
+        # A record that cannot be read as written refuses, whatever is asked of the lock.
+        sample = dict(lock['retired']['tests/helper.py'])
+        for change, needle in (
+                (lambda bad: bad.update(lockFormat=2), 'lock retired'),
+                (lambda bad: bad.update(lockFormat=4), 'unsupported specification lock format'),
+                (lambda bad: bad.update(retired=[]), 'lock retired'),
+                (lambda bad: bad['retired']['tests/helper.py'].update(reason=' '), 'lock retired'),
+                (lambda bad: bad['retired']['tests/helper.py'].update(reason='two\nlines'), 'lock retired'),
+                (lambda bad: bad['retired']['tests/helper.py'].update(sha256='abc'), 'lock retired'),
+                (lambda bad: bad['retired']['tests/helper.py'].update(when='now'), 'lock retired'),
+                (lambda bad: bad['retired'].update({'../outside.py': sample}), 'inside the repository'),
+                (lambda bad: bad['retired'].update({'tests/test_landing.py': sample}), 'still frozen')):
+            with self.subTest(needle=needle, change=change.__code__.co_firstlineno):
+                bad = json.loads(json.dumps(lock))
+                change(bad)
+                self.write(specification.LOCK, json.dumps(bad, indent=2) + '\n')
+                for args in (('--check',), ('--lock',), ('--inputs',)):
+                    refused = self.cli(*args)
+                    self.assertEqual(refused.returncode, 1, args)
+                    self.assertIn(needle, refused.stderr)
+
     def test_packet_revision_retains_an_archive_no_longer_referenced(self):
         self.lock()
         self.doc['checks'][0]['scope'] = 'New directly written reviewed scope'

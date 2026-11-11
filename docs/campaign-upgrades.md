@@ -6,7 +6,8 @@ emitted guards. An old repository copy missing `RedTeamV1.coverage`,
 The contracts summary also lists properties omitted from shipped schemas.
 Update the repository copies while preserving their additional constraints.
 
-New specification locks carry `lockFormat: 2`. Existing locks remain readable.
+New specification locks carry `lockFormat: 2`. A lock that records a retired
+harness path carries `lockFormat: 3` and a `retired` map. Existing locks remain readable.
 If a pre-1.44 lock lacks a references map, the diagnostic names that format gap
 and the archive paths to review. It does not claim those files were edited.
 Review them and re-lock before compiling new work.
