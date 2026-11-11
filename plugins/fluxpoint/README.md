@@ -177,6 +177,14 @@ the stable result before recording PASS.
 
 The hygiene scan reads added lines and untracked source. The hedge `for now`
 is checked in comments, so Python loop variables named `now` do not match.
+`TODO`, `FIXME`, `XXX`, Coq's `Admitted` and Dafny's `{:axiom}` and
+`{:verify false}` match in that exact spelling, so `a todo list` and
+`re-admitted` pass. `sorry` is a keyword in Lean and Isabelle and an English
+word elsewhere, so it is flagged in `.lean` and `.thy` files only. A Lean line
+that starts with `--` and holds no `"` or `-/` cannot contain code, so the
+word does not count there; a trailing comment or a string holding the word
+still matches. Calls, attributes and flags such as `.unwrap()`, `todo!()`,
+`.skip(` and `--no-verify` match in any case.
 `.fluxpoint-hygiene-allow` holds one Python regex per line for justified source
 lines (for example `skip\(f?"UNVERIFIED:`); blank lines and `#` comments are
 ignored. Both that policy and `.fluxpoint-hygiene-ignore` belong to the trust

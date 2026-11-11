@@ -125,5 +125,70 @@ printf '# the scratch dir, full of TODO markers\nscratch/*\n' > "$R/.fluxpoint-h
 n="$(scan "$R" | wc -l | tr -d ' ')"
 check "the ignore list is not scanned as its own violation" 0 "$n"
 
+# ====== a marker is spelled the way its language spells it ===============
+# The filter matched every alternative case-insensitively, so ordinary words
+# tripped the proof-escape and marker checks: "re-admitted" read as Coq's
+# Admitted and "a todo list" as a TODO. One row per decision, with both sides
+# of it. Case cannot separate Lean's `sorry` from the English word, so the
+# file type does: it is a keyword in .lean and .thy files and prose elsewhere.
+# In a Lean file only a line that cannot hold code is let through: one that
+# opens with `--` and closes neither a string nor a block comment. A trailing
+# comment still matches, because the `--` before it may sit inside a string.
+# The rows wanting 1 for a call, an attribute or a flag pin what must not
+# change: those keep matching in any case.
+PY="$( . "$PLUGIN/scripts/python-env.sh" >/dev/null 2>&1; printf '%s' "$FPL_PY" )"
+mkdir -p "$WORK/empty"
+flagged() {
+  printf '%s\n' "$2" | ( cd "$WORK/empty" && "$PY" "$PLUGIN/scripts/hygiene-filter.py" "$1" ) | wc -l | tr -d ' '
+}
+while IFS='|' read -r want path line; do
+  [ -n "$want" ] || continue
+  check "$path: $line" "$want" "$(flagged "$path" "$line")"
+done <<'ROWS'
+0|notes.txt|the record was re-admitted
+0|notes.txt|a todo list
+0|notes.txt|phone xx-xxx-1234
+0|notes.txt|sorry, the file moved
+1|notes.txt|TODO: fix
+1|Proof.v|Admitted.
+1|app.js|let a = 1 // FIXME new
+0|app.js|let fixme = 1
+1|app.js|// XXX: remove before merge
+1|spec.dfy|lemma {:axiom} L()
+1|spec.dfy|method {:verify false} M()
+0|spec.dfy|// {:AXIOM} in capitals is an attribute Dafny does not read
+1|Proofs.lean|theorem t : True := by sorry
+1|Proofs.lean|  sorry
+1|Scratch.thy|  sorry
+1|Proofs.lean|theorem c : parse "-- x" = none := by sorry
+1|Proofs.lean|  exact h -- sorry about this
+1|Proofs.lean|-- the header ends here -/ theorem t : True := by sorry
+1|Proofs.lean|-- " ++ (sorry : String)
+0|Proofs.lean|-- sorry, the file moved
+0|Proofs.lean|def Sorry := 1
+0|app.js|throw new Error("sorry, the file moved")
+1|src/lib.rs|    todo!()
+1|src/lib.rs|    unimplemented!("later")
+1|src/lib.rs|    #[ignore = "slow"]
+1|src/lib.rs|    let v = x.unwrap();
+1|src/lib.rs|#[verifier::external_body]
+1|app_test.go|	t.Skip("flaky")
+1|app.test.js|it.only("runs alone", () => {})
+1|ci.sh|git commit --no-verify -m wip
+1|ci.sh|git commit --NO-VERIFY -m wip
+1|deploy.ps1|Try { Publish } Catch { }
+ROWS
+
+# The same rule through the scan the gate runs. The path reaches the filter on
+# both branches: the added lines of a tracked file and a whole untracked one.
+R="$(mkrepo spelled)"
+printf 'theorem t : True := trivial\n' > "$R/Proofs.lean"
+( cd "$R" && git add -A && git commit -qm lean ) >/dev/null
+printf 'theorem t : True := by sorry\n-- sorry, the file moved\n' > "$R/Proofs.lean"
+printf '# sorry, the file moved\n# the record was re-admitted to a todo list\n' > "$R/notes.py"
+out="$(scan "$R")"
+check "the scan flags a Lean sorry on an added line" 1 "$(printf '%s\n' "$out" | grep -c 'by sorry' || true)"
+check "and flags no prose around it, tracked or untracked" 1 "$(printf '%s\n' "$out" | grep -c . || true)"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
