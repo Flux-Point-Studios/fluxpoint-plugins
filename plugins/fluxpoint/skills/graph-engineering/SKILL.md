@@ -166,6 +166,31 @@ future elapsed time; an unreached node contributes no executed cost.
 Graphs without these declarations or rejudge args keep their existing
 serial script and runtime keys.
 
+A node that must run once per run declares `"resume": "never"`. A red-team
+fan-out is the case it exists for. Replay is the longest unchanged prefix
+of calls, so after one dead lens every later lens runs again; a lens that
+raised claims the first time can come back clean, and the review is rolled
+twice under one record. A run that started such a node, or any node that
+depends on it, is not resumed: `resume.py --run` and `compile-graph.py
+--plan --resume` refuse with `RESUME-PAST-NO-RESUME-NODE: <node>` before
+anything is planned or compiled, and the compiled script refuses before
+its first call. Started means the record shows the node ran: a result it
+produced, a provenance row that is neither a wait nor a decline, or a call
+under its label in the summary or the runtime journal. A node that was
+blocked behind a park, or that the budget declined before any call, did not
+start, so a resume that stops before the node is still allowed. The
+declaration rides out in the summary as `noResume`, and a later resume is
+held to it even when the field has since been deleted from the graph. The
+launcher tells the script what the source run started in
+`args._resumeReach`; a launch that names a source run without it is
+refused as `RESUME-REACH-UNKNOWN`. A parked node cannot declare the field,
+because a park is resumed past by design. `--check` warns about a
+`RedTeamV1` fan-out that omits it. One limit stands: a native resume
+launched by hand with the first launch's exact arguments names no source,
+and the script cannot tell it from a first launch. Assemble every resume
+with `resume.py`. The fix after a refusal is a fresh launch, which is a
+new run with its own record.
+
 ## The IR is the source of truth
 
 One ```json graph-ir fenced block in WORK.md. `graph-run` compiles it

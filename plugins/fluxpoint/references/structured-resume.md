@@ -135,6 +135,25 @@ Embedded context has the same authority as inline context. It does not extend
 the relayed user request, bypass a human confirmation, discharge a red gate or
 authorize dispatch by itself.
 
+## Nodes a resume may not pass
+
+A node declares `"resume": "never"` when it must run once per run. The
+shipped feature and verified templates declare it on `red-team-lenses`.
+Before it plans or compiles, `resume.py --run` reads the recorded summary
+and the run's journal and refuses with `RESUME-PAST-NO-RESUME-NODE: <node>`
+when either shows that the node, or a node that depends on it, started.
+`compile-graph.py --plan --resume` refuses with the same code. A node that
+was blocked behind a park, or declined by the budget before any call, did
+not start, so a run that stopped earlier resumes as usual.
+
+For a graph with such a node the launcher adds `_resumeReach` to the launch
+arguments: the node ids the source run started. The compiled script checks
+it before its first call, together with any prior results carried in and
+the replay state compiled into it. It refuses a launch that names a source
+run and carries no `_resumeReach` as `RESUME-REACH-UNKNOWN`. The summary
+records the declaration as `noResume`, and a resume is held to the recorded
+declaration as well as the current graph's.
+
 ## Witness version continuity
 
 A recorded summary names the compiling plugin root, version and witness code

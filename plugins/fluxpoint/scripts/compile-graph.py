@@ -50,7 +50,7 @@ NODE_FIELDS = {
     "verifyOver", "expectItems", "haltWhen", "haltReason", "onRed", "isolation",
     "repeat", "irreversible", "actor", "release", "wake", "decides", "honors",
     "memory", "reduce", "lane", "pushes", "repository", "branch", "replay", "fresh", "cites", "probe",
-    "sameShaAs",
+    "sameShaAs", "resume",
 }
 # The two failure policies. Anything else used to fall back to a default
 # silently — a misspelled 'Halt' weakened the declared policy in the
@@ -680,6 +680,128 @@ def ancestors(n, by_id):
     return found
 
 
+# What a record files for a node that did not run: an inherited or parked
+# wait, work the budget declined, an effect nobody confirmed. Anything else
+# filed against a node means it started.
+NOT_STARTED = {"BLOCKED", "SKIPPED", "REFUSED", "LEDGER-CONFLICT"}
+
+
+def no_resume_reach(ir):
+    """Each "resume": "never" node with the ids that show a run reached it.
+
+    That is the node itself and every node that depends on it, through
+    `after`, a reduce's `from` or `verifies`. A node declared later that
+    does not depend on it is left out: behind a park it runs while this
+    one still waits, and in another lane it runs beside it.
+    """
+    nodes = [n for n in ir.get("nodes") or [] if isinstance(n, dict) and isinstance(n.get("id"), str)]
+    declared = [n["id"] for n in nodes if n.get("resume") == "never"]
+    if not declared:
+        return {}
+    needs = {}
+    for n in nodes:
+        deps = after_ids(n) + [(n.get("reduce") or {}).get("from") if isinstance(n.get("reduce"), dict) else None,
+                               n.get("verifies"), *repair_integrations(n)]
+        needs[n["id"]] = {d for d in deps if isinstance(d, str)}
+    def depends(nid, target, seen):
+        return any(d == target or (d in needs and d not in seen and not seen.add(d) and depends(d, target, seen))
+                   for d in needs[nid])
+    return {target: [n["id"] for n in nodes if n["id"] == target or depends(n["id"], target, set())]
+            for target in declared}
+
+
+def run_started(summary, labels=()):
+    """Ids of the nodes a recorded run started, read from its own record.
+
+    Any one kind of evidence is enough: a result the node produced, a
+    provenance row that is neither a wait nor a decline, or a call under
+    the node's label, in the summary's call records or in `labels` read
+    from the runtime journal. An advisor call belongs to a parked node
+    that is still waiting, so it starts nothing.
+    """
+    started = set()
+    results = summary.get("results")
+    for nid, value in (results.items() if isinstance(results, dict) else ()):
+        if value is not None and value != []:
+            started.add(nid)
+    rows = summary.get("provenance")
+    for row in rows if isinstance(rows, list) else ():
+        if isinstance(row, dict) and isinstance(row.get("node"), str) and row.get("status") not in NOT_STARTED:
+            started.add(row["node"].split(":")[0])
+    calls = summary.get("callRecords")
+    seen = [((call.get("opts") or {}).get("label") if isinstance(call.get("opts"), dict) else None)
+            for call in (calls if isinstance(calls, list) else ()) if isinstance(call, dict)]
+    memos = summary.get("memoRecords")
+    seen += [memo.get("node") for memo in (memos if isinstance(memos, list) else ()) if isinstance(memo, dict)]
+    for label in [*seen, *labels]:
+        if isinstance(label, str) and label and not label.endswith(":advice"):
+            started.add(label.split(":")[0])
+    return started
+
+
+def held_no_resume(ir, summary):
+    """The "resume": "never" nodes a resume of this run is held to.
+
+    The current graph's, and the ones the run itself was compiled with:
+    deleting the field from the graph afterwards does not make an old
+    review resumable.
+    """
+    reach = dict(no_resume_reach(ir))
+    recorded = summary.get("noResume") if isinstance(summary, dict) else None
+    for node, after in (recorded.items() if isinstance(recorded, dict) else ()):
+        if isinstance(after, list):
+            reach.setdefault(node, [nid for nid in after if isinstance(nid, str)])
+    return reach
+
+
+def resume_refusal(ir, summary, labels=()):
+    """Why a recorded run cannot be resumed, or None."""
+    reach = held_no_resume(ir, summary)
+    if not reach:
+        return None
+    started = run_started(summary, labels)
+    for node, after in reach.items():
+        hit = [nid for nid in after if nid in started]
+        if hit:
+            return (f"RESUME-PAST-NO-RESUME-NODE: {node} — the recorded run started "
+                    f"{', '.join(repr(nid) for nid in hit)}, and '{node}' declares \"resume\": \"never\": "
+                    f"a resume would run it a second time under the same record. Launch fresh.")
+    return None
+
+
+def resume_reach(ir, summary, run_id, projects=None):
+    """What a resume of a recorded run is told its source started.
+
+    None when no node declares "resume": "never", so a graph without the
+    field launches exactly as before. Raises ValueError, with the named
+    code, when the run started such a node. The runtime journal is read
+    as well as the record, because it also holds an attempt that reached
+    further than the last one anybody recorded.
+    """
+    if not held_no_resume(ir, summary):
+        return None
+    labels = journal_labels(run_id, projects)
+    refusal = resume_refusal(ir, summary, labels)
+    if refusal:
+        raise ValueError(refusal)
+    return sorted(run_started(summary, labels))
+
+
+def journal_labels(run_id, projects=None):
+    """Labels of every call the runtime journal holds for a run, or [] with no journal.
+
+    The journal is the runtime's own list, so it covers an attempt that
+    reached further than the last one anybody recorded.
+    """
+    helper = _sibling("replay_memo")
+    try:
+        rows = helper._rows(helper._run_dir(run_id, projects) / "journal.jsonl")
+        return [row.get("label", (row.get("opts") or {}).get("label") if isinstance(row.get("opts"), dict) else None)
+                for row in rows if isinstance(row, dict) and row.get("type") == "started"]
+    except (helper.ReplayError, OSError, ValueError):
+        return []
+
+
 def replay_features(ir, embedded_args=None):
     return (any(n.get('irreversible') or n.get('contract') == 'NativeReadingsV1' or any(key in n for key in ("lane", "replay", "fresh", "pushes", "repository", "branch")) or isinstance(n.get('after'), list) for n in ir.get("nodes", []))
             or bool((embedded_args or {}).get("rejudge")))
@@ -1187,6 +1309,13 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
             f.append(f"{where}: id must be lowercase kebab-case")
         if nid in seen:
             f.append(f"{where}: duplicate id")
+        if "resume" in n:
+            if n["resume"] != "never" or not isinstance(n["resume"], str):
+                f.append(f"{where}: resume takes one value, \"never\": a run that started this node "
+                         f"cannot be resumed")
+            elif n.get("actor", "agent") != "agent":
+                f.append(f"{where}: resume \"never\" on a {n.get('actor')} node contradicts the park — "
+                         f"the campaign continues by resuming past it")
         same = n.get("sameShaAs")
         if same is not None:
             target = seen.get(same) if isinstance(same, str) else None
@@ -2076,6 +2205,14 @@ def warnings(ir, agents=None, specification=None, gates=None):
                 f"Each gate resolves its commit when it runs, so a branch that moves between them is "
                 f"certified at two heads and the run still records COMPLETE. Add "
                 f"\"sameShaAs\": \"{first}\" to halt when the two commits differ.")
+    for node in ir.get("nodes") or []:
+        if (isinstance(node, dict) and node.get("contract") == "RedTeamV1" and node.get("foreach")
+                and node.get("resume") != "never"):
+            w.append(
+                f"node '{node.get('id', '?')}': a red-team fan-out a resume can pass. Replay is the longest "
+                f"unchanged prefix of calls, so after one dead lens every later lens runs again and the review "
+                f"is rolled a second time under one record. Add \"resume\": \"never\" to refuse a resume of "
+                f"any run that started it; prose in a prompt does not hold.")
     for node in ir.get("nodes") or []:
         if not isinstance(ceiling, int) or isinstance(ceiling, bool) or not panel_over_sources(node, ir):
             continue
@@ -3213,6 +3350,33 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         condition = f"!Object.prototype.hasOwnProperty.call(A, {js_str(k)})" if embedded_args is not None else f"!A[{js_str(k)}]"
         a(f"if ({condition}) A[{js_str(k)}] = {js_str(v)}")
     a(f"const campaign = {js_str(ir['campaign'])}")
+    no_resume = no_resume_reach(ir)
+    if no_resume:
+        a("// --- resume: never ---")
+        a("// Each node below is a review that runs once. A resume replays the longest")
+        a("// unchanged prefix of calls and runs the rest again, so resuming a run that")
+        a("// started one rolls it a second time under the same record. This launch")
+        a("// names a source run when it is a resume; what that run started comes from")
+        a("// the launcher's reading of its record, from prior results carried in, and")
+        a("// from the replay state compiled into this script, which is read whether or")
+        a("// not a source is named. A resume that does not say what its source started")
+        a("// cannot be shown to stop short, and is refused.")
+        a("const NO_RESUME = " + json.dumps(no_resume, sort_keys=True))
+        a("{")
+        a("  const resumed = A._resumeFromRunId !== undefined && A._resumeFromRunId !== null")
+        a("  const held = new Set(), owner = label => typeof label === 'string' && label && !label.endsWith(':advice') ? label.split(':')[0] : null")
+        a("  for (const entry of Array.isArray(A._prefix) ? A._prefix : []) { const id = owner(entry && entry.label); if (id) held.add(id) }")
+        a("  for (const entry of Object.values(A._memo && typeof A._memo === 'object' ? A._memo : {})) { const id = owner(entry && (entry.node || (entry.payload || {}).id)); if (id) held.add(id) }")
+        a("  for (const entry of Object.values(A._ledgerCalls && typeof A._ledgerCalls === 'object' ? A._ledgerCalls : {})) { const id = owner(entry && entry.node); if (id) held.add(id) }")
+        a("  for (const [id, value] of Object.entries(A._priorResults && typeof A._priorResults === 'object' ? A._priorResults : {})) if (value !== null && value !== undefined && !(Array.isArray(value) && !value.length)) held.add(id)")
+        a("  const reach = Array.isArray(A._resumeReach) ? A._resumeReach : null")
+        a("  for (const id of reach || []) held.add(String(id))")
+        a("  for (const [node, after] of Object.entries(NO_RESUME)) {")
+        a("    const hit = after.filter(id => held.has(id))")
+        a("    if (hit.length) throw new Error(`RESUME-PAST-NO-RESUME-NODE: ${node} — the run this launch resumes${resumed ? ' (' + A._resumeFromRunId + ')' : ''} started ${hit.join(', ')}, and '${node}' declares \"resume\": \"never\". Launch fresh.`)")
+        a("  }")
+        a("  if (resumed && reach === null) throw new Error(`RESUME-REACH-UNKNOWN: this launch resumes ${A._resumeFromRunId} and does not say which nodes that run started (args._resumeReach), so nothing shows it stops before ${Object.keys(NO_RESUME).join(', ')}, which declare${Object.keys(NO_RESUME).length > 1 ? '' : 's'} \"resume\": \"never\". Assemble the resume with resume.py, which reads the recorded run.`)")
+        a("}")
     a("// {{item...}} / {{A...}} render text as itself and structure as JSON.")
     a("function tokenText(v) { return v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v) }")
     a("function longPreamble() { return " + js_str(LONG_PREAMBLE) + "; }")
@@ -3690,6 +3854,10 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         extra += ", argsSha256: ARGS_SHA256, evidenceUnpinned: A._evidenceUnpinned || []"
         if not modern and not prove_nodes and not repair_loops(ir):
             extra += ", launch: A._launch || null"
+    if no_resume:
+        # The declaration rides out in the record, so a later resume is held
+        # to what this run was compiled with whatever the graph says by then.
+        extra += ", noResume: NO_RESUME"
     reducers = [n["id"] for n in nodes if is_reduce(n)]
     if reducers:
         # Named so a consumer counting produced items can tell a reducer's
@@ -5273,6 +5441,7 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     helper = _sibling('replay_memo')
     source_artifact, source_sha = _sibling('run_artifacts').read(root, run_id, artifact_sha256=artifact_sha256)
     source = source_artifact['summary']
+    reach = resume_reach(ir, source, run_id, projects)
     launch = source.get('launch')
     if not isinstance(launch, dict):
         raise ValueError('resume source has no immutable launch stamp')
@@ -5283,6 +5452,8 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
                 branch=git('branch', '--show-current'), porcelain=subprocess.check_output(['git', '-C', root, 'status', '--porcelain'], text=True, encoding='utf-8'))
     runtime_args = dict(replay, _base=base, _launch=launch, _replayLaunchNonce='plan-hypothetical-live-reading',
                         _resumeFromRunId=run_id, _resumeArtifactSha256=source_sha, _priorResults=source.get('results') or {}, _ledger={}, _releases={})
+    if reach is not None:
+        runtime_args['_resumeReach'] = reach
     if source.get('ledger'):
         runtime_args['_ledger'] = {r['key']: r for r in source['ledger'] if isinstance(r, dict) and 'key' in r}
     if any(n.get('irreversible') for n in ir['nodes']):

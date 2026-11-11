@@ -81,6 +81,12 @@ command.
      `target` and `class`. A key on `finding` or `exploit_path` merges
      nothing two lenses word differently, and every lens that sees a
      defect then costs its own panel out of `budget.maxNodes`.
+   - a review that must run once per run declares `"resume": "never"` on
+     its fan-out. A resume replays the calls before the first dead one
+     and runs the rest again, so without the field a resumed run rolls
+     the review twice. With it, a run that started the node is refused
+     at resume (`RESUME-PAST-NO-RESUME-NODE`) and launches fresh. Prose
+     in a prompt that forbids the resume is not enforced by anything.
 5. Compile-check until clean:
    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" compile-graph.py WORK.md --check`
    Its findings are structural. Fix the IR — never weaken a contract,

@@ -141,6 +141,7 @@ Campaign section to use it.
       "contract": "RedTeamV1",
       "verify": "schema-only",
       "onRed": "halt",
+      "resume": "never",
       "foreach": "red-team-lenses",
       "independent": true,
       "verifies": "build",
@@ -234,6 +235,9 @@ Campaign section to use it.
   `red-team-refute` runs three refuters per defect over every lens's wording
   of it; the separate `red-team` gate binds their results and raw coverage.
   BLOCK, incomplete coverage and unverified claims stop the campaign.
+  `red-team-lenses` declares `"resume": "never"`: a run that started the
+  review is never resumed (`RESUME-PAST-NO-RESUME-NODE`), because a resume
+  would run the lenses after the first dead one a second time. Launch fresh.
 
 ## Failure policy
 - Any node returning nothing halts (`onRed: halt`).

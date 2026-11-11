@@ -170,6 +170,7 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
       "contract": "RedTeamV1",
       "verify": "schema-only",
       "onRed": "halt",
+      "resume": "never",
       "foreach": "red-team-lenses",
       "independent": true,
       "verifies": "build",
@@ -245,6 +246,10 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
   raw lens coverage/blocker context. Missing work cannot become SHIP just
   because findings were empty or refuted. Every SHIP carries exact ranges,
   diff counts, completed attacker/lens counts and sampled status.
+  `red-team-lenses` declares `"resume": "never"`: the review runs once per
+  run, so a run that started it is never resumed. `resume.py`, `--plan`
+  and the compiled script each refuse with `RESUME-PAST-NO-RESUME-NODE`;
+  fix what the review found and launch fresh.
 - Terminal: merge happens outside the graph, per WORK.md Merge policy,
   with the harness as a required CI check.
 

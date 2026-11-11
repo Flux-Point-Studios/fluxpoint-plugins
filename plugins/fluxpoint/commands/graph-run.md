@@ -320,6 +320,11 @@ Workflow tool requires.
    tracked config such as `.claude/settings.json` does. The compiler plan
    determines which calls replay under the graph's declared replay rules;
    irreversible nodes replay from the fresh ledger rather than firing twice.
+   A run that started a node declaring `"resume": "never"` (the shipped
+   templates declare it on `red-team-lenses`) is refused as
+   `RESUME-PAST-NO-RESUME-NODE: <node>`: the review ran once, and a resume
+   would run part of it again. Do not work around the refusal by passing
+   `resumeFromRunId` yourself. Fix what the review found and launch fresh.
    Apply step 5's launch-turn rule to every resume too. A node that stopped
    because its slice goes beyond the relayed user's request has an
    authorization-context stop, not a code defect. Resume from the operator's
