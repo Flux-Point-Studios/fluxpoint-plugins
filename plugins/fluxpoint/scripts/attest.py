@@ -1572,11 +1572,14 @@ def verify_claims(root, summary):
                 if valid and any(x.get('gate') not in steps for x in claims):
                     checks.append({'node': node, 'declared': True, 'status': 'MISMATCH', 'detail': 'undeclared step citation'})
             c = contracts.get(node)
-            if c not in (None, "HarnessCheckV1", "ExecutionV1"):
-                continue
             declared = proved.get(node)
+            # A prove: node is held to the log whatever its contract is
+            # called: the compiler accepts any contract that keeps the
+            # fields this check reads, so the name decides nothing here.
+            if not declared and c not in (None, "HarnessCheckV1", "ExecutionV1"):
+                continue
             if declared:
-                # An ExecutionV1 cites its attestation directly, so the check
+                # A prove: result cites its attestation directly, so the check
                 # is against the id rather than a command string it never
                 # carries.
                 check = _check_cited(rows, node, declared, r, launch, head, used, root=root, gates=gates, plugin=plugin)

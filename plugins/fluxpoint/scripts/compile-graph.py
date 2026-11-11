@@ -50,6 +50,7 @@ NODE_FIELDS = {
     "verifyOver", "expectItems", "haltWhen", "haltReason", "onRed", "isolation",
     "repeat", "irreversible", "actor", "release", "wake", "decides", "honors",
     "memory", "reduce", "lane", "pushes", "repository", "branch", "replay", "fresh", "cites", "probe",
+    "sameShaAs",
 }
 # The two failure policies. Anything else used to fall back to a default
 # silently — a misspelled 'Halt' weakened the declared policy in the
@@ -546,6 +547,61 @@ def prove_gate(n):
 def judge_size(n):
     m = TIER.match(str(n.get("verify", "schema-only")))
     return int(m.group(5)) if m and m.group(5) else 0
+
+
+EXACT_SHA = "^[0-9a-f]{40}$"
+_PROVE_BASE = []
+
+
+def _typed(shape, kind):
+    """`shape` admits only values of JSON type `kind`: by its type, or by an enum or const of them."""
+    python = {"string": str, "integer": int}[kind]
+    is_kind = lambda value: isinstance(value, python) and not isinstance(value, bool)
+    if shape.get("type") == kind:
+        return True
+    if isinstance(shape.get("enum"), list) and shape["enum"]:
+        return all(is_kind(value) for value in shape["enum"])
+    return "const" in shape and is_kind(shape["const"])
+
+
+def prove_contract_issue(schema):
+    """Why this contract cannot back a `prove:` node, or None.
+
+    The attest check reads four fields of the node's result. A contract
+    that requires them, typed as the shipped ExecutionV1 types them, can
+    carry a prove: node whatever it is called, so each gate's contract
+    says only what that gate returns. The name used to be the whole test:
+    a second gate had to be folded into one overloaded schema, and a
+    repository's own copy named ExecutionV1 passed whatever it dropped.
+    """
+    if not _PROVE_BASE:
+        shipped = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "contracts", "ExecutionV1.schema.json")
+        with open(shipped, encoding="utf-8") as fh:
+            _PROVE_BASE.append(json.load(fh))
+    base = _PROVE_BASE[0]
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return "is not an object schema"
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = schema.get("required") if isinstance(schema.get("required"), list) else []
+    for field in base["required"]:
+        want, mine = base["properties"][field], props.get(field)
+        if field not in required or not isinstance(mine, dict):
+            return f"does not require '{field}'"
+        if not _typed(mine, want["type"]):
+            return f"does not type '{field}' as {want['type']}"
+        if "pattern" in want and mine.get("pattern") != want["pattern"]:
+            return f"does not hold '{field}' to the pattern {want['pattern']}"
+    return None
+
+
+def carries_exact_sha(schema):
+    """The contract requires a full 40-hex commit in `sha`."""
+    if not isinstance(schema, dict):
+        return False
+    sha = (schema.get("properties") or {}).get("sha")
+    return ("sha" in (schema.get("required") or []) and isinstance(sha, dict)
+            and sha.get("type") == "string" and sha.get("pattern") == EXACT_SHA)
 
 
 def is_reduce(n):
@@ -1131,6 +1187,22 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
             f.append(f"{where}: id must be lowercase kebab-case")
         if nid in seen:
             f.append(f"{where}: duplicate id")
+        same = n.get("sameShaAs")
+        if same is not None:
+            target = seen.get(same) if isinstance(same, str) else None
+            if not isinstance(same, str) or not same:
+                f.append(f"{where}: sameShaAs must be the id of one earlier node")
+            elif target is None:
+                f.append(f"{where}: sameShaAs '{same}' names no earlier node — the commit to "
+                         f"compare with has to exist when this node returns")
+            else:
+                for label, node in ((where, n), (f"node '{same}'", target)):
+                    if is_reduce(node) or node.get("foreach") or node.get("repeat") or judge_size(node):
+                        f.append(f"{where}: sameShaAs compares one commit with one commit, and "
+                                 f"{label} yields several results")
+                    elif not carries_exact_sha(contracts.get(node.get("contract"))):
+                        f.append(f"{where}: sameShaAs needs an exact commit on both nodes, and "
+                                 f"{label}'s contract {node.get('contract')} does not require a 40-hex sha")
 
         # Reduce nodes are deterministic code, not agents: they carry none of
         # the agent-node machinery, so they validate on their own path.
@@ -1239,11 +1311,13 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
                     f"(declared: {', '.join(sorted(gates)) or 'none'})"
                     + (" — prove:ci needs a top-level 'ci' section naming the "
                        "forge and the contexts that decide" if gate == "ci" else ""))
-            if c != "ExecutionV1":
+            problem = prove_contract_issue(contracts[c]) if c in contracts else None
+            if problem:
                 f.append(
-                    f"{where}: verify prove:{gate} requires contract ExecutionV1 "
-                    f"(has '{c}') — the attestId is what makes the exit code "
-                    f"checkable, and no other contract carries one")
+                    f"{where}: verify prove:{gate} needs a contract that requires gate, exit, "
+                    f"attestId and sha as the shipped ExecutionV1 types them, and '{c}' "
+                    f"{problem} — the attestId is what makes the exit code checkable, and "
+                    f"the sha is what ties it to a commit")
             if n.get("verifyOver"):
                 f.append(f"{where}: verify prove:{gate} verifies the node's own "
                          f"execution, not an array — drop verifyOver")
@@ -1991,6 +2065,17 @@ def warnings(ir, agents=None, specification=None, gates=None):
     w = []
     by_id = {x.get("id"): x for x in ir.get("nodes") or [] if isinstance(x, dict)}
     ceiling = (ir.get("budget") or {}).get("maxNodes")
+    for node in ir.get("nodes") or []:
+        if not isinstance(node, dict) or not prove_gate(node) or node.get("sameShaAs"):
+            continue
+        earlier = [nid for nid in ancestors(node, by_id) if prove_gate(by_id.get(nid) or {})]
+        if earlier:
+            first = next(x.get("id") for x in ir["nodes"] if x.get("id") in earlier)
+            w.append(
+                f"node '{node.get('id', '?')}': a second attested gate after '{first}' with no sameShaAs. "
+                f"Each gate resolves its commit when it runs, so a branch that moves between them is "
+                f"certified at two heads and the run still records COMPLETE. Add "
+                f"\"sameShaAs\": \"{first}\" to halt when the two commits differ.")
     for node in ir.get("nodes") or []:
         if not isinstance(ceiling, int) or isinstance(ceiling, bool) or not panel_over_sources(node, ir):
             continue
@@ -3198,7 +3283,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("function provePreamble(gate) {")
         a("  return longPreamble() + (gate === 'ci'")
         a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run ${ATTEST} --ci${ROOT_ARG} --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
-        a("    : `PROVE GATE ${gate} — use the pinned witness command, which verifies the compiler identity before executing the declared gate: ${ATTEST} --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground ${ATTEST} --await <token>${ROOT_ARG}. A red whose wrapper row carries fault can be settled only by ${ATTEST} --rerun-fault <attestId>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}; await its one sequential native/reference pair and cite the pair. Every other red stays red. Never rerun until green: a later pass does not erase any unsettled red at the same tree and nonce. Return gate '${gate}', the exit, the full judged commit sha, and the attestId the witness recorded (${ATTEST} --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
+        a("    : `PROVE GATE ${gate} — use the pinned witness command, which verifies the compiler identity before executing the declared gate: ${ATTEST} --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground ${ATTEST} --await <token>${ROOT_ARG}. A red whose wrapper row carries fault can be settled only by ${ATTEST} --rerun-fault <attestId>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}; await its one sequential native/reference pair and cite the pair. Every other red stays red. Never rerun until green: a later pass does not erase any unsettled red at the same tree and nonce. Return gate '${gate}', the exit, the full judged commit sha, and the attestId the witness recorded (${ATTEST} --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it). Run each of these commands exactly as written. They begin with bash and the plugin's py.sh, which is the spelling the isolation check accepts and the one that picks the right shell on Windows; if another spelling is refused, come back to this one and never start attest.py with python directly.\\n\\n`)")
         a("}")
         a("const CITES = " + json.dumps({n['id']: n['cites'] for n in cited_nodes}, sort_keys=True))
         a("function citesPreamble(gates) {")
@@ -3490,6 +3575,13 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("const WINNERS = {}")
     a("const RESULTS = {}")
     a("const PROVENANCE = []")
+    if any(n.get("sameShaAs") for n in nodes):
+        a("// Two nodes that must certify one head: this node's commit against an earlier node's.")
+        a("function sameSha(id, r, other) {")
+        a("  const exact = /^[0-9a-f]{40}$/, mine = r && r.sha, theirs = RESULTS[other] && RESULTS[other].sha")
+        a("  if (!exact.test(mine || '') || !exact.test(theirs || '')) return `${id}: sameShaAs '${other}' needs an exact commit on both nodes, and one of them returned none`")
+        a("  return mine === theirs ? null : `${id} judged ${mine} and '${other}' judged ${theirs}: the commit moved between the two, so they do not certify one head`")
+        a("}")
     a("const RECURRING_CLASSES = []")
     a("// The optional data arg is structured, not prose: round counts, worker")
     a("// tallies, reduce before/after. metrics.py aggregates these across runs,")
@@ -4478,6 +4570,18 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         a(f"  log(`UNPROVEN ${{cite_{var}}}`)")
         a(f"  note({js_str(nid)}, 'UNPROVEN', cite_{var})")
         a("  INCOMPLETE = true")
+        a("}")
+    if n.get("sameShaAs"):
+        # Each gate resolves its commit when it runs. Two gates that are
+        # meant to certify one head are compared here, in code, because a
+        # branch that moves between them is otherwise recorded COMPLETE
+        # with a verdict about one commit and a gate pass about another.
+        a(f"const same_{var} = sameSha({js_str(nid)}, {var}, {js_str(n['sameShaAs'])})")
+        a(f"if (same_{var}) {{")
+        a(f"  log(`HALT at {nid}: ${{same_{var}}}`)")
+        a(f"  note({js_str(nid)}, 'HALTED', same_{var})")
+        a(f"  RESULTS[{js_str(nid)}] = {var}")
+        a("  return summary('HALTED')")
         a("}")
     a(f"RESULTS[{js_str(nid)}] = {var}")
     if n.get("decides"):

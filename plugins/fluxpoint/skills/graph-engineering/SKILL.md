@@ -538,6 +538,20 @@ report clean when its own verification says its exit codes are not what
 happened. A `prove:` node citing nothing is `INCOMPLETE` instead: the
 declared verification did not run, which is not the same accusation.
 
+The contract need not be named `ExecutionV1`. Any contract that requires
+`gate`, `exit`, `attestId` and `sha`, typed as the shipped `ExecutionV1`
+types them, can carry a `prove:` node, so a second gate with its own
+return shape gets its own contract. The check at record time follows the
+node's `prove:` tier and ignores the contract's name.
+
+Two gates that must certify one commit say so. Each gate resolves its
+commit when it runs, so a branch that moves between them leaves a verdict
+about one head and a gate pass about another, and the run still records
+COMPLETE. `"sameShaAs": "<node id>"` on the later node halts the run when
+its `sha` differs from the earlier node's. Both contracts must require a
+40-hex `sha`. `--check` warns about a second `prove:` node in a chain that
+names none.
+
 A citation is also bound to the run that cites it. The compiled graph
 refuses to start without the launch stamp `/fluxpoint:graph-run` passes in
 `args._launch` (`attest.py --stamp`: a `since` and a run nonce), tells each

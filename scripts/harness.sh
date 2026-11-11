@@ -298,6 +298,7 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     step "graph-audit workflow: lenses, reduce, refutation (executed)" \
       "$FPL_PY" "$PLUGIN/tests/audit-workflow-test.py"
     step "compiler invariants" "$FPL_PY" "$PLUGIN/tests/compile-test.py"
+    step "attested gates: own contracts and one judged commit" "$FPL_PY" "$PLUGIN/tests/prove-gates-test.py"
     step "graph lanes, replay and rejudgment" "$FPL_PY" "$PLUGIN/tests/graph-replay-test.py"
     step "journal and transcript replay provenance" "$FPL_PY" "$PLUGIN/tests/replay-memo-test.py"
     step "captured prefix and once-only ledger continuity" "$FPL_PY" "$PLUGIN/tests/captured-prefix-test.py"
