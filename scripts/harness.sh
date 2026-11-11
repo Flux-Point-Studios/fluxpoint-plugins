@@ -251,6 +251,9 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
       "$PLUGIN"/scripts/memory.py | "$PLUGIN"/scripts/recurrence-guard.py)
         step "recurrence gate" "$FPL_PY" "$PLUGIN/tests/recurrence-test.py"
         step "lessons across runs" "$FPL_PY" "$PLUGIN/tests/memory-test.py" ;;
+      "$PLUGIN"/scripts/rust_hatches.py)
+        step "Rust and FRAME escape hatches in production code" "$FPL_PY" "$PLUGIN/tests/rust-hatches-test.py"
+        step "Rust and FRAME attack taxonomies" "$FPL_PY" "$PLUGIN/tests/rust-taxonomy-test.py" ;;
       "$PLUGIN"/scripts/pair-guard.py)
         step "relation gate" bash "$PLUGIN/tests/pair-test.sh"
         step "relation gate: differential + bite + scan" bash "$PLUGIN/tests/pair-verify-test.sh" ;;
@@ -332,11 +335,13 @@ print(p.replace(os.sep, "/"))' "$f" 2>/dev/null || true)"
     step "STATUS vocabulary" "$FPL_PY" "$PLUGIN/tests/status-vocab-test.py"
     step "proof-strength ratchet" bash "$PLUGIN/tests/proof-guard-test.sh"
     step "Python type escape hatches" "$FPL_PY" "$PLUGIN/tests/python-hatches-test.py"
+    step "Rust and FRAME escape hatches in production code" "$FPL_PY" "$PLUGIN/tests/rust-hatches-test.py"
     step "Native Compact adapter protocol" "$FPL_PY" "$PLUGIN/tests/compact-native-test.py"
     step "Shared recall corpus indexes" "$FPL_PY" "$PLUGIN/tests/recall-shared-index-test.py"
     step "Campaign schema and record upgrades" "$FPL_PY" "$PLUGIN/tests/campaign-upgrade-test.py"
     step "Codex memory corpus scoping" "$FPL_PY" "$PLUGIN/tests/codex-memory-test.py"
     step "Midnight attack taxonomy" "$FPL_PY" "$PLUGIN/tests/compact-taxonomy-test.py"
+    step "Rust and FRAME attack taxonomies" "$FPL_PY" "$PLUGIN/tests/rust-taxonomy-test.py"
     step "statement ratchet" bash "$PLUGIN/tests/spec-guard-test.sh"
     step "counterexample ledger (executed)" bash "$PLUGIN/tests/cex-test.sh"
     step "mutation ratchet (executed)" bash "$PLUGIN/tests/mutation-test.sh"

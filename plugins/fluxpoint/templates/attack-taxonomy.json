@@ -233,6 +233,152 @@
         }
       ],
       "waived": {}
+    },
+    {
+      "language": "rust",
+      "note": "Rust services and off-chain code that read hostile bytes and move value. Active when the repository tracks a Rust test function. A class is specified by a Rust test function whose name carries the class id: a function under #[test] or a sibling attribute such as #[tokio::test] or #[rstest], including the functions a proptest! block declares. A helper no test build collects, a comment and a string do not count. A match in a file that uses proptest, quickcheck, bolero, arbtest or Kani is a property over a generator; a match in a file without one is noted as an example. A crate that builds Cardano transactions owes the builder classes as well: copy them from the typescript taxonomy into this one's classes, where they are then specified by Rust tests.",
+      "classes": [
+        {
+          "id": "attack_panic_on_hostile_input",
+          "applies": "decode",
+          "property": "No bytes an outsider can supply make the process panic or abort: every decoder, parser and verifier returns a typed error for malformed, truncated, oversized and adversarially nested input. A panic in a service is a restart an attacker can repeat, and in a consensus or signing path it is a halt.",
+          "fuzz": "arbitrary byte strings and structure-aware mutations of valid inputs: truncation at every offset, length prefixes beyond the remaining input, nesting at and past the documented depth, non-canonical encodings and invalid UTF-8"
+        },
+        {
+          "id": "attack_unbounded_allocation",
+          "applies": "decode",
+          "property": "Memory reserved while decoding is bounded by the bytes actually received, never by a length the input declares: a length prefix, an element count or a capacity hint from the wire does not size an allocation before the data behind it has arrived, and the total decoded size stays under a documented cap.",
+          "fuzz": "inputs declaring lengths and counts from zero to u64::MAX with little or no payload behind them, deeply nested containers, and many small messages against one connection"
+        },
+        {
+          "id": "attack_amount_overflow",
+          "applies": "all",
+          "property": "Arithmetic on amounts, fees, indexes and timestamps is checked in the build that ships: an operation that would overflow, underflow, divide by zero or lose value in a conversion returns an error, and no result wraps or truncates. A release build wraps by default, so the property has to hold under the release profile and not only in a debug test run.",
+          "fuzz": "operands at and around zero, one, and each type's MIN and MAX, values that overflow only after scaling by decimals or a rate, and conversions between every integer width the code uses"
+        },
+        {
+          "id": "attack_decode_encode_divergence",
+          "applies": "all",
+          "property": "What this code encodes it decodes to the same value, and it agrees with the other implementation of the same format: for any value, decoding its encoding yields that value, and the bytes equal the reference encoder's for the same input. Two readers of one wire format that disagree on a single input let a signer approve one thing while a verifier checks another.",
+          "fuzz": "values across each field's full range, canonical and non-canonical encodings of the same value, and the same vectors run through the reference implementation, with bytes and decoded values both compared"
+        },
+        {
+          "id": "attack_error_swallowed",
+          "applies": "all",
+          "property": "A failure in a value-moving step stops the operation: no error from a write, a submit, a transfer or a signature check is discarded, logged and continued past, or replaced by a default. The caller of a step that failed observes the failure, and nothing that depended on the step has happened.",
+          "fuzz": "fault injection at every fallible call on the path: I/O errors, timeouts, partial writes, and a dependency returning each error variant it declares, with the resulting state compared against the state before the call"
+        },
+        {
+          "id": "attack_blind_signing",
+          "applies": "sign",
+          "property": "Every payload this code signs is one it built, or one it decoded and checked against the request that asked for it: the inputs it spends, the outputs and amounts it intends, and no certificate, withdrawal, mint or metadata beyond them. A transaction returned by a remote resolver, a counterparty or a worker is hostile until it has been checked.",
+          "fuzz": "well-formed transactions that differ from the request in one field: an extra output, a redirected change address, a raised fee, an added withdrawal or mint, a swapped input, and a body for another network"
+        },
+        {
+          "id": "attack_secret_in_output",
+          "applies": "all",
+          "property": "Key material and credentials never reach a log line, an error value, a panic message or a Debug or Display rendering: types that hold them do not derive Debug over the secret, and every error built on a path that touches them is free of it.",
+          "fuzz": "distinctive secret bytes driven through every failing path, with logs, error chains, panic output and formatted values searched for them in raw, hex and base64 forms"
+        },
+        {
+          "id": "attack_request_amplification",
+          "applies": "request",
+          "property": "The work one unauthenticated request can cause stays within a documented bound as outsider-controlled data grows: upstream calls, database rows read and bytes allocated per request are capped, and a process-wide budget bounds the sustained rate across concurrent requests. A cap per request alone is not a bound.",
+          "fuzz": "row, page and item counts at and one past each documented limit, repeated and concurrent unauthenticated requests across routes, slow upstreams, and retries across the budget window boundary"
+        },
+        {
+          "id": "attack_blocked_executor",
+          "applies": "async",
+          "property": "No async task does blocking or CPU-bound work that grows with outsider input on a runtime worker thread: such work runs on a blocking pool or is bounded, so an unrelated task stays responsive within a documented bound while a hostile request is being served.",
+          "fuzz": "every async entry point with a slow synchronous dependency, hashing, decoding or a cache miss over growing outsider input, measured against a concurrent heartbeat task"
+        },
+        {
+          "id": "attack_shared_resource_exhaustion",
+          "applies": "request",
+          "property": "Every queue, channel, connection pool, semaphore and cache the service shares is bounded and named, and flooding one route cannot exhaust what the others need: an unbounded channel is memory an outsider controls, and a permit held across an await that never completes is a route that never serves again.",
+          "fuzz": "request floods at and past each capacity, distinct keys at and past cache capacity, cancellation while holding a permit or a lock, and simultaneous requests to unrelated routes"
+        }
+      ],
+      "waived": {}
+    },
+    {
+      "language": "frame",
+      "note": "FRAME pallets and runtimes (Polkadot SDK, Cardano partner chains), after the vulnerability classes Parity publishes as the Polkadot Top Ten and the obligations FRAME itself states as attributes. Active when a tracked Rust file declares a pallet or assembles a runtime. A class is specified by a Rust test function whose name carries the class id, by the same rule as the rust taxonomy; a match in a file that uses proptest, quickcheck, bolero, arbtest or Kani is a property, and any other match is noted as an example over the cases it lists. A test named for a class shows the class was declared, never that it runs or bites: the project harness has to execute it.",
+      "classes": [
+        {
+          "id": "attack_weight_underestimate",
+          "applies": "call",
+          "property": "Every dispatchable's declared weight covers its worst case, proof size included: for the largest arguments the call admits and the fullest storage it can meet, measured execution stays within the declared weight. An underweight call lets one transaction fill a block for the price of a small one.",
+          "fuzz": "arguments at each bound the call accepts, storage populated to its declared maximum, and the declared weight compared with measured reference time and proof size on the worst-case path"
+        },
+        {
+          "id": "attack_unbounded_iteration",
+          "applies": "all",
+          "property": "No call, hook or runtime API walks a collection whose length an account can grow without paying for each step: iteration over storage, over a vector argument or over a prefix is bounded by a constant the weight accounts for, or is paged. This holds for on_initialize, on_finalize and on_idle above all, which run whether or not anyone pays.",
+          "fuzz": "collections grown to and past their declared bound by many accounts, with each call and each hook measured as the count rises"
+        },
+        {
+          "id": "attack_reachable_panic",
+          "applies": "all",
+          "property": "No extrinsic, inherent, hook or runtime API panics on input an account or a block author controls: indexing, slicing, division, decoding, unwrap and expect are unreachable for every admissible call. A panic in a dispatchable invalidates a transaction; a panic in a hook or an inherent stops block production.",
+          "fuzz": "every call with arguments at and beyond each bound, empty and maximal vectors, zero divisors and malformed SCALE bytes, and every hook run at genesis, at session and era boundaries and over empty storage"
+        },
+        {
+          "id": "attack_unsafe_math",
+          "applies": "all",
+          "property": "Balances, counters, weights and indexes use checked or saturating arithmetic whose saturation is itself safe: no addition, subtraction, multiplication or conversion wraps or truncates in the runtime's release build, and a result that saturated never credits or debits the wrong amount.",
+          "fuzz": "operands at zero, one and each type's maximum, amounts that overflow only after scaling, repeated accumulation across blocks, and conversions between the balance, block-number and weight types"
+        },
+        {
+          "id": "attack_storage_exhaustion",
+          "applies": "call",
+          "property": "Every byte an account can place in storage is paid for by a deposit or bounded per account: creating an entry reserves an amount proportional to its size, entries have a maximum encoded length, and removing them returns the deposit. Storage that is free to fill is a permanent cost on every node.",
+          "fuzz": "many accounts creating entries of minimal and maximal size, accounts with exactly the deposit and one unit less, and create-then-remove cycles with the reserved balance checked at each step"
+        },
+        {
+          "id": "attack_missing_origin_check",
+          "applies": "call",
+          "property": "Every dispatchable checks its origin before it reads state or changes it: a privileged call refuses a signed caller, a signed call refuses none, and no call reaches a write on an origin it did not match. The check is on the call itself, not on a caller the pallet assumes.",
+          "fuzz": "each call dispatched from none, from root, from every signed role the pallet distinguishes and from each custom origin, with otherwise valid arguments"
+        },
+        {
+          "id": "attack_unsigned_replay",
+          "applies": "unsigned",
+          "property": "A call admitted without a signature can be included once: its validation binds it to state that changes when it executes, runs when the call enters the pool and again at dispatch, and gives it a unique provides tag and a bounded longevity. An unsigned call with no such binding can be resubmitted for as long as anyone likes, at no cost.",
+          "fuzz": "the same unsigned payload resubmitted in the same block, in later blocks and after the state it proves has moved on, and payloads produced for another chain, another pallet instance or another era"
+        },
+        {
+          "id": "attack_unchecked_inherent",
+          "applies": "inherent",
+          "property": "Data a block author supplies as an inherent is checked by every importing node against what that node itself observes: check_inherent rejects a block whose inherent disagrees with the verifier's own source beyond a documented tolerance, and a missing required inherent is an error. An inherent nobody checks is whatever the block author says it is.",
+          "fuzz": "blocks carrying an inherent with altered, stale, future-dated, duplicated and missing data, imported by a node whose own source disagrees, at and beyond the tolerance"
+        },
+        {
+          "id": "attack_discarded_result",
+          "applies": "all",
+          "property": "No failure inside a dispatchable or a hook is discarded: the result of a transfer, a reserve, an unreserve, a repatriation or a nested dispatch is propagated, or handled by a fallback that is itself tested, so a call never reports success for an effect that did not happen and never leaves funds reserved that the code believes it released.",
+          "fuzz": "each fallible currency and dispatch call forced to fail or to succeed in part: an account with less reserved than expected, a destination that cannot exist, a balance at the existential deposit"
+        },
+        {
+          "id": "attack_insecure_randomness",
+          "applies": "all",
+          "property": "No outcome a caller or a block author profits from depends on a value either of them can choose or predict: randomness comes from a verifiable source used with its documented delay, never from a block hash, a timestamp, an extrinsic index or collective flip.",
+          "fuzz": "the same call repeated across blocks and forks with the author controlling timestamps and ordering, checking that outcomes cannot be selected by withholding or reordering"
+        },
+        {
+          "id": "attack_account_reference_counts",
+          "applies": "all",
+          "property": "An account's existence agrees with what depends on it: provider, consumer and sufficient references are taken and released in pairs, so no account is reaped while a pallet still holds state for it and none is kept alive for free.",
+          "fuzz": "accounts created, funded to exactly the existential deposit, drained and re-created while holding each kind of pallet state, with reference counts and remaining storage checked after every step"
+        },
+        {
+          "id": "attack_runtime_upgrade_state",
+          "applies": "migration",
+          "property": "A runtime upgrade leaves storage decodable and every invariant holding: each migration is idempotent, bounded in weight, guarded by the storage version it bumps, and its pre- and post-upgrade checks pass against state shaped like the live chain's. A migration that runs twice, or past the block limit, breaks the chain it upgrades.",
+          "fuzz": "state at each earlier storage version, empty and at its maximum, with the migration applied once and applied twice, and its weight measured against the block limit"
+        }
+      ],
+      "waived": {}
     }
   ]
 }

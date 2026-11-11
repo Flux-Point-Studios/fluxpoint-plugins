@@ -1,0 +1,545 @@
+{
+  "version": 1,
+  "goal": "Rust is a first-class language of the harness: escape hatches in production Rust and FRAME pallets ratchet like TypeScript's, Rust tests can specify attack classes, and proptest failures reach the counterexample ledger",
+  "asset": "The existing proof-guard hatch ratchet, spec-guard attack taxonomy, counterexample ledger and scaffolded harness, which already carry Rust only for Kani, Verus and cargo-mutants",
+  "scope": [
+    "Hatch categories for production Rust: unsafe, typed holes, panic sites, silenced lints, discarded values",
+    "FRAME pallet and runtime opt-outs: unbenchmarked weights, unbounded storage, dev mode, feeless calls, calls admitted without a signature",
+    "Structural exclusion of code only a test, benchmark or verification build compiles",
+    "Lints allowed from a Cargo manifest and lint gates switched off from a command line",
+    "rust and frame attack taxonomies decided from Rust test functions",
+    "proptest failures parsed from cargo test output into the counterexample ledger",
+    "Scaffolded harness: workspace-wide clippy and tests, Kani harnesses found in any tracked crate"
+  ],
+  "outOfScope": [
+    "Numeric as casts, indexing and unchecked arithmetic, which need types a token scan does not have; clippy has them and its suppressions are counted",
+    "Running cargo, clippy or any Rust toolchain from the ratchet itself",
+    "ink!, Solana, CosmWasm and other Rust contract platforms",
+    "Registering every Rust test as a statement obligation",
+    "Pebble and other Cardano contract languages, which need their own verified parsers",
+    "Macro expansion, include! and build-script generated code"
+  ],
+  "decisions": [
+    {
+      "id": "rust-scan-method",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should Rust escape hatches be found so that the count is stable enough to commit as a baseline?",
+        "options": [
+          {
+            "option": "token-scanner",
+            "argued_by": "model",
+            "strongest_objection": "A hand-written lexer and item walker is new code that can disagree with rustc on exotic syntax, and it cannot see through macro expansion"
+          },
+          {
+            "option": "line-regexes",
+            "argued_by": "model",
+            "strongest_objection": "Line patterns cannot tell a raw string, a nested block comment or a test module from production code, so the count moves with every new test"
+          },
+          {
+            "option": "clippy-restriction-lints",
+            "argued_by": "model",
+            "strongest_objection": "It needs a toolchain and a full build inside a gate that runs in CI images without Rust, and an allow attribute silences it, which is the hatch being counted"
+          }
+        ],
+        "chosen": "token-scanner",
+        "rationale": "Only a scanner that reads tokens and item boundaries can leave test code out, and a count that includes test code rises with every honest test. It stays a static read of tracked files, like the Python scanner beside it, so the gate needs no toolchain.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Raw grep over one Polkadot SDK partner chain workspace: 144 unwrap and 440 expect call sites beside 638 test functions",
+          "The CI image for this repository's harness carries Python and Node and no Rust toolchain (.woodpecker.yaml)",
+          "python_hatches.py already takes the structural route for Python with tokenize and ast"
+        ]
+      },
+      "costs": [
+        {
+          "option": "token-scanner",
+          "cost": "One new module with a lexer, an attribute and item walker and module-file resolution, plus focused regressions",
+          "basis": "estimate",
+          "evidence": [
+            "The scope is fixed by plugins/fluxpoint/tests/rust-hatches-test.py"
+          ]
+        },
+        {
+          "option": "line-regexes",
+          "cost": "A few PATTERNS rows, and a baseline every Rust repo re-records whenever tests are added",
+          "basis": "estimate",
+          "evidence": [
+            "The TypeScript categories are line patterns and list their own known misses in proof-guard.py"
+          ]
+        },
+        {
+          "option": "clippy-restriction-lints",
+          "cost": "A cargo build per gate run and a Rust toolchain wherever the gate runs",
+          "basis": "unknown",
+          "evidence": [
+            "Build time depends on the consuming workspace and was not measured here"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rust-test-scope",
+      "status": "defaulted",
+      "dependsOn": [
+        "rust-scan-method"
+      ],
+      "record": {
+        "question": "Should Rust test code count toward the hatch baseline, and how is test code recognised?",
+        "options": [
+          {
+            "option": "exclude-by-cfg-evidence",
+            "argued_by": "model",
+            "strongest_objection": "Resolving out-of-line modules across files is more machinery, and a cfg written through a macro or an unusual path attribute is missed and counted as production"
+          },
+          {
+            "option": "count-everything",
+            "argued_by": "model",
+            "strongest_objection": "A test that unwraps is asserting, so every new test would raise the count and the baseline would be re-recorded without being read"
+          },
+          {
+            "option": "exclude-by-file-name",
+            "argued_by": "model",
+            "strongest_objection": "A file named tests.rs that is declared without cfg(test) ships in production, so a name is a way to take code out of the count"
+          }
+        ],
+        "chosen": "exclude-by-cfg-evidence",
+        "rationale": "The cfg attribute is what decides whether code reaches a release build, so it is the only evidence that cannot be satisfied by renaming a file. Misses fall on the counted side, which costs a false rise and never hides a hatch.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "That workspace declares its pallet tests as out-of-line modules under #[cfg(test)], with nested module files beneath them",
+          "The existing hygiene scan already forbids .unwrap() on added lines, so the ratchet is the persistent complement to it"
+        ]
+      },
+      "costs": [
+        {
+          "option": "exclude-by-cfg-evidence",
+          "cost": "Module declaration parsing, path resolution and a fixed point over declaring files",
+          "basis": "estimate",
+          "evidence": [
+            "Rust's module file rules are documented in the Rust Reference, items/modules"
+          ]
+        },
+        {
+          "option": "count-everything",
+          "cost": "No extra code; one re-baseline for each change that adds tests",
+          "basis": "estimate",
+          "evidence": [
+            "638 test functions in that workspace would each be free to move the count"
+          ]
+        },
+        {
+          "option": "exclude-by-file-name",
+          "cost": "A short list of names and an unbounded list of exceptions",
+          "basis": "estimate",
+          "evidence": [
+            "That workspace alone uses tests.rs, integration_tests.rs, mock.rs and a tests/ module directory"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rust-categories",
+      "status": "defaulted",
+      "dependsOn": [
+        "rust-scan-method"
+      ],
+      "record": {
+        "question": "Which Rust constructs are counted, given that a category which cries wolf is re-baselined blind?",
+        "options": [
+          {
+            "option": "unambiguous-discharges",
+            "argued_by": "model",
+            "strongest_objection": "Counting every unwrap and every allowed lint asks for a justification on idiomatic code such as a mutex lock, which some teams will find strict"
+          },
+          {
+            "option": "unsafe-and-holes-only",
+            "argued_by": "model",
+            "strongest_objection": "It leaves the cheapest ways an agent passes clippy -D warnings uncounted: an allow attribute, a let underscore and an unwrap"
+          },
+          {
+            "option": "everything-clippy-restricts",
+            "argued_by": "model",
+            "strongest_objection": "Casts, indexing and arithmetic are only hatches for some types, and a scan without types would flag lossless conversions it cannot tell apart"
+          }
+        ],
+        "chosen": "unambiguous-discharges",
+        "rationale": "Each counted construct overrules a checker that then exits 0: the borrow checker, the totality of Option and Result, a lint, or must_use. Trades between equivalent spellings stay inside one category so that an unwrap rewritten as an expect is not a rise. Whatever needs types is left to clippy, whose suppressions are counted.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "proof-guard.py documents the same rule for TypeScript: as any counts, @ts-expect-error does not because it retires itself",
+          "Rust's #[expect] attribute warns once the lint it names stops firing, so it is the self-retiring counterpart of #[allow]",
+          "The partner chain workspace measured for this work writes most of its extrinsic weights by hand and wires runtime Config impls to type WeightInfo = ()"
+        ]
+      },
+      "costs": [
+        {
+          "option": "unambiguous-discharges",
+          "cost": "Five Rust categories, five FRAME categories and one command-line category, each reported as new on an existing baseline until re-recorded",
+          "basis": "estimate",
+          "evidence": [
+            "proof-guard --check already reports a category absent from the baseline as new and leaves it unratcheted"
+          ]
+        },
+        {
+          "option": "unsafe-and-holes-only",
+          "cost": "Two categories and a ratchet that does not hold the lint gate",
+          "basis": "estimate",
+          "evidence": [
+            "The scaffolded harness runs cargo clippy with -D warnings, which an allow attribute satisfies"
+          ]
+        },
+        {
+          "option": "everything-clippy-restricts",
+          "cost": "Many categories whose precision depends on type information the scanner lacks",
+          "basis": "unknown",
+          "evidence": [
+            "The false positive rate of an untyped cast count was not measured and cannot be bounded without types"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rust-taxonomies",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How should attack classes for Rust services and FRAME pallets join the taxonomy gate?",
+        "options": [
+          {
+            "option": "two-taxonomies-by-test-name",
+            "argued_by": "model",
+            "strongest_objection": "A test named after a class proves the name exists, never that the test exercises the property or runs at all"
+          },
+          {
+            "option": "one-rust-taxonomy",
+            "argued_by": "model",
+            "strongest_objection": "A pallet and a hosted service answer for different attacks, so one list forces each kind of repo to waive the other half"
+          },
+          {
+            "option": "documentation-only",
+            "argued_by": "model",
+            "strongest_objection": "Classes nobody is required to specify stay unspecified, which is the gap the taxonomy gate exists to close"
+          }
+        ],
+        "chosen": "two-taxonomies-by-test-name",
+        "rationale": "The existing contract already decides specified from a test name for TypeScript and Python, and each taxonomy gates only a repo that carries its surface. FRAME is recognised by its own attributes, so a service is silent on pallet classes and a pallet repo may exclude the service half by declaration.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "spec-guard.py decides typescript and python classes from test titles and pytest function names",
+          "The compact taxonomy is already activated by source evidence and specified by tests in other languages"
+        ]
+      },
+      "costs": [
+        {
+          "option": "two-taxonomies-by-test-name",
+          "cost": "Two language registry entries, a Rust test-function reader and focused regressions",
+          "basis": "estimate",
+          "evidence": [
+            "The reader reuses the scanner's attribute walk"
+          ]
+        },
+        {
+          "option": "one-rust-taxonomy",
+          "cost": "One registry entry and standing waivers in every repo that is only a pallet or only a service",
+          "basis": "estimate",
+          "evidence": [
+            "Waivers are scoped to a taxonomy and need a reason of at least twenty characters each"
+          ]
+        },
+        {
+          "option": "documentation-only",
+          "cost": "No code, and no gate",
+          "basis": "measured",
+          "evidence": [
+            "No Rust or FRAME taxonomy ships in templates/attack-taxonomy.json at the start of this work"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proptest-ledger",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "Should failures from Rust property tests enter the counterexample ledger, and from what output?",
+        "options": [
+          {
+            "option": "parse-cargo-test-output",
+            "argued_by": "model",
+            "strongest_objection": "proptest's failure text is prose inside a panic message and can change between releases, so the parser can drift"
+          },
+          {
+            "option": "read-regression-files",
+            "argued_by": "model",
+            "strongest_objection": "A proptest-regressions seed replays a generator path, so it stops meaning the same input once the strategy changes"
+          },
+          {
+            "option": "leave-rust-properties-out",
+            "argued_by": "model",
+            "strongest_objection": "A Rust backend would be the one stack whose shrunk failing inputs scroll away with the terminal"
+          }
+        ],
+        "chosen": "parse-cargo-test-output",
+        "rationale": "The shrunk input printed at failure is the value a regression test must carry, and the ledger's pin rule already reads Rust test bodies for Kani. Drift is handled the way it is for every other prover: output that reports a failure the parser cannot read files INGEST-FAILED.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "cex.py parses fast-check failures out of a vitest run on the same argument",
+          "The fixture is captured from a real cargo test run with proptest in this change, not written from documentation"
+        ]
+      },
+      "costs": [
+        {
+          "option": "parse-cargo-test-output",
+          "cost": "One parser, one tool registry entry and regressions over captured output",
+          "basis": "estimate",
+          "evidence": [
+            "The Kani entry already supplies the Rust comment, string and test-body readers"
+          ]
+        },
+        {
+          "option": "read-regression-files",
+          "cost": "A file reader, and pins that silently stop reproducing after a strategy edit",
+          "basis": "estimate",
+          "evidence": [
+            "proptest documents its persistence files as seeds for the failing case"
+          ]
+        },
+        {
+          "option": "leave-rust-properties-out",
+          "cost": "No code; counterexamples from Rust property tests are not retained",
+          "basis": "measured",
+          "evidence": [
+            "cex.py has no Rust property-test entry at the start of this work"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "rust-hatches-counted",
+      "statement": "In production Rust each unsafe keyword, typed hole, panic site, allowed lint and discarded value is counted once in its category, and the same words in comments, strings, raw strings, char literals, lifetimes, longer identifiers and self-retiring #[expect] attributes are not",
+      "decisions": [
+        "rust-scan-method",
+        "rust-categories"
+      ],
+      "checks": [
+        "rust-hatches-tests"
+      ],
+      "counterexample": "A message reading \"do not .unwrap() here\" raises rust.panic, or self.0.unwrap() is lexed as a number and missed"
+    },
+    {
+      "id": "rust-test-code-excluded",
+      "statement": "Code no shipped build compiles (tests, benchmarks, verification harnesses and the Cargo build script) is left out on the evidence of its cfg, its test attribute or its place beside a manifest, including out-of-line modules resolved through their declarations and Cargo test and bench targets, while a module merely named tests is counted",
+      "decisions": [
+        "rust-test-scope"
+      ],
+      "checks": [
+        "rust-hatches-tests"
+      ],
+      "counterexample": "Adding a test that calls unwrap turns the gate red, or renaming a production file to tests.rs removes its hatches from the count"
+    },
+    {
+      "id": "frame-opt-outs-counted",
+      "statement": "A FRAME call weight that names no WeightInfo, a Config wired to the unit WeightInfo, a storage key whitelisted out of the benchmark, storage opted out of its bound, a dev-mode pallet, a feeless call and a call admitted without a signature are each counted, and a weight taken from a WeightInfo is not",
+      "decisions": [
+        "rust-categories"
+      ],
+      "checks": [
+        "rust-hatches-tests"
+      ],
+      "counterexample": "A new extrinsic ships with #[pallet::weight(Weight::from_parts(10_000, 0))] and every count holds flat"
+    },
+    {
+      "id": "rust-lint-gate-held",
+      "statement": "A lint allowed in a Cargo manifest's lints table counts with the source attributes, and a lint gate switched off from a command line in a tracked script, workflow or Cargo config is its own category",
+      "decisions": [
+        "rust-categories"
+      ],
+      "checks": [
+        "rust-hatches-tests"
+      ],
+      "counterexample": "A source #[allow] is refused, so the same lint is set to allow in Cargo.toml or passed as -A to clippy in CI and the gate stays green"
+    },
+    {
+      "id": "rust-ratchet-cli",
+      "statement": "proof-guard --check is red when a Rust category rises and names the category, both counts, the file and the line; a fall is green; a baseline recorded before these categories reports them as new without failing",
+      "decisions": [
+        "rust-categories"
+      ],
+      "checks": [
+        "rust-hatches-tests",
+        "proof-guard-tests"
+      ],
+      "counterexample": "Upgrading the plugin turns an untouched Rust repository red because its baseline has no rust.panic key"
+    },
+    {
+      "id": "rust-attack-classes",
+      "statement": "The rust and frame taxonomies gate a repository that carries Rust tests or a FRAME pallet, a class is specified only by a Rust test function whose name carries its id, and waivers and dormancy follow the existing per-taxonomy rules",
+      "decisions": [
+        "rust-taxonomies"
+      ],
+      "checks": [
+        "rust-taxonomy-tests"
+      ],
+      "counterexample": "A pallet repository with no test for weight exhaustion reports every class specified, or a class id in a comment counts as a test"
+    },
+    {
+      "id": "proptest-counterexamples",
+      "statement": "A proptest failure in cargo test output is recorded with its shrunk input, a passing run records nothing, a failure the parser cannot read files INGEST-FAILED, and a pin must carry the recorded literals in a Rust test that is not ignored",
+      "decisions": [
+        "proptest-ledger"
+      ],
+      "checks": [
+        "cex-tests"
+      ],
+      "counterexample": "A property fails with minimal failing input: amount = 0 and the only record is terminal scrollback"
+    },
+    {
+      "id": "rust-scaffold",
+      "statement": "The scaffolded harness lints and tests every workspace member, runs Kani when any tracked crate declares a harness, hands cargo test output to the ledger with the test exit code still deciding, and the hygiene scan flags an ignored test whether or not the attribute gives a reason",
+      "decisions": [
+        "rust-test-scope",
+        "proptest-ledger"
+      ],
+      "checks": [
+        "rust-scaffold-tests"
+      ],
+      "counterexample": "A workspace with a root package reports green while a member crate's tests never ran"
+    },
+    {
+      "id": "rust-claims-documented",
+      "statement": "The documentation names every Rust and FRAME category, what is deliberately not counted and why, and the known misses, and those statements are checked against the code",
+      "decisions": [
+        "rust-categories",
+        "rust-test-scope"
+      ],
+      "checks": [
+        "doc-claims-tests"
+      ],
+      "counterexample": "The README says numeric casts are ratcheted while the scanner leaves them to clippy"
+    }
+  ],
+  "checks": [
+    {
+      "id": "rust-hatches-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/rust-hatches-test.py"
+      ],
+      "scope": "The scanner over in-memory source trees and the proof-guard CLI over temporary git repositories",
+      "assumptions": [
+        "The fixtures are representative Rust; the scanner reads tokens and never expands macros or runs rustc"
+      ],
+      "timeoutSeconds": 120
+    },
+    {
+      "id": "proof-guard-tests",
+      "kind": "test",
+      "argv": [
+        "bash",
+        "plugins/fluxpoint/tests/proof-guard-test.sh"
+      ],
+      "scope": "The existing hatch ratchet for every other prover and TypeScript, unchanged by the Rust categories",
+      "assumptions": [
+        "A category absent from a recorded baseline is reported as new by the existing rule"
+      ],
+      "timeoutSeconds": 300
+    },
+    {
+      "id": "rust-taxonomy-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/rust-taxonomy-test.py"
+      ],
+      "scope": "The spec-guard taxonomy functions and CLI over temporary repositories carrying Rust tests and FRAME pallets",
+      "assumptions": [
+        "A test name establishes that a class is declared, not that the test runs or exercises it"
+      ],
+      "timeoutSeconds": 120
+    },
+    {
+      "id": "cex-tests",
+      "kind": "test",
+      "argv": [
+        "bash",
+        "plugins/fluxpoint/tests/cex-test.sh"
+      ],
+      "scope": "The counterexample ledger for every prover, including proptest output captured from a real cargo test run",
+      "assumptions": [
+        "The captured proptest output shape holds for the proptest release named beside the fixture"
+      ],
+      "timeoutSeconds": 900
+    },
+    {
+      "id": "rust-scaffold-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/rust-scaffold-test.py"
+      ],
+      "scope": "templates/harness.sh run in temporary repositories against a recording cargo stand-in, and the hygiene filter over added Rust lines",
+      "assumptions": [
+        "The stand-in records the arguments cargo would receive; it does not compile Rust"
+      ],
+      "timeoutSeconds": 300
+    },
+    {
+      "id": "doc-claims-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/doc-claims-test.py"
+      ],
+      "scope": "Statements in the plugin documentation compared with the scanner's category registry and behaviour",
+      "assumptions": [
+        "A pinned sentence shows the documentation states a boundary, not that a reader will find it"
+      ],
+      "timeoutSeconds": 300
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Counting unwrap in production code will red idiomatic Rust such as mutex.lock().unwrap().",
+      "resolution": "It reds only a rise over the committed baseline, and the rise is a real new panic site in a release build. The fix is a typed error, a poison-free lock, or a reviewed re-baseline. Test code is excluded, which is where the idiom is free."
+    },
+    {
+      "claim": "Counting every weight that names no WeightInfo flags a careful sum over DbWeight together with a guessed constant.",
+      "resolution": "On purpose. Whether a hand-written weight is an argument or a guess is a judgment a token scan cannot make, and the only syntactic fact is that nobody measured it. The partner chain workspace measured for this work weights most of its extrinsics as a small constant plus DbWeight terms, which a constants-only rule would have passed. The baseline absorbs existing weights; the next hand-written one is reviewed."
+    },
+    {
+      "claim": "A repository that commits cargo vendor output will have its dependencies counted.",
+      "resolution": "Yes, and deliberately. Leaving a crate out on the evidence of a marker file would let any added file take code out of the count at no cost. Vendored code is absorbed by the baseline, and a dependency bump that moves a count is re-recorded in the diff that made it."
+    },
+    {
+      "claim": "A build script can do harm, so leaving build.rs out hides something.",
+      "resolution": "It hides nothing that passes in silence. A panic in a build script fails the build, which the harness then reports; an unwrap there discharges no obligation of the shipped program. In the partner chain workspace measured for this work, most of the panic sites outside tests were in one build script, and a count dominated by them would not have been read."
+    },
+    {
+      "claim": "A scanner without macro expansion misses hatches that macros generate.",
+      "resolution": "Stated as a known miss. A macro definition is counted where it is written, and generated code is outside any static read of tracked files. Semantic review remains the proof-auditor's pass."
+    },
+    {
+      "claim": "Does a Rust test named after an attack class prove the class is covered?",
+      "resolution": "No. It extends the existing declaration contract. The project harness must still run the test, and review must read its generators and assertions."
+    },
+    {
+      "claim": "Treating FRAME's runtime-benchmarks and try-runtime features as non-production could hide code that ships.",
+      "resolution": "Both features are build modes that must never be deployed, and FRAME's own guidance says so. The exclusion is limited to items whose cfg requires one of those features or test, evaluated as a predicate, so any(test, feature = \"std\") stays counted."
+    }
+  ]
+}

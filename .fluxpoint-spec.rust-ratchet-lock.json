@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "sha256": "2b5f4e9b46507980161253cf472cb8bd6f3e1bb86819d004f37913d683af4a5d",
+  "proofBaselineSha256": null,
+  "harness": {
+    "plugins/fluxpoint/tests/cex-test.sh": "6c62a83e1990d1c4ea5903545aa306caad8e39317dd90596d8ebaf267814c437",
+    "plugins/fluxpoint/tests/doc-claims-test.py": "6b3c3a53b0ca6d016b8647f523a3113fd15aa83966b25fff3270632d01cbec23",
+    "plugins/fluxpoint/tests/proof-guard-test.sh": "d1846e5fcc921cad12d0bf157846498bea63938cfcad3db3531c2a9b6f0a3ba7",
+    "plugins/fluxpoint/tests/rust-hatches-test.py": "73209c5c70e5d090541c4f18977892a5f68d3b683012f05695dab046e6d1bd4f",
+    "plugins/fluxpoint/tests/rust-scaffold-test.py": "4dd469a14e889f5343435ba2f1636f99e95cecac1e58c2e6b182afd198bed421",
+    "plugins/fluxpoint/tests/rust-taxonomy-test.py": "68ae4c4e26f7f4b6f68ad8613feac78bd3e86725df0e0fb454e2822dd81d4919"
+  },
+  "lockFormat": 2
+}
