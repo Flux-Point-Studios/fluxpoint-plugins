@@ -185,11 +185,15 @@ launcher tells the script what the source run started in
 `args._resumeReach`; a launch that names a source run without it is
 refused as `RESUME-REACH-UNKNOWN`. A parked node cannot declare the field,
 because a park is resumed past by design. `--check` warns about a
-`RedTeamV1` fan-out that omits it. One limit stands: a native resume
-launched by hand with the first launch's exact arguments names no source,
-and the script cannot tell it from a first launch. Assemble every resume
-with `resume.py`. The fix after a refusal is a fresh launch, which is a
-new run with its own record.
+`RedTeamV1` fan-out that omits it. A native resume launched by hand with
+the first launch's exact arguments names no source, and the script cannot
+tell it from a first launch. It keeps its run id, so the record is held
+instead: `record-run.py` refuses to file a later attempt under a run id
+whose earlier attempt had started the node, and the earlier record stands.
+That check reads recorded attempts, so one limit remains: an attempt that
+died inside the node and was never recorded leaves nothing to compare.
+Record every attempt, and assemble every resume with `resume.py`. The fix
+after a refusal is a fresh launch, which is a new run with its own record.
 
 ## The IR is the source of truth
 

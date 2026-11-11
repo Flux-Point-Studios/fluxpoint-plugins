@@ -17,6 +17,11 @@ that flag. Make the check a prove: node in the graph, or file its refusal
 with --veto REASON --veto-evidence FILE. A veto lowers the recorded verdict
 to BLOCK and never raises one, and it stays on the run id when the run is
 recorded again.
+
+A node that declares "resume": "never" runs once per run. A later attempt
+under a run id whose earlier attempt started such a node, or a resume whose
+named source run did, is refused as RESUME-PAST-NO-RESUME-NODE and nothing
+is written: the earlier record stands.
 """
 import argparse
 import datetime
@@ -534,6 +539,70 @@ def file_veto_evidence(root, digest, data):
     return str(target)
 
 
+def resumed_past(root, run_id, summary):
+    """Why this record is a second roll of a node that runs once per run, or None.
+
+    A node that declares "resume": "never" is held at launch by resume.py,
+    by the compiler's plan and by the compiled script. A native resume
+    launched by hand, with the first launch's own arguments, names no
+    source run and passes all three. It keeps its run id, though, so it
+    arrives here as a later attempt under an id whose earlier attempt had
+    started the node. A resume that names its source is held to that
+    source's record in the same way.
+    """
+    runs = os.path.join(root, ".claude", "fluxpoint", "runs")
+    history = os.path.join(runs, "history", run_id)
+    paths = [os.path.join(runs, run_id + ".json")]
+    if os.path.isdir(history):
+        paths += [os.path.join(history, name) for name in sorted(os.listdir(history))
+                  if name.endswith(".json")]
+    source = summary.get("resumeSource")
+    source_id = source.get("runId") if isinstance(source, dict) else None
+    if (isinstance(source_id, str) and source_id != run_id
+            and re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}", source_id)):
+        paths.append(os.path.join(runs, source_id + ".json"))
+
+    def same(a, b):
+        strip = lambda s: {k: v for k, v in s.items() if k != "evidenceUnpinned"}
+        return strip(a) == strip(b)
+
+    earlier = []
+    for path in paths:
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            if b'"noResume"' not in raw and not summary.get("noResume"):
+                continue
+            row = json.loads(raw.decode("utf-8"))
+        except (OSError, ValueError):
+            continue
+        prior = row.get("summary") if isinstance(row, dict) else None
+        if isinstance(prior, dict) and not same(prior, summary):
+            earlier.append((row.get("runId"), prior))
+    if not earlier:
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "compile_graph_recorder", os.path.join(os.path.dirname(os.path.abspath(__file__)), "compile-graph.py"))
+    compiler = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(compiler)
+    for prior_id, prior in earlier:
+        # Held to what either attempt was compiled with: the field may have
+        # been added to the graph, or deleted from it, between the two.
+        held = dict(compiler.held_no_resume({}, summary), **compiler.held_no_resume({}, prior))
+        started = compiler.run_started(prior)
+        for node, after in held.items():
+            hit = [nid for nid in after if nid in started]
+            if hit:
+                which = ("an earlier attempt of this run" if prior_id == run_id
+                         else f"the run this one resumes ({prior_id})")
+                return (f"RESUME-PAST-NO-RESUME-NODE: {node} — {which} started "
+                        f"{', '.join(repr(nid) for nid in hit)}, and '{node}' declares "
+                        f"\"resume\": \"never\": this result is a second roll of it. The earlier "
+                        f"record stands. Launch fresh for a run that can be recorded.")
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-id", required=True)
@@ -622,6 +691,18 @@ def main():
         except ValueError as e:
             print(f"record-run: veto refused, no run artifact or Evidence row written: {e}",
                   file=sys.stderr)
+            if ledger_written:
+                print(f"record-run: the once-only ledger still recorded "
+                      f"{len(ledger_written)} irreversible effect(s) from this run",
+                      file=sys.stderr)
+            return 2
+
+    # 0b. A node that runs once per run is not filed twice. Checked before
+    # anything below writes, so the earlier attempt's record is left as it is.
+    if isinstance(summary, dict):
+        rerolled = resumed_past(args.root, args.run_id, summary)
+        if rerolled:
+            print(f"record-run: {rerolled} No run artifact or Evidence row written.", file=sys.stderr)
             if ledger_written:
                 print(f"record-run: the once-only ledger still recorded "
                       f"{len(ledger_written)} irreversible effect(s) from this run",

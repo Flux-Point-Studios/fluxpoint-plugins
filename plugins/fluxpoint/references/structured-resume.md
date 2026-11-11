@@ -154,6 +154,13 @@ run and carries no `_resumeReach` as `RESUME-REACH-UNKNOWN`. The summary
 records the declaration as `noResume`, and a resume is held to the recorded
 declaration as well as the current graph's.
 
+A native `resumeFromRunId` launched by hand with the first launch's exact
+arguments names no source run, so none of those checks can see it. It keeps
+its run id. `record-run.py` therefore refuses, with the same code, a later
+attempt under a run id whose earlier recorded attempt had started the node,
+and a resume whose named source run had. Nothing is written and the earlier
+record stands. Recording the same attempt again is not a later attempt.
+
 ## Witness version continuity
 
 A recorded summary names the compiling plugin root, version and witness code

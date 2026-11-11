@@ -12,7 +12,9 @@ A node can now declare "resume": "never". A run whose record shows that
 node started, or any node that depends on it, cannot be resumed. Executed
 on every path that can launch a resume: the validator, the rule over a
 recorded summary, resume.py, compile-graph.py --plan, and the compiled
-script's own check before its first call.
+script's own check before its first call. A native resume launched by hand
+names no source run and reaches none of those, so record-run.py holds the
+record too: a later attempt of a run that had started the node is not filed.
 """
 import argparse
 import copy
@@ -273,6 +275,73 @@ class CompiledScript(unittest.TestCase):
         self.assertEqual(run(graph())['r']['outcome'], 'COMPLETE')
         plain = run(graph(flag=False), args={'_resumeFromRunId': 'wf_source'})
         self.assertEqual((plain.get('r') or {}).get('outcome'), 'COMPLETE', plain)
+
+
+class Recorder(unittest.TestCase):
+    """record-run.py does not file a second roll of the review under one run."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='no resume record ')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        for argv in (('init', '-q'), ('config', 'user.name', 'fixture'), ('config', 'user.email', 'fixture@example.invalid')):
+            subprocess.run(['git', *argv], cwd=self.root, check=True, capture_output=True)
+        (self.root / '.gitignore').write_text('.claude/\nresult.json\n', encoding='utf-8')
+        (self.root / 'WORK.md').write_text('# Campaign\n\n```json graph-ir\n' + json.dumps(graph()) + '\n```\n\n## Evidence\n\n'
+                                           '| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n', encoding='utf-8')
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'base'], cwd=self.root, check=True)
+
+    def record(self, summary, run_id='wf_review', want=0):
+        (self.root / 'result.json').write_text(json.dumps(summary), encoding='utf-8')
+        done = subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'), '--root', str(self.root), '--graph',
+                               str(self.root / 'WORK.md'), '--run-id', run_id, '--result', str(self.root / 'result.json')],
+                              cwd=self.root, capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(done.returncode, want, done.stdout + done.stderr)
+        return done
+
+    def filed(self, run_id='wf_review'):
+        return json.loads((self.root / '.claude/fluxpoint/runs' / (run_id + '.json')).read_text(encoding='utf-8'))
+
+    def rows(self):
+        return [line for line in (self.root / 'WORK.md').read_text(encoding='utf-8').splitlines() if line.startswith('| 20')]
+
+    def test_a_later_attempt_under_one_run_id_is_not_filed(self):
+        # The run died inside the review and was recorded. It was then resumed by
+        # hand: the lenses after the dead one ran again and this time all returned.
+        self.record(recorded(dead={'lenses:b'}))
+        done = self.record(recorded(), want=2)
+        self.assertIn(CODE, done.stderr)
+        self.assertEqual(self.filed()['summary']['outcome'], 'NODE-DEAD')
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_the_same_attempt_is_recorded_again_without_complaint(self):
+        summary = recorded()
+        self.record(summary)
+        self.record(summary)
+        self.assertEqual(self.filed()['summary']['outcome'], 'COMPLETE')
+
+    def test_an_attempt_after_one_that_stopped_before_the_node_is_filed(self):
+        self.record(recorded(dead={'build'}))
+        self.record(recorded())
+        self.assertEqual(self.filed()['summary']['outcome'], 'COMPLETE')
+
+    def test_a_new_launch_has_its_own_run_id_and_its_own_record(self):
+        self.record(recorded(dead={'lenses:b'}), run_id='wf_first')
+        self.record(recorded(), run_id='wf_second')
+        self.assertEqual(self.filed('wf_second')['summary']['outcome'], 'COMPLETE')
+
+    def test_a_resume_that_names_its_source_is_held_to_the_source_record(self):
+        self.record(recorded(dead={'lenses:b'}), run_id='wf_source')
+        resumed = dict(recorded(), resumeMode='captured-prefix', resumeSource={'runId': 'wf_source', 'artifactSha256': 'f' * 64})
+        done = self.record(resumed, run_id='wf_resumed', want=2)
+        self.assertIn(CODE, done.stderr)
+        self.assertFalse((self.root / '.claude/fluxpoint/runs/wf_resumed.json').exists())
+
+    def test_a_graph_without_the_field_records_every_attempt(self):
+        self.record(recorded(graph(flag=False), dead={'lenses:b'}))
+        self.record(recorded(graph(flag=False)))
+        self.assertEqual(self.filed()['summary']['outcome'], 'COMPLETE')
 
 
 class Launcher(unittest.TestCase):
