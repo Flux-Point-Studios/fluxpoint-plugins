@@ -199,9 +199,10 @@ A lock that records a retirement is written with `lockFormat: 3`. Any other
 lock is still written with `lockFormat: 2`, so a lock without retirements is
 unchanged. No path leaves the locked set without a record, except a state
 store path that an older lock froze.
-The harness map stays outside the compared identity, so editing check code
-changes neither the graph's IR nor its compiled script and does not stale its
-specification. It remains reviewed code, with its own recorded identity.
+The harness map and the retirement records stay outside the compared identity,
+so editing check code or retiring a path changes neither the graph's IR nor its
+compiled script and does not stale its specification. Check code remains
+reviewed code, with its own recorded identity.
 `--check --strict-harness` and `--run --strict-harness` refuse changed, missing
 or newly discovered harness inputs in the exact checkout being judged, naming
 them before running checks and checking again afterwards. Newly scaffolded
