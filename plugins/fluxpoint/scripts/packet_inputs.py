@@ -17,6 +17,7 @@ PATH_FLAGS = {'--path', '--config', '-c'}
 PATTERN_FLAGS = {'--testPathPattern', '--testPathPatterns'}
 CWD_FLAGS = {'--prefix', '--dir', '--cwd'}
 IGNORED_DIRS = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', '.tox'}
+STORE = ('.claude', 'fluxpoint')  # The plugin's state store, below the root.
 
 
 def trust_paths(root, doc, frozen=None):
@@ -191,6 +192,11 @@ class Inputs:
             raise ValueError('ambiguous parent traversal through a symlink in import/config path: ' + str(path))
         return path
 
+    def store(self, path):
+        """The plugin's state store holds what a run leaves behind. A recorded run or
+        decision must never move a lock, so no file or directory in it is an input."""
+        return Path(os.path.abspath(path)).is_relative_to(self.root.joinpath(*STORE))
+
     def tracked(self):
         if self._tracked is None:
             result = subprocess.run(['git', 'ls-files', '-z', '--cached'], cwd=self.root,
@@ -238,6 +244,8 @@ class Inputs:
         if not text or text.startswith('-'):
             return None
         path = Path(text)
+        if self.store(self.root / path) or (cwd is not None and self.store(cwd / path)):
+            return None  # Decided by the path alone, before asking whether it exists.
         # Win32 strips a component's trailing dots and spaces, so on Windows Go's
         # './...' exists: it names the directory it is spelled under.
         if os.name == 'nt' and any(p != '..' and p != p.rstrip('. ') for p in path.parts):
@@ -331,6 +339,9 @@ class Inputs:
                     if path is not None:
                         self._seed_path(path, kind, cid, text)
         for rel in self.doc.get('harnessInputs', []):
+            if self.store(self.path(rel)):
+                # Skipping a declared input in silence would be a hole in the lock.
+                raise ValueError('harnessInputs names the plugin state store, which is never a packet input: ' + rel)
             for check in self.doc['checks']:
                 self._seed_path(self.path(rel), 'harnessInputs', check['id'])
 
@@ -614,9 +625,10 @@ class Inputs:
                 self._queue.append((dep, cid, is_locked))
 
     def include_locked(self, paths, expand=True):
-        """Retained paths remain roots, even when the new argv no longer names them."""
+        """Retained paths remain roots, even when the new argv no longer names them.
+        A state store path an older lock froze is the exception: it was never an input."""
         for rel in paths:
-            if rel not in self.reasons:
+            if rel not in self.reasons and not self.store(self.path(rel)):
                 for check in self.doc['checks']:
                     self.add(self.path(rel), 'locked-harness', check['id'])
                     self._queue.append((rel, check['id'], True))

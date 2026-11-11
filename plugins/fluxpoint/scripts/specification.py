@@ -399,7 +399,8 @@ def harness_inputs(root, doc, allow_missing=False, closure=True):
 
 
 def freeze_harness(root, doc, lock_file, references=None):
-    """A re-lock may update hashes and add paths, never remove a frozen path."""
+    """A re-lock may update hashes and add paths, never remove a frozen path.
+    A state store path that an older lock froze is the one exception, and is named."""
     previous = {}
     if lock_file.exists():
         old = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
@@ -412,7 +413,12 @@ def freeze_harness(root, doc, lock_file, references=None):
     inputs = packet_inputs.Inputs(root, doc, frozen=previous)
     for warning in sorted(inputs.warnings):
         print('specification: warning: ' + warning, file=sys.stderr)
-    return inputs.hashes()
+    frozen = inputs.hashes()
+    for rel in sorted(set(previous) - set(frozen)):
+        # Only a state store path leaves this way; every other frozen path is retained.
+        print(f'specification: dropped {rel} from the harness map: '
+              'the plugin state store is never a packet input')
+    return frozen
 
 
 def input_report(root, doc, identity, spec=None, closure=False):

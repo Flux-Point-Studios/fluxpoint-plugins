@@ -352,6 +352,127 @@ class PacketInputsTests(unittest.TestCase):
         self.save()
         self.assertEqual(self.cli('--lock').returncode, 1)
 
+    def store_checkout(self):
+        """A checkout whose checks name its own state store, by flag and by position."""
+        self.root = self.root.resolve()  # Absolute argv paths are compared with the resolved root.
+        self.store = self.root / '.claude' / 'fluxpoint'
+        compiler = str(PLUGIN / 'scripts/compile-graph.py')
+        self.doc['checks'][0]['argv'] = ['{python}', compiler, 'WORK.md', '--check',
+                                         '--decisions', str(self.store / 'decisions.jsonl'),
+                                         '--runs-dir', str(self.store / 'runs')]
+        self.doc['checks'].append(dict(self.doc['checks'][0], id='store-reader', argv=[
+            '{python}', 'tests/test_landing.py', str(self.store / 'runs'), str(self.store / 'decisions.jsonl'),
+            '.claude/fluxpoint/runs/history', '--runs-dir=.claude/fluxpoint/runs']))
+        self.doc['requirements'][0]['checks'].append('store-reader')
+        self.write('.gitignore', '.claude/fluxpoint/\n')
+        self.write('WORK.md', 'STATUS: READY\nSPEC: .fluxpoint-spec.json\n\n```json graph-ir\n'
+                   + json.dumps(fixtures.graph()) + '\n```\n')
+        # The Evidence row goes to a file no check names, so recording moves no input.
+        self.write('EVIDENCE.md', '## Evidence\n\n| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n')
+        self.save()
+        self.commit()
+
+    def assert_store_is_no_input(self, moment):
+        env = dict(os.environ, PYTHONIOENCODING='utf-8')
+        with self.subTest(moment=moment):
+            for args in (('--check',), ('--check', '--strict-harness'), ('--lock',)):
+                result = self.cli(*args)
+                self.assertEqual(result.returncode, 0, ' '.join(args) + ': ' + result.stderr)
+            compiled = subprocess.run([sys.executable, str(PLUGIN / 'scripts/compile-graph.py'), 'WORK.md', '--check'],
+                                      cwd=self.root, capture_output=True, text=True, encoding='utf-8', env=env, timeout=60)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            harness = json.loads((self.root / specification.LOCK).read_text())['harness']
+            listed = {row['path'] for row in self.report('--inputs', '--closure')['inputs']}
+            for paths in (set(harness), listed):
+                self.assertEqual(sorted(p for p in paths if p.startswith('.claude/')), [])
+            self.assertIn('tests/test_landing.py', harness)
+            self.assertEqual(self.cli('--touches', '.claude/fluxpoint/runs',
+                                      '.claude/fluxpoint/decisions.jsonl').returncode, 0)
+
+    def test_recorded_run_and_decisions_in_the_state_store_are_never_packet_inputs(self):
+        self.store_checkout()
+        self.lock()
+        self.assert_store_is_no_input('before the store exists')
+        self.write('.claude/fluxpoint/decisions.jsonl', '{"id": "first"}\n')
+        self.assert_store_is_no_input('a decision is recorded')
+        lock = json.loads((self.root / specification.LOCK).read_text())
+        identity = {k: v for k, v in lock.items() if k not in ('harness', 'lockFormat')}
+        self.write('result.json', json.dumps({'outcome': 'COMPLETE', 'specification': identity}))
+        recorded = subprocess.run([sys.executable, str(PLUGIN / 'scripts/record-run.py'), '--root', '.',
+                                   '--run-id', 'first-run', '--result', 'result.json', '--evidence', 'EVIDENCE.md'],
+                                  cwd=self.root, capture_output=True, text=True, encoding='utf-8', timeout=60,
+                                  env=dict(os.environ, PYTHONIOENCODING='utf-8', FPL_MEMORY_INDEX='0'))
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        self.assertIn('| first-run |', (self.root / 'EVIDENCE.md').read_text(encoding='utf-8'))
+        self.assertTrue((self.store / 'runs/first-run.json').is_file())
+        self.assertTrue((self.store / 'runs/history').is_dir())
+        self.assert_store_is_no_input('a run is recorded')
+        self.write('.claude/fluxpoint/decisions.jsonl', '{"id": "first"}\n{"id": "second"}\n')
+        self.assert_store_is_no_input('another decision is recorded')
+        shutil.rmtree(self.store / 'runs')
+        (self.store / 'runs').mkdir()
+        self.assert_store_is_no_input('the runs directory is emptied')
+
+    def test_harness_inputs_naming_the_state_store_refuse_as_file_or_directory(self):
+        self.store_checkout()
+        self.write('.claude/fluxpoint/decisions.jsonl', '{"id": "first"}\n')
+        self.write('.claude/fluxpoint/runs/first-run.json', '{}')
+        for rel in ('.claude/fluxpoint', '.claude/fluxpoint/runs', '.claude/fluxpoint/decisions.jsonl',
+                    '.claude/fluxpoint/runs/first-run.json', '.claude/fluxpoint/not-written-yet.json'):
+            with self.subTest(rel=rel):
+                self.doc['harnessInputs'] = ['tests/helper.py', rel]
+                self.save()
+                result = self.cli('--lock')
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('harnessInputs names the plugin state store, which is never a packet input: ' + rel,
+                              result.stderr)
+        # The rule is the store, not the name: a sibling directory stays an ordinary input.
+        self.write('.claude/fluxpoint-fixtures/case.json', '{}')
+        self.git('add', '.claude/fluxpoint-fixtures/case.json')
+        self.doc['harnessInputs'] = ['.claude/fluxpoint-fixtures']
+        self.save()
+        self.assertIn('.claude/fluxpoint-fixtures/case.json', self.lock()['harness'])
+        # An explicit path flag refuses a missing input elsewhere, and never asks whether the store exists.
+        self.doc.pop('harnessInputs')
+        for argv, code in ((['node', 'adapter.js', '--path', '.claude/fluxpoint/not-written-yet.json'], 0),
+                           (['node', 'adapter.js', '--config=.claude/fluxpoint/runs'], 0),
+                           (['node', 'adapter.js', '--path', 'tests/not-written-yet.json'], 1)):
+            with self.subTest(argv=argv):
+                self.doc['checks'][0]['argv'] = argv
+                self.save()
+                self.assertEqual(self.cli('--lock').returncode, code)
+
+    def test_store_path_frozen_by_an_older_lock_leaves_at_the_next_lock(self):
+        self.store_checkout()
+        self.write('.fluxpoint-gates.json', json.dumps({'version': 1, 'gates': {
+            'verify': '"' + sys.executable + '" -c "print(123)"'}}))
+        self.commit()
+        attest = subprocess.run([sys.executable, str(PLUGIN / 'scripts/attest.py'), '--run', 'verify'],
+                                cwd=self.root, capture_output=True, text=True, timeout=20)
+        self.assertEqual(attest.returncode, 0, attest.stderr)
+        frozen = '.claude/fluxpoint/decisions.jsonl'
+        for args in (('--lock',), ('--lock-harness', '--gate', 'verify')):
+            with self.subTest(args=args):
+                self.write(frozen, '{"id": "first"}\n')
+                lock = self.lock()
+                # An older lock froze the store file its check names.
+                lock['harness'][frozen] = hashlib.sha256(b'{"id": "first"}\n').hexdigest()
+                self.write(specification.LOCK, json.dumps(lock, indent=2) + '\n')
+                self.assertEqual(self.cli('--check', '--strict-harness').returncode, 0)
+                self.write(frozen, '{"id": "first"}\n{"id": "second"}\n')
+                # The lock on disk is what is enforced until it is written again.
+                drifted = self.cli('--check', '--strict-harness')
+                self.assertEqual(drifted.returncode, 1)
+                self.assertIn(frozen, drifted.stderr)
+                relocked = self.cli(*args)
+                self.assertEqual(relocked.returncode, 0, relocked.stderr)
+                self.assertIn('specification: dropped ' + frozen + ' from the harness map: '
+                              'the plugin state store is never a packet input', relocked.stdout)
+                harness = json.loads((self.root / specification.LOCK).read_text())['harness']
+                self.assertEqual(set(harness), set(lock['harness']) - {frozen})
+                self.assertEqual(self.cli('--check', '--strict-harness').returncode, 0)
+                self.assertNotIn('dropped', self.cli(*args).stdout)
+
     def test_go_package_patterns_are_not_directories(self):
         # Win32 strips a component's trailing dots, so on Windows '<root>/...' names the root.
         self.write('go.mod', 'module example.com/signer\n')

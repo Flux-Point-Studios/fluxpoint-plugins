@@ -140,7 +140,13 @@ packet differs from the graph's embedded packet must not certify that graph.
 It includes repository files named in `argv`/`witness`, including `file::node`
 selectors and `--option=file`, plus every `harnessInputs` file. A directory
 expands to its Git-tracked files; an empty or untracked-only directory refuses
-to freeze. Explicit inputs must exist inside the repository. Package cwd
+to freeze. Explicit inputs must exist inside the repository.
+The plugin's state store, `.claude/fluxpoint/`, is runtime state and never a
+packet input. A check may name a file or a directory in it, such as
+`--runs-dir`, and nothing there is frozen, whether the path exists yet or not.
+A recorded run or decision therefore moves no lock. A `harnessInputs` entry in
+the store refuses. A store path that an older lock froze leaves the harness map
+at the next `--lock` or `--lock-harness`, which prints each one. Package cwd
 flags (`--prefix`, `--dir`, `--cwd`, and a directory-valued `-C` or `--project`)
 resolve package-relative paths. A `--project` file is pinned as configuration;
 its parent guides local module resolution. Non-directory `-C` values and Jest
