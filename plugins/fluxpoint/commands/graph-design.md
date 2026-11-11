@@ -50,7 +50,12 @@ command.
      stop the campaign.
    - `budget.maxEstimatedTokens` set from the estimate `--check` prints —
      calls are the wrong unit for the bill, and this is the ceiling on the
-     right one — and `budget.cacheTtl: "1h"` whenever a node fans out or
+     right one. It is checked against the plan when the graph compiles
+     and enforced on the run by the compiled script, which declines a
+     call once the estimated spend would pass it. Leave headroom over the
+     estimate for what the plan cannot see: more findings than
+     `expectItems`, another discovery round. Set `budget.cacheTtl: "1h"`
+     whenever a node fans out or
      parks, because the default five-minute prompt cache expires while
      the parent blocks. Read the compiler's transition warnings: an effort
      bump between consecutive nodes is a cold prefill, so bump only where

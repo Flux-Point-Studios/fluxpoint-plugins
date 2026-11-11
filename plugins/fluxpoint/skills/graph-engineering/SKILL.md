@@ -746,6 +746,20 @@ script's header, and in the run summary as `estimate` beside `spent`, with
 a per-node `profile` (effort, model, calls, tokens) so an effort setting
 has a number to answer for.
 
+The cap holds the run as well as the plan. The plan leans on `expectItems`,
+which is a guess, and `maxNodes` counts calls whatever they cost, so a
+sweep that finds more than it expected can spend several times its
+estimate inside the node ceiling. The compiled script prices each call it
+makes at the figure the estimate used for that node and that kind of call,
+and declines one that would pass `maxEstimatedTokens` the way it declines
+one past `maxNodes`: the work is filed SKIPPED, the run is INCOMPLETE, and
+a halting node ends it BUDGET-EXHAUSTED. A run that follows its plan is
+charged exactly its estimate, so a cap set from the estimate never stops
+it. The charge is the compiler's estimate, not the runtime's meter; the
+summary carries it as `estimatedSpend` beside `spent`. `--check` also
+prices the node ceiling, `maxNodes` times the dearest planned call, and
+says when that is more than the cap or when no cap bounds it.
+
 **The prompt cache is a budget decision, declared as one.** A forked call
 shares its parent's cache only on a byte-identical prefix at the same
 model and the same effort, and the default time-to-live is five minutes

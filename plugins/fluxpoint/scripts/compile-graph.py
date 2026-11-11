@@ -2563,7 +2563,7 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
     # shared text is cached.
     tracks = {}
     calls, cold = 0, 0
-    per_node, raw = {}, {}
+    per_node, raw, by_kind = {}, {}, {}
     # One token per ASCII serialization byte is deliberately conservative.
     # Do not assume the packet, after a varying preamble, shares the cache.
     projected_spec = project_specification(specification, ir)
@@ -2611,6 +2611,10 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
                 cold += 1
                 warm.add(key)
             raw[nid] = raw.get(nid, 0.0) + cost
+            share = by_kind.setdefault(nid, {}).setdefault(
+                "sentinel" if g.get("sentinel") else g.get("kind") or "work", [0.0, 0])
+            share[0] += cost
+            share[1] += 1
             rec = per_node.setdefault(nid, {"calls": 0, "estimatedTokens": 0, "effort": effort,
                                             "model": model or "default", "specificationInputTokens": 0 if g.get("sentinel") else spec_input})
             rec["calls"] += 1
@@ -2623,6 +2627,11 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
         "total": sum(r["estimatedTokens"] for r in per_node.values()),
         "calls": calls, "cold": cold, "ttl": ttl,
         "perNode": per_node,
+        # The same total by what each call was: a node's own work, a
+        # refuter of it, an advisor, a sentinel. The compiled script prices
+        # the calls it actually makes from this.
+        "byKind": {nid: {kind: {"estimatedTokens": cost, "calls": count} for kind, (cost, count) in kinds.items()}
+                   for nid, kinds in by_kind.items()},
         "unpriced": unpriced_expansions(source_ir, embedded_args),
         "assumptions": {"prefixTokens": PREFIX_TOKENS,
                         "specificationInputTokens": spec_input,
@@ -2633,6 +2642,37 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
                         "workTokens": WORK_TOKENS, "effortMult": EFFORT_MULT,
                         "modelMult": dict(MODEL_MULT)},
     }
+
+
+def call_prices(est):
+    """({profile id: {kind: tokens per call}}, tokens charged up front) for the run-time cap.
+
+    The estimate is a sum over planned calls, so pricing each call the run
+    makes at its node's planned figure for that kind of call makes a run
+    that follows its plan spend the estimate exactly, and one that outgrows
+    it spend more. Prices are scaled so each node's calls add up to its
+    rounded figure in the profile: a cap set to the estimate must never
+    decline a planned call over a fraction of a token. Sentinel calls do
+    not pass through the spawn wrapper, so their planned cost is charged
+    before the first call.
+    """
+    prices, upfront = {}, 0.0
+    for nid, kinds in est["byKind"].items():
+        planned = est["perNode"][nid]["estimatedTokens"]
+        raw = sum(row["estimatedTokens"] for row in kinds.values())
+        scale = planned / raw if raw else 1.0
+        if "sentinel" in kinds:
+            upfront += planned
+            continue
+        prices[nid] = {kind: row["estimatedTokens"] * scale / row["calls"]
+                       for kind, row in kinds.items() if row["calls"]}
+    return prices, upfront
+
+
+def dearest_call(est):
+    """The most any one planned call is priced at."""
+    prices, _ = call_prices(est)
+    return max((price for row in prices.values() for price in row.values()), default=0.0)
 
 
 def unpriced_expansions(ir, embedded_args=None):
@@ -3660,7 +3700,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     # spent is the runtime's own token meter. Without these in the artifact,
     # fan-out efficiency and budget accuracy are vibes, not numbers.
     if (ir.get("budget") or {}).get("maxNodes") is not None:
-        extra += ", spawned: SPAWNED, declined: DECLINED"
+        extra += ", spawned: SPAWNED, declined: DECLINED, declinedByTokens: DECLINED_BY_TOKENS, estimatedSpend: Math.round(SPENT_ESTIMATE)"
     # spent is guarded: it is a newer runtime API than the rest of the
     # budget surface, and a summary that throws on an older runtime loses
     # the entire run record over a nice-to-have number.
@@ -3703,17 +3743,51 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("// is neither success nor failure — never DEAD, never a halt reason.")
         a("let DECLINED = 0")
         a("const DECLINED_LABELS = new Set()")
-        a("// Every agent in this graph is spawned through here, so the ceiling")
-        a("// counts what actually ran.")
+        a("// Which ceiling declined the last call, for the notes that file it.")
+        a("let DECLINED_BY = 'node ceiling'")
+        a("// budget.maxEstimatedTokens was compared with the plan when the graph")
+        a("// compiled and never reached this script, so what a run could spend was")
+        a("// MAX_NODES times whatever each call cost. Every call is priced here at")
+        a("// the figure the estimate used for that node and that kind of call, and")
+        a("// one that would pass the cap is declined like one past the node ceiling.")
+        a("// A run that follows its plan is charged exactly its estimate.")
+        cap_tokens = budget_cfg.get("maxEstimatedTokens")
+        prices, upfront = call_prices(est)
+        a("const MAX_TOKENS = " + (str(int(cap_tokens)) if isinstance(cap_tokens, int) and not isinstance(cap_tokens, bool) else "null"))
+        a("const PRICES = " + json.dumps(prices, sort_keys=True))
+        a("const DEAREST = " + json.dumps(dearest_call(est)))
+        a("let SPENT_ESTIMATE = " + json.dumps(upfront))
+        a("let DECLINED_BY_TOKENS = 0")
+        a("function priceOf(label) {")
+        a("  let id = null")
+        a("  for (const key of Object.keys(PRICES)) if ((label === key || label.startsWith(key + ':')) && (id === null || key.length > id.length)) id = key")
+        a("  if (id === null) return DEAREST          // a call the plan did not price")
+        a("  const row = PRICES[id], kind = /:refute\\d+$/.test(label) ? 'refute' : label.endsWith(':advice') ? 'advise' : 'work'")
+        a("  return row[kind] !== undefined ? row[kind] : Math.max(...Object.values(row))")
+        a("}")
+        a("// Every agent in this graph is spawned through here, so the ceilings")
+        a("// count what actually ran.")
         a("async function spawn(prompt, opts) {")
         a("  if (SPAWNED >= MAX_NODES) {")
         a("    log(`budget ceiling: ${opts.label} NOT RUN — ${SPAWNED}/${MAX_NODES} agent call(s) already spawned`)")
         a("    INCOMPLETE = true")
         a("    DECLINED++")
+        a("    DECLINED_BY = 'node ceiling'")
+        a("    DECLINED_LABELS.add(String(opts.label))")
+        a("    return null")
+        a("  }")
+        a("  const price = priceOf(String(opts.label))")
+        a("  if (MAX_TOKENS !== null && SPENT_ESTIMATE + price > MAX_TOKENS + 1e-6) {")
+        a("    log(`token ceiling: ${opts.label} NOT RUN — ~${Math.round(SPENT_ESTIMATE)} of ${MAX_TOKENS} estimated tokens are spent and this call is priced at ~${Math.round(price)}`)")
+        a("    INCOMPLETE = true")
+        a("    DECLINED++")
+        a("    DECLINED_BY_TOKENS++")
+        a("    DECLINED_BY = 'token ceiling'")
         a("    DECLINED_LABELS.add(String(opts.label))")
         a("    return null")
         a("  }")
         a("  SPAWNED++")
+        a("  SPENT_ESTIMATE += price")
         a("  return agent(prompt, opts)")
         a("}")
     a("// True when there is room to spawn work. Anything declined is announced")
@@ -4366,7 +4440,7 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
                     f"      if (!prev) {{\n"
                     f"        if (DECLINED_LABELS.has(`{nid}:${{item.key || i}}`)) {{\n"
                     f"          skipped_{var}++; note({js_str(nid)}, 'SKIPPED', "
-                    f"`${{item.key || i}} declined by the node ceiling`)\n"
+                    f"`${{item.key || i}} declined by the ${{DECLINED_BY}}`)\n"
                     f"        }} else {{\n"
                     f"          dead_{var}++; note({js_str(nid)}, 'DEAD', `${{item.key || i}} produced nothing`)\n"
                     f"          log(`node {nid} died for ${{item.key || i}} — dropped`)\n"
@@ -4415,7 +4489,7 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
                   f"${{dead_{var}}} node(s) died — see provenance`)")
         if has_ceiling:
             a(f"  if (skipped_{var}) note({js_str(nid)}, 'SKIPPED', "
-              f"`${{skipped_{var}}} spawn(s) declined by the node ceiling — "
+              f"`${{skipped_{var}}} spawn(s) declined by the ${{DECLINED_BY}} — "
               f"coverage incomplete, not worker death`)")
         if on_red == "halt":
             a(f"  if (dead_{var}) {{")
@@ -4521,9 +4595,9 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         a("  // declined by the token floor above — nothing died")
         if has_ceiling:
             a(f"}} else if (!{raw} && DECLINED > d0_{var}) {{")
-            a(f"  note({js_str(nid)}, 'SKIPPED', 'spawn declined by the node ceiling')")
+            a(f"  note({js_str(nid)}, 'SKIPPED', `spawn declined by the ${{DECLINED_BY}}`)")
             if on_red == "halt":
-                a(f"  log(`node {nid} not run — node ceiling reached; halting as exhausted, not as dead`)")
+                a(f"  log(`node {nid} not run — ${{DECLINED_BY}} reached; halting as exhausted, not as dead`)")
                 a("  return summary('BUDGET-EXHAUSTED')")
             a(f"}} else if (!{raw}) {{")
         else:
@@ -4622,7 +4696,7 @@ def emit_judges(n, ir, prompt, phase):
     a(f"const votes_{var} = await parallel(Array.from({{ length: {seats} }}, (_, i) => () =>")
     a(f"  spawn({prompt} + '\\n\\nCOUNCIL BALLOT: choose one exact key from ' + JSON.stringify(choices_{var}) + '. Return JudgmentV1. Rank every key, including none, exactly once with winner first. strongest_objection maps EVERY key to its strongest substantive objection, including your winner. No prose aliases, inferred ids or fallback candidates. Judge independently; you do not see other votes.', {opts(n, ir, phase, label, 'schema_' + var)})")
     a("))")
-    a(f"if (DECLINED > d0_{var}) {{ note({js_str(nid)}, 'SKIPPED', 'judge seat declined by node ceiling'); return summary('BUDGET-EXHAUSTED') }}")
+    a(f"if (DECLINED > d0_{var}) {{ note({js_str(nid)}, 'SKIPPED', `judge seat declined by ${{DECLINED_BY}}`); return summary('BUDGET-EXHAUSTED') }}")
     a(f"const valid_{var} = vote => !!vote && typeof vote === 'object' && !Array.isArray(vote) &&")
     a("  Object.keys(vote).every(k => " + json.dumps(['winner', 'ranking', 'rationale', 'strongest_objection'] + (['baseSeen'] if worktree_base_node(n) else [])) + ".includes(k)) &&")
     a(f"  choices_{var}.includes(vote.winner) && Array.isArray(vote.ranking) && vote.ranking.length === choices_{var}.length &&")
@@ -4940,10 +5014,10 @@ def emit_repeat(n, ir, prompt, phase, panel, over):
         a(f"  const declined_{var} = DECLINED - d0r_{var}")
         a(f"  if (declined_{var}) {{")
         a(f"    note({js_str(nid)}, 'SKIPPED', `round ${{round_{var}}}: "
-          f"${{declined_{var}}} spawn(s) declined by the node ceiling — "
+          f"${{declined_{var}}} spawn(s) declined by the ${{DECLINED_BY}} — "
           f"discovery INCOMPLETE`, {{ round: round_{var}, declined: declined_{var} }})")
         if on_red == "halt":
-            a(f"    log(`node {nid}: node ceiling reached in round ${{round_{var}}} — "
+            a(f"    log(`node {nid}: ${{DECLINED_BY}} reached in round ${{round_{var}}} — "
               f"halting as exhausted, not as dead`)")
             a(f"    RESULTS[{js_str(nid)}] = {var}")
             a("    return summary('BUDGET-EXHAUSTED')")
@@ -5538,6 +5612,20 @@ def main():
                  + f" ({est['cold']} cold prefill(s) of {est['calls']} call(s), "
                  f"prompt-cache TTL {est['ttl']}" + context_line
                  + (f"; {blind}" if blind else "") + ")")
+    # maxNodes bounds calls and the cap bounds their price. Priced at the
+    # dearest planned call, the node ceiling is what the run could spend
+    # with nothing else to stop it, and until the compiled script enforced
+    # the cap nothing else did.
+    node_ceiling = (ir.get("budget") or {}).get("maxNodes")
+    if isinstance(node_ceiling, int) and not isinstance(node_ceiling, bool):
+        dearest = dearest_call(est)
+        allowed = int(round(node_ceiling * dearest))
+        if cap is None:
+            cost_line += (f"; node ceiling: {node_ceiling} call(s) at the dearest planned call (~{int(round(dearest)):,}) "
+                          f"allow ~{allowed:,} estimated tokens, and no budget.maxEstimatedTokens bounds them")
+        elif allowed > cap:
+            cost_line += (f"; node ceiling: {node_ceiling} call(s) at the dearest planned call (~{int(round(dearest)):,}) "
+                          f"would allow ~{allowed:,} estimated tokens, so the run stops at the cap, which the compiled script enforces")
     # --check measures exactly the script compilation would write.
     try:
         graph_rel = os.path.relpath(os.path.abspath(args.graph),

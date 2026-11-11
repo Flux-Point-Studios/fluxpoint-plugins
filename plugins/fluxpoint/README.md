@@ -237,7 +237,8 @@ base and cannot disable the gate's code-change detection.
   as a cache read when the previous call shares its `(model, effort)` and
   the declared `cacheTtl` keeps it warm, work scaled by effort, the call
   weighted by model — and `budget.maxEstimatedTokens` is the ceiling on
-  that estimate. The constants are stated assumptions in one place;
+  that estimate, at compile time for the plan and in the compiled script
+  for the run. The constants are stated assumptions in one place;
   `metrics.py` holds them to the runtime's own `spent`. Effort
   transitions between consecutive nodes into a key the run has not warmed
   are warned about as the cold prefills they are, and every expansion the
