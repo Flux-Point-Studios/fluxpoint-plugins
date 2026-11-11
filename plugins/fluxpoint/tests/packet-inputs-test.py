@@ -418,6 +418,123 @@ class PacketInputsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('inside the repository', result.stderr)
 
+    def test_parent_import_outside_repository_refusal_names_file_and_line(self):
+        self.frontend()
+        self.write('frontend/tests/landing/sign.test.ts',
+                   "import { value } from './helper'\n"
+                   "import {\n  other,\n} from '../../../../outside'\n")
+        result = self.cli('--lock')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('import/config path must stay inside the repository', result.stderr)
+        self.assertIn("'../../../../outside' at frontend/tests/landing/sign.test.ts:4", result.stderr)
+        # The same refusal reaches a preflight over an existing lock.
+        self.write('frontend/tests/landing/sign.test.ts', "import { value } from './helper'\n")
+        self.lock()
+        self.write('frontend/tests/landing/helper.ts',
+                   "export const value = 1\nexport { other } from '../../../../outside'\n")
+        for args in (('--touches', 'frontend/tests/landing/helper.ts'), ('--inputs', '--closure'),
+                     ('--reach', 'frontend/tests/landing/helper.ts')):
+            with self.subTest(args=args):
+                result = self.cli(*args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("'../../../../outside' at frontend/tests/landing/helper.ts:2", result.stderr)
+
+    def test_unresolved_relative_import_warns_with_file_and_line(self):
+        self.frontend()
+        self.write('frontend/tests/landing/sign.test.ts',
+                   "import { value } from './helper'\n"
+                   "import './fixture.css'\n"
+                   "import {\n  gone,\n} from './missing_module'\n"
+                   "export { p } from './.../provider'\n"
+                   "const late = require('../support/absent')\n")
+        self.write('frontend/tests/landing/fixture.css', 'body {}\n')
+        self.commit()
+        expected = ["import './.../provider' at frontend/tests/landing/sign.test.ts:6"
+                    ' does not resolve to a repository file',
+                    "import './missing_module' at frontend/tests/landing/sign.test.ts:5"
+                    ' does not resolve to a repository file',
+                    "import '../support/absent' at frontend/tests/landing/sign.test.ts:7"
+                    ' does not resolve to a repository file']
+        result = self.cli('--lock')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for warning in expected:
+            self.assertIn('specification: warning: ' + warning, result.stderr)
+        # A specifier that resolves, with or without a suffix, is silent.
+        self.assertNotIn('./helper', result.stderr)
+        self.assertNotIn('fixture.css', result.stderr)
+        harness = json.loads((self.root / specification.LOCK).read_text())['harness']
+        self.assertIn('frontend/tests/landing/fixture.css', harness)
+        self.assertEqual([p for p in harness if 'missing_module' in p or 'absent' in p or '...' in p], [])
+        touched = self.cli('--touches', 'frontend/tests/landing/sign.test.ts')
+        self.assertEqual(touched.returncode, 4, touched.stderr)
+        reports = [json.loads(touched.stdout), self.report('--inputs', '--closure'),
+                   self.report('--reach', 'frontend/tests/landing/helper.ts')]
+        for report in reports:
+            self.assertEqual([w for w in report['warnings'] if 'does not resolve' in w], sorted(expected))
+        # The plain input list does not walk imports, so it has nothing to report.
+        self.assertEqual(self.report('--inputs')['warnings'], [])
+
+    def test_quoted_import_shapes_are_not_imports_and_hide_no_real_import(self):
+        self.frontend()
+        # Every decoy leaves the repository or names no file: read as an import,
+        # it would refuse the lock or warn. Real imports sit between the shapes.
+        self.write('frontend/tests/landing/sign.test.ts',
+                   "#!/usr/bin/env node\n"
+                   "/**\n"
+                   " * Type-only re-exports keep `import type { ... } from '.../some_module'`\n"
+                   " * and `export * from '../../../../jsdoc'`.\n"
+                   " */\n"
+                   "/*\nimport a from '../../../../block'\nrequire('./decoy-block')\n*/\n"
+                   "const half = (w, n) => w / 2 / n // import('../../../../trailing')\n"
+                   "const url = 'http://example.invalid/*' + \"import b from './decoy-string'\"\n"
+                   "import { one } from '../support/one'\n"
+                   "const glob = 'src/*.ts', tick = '`', quote = \"it's\"\n"
+                   "const doc = `\nimport c from '../../../../template'\n// it's ${ `nested ${glob} from './decoy-nested'` } /*\n`\n"
+                   "const brace = `${ {a: 1}.a }${ f('}') }${ half /* } */ } from '../../../../expression'`\n"
+                   "const escaped = `\\` \\${ from '../../../../escaped'`\n"
+                   "import { two } from '../support/two'\n"
+                   "const scheme = /https?:\\/\\//, ends = (s) => s.replace(/\\/*$/, ''), cls = /[/'\"`]/\n"
+                   "const quotes = (s) => s.split(/'/).concat(s.split(/`/))\n"
+                   "function word(s) { return /'/.test(s) }\n"
+                   "if (word(url)) /[/*]/.test(url);\n"
+                   "const elided = Array.from('../../../../argument'), named = { from: '../../../../property' }\n"
+                   "export { three } from '../support/three'\n"
+                   "const four = require('../support/four'), five = await import('../support/five')\n")
+        for name in ('one', 'two', 'three', 'four', 'five'):
+            self.write('frontend/tests/support/' + name + '.ts', 'export const ' + name + ' = 1\n')
+        self.commit()
+        result = self.cli('--lock')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('warning', result.stderr)
+        harness = json.loads((self.root / specification.LOCK).read_text())['harness']
+        for name in ('one', 'two', 'three', 'four', 'five'):
+            self.assertIn('frontend/tests/support/' + name + '.ts', harness)
+        self.assertEqual(self.report('--inputs', '--closure')['warnings'], [])
+        touched = self.cli('--touches', 'frontend/tests/support/five.ts')
+        self.assertEqual(touched.returncode, 4, touched.stderr)
+        self.assertEqual(json.loads(touched.stdout)['warnings'], [])
+
+    def test_issue_comment_passes_touches_and_lock_harness(self):
+        self.frontend()
+        self.write('.fluxpoint-gates.json', json.dumps({'version': 1, 'gates': {
+            'verify': '"' + sys.executable + '" -c "print(123)"'}}))
+        self.lock()
+        self.write('frontend/tests/landing/helper.ts',
+                   "// Type-only re-exports keep `import type { ... } from '.../some_module'`\n"
+                   "/** Type-only re-exports keep `import type { ... } from '.../some_module'` */\n"
+                   'export const value = 1\n')
+        self.commit()
+        attest = subprocess.run([sys.executable, str(PLUGIN / 'scripts/attest.py'), '--run', 'verify'],
+                                cwd=self.root, capture_output=True, text=True, timeout=20)
+        self.assertEqual(attest.returncode, 0, attest.stderr)
+        touched = self.cli('--touches', 'frontend/tests/landing/helper.ts')
+        self.assertEqual(touched.returncode, 4, touched.stderr)
+        self.assertEqual(json.loads(touched.stdout)['warnings'], [])
+        relocked = self.cli('--lock-harness', '--gate', 'verify')
+        self.assertEqual(relocked.returncode, 0, relocked.stderr)
+        self.assertNotIn('warning', relocked.stderr)
+        self.assertIn('harness changed frontend/tests/landing/helper.ts', relocked.stdout)
+
     def test_import_text_in_comments_and_strings_is_not_an_import(self):
         self.frontend()
         self.write('frontend/tests/landing/sign.test.ts',

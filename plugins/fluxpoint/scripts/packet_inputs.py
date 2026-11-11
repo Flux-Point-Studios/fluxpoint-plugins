@@ -54,10 +54,11 @@ REGEX_AFTER = ({('punct', p) for p in '(,=:[!&|?{};+-*%<>~^'}
                                         'void', 'throw', 'case', 'do', 'else', 'yield', 'await')})
 
 
-def js_tokens(text):
+def js_tokens(text, offsets=None):
     """Words, punctuation and string literals of JS/TS source. Comments are dropped,
     so prose that quotes an import is never read as one; template and regex
-    literals become opaque tokens, so a '/*' or quote inside them hides no code."""
+    literals become opaque tokens, so a '/*' or quote inside them hides no code.
+    offsets, when given, maps each string token's index to its source offset."""
     tokens, templates, parens, i, n = [], [], [], 0, len(text)
     control_end = -1
     while i < n:
@@ -86,6 +87,8 @@ def js_tokens(text):
             j = i + 1
             while j < n and text[j] not in (c, '\n'):
                 j += 2 if text[j] == '\\' else 1
+            if offsets is not None:
+                offsets[len(tokens)] = i
             tokens.append(('string', text[i + 1:j]))
             i = j + 1
         elif c == '/' and (not tokens or tokens[-1] in REGEX_AFTER or len(tokens) - 1 == control_end):
@@ -125,15 +128,17 @@ def js_tokens(text):
 
 
 def js_specifiers(text):
-    """Relative specifiers of literal import, export-from, import() and require()."""
-    tokens = js_tokens(text)
+    """Relative specifiers of literal import, export-from, import() and require(),
+    each with the 1-based line it is written on."""
+    offsets = {}
+    tokens = js_tokens(text, offsets)
     for k, (kind, value) in enumerate(tokens):
         if kind != 'string' or len(value) < 2 or not value.startswith('.'):
             continue
         before = tokens[k - 1] if k else None
         if before in (('word', 'from'), ('word', 'import')) or (
                 before == ('punct', '(') and k > 1 and tokens[k - 2] in (('word', 'import'), ('word', 'require'))):
-            yield value
+            yield value, text.count('\n', 0, offsets[k]) + 1
 
 
 class Inputs:
@@ -552,11 +557,19 @@ class Inputs:
                         pass
                 if not targets or not all(self.explicitly_covered(target) for target in targets):
                     self.warnings.add('dynamic JS import/require needs explicit harnessInputs: ' + rel)
-        for specifier in js_specifiers(text):
-            base = self.local(self.path(rel).parent / specifier)
-            candidates = [base] + [Path(str(base) + suffix) for suffix in JS_SUFFIXES]
-            candidates += [base / ('index' + suffix) for suffix in JS_SUFFIXES]
-            result.update(self.rel(p) for p in candidates if p.is_file())
+        for specifier, line in js_specifiers(text):
+            where = 'import ' + repr(specifier) + ' at ' + rel + ':' + str(line)
+            try:
+                base = self.local(self.path(rel).parent / specifier)
+                candidates = [base] + [Path(str(base) + suffix) for suffix in JS_SUFFIXES]
+                candidates += [base / ('index' + suffix) for suffix in JS_SUFFIXES]
+                found = {self.rel(p) for p in candidates if p.is_file()}
+            except ValueError as exc:
+                # Leaving the repository stays a refusal; say where it is written.
+                raise ValueError(str(exc) + ' (' + where + ')') from exc
+            if not found:
+                self.warnings.add(where + ' does not resolve to a repository file')
+            result.update(found)
         return result
 
     def _expand(self):

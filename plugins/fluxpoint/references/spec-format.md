@@ -161,6 +161,16 @@ Known Python dynamic loaders and computed or template-literal JS imports emit
 warnings in lock and preflight output; a known target explicitly covered by
 `harnessInputs` discharges its warning. Static closure still cannot enumerate
 arbitrary resource paths computed by repository programs.
+JavaScript and TypeScript sources are read as tokens. Import text inside a
+comment, a template literal, a regular expression or a string that is not an
+import specifier is not an import. A relative specifier that names no
+repository file emits a warning with the specifier, its file and its line.
+That import is not followed, so name the file it means in `harnessInputs`.
+A specifier that resolves outside the repository refuses, and the refusal
+names the same location. The token reader is not a parser. It reads JSX text
+as code, so JSX text holding `/*` or an unpaired backtick can hide the imports
+after it. It takes a `/` after a postfix `++` or `--` or a TypeScript non-null
+`!` for the start of a regular expression when another `/` follows on that line.
 Every path in a previous harness map is retained as a closure root, even after
 an argv or import is removed. A missing retained file refuses re-locking; no
 path can silently leave the locked set.
