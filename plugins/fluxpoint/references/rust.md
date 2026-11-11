@@ -80,7 +80,7 @@ name:
   functions a `proptest!` block declares, and a `#[kani::proof]` harness;
 - a file every declaration of which is such a module: `#[cfg(test)] mod
   tests;` makes `tests.rs` test code, and whatever `tests.rs` declares in
-  turn. `#[path = "..."]` is followed;
+  turn. `#[path = "..."]` is followed, and so is `include!("file.rs")`;
 - a file that opens with `#![cfg(test)]`;
 - Cargo's own `tests/` and `benches/` targets beside a tracked `Cargo.toml`,
   and the `build.rs` beside it. A build script runs at build time, and when
@@ -88,9 +88,21 @@ name:
   in silence.
 
 A module merely named `tests` and declared without the cfg ships in
-production and is counted. So does a file that one production module also
-declares. Misses fall on the counted side: an unusual declaration costs a
-false rise and never hides a hatch.
+production and is counted. A file ships when anything that ships compiles
+it, so two more rules keep code in the count:
+
+- One production `mod` or `include!` line keeps a file counted wherever it
+  sits. A module moved under `tests/` and reached from `src/lib.rs` with
+  `#[path]` is still production.
+- A crate root is never test code by declaration. Cargo builds
+  `src/lib.rs`, `src/main.rs`, a target under `src/bin/` or `examples/`,
+  and the `path` a manifest gives a `[lib]`, `[[bin]]` or `[[example]]`,
+  each on its own. A test that pulls the binary in with
+  `#[path = "../src/main.rs"]` declares it and does not take the program
+  out of the count.
+
+A declaration the scan cannot follow falls on the counted side: the file
+it names stays production, which costs a false rise and hides nothing.
 
 ## What is deliberately not counted
 
@@ -124,13 +136,16 @@ baseline absorbs vendored code, and a dependency bump that moves a count is
 re-recorded in the diff that made it.
 
 Known misses: code a macro generates (a macro definition is counted once,
-where it is written), `include!`d files, `Option::unwrap(x)` written as a
-path, a message passed to `.expect` in a variable, `.ok();` used to discard
-a result, `if cfg!(test)` branches, a `WeightInfo` whose own implementation
-was written by hand, and the opt-outs of the benchmarks themselves
-(`#[benchmark(skip_meta)]`, `pov_mode = Ignored`), which sit in code the
-scan leaves out as benchmark-only. `/fluxpoint:proof-audit` is the pass for
-what a count cannot see.
+where it is written), an `include!` whose path is computed, a target
+`path` a manifest spreads over several lines of an inline table, a crate
+root in a tree that tracks no `Cargo.toml` (nothing there tells it from a
+module, so one that only test code declares is left out),
+`Option::unwrap(x)` written as a path, a message passed to `.expect` in a
+variable, `.ok();` used to discard a result, `if cfg!(test)` branches, a
+`WeightInfo` whose own implementation was written by hand, and the opt-outs
+of the benchmarks themselves (`#[benchmark(skip_meta)]`, `pov_mode =
+Ignored`), which sit in code the scan leaves out as benchmark-only.
+`/fluxpoint:proof-audit` is the pass for what a count cannot see.
 
 ## Attack classes
 

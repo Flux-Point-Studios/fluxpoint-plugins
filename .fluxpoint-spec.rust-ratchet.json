@@ -17,7 +17,12 @@
     "ink!, Solana, CosmWasm and other Rust contract platforms",
     "Registering every Rust test as a statement obligation",
     "Pebble and other Cardano contract languages, which need their own verified parsers",
-    "Macro expansion, include! and build-script generated code"
+    "Macro expansion, code a build script generates, and an include! whose path is computed"
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/scripts/spec-guard.py",
+    "plugins/fluxpoint/scripts/specification.py",
+    "plugins/fluxpoint/templates/attack-taxonomy.json"
   ],
   "decisions": [
     {
@@ -107,7 +112,7 @@
           }
         ],
         "chosen": "exclude-by-cfg-evidence",
-        "rationale": "The cfg attribute is what decides whether code reaches a release build, so it is the only evidence that cannot be satisfied by renaming a file. Misses fall on the counted side, which costs a false rise and never hides a hatch.",
+        "rationale": "The cfg attribute is what decides whether code reaches a release build, so it is the only evidence that cannot be satisfied by renaming a file. A declaration the scan cannot follow falls on the counted side, which costs a false rise and hides nothing; a crate root and a file production code names are counted whatever else declares them.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
@@ -342,14 +347,14 @@
     },
     {
       "id": "rust-test-code-excluded",
-      "statement": "Code no shipped build compiles (tests, benchmarks, verification harnesses and the Cargo build script) is left out on the evidence of its cfg, its test attribute or its place beside a manifest, including out-of-line modules resolved through their declarations and Cargo test and bench targets, while a module merely named tests is counted",
+      "statement": "Code no shipped build compiles (tests, benchmarks, verification harnesses and the Cargo build script) is left out on the evidence of its cfg, its test attribute or its place beside a manifest, including out-of-line modules and included files resolved through the code that names them and Cargo test and bench targets, while a module merely named tests is counted, and so is a crate root or a file that production code names, whatever tests also declare it and wherever it sits",
       "decisions": [
         "rust-test-scope"
       ],
       "checks": [
         "rust-hatches-tests"
       ],
-      "counterexample": "Adding a test that calls unwrap turns the gate red, or renaming a production file to tests.rs removes its hatches from the count"
+      "counterexample": "Adding a test that calls unwrap turns the gate red, or renaming a production file to tests.rs removes its hatches from the count, or an integration test that declares src/main.rs with #[path] removes the binary from the count"
     },
     {
       "id": "frame-opt-outs-counted",
@@ -528,6 +533,10 @@
     {
       "claim": "A build script can do harm, so leaving build.rs out hides something.",
       "resolution": "It hides nothing that passes in silence. A panic in a build script fails the build, which the harness then reports; an unwrap there discharges no obligation of the shipped program. In the partner chain workspace measured for this work, most of the panic sites outside tests were in one build script, and a count dominated by them would not have been read."
+    },
+    {
+      "claim": "A file that only test code declares is test code, so resolving declarations is enough.",
+      "resolution": "Not for a file Cargo builds on its own. A crate root has no declaration in production, so an integration test that pulls the binary in with #[path], or a stray #[cfg(test)] mod main, would be its only declaration and the whole program would leave the count. The first version of the scanner had this gap and it was found on review, before any repository armed on it. A target root found where Cargo looks, or named by path in its own manifest, is now never test code by declaration; one production mod or include! line keeps a file counted even under tests/; and a file does not become test code by declaring itself. Across the 13,288 Rust files of the comparison corpus the correction moved no file into the count and three out, each a file that only tests or a build script include."
     },
     {
       "claim": "A scanner without macro expansion misses hatches that macros generate.",

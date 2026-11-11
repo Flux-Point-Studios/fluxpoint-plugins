@@ -39,11 +39,20 @@ itself uses, never a file name: an item under a `cfg` that requires `test`,
 `kani`, `fuzzing`, `doctest` or FRAME's `runtime-benchmarks` / `try-runtime`
 features; a function under `#[test]` or a sibling attribute; a file every
 declaration of which is such a module (`#[cfg(test)] mod tests;` and
-whatever that file declares in turn); a file that opens with `#![cfg(test)]`;
+whatever that file declares in turn, with `#[path]` and
+`include!("file.rs")` followed); a file that opens with `#![cfg(test)]`;
 and Cargo's own `tests/` and `benches/` targets beside a tracked manifest.
 The `build.rs` beside a manifest is left out on the same evidence: it runs
 at build time, and when it panics the build fails, which is the opposite
 of a hatch that passes in silence.
+
+A file ships when anything that ships compiles it. One production `mod` or
+`include!` line therefore keeps a file in the count wherever it sits,
+`tests/` included. A crate root is never test code by declaration, because
+Cargo builds it on its own: `src/lib.rs`, `src/main.rs`, a target under
+`src/bin/` or `examples/`, and the `path` a manifest gives a `[lib]`,
+`[[bin]]` or `[[example]]`. A test that pulls the binary in with
+`#[path = "../src/main.rs"]` does not take the program out of the count.
 A module merely named `tests` and declared without the cfg ships, and is
 counted. So is a tracked `vendor/` tree: a marker file that took a crate
 out of the count would be a file anyone could add, and a ratchet has no use
@@ -62,12 +71,16 @@ not others, and a token scan has no types. Clippy does, in its
 lints, and the `allow` that silences it is counted here.
 
 Known misses, stated rather than assumed: code a macro generates (a macro
-definition is counted once, where it is written), `include!`d files,
-`Option::unwrap(x)` written as a path, a message passed to `.expect` in a
-variable, `.ok();` used to discard a result, `if cfg!(test)` branches, a
-`WeightInfo` whose own implementation was written by hand, and the opt-outs
-of the benchmarks themselves (`#[benchmark(skip_meta)]`, `pov_mode =
-Ignored`), which sit in code this scan leaves out as benchmark-only.
+definition is counted once, where it is written), an `include!` whose
+path is computed, a target path a manifest spreads over several lines of
+an inline table, a crate root in a tree that tracks no `Cargo.toml`
+(nothing there tells it from a module, so one that only test code declares
+is left out), `Option::unwrap(x)` written as a path, a message passed to
+`.expect` in a variable, `.ok();` used to discard a result,
+`if cfg!(test)` branches, a `WeightInfo` whose own implementation was
+written by hand, and the opt-outs of the benchmarks themselves
+(`#[benchmark(skip_meta)]`, `pov_mode = Ignored`), which sit in code this
+scan leaves out as benchmark-only.
 """
 import bisect
 import posixpath
@@ -114,6 +127,12 @@ _ITEM_SEMI = frozenset(('type', 'use', 'static', 'let'))
 _ITEM_PREFIX = frozenset(('pub', 'crate', 'super', 'self', 'in', 'default', 'async', 'unsafe', 'extern', 'safe'))
 _MOD_ROOTS = frozenset(('lib.rs', 'main.rs', 'mod.rs'))
 _CRATE_ROOT = re.compile(r'(?:^|/)(?:src/bin|tests|benches|examples)/[^/]+\.rs$')
+# Where Cargo finds the targets that ship, relative to a manifest, and the
+# manifest tables whose `path` moves one.
+_TARGET = re.compile(r'src/(?:lib|main)\.rs|(?:src/bin|examples)/[^/]+(?:/main)?\.rs')
+_TARGET_TABLES = frozenset(('lib', 'bin', 'example'))
+_TARGET_KEY = re.compile(r'^\s*(?:lib|bin|example)\s*[.=]')
+_TARGET_PATH = re.compile(r'''(?<![\w-])path\s*=\s*(["'])([^"']+)\1''')
 _STATEMENT_START = frozenset((';', '{', '}'))
 _MACRO_OPEN = frozenset(('(', '[', '{'))
 
@@ -136,6 +155,7 @@ class _Source:
         self.nonprod = False        # the file declares itself test-only
         self.attributes = []        # (index of '#', index of ']', first token inside)
         self.mods = []              # (name, inline module names, #[path] value or None, test-only)
+        self.includes = []          # (path an `include!` names, test-only)
         self.tests = []             # (function name, token index) under a test attribute
         self.regions = []           # (first, last) token of each item a test-only attribute covers
         self._mod_paths = {}
@@ -353,11 +373,21 @@ class _Source:
             at += 1
 
     def _modules(self):
-        """Out-of-line `mod name;` declarations, with the inline modules around each."""
+        """Out-of-line `mod name;` declarations, with the inline modules around each, and `include!` sites."""
         texts, kinds, match, excluded = self.texts, self.kinds, self.match, self.excluded
         inline = []
         for index in range(self.size):
-            if texts[index] != 'mod' or kinds[index] != 'i' or kinds[index + 1] != 'i':
+            if kinds[index] != 'i':
+                continue
+            if texts[index] == 'include':
+                # Only a literal path: `include!(concat!(env!("OUT_DIR"), ...))`
+                # names a file the build writes, which is not tracked.
+                literal = texts[index + 3]
+                if (texts[index + 1] == '!' and texts[index + 2] in _MACRO_OPEN and kinds[index + 3] == 's'
+                        and match[index + 2] == index + 4 and literal.startswith('"') and '\\' not in literal):
+                    self.includes.append((literal[1:-1], bool(excluded[index])))
+                continue
+            if texts[index] != 'mod' or kinds[index + 1] != 'i':
                 continue
             while inline and inline[-1][1] < index:
                 inline.pop()
@@ -570,7 +600,7 @@ class Tree:
         self.nonprod_files = self._nonprod_files()
 
     def _declared(self, rel, source):
-        """(file a `mod` declaration in `rel` names, declared test-only)."""
+        """(file a `mod` declaration or an `include!` in `rel` names, named by test-only code)."""
         directory, base = posixpath.split(rel)
         own = posixpath.join(directory, base[:-3])
         # `lib.rs`, `main.rs` and `mod.rs` keep their modules beside them. So
@@ -600,28 +630,70 @@ class Tree:
                     for candidate in found:
                         yield candidate, nonprod
                     break
+        for path, nonprod in source.includes:
+            # Relative to the including file, whatever inline module it is in.
+            target = posixpath.normpath(posixpath.join(directory, path))
+            if target in self.sources:
+                yield target, nonprod
+
+    def _roots(self):
+        """Files Cargo compiles on their own into something that ships.
+
+        Returned as {file: the package directories whose manifest names it
+        by `path`}, with an empty set for a target found where Cargo looks.
+        """
+        roots = {}
+        for rel in self.sources:
+            parts = rel.split('/')
+            for depth in range(max(0, len(parts) - 4), len(parts) - 1):
+                if ('/'.join(parts[:depth] + ['Cargo.toml']) in self.manifests
+                        and _TARGET.fullmatch('/'.join(parts[depth:]))):
+                    roots.setdefault(rel, set())
+        for manifest, text in self.manifests.items():
+            home, section = posixpath.dirname(manifest), ''
+            for raw in text.splitlines():
+                line = _uncommented(raw)
+                header = _SECTION.match(line)
+                if header:
+                    section = re.sub(r'[\s"\']', '', header.group(1))
+                elif section in _TARGET_TABLES or (not section and _TARGET_KEY.match(line)):
+                    for _, value in _TARGET_PATH.findall(line):
+                        roots.setdefault(posixpath.normpath(posixpath.join(home, value)), set()).add(home)
+        return roots
 
     def _nonprod_files(self):
-        """Files no shipped build compiles: tests, benches, build scripts, and what they declare."""
-        tests = set()
+        """Files no shipped build compiles: tests, benches, build scripts, and what only they name.
+
+        The least set closed under three rules. A file that declares itself
+        test-only is in it. So is a file Cargo builds as a test, bench or
+        build target, unless shipping code names it too. So is any other
+        file that something names and nothing shipping does, unless Cargo
+        builds it as a target of its own.
+        """
+        roots, located, named = self._roots(), set(), {}
         for rel, source in self.sources.items():
             parts = rel.split('/')
-            if source.nonprod or any(
+            # A `tests/` directory makes test targets of the files in it for
+            # the package it belongs to, except the one that package's own
+            # manifest names as its library or a binary.
+            shipped_by = roots.get(rel, ())
+            if (parts[-1] == 'build.rs' and '/'.join(parts[:-1] + ['Cargo.toml']) in self.manifests) or any(
                     part in ('tests', 'benches') and '/'.join(parts[:depth] + ['Cargo.toml']) in self.manifests
+                    and '/'.join(parts[:depth]) not in shipped_by
                     for depth, part in enumerate(parts[:-1])):
-                tests.add(rel)
-            elif parts[-1] == 'build.rs' and '/'.join(parts[:-1] + ['Cargo.toml']) in self.manifests:
-                tests.add(rel)
-        declared = {}
-        for rel, source in self.sources.items():
+                located.add(rel)
             for target, nonprod in self._declared(rel, source):
-                declared.setdefault(target, []).append((rel, nonprod))
+                if target != rel:           # a file is not test code for naming itself
+                    named.setdefault(target, []).append((rel, nonprod))
+        tests = {rel for rel, source in self.sources.items() if source.nonprod}
         changed = True
         while changed:
             changed = False
-            for target, edges in declared.items():
-                if target not in tests and all(nonprod or parent in tests for parent, nonprod in edges):
-                    tests.add(target)
+            for rel in self.sources:
+                edges = named.get(rel, ())
+                if (rel not in tests and (rel in located or (edges and rel not in roots))
+                        and all(nonprod or parent in tests for parent, nonprod in edges)):
+                    tests.add(rel)
                     changed = True
         return tests
 

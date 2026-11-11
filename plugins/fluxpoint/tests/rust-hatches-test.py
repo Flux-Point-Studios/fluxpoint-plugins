@@ -179,6 +179,86 @@ fn after() -> u8 { todo!() }
         }
         self.assertEqual(tally(files)['rust.panic'], 1)
 
+    def test_a_crate_root_ships_whatever_else_declares_it(self):
+        # Cargo compiles a target root on its own, so no `mod` line decides
+        # whether it ships. A test that pulls the binary in with `#[path]`
+        # declares it, and so does a stray `#[cfg(test)] mod main;`. Read as
+        # test code, the whole program would leave the count.
+        files = {
+            'Cargo.toml': '[package]\nname = "x"\n',
+            'src/lib.rs': '#[cfg(test)]\nmod main;\npub fn api(x: Option<u8>) -> u8 { x.unwrap() }\n',
+            'src/main.rs': 'fn main() { run().unwrap(); }\n',
+            'src/bin/extra.rs': 'fn main() { run().unwrap(); }\n',
+            'src/bin/multi/main.rs': 'mod part;\nfn main() { run().unwrap(); }\n',
+            'src/bin/multi/part.rs': 'pub fn p(x: Option<u8>) -> u8 { x.unwrap() }\n',
+            'examples/demo.rs': 'fn main() { run().unwrap(); }\n',
+            'tests/it.rs': ('#[path = "../src/lib.rs"]\nmod lib;\n#[path = "../src/bin/extra.rs"]\nmod extra;\n'
+                            '#[path = "../src/bin/multi/main.rs"]\nmod multi;\n#[path = "../examples/demo.rs"]\nmod demo;\n'
+                            '#[test]\nfn t() { extra::main(); helper().unwrap(); }\n'),
+        }
+        self.assertEqual(tally(files), {'rust.panic': 6})
+
+    def test_a_target_a_manifest_names_is_a_crate_root(self):
+        files = {
+            'Cargo.toml': ('[package]\nname = "x"\n\n[lib]\nname = "x"\npath = "lib/api.rs" # not src/lib.rs\n\n'
+                           '[[bin]]\nname = "tool"\npath = \'tools/tool.rs\'\n\n'
+                           '[[test]]\nname = "it"\npath = "checks/it.rs"\n\n'
+                           '[dependencies]\nlocal = { path = "crates/local.rs" }\n'),
+            'lib/api.rs': '#[cfg(test)]\n#[path = "../tools/tool.rs"]\nmod tool;\npub fn api(x: Option<u8>) -> u8 { x.unwrap() }\n',
+            'tools/tool.rs': 'fn main() { run().unwrap(); }\n',
+            'checks/it.rs': ('#[cfg(test)]\n#[path = "../lib/api.rs"]\nmod api;\n'
+                             '#[cfg(test)]\n#[path = "../crates/local.rs"]\nmod local;\n'
+                             '#[cfg(test)]\n#[path = "../sub/core.rs"]\nmod core;\n'),
+            'crates/local.rs': 'pub fn only_tests_reach_this() { run().unwrap(); }\n',
+            'sub/Cargo.toml': 'lib = { name = "sub", path = "core.rs" }\n\n[package]\nname = "sub"\n',
+            'sub/core.rs': 'pub fn f(x: Option<u8>) -> u8 { x.unwrap() }\n',
+        }
+        # A `path` under [dependencies] names a crate directory, and a
+        # [[test]] target does not ship: neither makes a file a root.
+        self.assertEqual(tally(files), {'rust.panic': 3})
+
+    def test_a_shipping_target_its_manifest_puts_under_tests_still_ships(self):
+        files = {
+            'Cargo.toml': '[package]\nname = "x"\n\n[[bin]]\nname = "x"\npath = "tests/main.rs"\n',
+            'tests/main.rs': 'mod part;\nfn main() { run().unwrap(); }\n',
+            'tests/part.rs': 'pub fn p(x: Option<u8>) -> u8 { x.unwrap() }\n',
+            'tests/it.rs': '#[test]\nfn t() { a().unwrap(); }\nfn helper() { b().unwrap(); }\n',
+            # A crate of test support that lives under tests/ names its own
+            # targets, and stays test code of the workspace around it.
+            'tests/support/Cargo.toml': '[package]\nname = "support"\n\n[lib]\npath = "lib.rs"\n',
+            'tests/support/lib.rs': 'pub fn fixture() -> u8 { load().unwrap() }\n',
+        }
+        self.assertEqual(tally(files), {'rust.panic': 2})
+
+    def test_a_file_does_not_become_test_code_by_declaring_itself(self):
+        files = {'src/lib.rs': '#[cfg(test)]\nmod lib;\npub fn f(x: Option<u8>) -> u8 { x.unwrap() }\n'}
+        self.assertEqual(tally(files), {'rust.panic': 1})
+
+    def test_a_file_production_declares_ships_wherever_it_sits(self):
+        # Where a file sits says what Cargo builds from it. A production
+        # `mod` line that reaches into `tests/` says it is also built into
+        # what ships, and moving a module there would otherwise hide it.
+        files = {
+            'Cargo.toml': '[package]\nname = "x"\n',
+            'src/lib.rs': '#[path = "../tests/shared.rs"]\nmod shared;\n#[path = "../build.rs"]\nmod probe;\n',
+            'tests/shared.rs': 'pub fn f(x: Option<u8>) -> u8 { x.unwrap() }\n',
+            'tests/it.rs': 'mod shared;\n#[test]\nfn t() { shared::f(None).checked_add(1).unwrap(); }\n',
+            'build.rs': 'fn main() { probe().unwrap(); }\n',
+        }
+        self.assertEqual(tally(files), {'rust.panic': 2})
+
+    def test_an_included_file_is_compiled_where_it_is_included(self):
+        files = {
+            'src/lib.rs': ('#[cfg(test)]\nmod handlers;\nmod live { include!("handlers.rs"); }\n'
+                           '#[cfg(test)]\nmod tests { include!("cases.rs"); }\n'
+                           'include!(concat!(env!("OUT_DIR"), "/generated.rs"));\n'),
+            'src/handlers.rs': 'pub fn handle(x: Option<u8>) -> u8 { x.unwrap() }\n',
+            'src/cases.rs': '#[test]\nfn t() { a().unwrap(); }\nfn helper() { todo!() }\n',
+        }
+        # handlers.rs is declared for tests and included for production, so
+        # it ships. cases.rs is included by test code alone.
+        self.assertEqual(tally(files), {'rust.panic': 1})
+
     def test_cargo_test_and_bench_targets_are_test_code(self):
         files = {
             'Cargo.toml': '[package]\nname = "x"\n',
