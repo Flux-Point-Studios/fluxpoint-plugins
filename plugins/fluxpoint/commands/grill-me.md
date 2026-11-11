@@ -98,6 +98,11 @@ it neither executes the checks nor grants approval. A blocked decision or
 invalid reference must be resolved before implementation. No empty packet,
 `--none`, fake assent or stale lock is a substitute.
 
+A directory named in a check's arguments or in `harnessInputs` means the
+tracked files under it. Stage a new check file before locking. While an
+untracked file that Git does not ignore sits under such a directory, `--lock`
+refuses and names it, and `--check` warns about it.
+
 Add `SPEC: .fluxpoint-spec.json` to WORK.md. Ensure the repo's harness includes
 the specification runner from the current template. Copying a plugin update
 does not upgrade a harness previously copied into a consuming repo.

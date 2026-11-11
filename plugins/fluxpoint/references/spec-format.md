@@ -140,7 +140,13 @@ packet differs from the graph's embedded packet must not certify that graph.
 It includes repository files named in `argv`/`witness`, including `file::node`
 selectors and `--option=file`, plus every `harnessInputs` file. A directory
 expands to its Git-tracked files; an empty or untracked-only directory refuses
-to freeze. Explicit inputs must exist inside the repository.
+to freeze. A directory input therefore means the tracked files under it.
+`--lock` and `--lock-harness` refuse while an untracked file that Git does not
+ignore sits under an input directory, and name each one: stage it or ignore it.
+`--check` and `--run` warn about the same files and do not fail. `--inputs`,
+`--touches` and `--reach` list them as warnings. An untracked file that the
+packet names outright, or that a locked test imports, is frozen like any other
+input. Explicit inputs must exist inside the repository.
 The plugin's state store, `.claude/fluxpoint/`, is runtime state and never a
 packet input. A check may name a file or a directory in it, such as
 `--runs-dir`, and nothing there is frozen, whether the path exists yet or not.

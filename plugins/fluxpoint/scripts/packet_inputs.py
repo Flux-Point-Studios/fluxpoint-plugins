@@ -148,8 +148,9 @@ class Inputs:
         self.doc, self.closure, self.allow_missing = doc, closure, allow_missing
         self.reasons, self.owners, self.seeds, self.edges, self.trees = {}, {}, {}, {}, {}
         self.search = {self.root, self.root / 'src'}
-        self.test_roots, self.warnings = set(), set()
+        self.test_roots, self.warnings, self.directories = set(), set(), set()
         self._tracked = None
+        self._untracked = None
         self._packages = None
         self._queue = deque()
         self._expanded = set()
@@ -239,6 +240,21 @@ class Inputs:
             return [self.path(p) for p in names]
         return [path]
 
+    def untracked(self, skip=()):
+        """Files under an input directory that Git neither tracks nor ignores. A directory
+        input means the tracked files under it, so these sit on disk outside every lock."""
+        if self._untracked is None:
+            self._untracked = set()
+            if self.directories:
+                result = subprocess.run(['git', 'ls-files', '-z', '--others', '--exclude-standard', '--',
+                                         *sorted(self.directories)], cwd=self.root, capture_output=True,
+                                        check=False, env=dict(os.environ, GIT_LITERAL_PATHSPECS='1'))
+                if not result.returncode:
+                    self._untracked = {v.decode('utf-8', 'replace') for v in result.stdout.split(b'\0') if v}
+        # A file the packet or its closure names is frozen whether or not it is tracked.
+        return sorted(rel for rel in self._untracked
+                      if rel not in self.reasons and rel not in skip and not self.store(self.root / rel))
+
     def locate(self, text, cwd=None, explicit=False):
         text = text.split('::', 1)[0]
         if not text or text.startswith('-'):
@@ -283,6 +299,8 @@ class Inputs:
         return None
 
     def _seed_path(self, path, kind, check, selector=None):
+        if path.is_dir():
+            self.directories.add(self.rel(path))
         for file in self.files(path):
             rel = self.add(file, kind, check)
             self.seeds.setdefault(check, {}).setdefault(rel, set())

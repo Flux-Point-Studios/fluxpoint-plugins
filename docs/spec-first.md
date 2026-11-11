@@ -37,7 +37,9 @@ Costs above describe concrete work and risk, not measured time or price estimate
    The lock separately records check files and optional `harnessInputs` as a
    harness map outside the specification identity. The plugin's state store,
    `.claude/fluxpoint/`, is runtime state and never enters that map, so a
-   recorded run or decision moves no lock. This is a reviewable freeze,
+   recorded run or decision moves no lock. A directory input means the tracked
+   files under it, and `--lock` refuses while an untracked file that Git does
+   not ignore sits there. This is a reviewable freeze,
    not an authorization grant or an adversarial security boundary. It runs no
    checks, allowing the tests to be RED before implementation.
 4. `--check` rejects absent, malformed, stale or blocked packets. `--run` also

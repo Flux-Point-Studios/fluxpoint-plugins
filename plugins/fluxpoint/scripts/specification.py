@@ -398,10 +398,23 @@ def harness_inputs(root, doc, allow_missing=False, closure=True):
     return packet_inputs.Inputs(root, doc, closure, allow_missing).hashes()
 
 
-def freeze_harness(root, doc, lock_file, references=None):
+UNTRACKED = 'untracked file in a locked directory: stage it or ignore it: '
+
+
+def untracked_inputs(root, inputs, spec=None, held=()):
+    """Files under an input directory that Git neither tracks nor ignores. A directory
+    input means the tracked files under it, so a lock written now would leave these out.
+    The packet, its lock, the proof baseline and the gates are held outside the harness
+    map, as are the paths in held: referenced archives and what a lock already froze."""
+    fixed = [*packet_paths(root, spec), Path(root) / BASELINE, Path(root) / '.fluxpoint-gates.json']
+    return inputs.untracked({path.relative_to(root).as_posix() for path in fixed} | set(held))
+
+
+def freeze_harness(root, doc, spec=None, references=None):
     """A re-lock may update hashes and add paths, never remove a frozen path.
     A state store path that an older lock froze is the one exception, and is named."""
-    previous = {}
+    lock_file = packet_paths(root, spec)[1]
+    previous, archives = {}, references
     if lock_file.exists():
         old = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
         if not isinstance(old, dict):
@@ -410,9 +423,15 @@ def freeze_harness(root, doc, lock_file, references=None):
         previous = set(old.get('harness', {}))
         if references is not None:
             previous.update(set(old.get('references', {})) - set(references))
+        else:
+            archives = old.get('references', {})
     inputs = packet_inputs.Inputs(root, doc, frozen=previous)
     for warning in sorted(inputs.warnings):
         print('specification: warning: ' + warning, file=sys.stderr)
+    untracked = untracked_inputs(root, inputs, spec, archives or ())
+    if untracked:
+        # Locking would report success over a set that differs from what is on disk.
+        raise ValueError(UNTRACKED + ', '.join(untracked))
     frozen = inputs.hashes()
     for rel in sorted(set(previous) - set(frozen)):
         # Only a state store path leaves this way; every other frozen path is retained.
@@ -436,6 +455,7 @@ def input_report(root, doc, identity, spec=None, closure=False):
     for rel in identity.get('references', {}):
         for cid in checks:
             inputs.add(inputs.path(rel), 'references', cid)
+    inputs.warnings.update(UNTRACKED + rel for rel in inputs.untracked())
     rows = inputs.rows()
     for row in rows:
         row['frozen'] = (row['path'] in lock.get('harness', {})
@@ -534,7 +554,7 @@ def relock_harness(root, doc, spec, gate):
         raise ValueError(f"--lock-harness requires an attested exit 0 for gate {gate!r} at HEAD")
     _, lock_file = packet_paths(root, spec)
     lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
-    current = freeze_harness(root, doc, lock_file)
+    current = freeze_harness(root, doc, spec)
     previous = lock.get('harness', {})
     changes = sorted(rel for rel in set(current) | set(previous)
                      if current.get(rel) != previous.get(rel))
@@ -888,7 +908,7 @@ def main():
             relock_harness(root, doc, spec, args.gate)
             return 0
         if args.lock:
-            frozen = freeze_harness(root, doc, lock_path, identity.get('references', {}))
+            frozen = freeze_harness(root, doc, spec, identity.get('references', {}))
             with lock_path.open('w', encoding='utf-8', newline='\n') as lock_file:
                 lock_file.write(json.dumps(dict(identity, harness=frozen, lockFormat=2), indent=2) + '\n')
             print(f"specification: locked {name} {identity['sha256']}; checks have not run")
@@ -901,6 +921,11 @@ def main():
             if 'scopeRef' not in check and re.fullmatch(r'[^\s#]+\.[a-zA-Z0-9]+', scope):
                 print(f"specification: warning: check {check['id']} scope is a bare path; "
                       'use path#/pointer to bind its text', file=sys.stderr)
+        # A warning here and a refusal at --lock: an unstaged scratch file must not turn a gate red.
+        lock = json.loads(lock_path.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
+        live = packet_inputs.Inputs(root, doc, closure=False, allow_missing=True)
+        for rel in untracked_inputs(root, live, spec, {**identity.get('references', {}), **lock.get('harness', {})}):
+            print('specification: warning: ' + UNTRACKED + rel, file=sys.stderr)
         if args.run:
             stack = json.loads(os.environ.get('FPL_SPEC_STACK', '[]'))
             if not strings(stack, nonempty=False) or str(root) in stack:

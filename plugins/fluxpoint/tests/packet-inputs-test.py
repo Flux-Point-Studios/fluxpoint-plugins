@@ -338,13 +338,170 @@ class PacketInputsTests(unittest.TestCase):
     def test_explicit_directory_only_expands_tracked_files(self):
         self.doc['harnessInputs'] = ['extra-fixtures']
         self.write('extra-fixtures/signer.json', '{"signed": false}')
+        self.write('.gitignore', '*.log\n')
         self.save()
         self.commit()
-        self.write('extra-fixtures/untracked.json', '{}')
-        lock = self.lock()
+        # An ignored file is outside the lock on purpose, and nothing is said about it.
+        self.write('extra-fixtures/scratch.log', 'ignored\n')
+        result = self.cli('--lock')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        lock = json.loads((self.root / specification.LOCK).read_text())
         self.assertIn('extra-fixtures/signer.json', lock['harness'])
-        self.assertNotIn('extra-fixtures/untracked.json', lock['harness'])
+        self.assertNotIn('extra-fixtures/scratch.log', lock['harness'])
         self.assertEqual(self.cli('--touches', 'extra-fixtures').returncode, 4)
+        self.assertEqual(self.cli('--check').stderr, '')
+
+    UNTRACKED = 'untracked file in a locked directory: stage it or ignore it: '
+
+    def gate(self):
+        """Commit a declared gate and attest it at HEAD, as --lock-harness requires."""
+        self.write('.fluxpoint-gates.json', json.dumps({'version': 1, 'gates': {
+            'verify': '"' + sys.executable + '" -c "print(123)"'}}))
+        self.commit()
+        attest = subprocess.run([sys.executable, str(PLUGIN / 'scripts/attest.py'), '--run', 'verify'],
+                                cwd=self.root, capture_output=True, text=True, timeout=20)
+        self.assertEqual(attest.returncode, 0, attest.stderr)
+
+    def test_untracked_file_in_a_locked_directory_refuses_lock_and_warns_on_check(self):
+        self.doc['harnessInputs'] = ['preflight']
+        self.doc['checks'][0]['argv'] = ['{python}', 'preflight/check_a.py']
+        self.write('preflight/check_a.py', 'print("a")\n')
+        self.write('.gitignore', '*.log\n')
+        self.save()
+        self.gate()
+        self.lock()
+        before = (self.root / specification.LOCK).read_bytes()
+        # A check no locked path imports, a nested one and an ignored scratch file arrive unstaged.
+        self.write('preflight/check_b.py', 'print("b")\n')
+        self.write('preflight/deeper/check_c.py', 'print("c")\n')
+        self.write('preflight/run.log', 'scratch\n')
+        unstaged = ['preflight/check_b.py', 'preflight/deeper/check_c.py']
+        for args in (('--lock',), ('--lock-harness', '--gate', 'verify')):
+            with self.subTest(args=args):
+                refused = self.cli(*args)
+                self.assertEqual(refused.returncode, 1, refused.stdout)
+                self.assertIn('specification: ' + self.UNTRACKED + ', '.join(unstaged), refused.stderr)
+                self.assertNotIn('run.log', refused.stderr)
+                self.assertEqual((self.root / specification.LOCK).read_bytes(), before)
+        # Everywhere else it is a warning: an unstaged scratch file must not turn a gate red.
+        for args in (('--check',), ('--check', '--strict-harness'), ('--run',)):
+            with self.subTest(args=args):
+                result = self.cli(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(sorted(line for line in result.stderr.splitlines() if line),
+                                 ['specification: warning: ' + self.UNTRACKED + rel for rel in unstaged])
+        for args in (('--inputs',), ('--inputs', '--closure'), ('--reach', 'preflight/check_a.py')):
+            with self.subTest(args=args):
+                self.assertEqual(self.report(*args)['warnings'], [self.UNTRACKED + rel for rel in unstaged])
+        touched = self.cli('--touches', 'preflight/check_a.py')
+        self.assertEqual(touched.returncode, 4, touched.stderr)
+        self.assertEqual(json.loads(touched.stdout)['warnings'], [self.UNTRACKED + rel for rel in unstaged])
+        # Staging one file leaves the other named; ignoring that one clears the refusal.
+        self.git('add', 'preflight/check_b.py')
+        refused = self.cli('--lock')
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn('specification: ' + self.UNTRACKED + 'preflight/deeper/check_c.py\n', refused.stderr)
+        self.write('.gitignore', '*.log\npreflight/deeper/\n')
+        result = self.cli('--lock')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        harness = json.loads((self.root / specification.LOCK).read_text())['harness']
+        self.assertIn('preflight/check_b.py', harness)
+        self.assertEqual([p for p in harness if 'check_c' in p or p.endswith('.log')], [])
+        self.assertEqual(self.cli('--check').stderr, '')
+
+    def test_untracked_file_under_a_directory_a_check_names_refuses_lock(self):
+        self.doc['checks'][0]['argv'] = ['{python}', '-m', 'pytest', 'tests']
+        self.save()
+        self.commit()
+        self.lock()
+        self.write('tests/test_unstaged.py', 'def test_unstaged(): pass\n')
+        refused = self.cli('--lock')
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn('specification: ' + self.UNTRACKED + 'tests/test_unstaged.py\n', refused.stderr)
+        self.assertIn('specification: warning: ' + self.UNTRACKED + 'tests/test_unstaged.py',
+                      self.cli('--check').stderr)
+        # An unstaged file that a locked test imports is in the closure: the lock freezes it.
+        self.git('add', 'tests/test_unstaged.py')
+        self.write('tests/test_landing.py', 'from tests import helper, unstaged_helper\n\n'
+                   'def test_sign():\n    assert helper.sign()\n')
+        self.write('tests/unstaged_helper.py', 'VALUE = 1\n')
+        result = self.cli('--lock')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        harness = json.loads((self.root / specification.LOCK).read_text())['harness']
+        self.assertTrue({'tests/test_unstaged.py', 'tests/unstaged_helper.py'} <= set(harness))
+        self.assertEqual(self.cli('--check').stderr, '')
+        # So is an unstaged file the packet names outright.
+        self.doc['harnessInputs'] = ['tests/data/named.json']
+        self.write('tests/data/named.json', '{}')
+        self.save()
+        result = self.cli('--lock')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('tests/data/named.json', json.loads((self.root / specification.LOCK).read_text())['harness'])
+
+    def test_packet_lock_baseline_gates_and_archives_under_a_locked_root_are_not_reported(self):
+        # The whole repository is a directory input, and only the support files are staged.
+        self.doc['checks'][0]['argv'] = ['{python}', '-m', 'pytest', '.']
+        self.save()
+        self.write(specification.BASELINE, '{}')
+        self.write('.fluxpoint-gates.json', json.dumps({'version': 1, 'gates': {'verify': 'true'}}))
+        self.git('init', '-q')
+        self.git('add', 'tests', 'src', 'conftest.py', 'pyproject.toml')
+        self.git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'Fixture')
+        for attempt in ('first lock', 'lock over its own unstaged lock'):
+            with self.subTest(attempt=attempt):
+                result = self.cli('--lock')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.cli('--check').stderr, '')
+        self.write('notes.txt', 'scratch\n')
+        refused = self.cli('--lock')
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn('specification: ' + self.UNTRACKED + 'notes.txt\n', refused.stderr)
+        self.assertEqual(self.cli('--check').stderr.strip(), 'specification: warning: ' + self.UNTRACKED + 'notes.txt')
+
+    def test_directory_inputs_and_the_state_store_follow_one_coherent_rule(self):
+        # No ignore rule covers the store here: the rule is the path, never the ignore file.
+        self.root = self.root.resolve()
+        store = self.root / '.claude' / 'fluxpoint'
+        self.doc['harnessInputs'] = ['.claude', 'fixtures']
+        self.doc['checks'][0]['argv'] = ['{python}', 'tests/test_landing.py', str(store / 'runs'),
+                                         str(store / 'decisions.jsonl')]
+        self.write('.claude/settings.json', '{}')
+        self.write('fixtures/case.json', '{}')
+        self.save()
+        self.commit()
+        self.write('.claude/fluxpoint/runs/first-run.json', '{}')
+        self.write('.claude/fluxpoint/decisions.jsonl', '{"id": "first"}\n')
+        # A directory input is the tracked files under it. The store is no input at all,
+        # so its unstaged files are neither frozen nor reported.
+        result = self.cli('--lock')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        harness = json.loads((self.root / specification.LOCK).read_text())['harness']
+        self.assertTrue({'.claude/settings.json', 'fixtures/case.json'} <= set(harness))
+        self.assertEqual([p for p in harness if p.startswith('.claude/fluxpoint')], [])
+        self.assertEqual(self.cli('--check', '--strict-harness').stderr, '')
+        # Beside the store, an unstaged file in the same directory input is named.
+        self.write('.claude/notes.md', 'scratch\n')
+        refused = self.cli('--lock')
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn('specification: ' + self.UNTRACKED + '.claude/notes.md\n', refused.stderr)
+        self.assertEqual(self.cli('--check').stderr.strip(),
+                         'specification: warning: ' + self.UNTRACKED + '.claude/notes.md')
+        (self.root / '.claude/notes.md').unlink()
+        # A directory with nothing tracked would freeze nothing, so it refuses outright.
+        self.write('.gitignore', 'only-ignored/\n')
+        self.write('only-unstaged/a.json', '{}')
+        self.write('only-ignored/a.json', '{}')
+        (self.root / 'empty').mkdir()
+        self.git('add', '.gitignore')
+        for rel in ('only-unstaged', 'only-ignored', 'empty'):
+            with self.subTest(rel=rel):
+                self.doc['harnessInputs'] = ['.claude', 'fixtures', rel]
+                self.save()
+                refused = self.cli('--lock')
+                self.assertEqual(refused.returncode, 1)
+                self.assertIn('packet input directory has no tracked files: ' + rel, refused.stderr)
 
     def test_directory_without_tracked_files_refuses(self):
         self.doc['harnessInputs'] = ['extra-fixtures']
