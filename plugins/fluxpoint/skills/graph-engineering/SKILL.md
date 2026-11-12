@@ -186,7 +186,13 @@ held to it even when the field has since been deleted from the graph. The
 launcher tells the script what the source run started in
 `args._resumeReach`; a launch that names a source run without it is
 refused as `RESUME-REACH-UNKNOWN`. A parked node cannot declare the field,
-because a park is resumed past by design. `--check` warns about a
+because a park is resumed past by design. For the same reason a node that
+declares it has to wait on every park in the graph: a park after the
+review, or beside it, is continued by a resume the review has already
+made impossible, and the compiler refuses that graph. The nodes of a
+repair loop cannot declare it either. The loop files its rounds under its
+checker and is continued by a resume; put the field on the review that
+follows the loop. `--check` warns about a
 `RedTeamV1` fan-out that omits it. A native resume launched by hand with
 the first launch's exact arguments names no source, and the script cannot
 tell it from a first launch. It keeps its run id, so the record is held

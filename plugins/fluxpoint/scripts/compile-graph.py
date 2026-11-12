@@ -681,9 +681,10 @@ def ancestors(n, by_id):
 
 
 # What a record files for a node that did not run: an inherited or parked
-# wait, work the budget declined, an effect nobody confirmed. Anything else
-# filed against a node means it started.
-NOT_STARTED = {"BLOCKED", "SKIPPED", "REFUSED", "LEDGER-CONFLICT"}
+# wait, work the budget declined, an effect nobody confirmed, a council
+# with no candidates to judge. Anything else filed against a node means it
+# started.
+NOT_STARTED = {"BLOCKED", "SKIPPED", "REFUSED", "LEDGER-CONFLICT", "NO-CANDIDATES", "INVALID-CANDIDATES"}
 
 
 def no_resume_reach(ir):
@@ -701,7 +702,7 @@ def no_resume_reach(ir):
     needs = {}
     for n in nodes:
         deps = after_ids(n) + [(n.get("reduce") or {}).get("from") if isinstance(n.get("reduce"), dict) else None,
-                               n.get("verifies"), *repair_integrations(n)]
+                               n.get("verifies")]
         needs[n["id"]] = {d for d in deps if isinstance(d, str)}
     def depends(nid, target, seen):
         return any(d == target or (d in needs and d not in seen and not seen.add(d) and depends(d, target, seen))
@@ -740,7 +741,12 @@ def run_started(summary, labels=(), declared=()):
     seen = [((call.get("opts") or {}).get("label") if isinstance(call.get("opts"), dict) else None)
             for call in (calls if isinstance(calls, list) else ()) if isinstance(call, dict)]
     memos = summary.get("memoRecords")
-    seen += [memo.get("node") for memo in (memos if isinstance(memos, list) else ()) if isinstance(memo, dict)]
+    for memo in memos if isinstance(memos, list) else ():
+        # The scheduled runtime files a record for a spawn the budget declined
+        # too, with no call and no result. Only a record of a call, or of a
+        # result replayed from a memo or the ledger, shows the node ran.
+        if isinstance(memo, dict) and (type(memo.get("callIndex")) is int or memo.get("result") is not None):
+            seen.append(memo.get("node"))
     for label in [*seen, *labels]:
         if isinstance(label, str) and label and not label.endswith(":advice"):
             started.add(label.split(":")[0])
@@ -1319,12 +1325,27 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
         if nid in seen:
             f.append(f"{where}: duplicate id")
         if "resume" in n:
+            parks = [x for x in ir.get("nodes") or [] if isinstance(x, dict) and x.get("actor", "agent") != "agent"
+                     and isinstance(x.get("id"), str)]
+            by_id = {x.get("id"): x for x in ir.get("nodes") or [] if isinstance(x, dict)}
             if n["resume"] != "never" or not isinstance(n["resume"], str):
                 f.append(f"{where}: resume takes one value, \"never\": a run that started this node "
                          f"cannot be resumed")
             elif n.get("actor", "agent") != "agent":
                 f.append(f"{where}: resume \"never\" on a {n.get('actor')} node contradicts the park — "
                          f"the campaign continues by resuming past it")
+            elif n in repair_loops(ir) or nid in repair_owned(ir):
+                f.append(f"{where}: resume \"never\" on a node of a repair loop — the loop files its rounds "
+                         f"under its checker and is continued by a resume, so the record cannot show which of "
+                         f"its nodes started. Declare it on the review that follows the loop")
+            else:
+                waits_on = ancestors(n, by_id)
+                beside = [x["id"] for x in parks if x["id"] not in waits_on]
+                if beside:
+                    f.append(f"{where}: resume \"never\" with a park it does not wait on "
+                             f"({', '.join(repr(p) for p in beside)}) — the run parks there after this node may "
+                             f"have started, and the resume that continues past the park would be refused. "
+                             f"Make this node depend on the park, or drop the field")
         same = n.get("sameShaAs")
         if same is not None:
             target = seen.get(same) if isinstance(same, str) else None

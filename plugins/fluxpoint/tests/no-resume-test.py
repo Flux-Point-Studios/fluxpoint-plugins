@@ -127,6 +127,49 @@ class Declared(unittest.TestCase):
         self.assertEqual(len(found), 1, found)
         self.assertIn("'sign-off'", found[0])
 
+    def test_every_park_has_to_come_before_the_node(self):
+        # A park after the review, or beside it, is continued by a resume, and
+        # by then the review has started. The graph cannot deliver both, so it
+        # is refused when it compiles instead of at the resume.
+        after = graph(parked=True)
+        after['nodes'][1]['after'], after['nodes'][2]['after'] = 'lenses', 'build'
+        found = self.issues(after)
+        self.assertEqual(len(found), 1, found)
+        for part in ("'lenses'", "'sign-off'"):
+            self.assertIn(part, found[0])
+        beside = graph(parked=True)
+        beside['nodes'][2]['after'] = 'build'
+        self.assertEqual(len(self.issues(beside)), 1)
+        # The review waits on the park: the run parks first, and resumes into a review that has not started.
+        self.assertEqual(self.issues(graph(parked=True)), [])
+
+    def test_a_repair_loop_cannot_declare_it(self):
+        # A repair loop files its rounds under its checker and is continued by a resume.
+        def loop(flagged):
+            nodes = [{'id': 'fix', 'foreach': 'slices', 'mutates': True, 'prompt': 'fix {{item.key}}: {{lastCheck}} in {{roundDir}}',
+                      'contract': 'SliceV1'},
+                     {'id': 'check', 'foreach': 'slices', 'after': 'fix', 'independent': True, 'verifies': 'fix',
+                      'isolation': 'measure', 'prompt': 'check {{prev}}', 'contract': 'HarnessCheckV1',
+                      'repeat': {'until': 'exit == 0', 'maxRounds': 2, 'integrate': ['merge', 'review']}},
+                     {'id': 'merge', 'after': 'check', 'mutates': True, 'prompt': 'merge {{prev}}', 'contract': 'SliceV1'},
+                     {'id': 'review', 'after': 'merge', 'independent': True, 'verifies': 'merge', 'isolation': 'measure',
+                      'prompt': 'review {{prev}}', 'contract': 'HarnessCheckV1', 'haltWhen': 'exit != 0'},
+                     {'id': 'verdict', 'after': 'review', 'prompt': 'judge {{prev}}', 'contract': 'DesignV1'}]
+            if flagged:
+                next(n for n in nodes if n['id'] == flagged)['resume'] = 'never'
+            return {'version': 1, 'name': 'repair', 'campaign': 'repair', 'treeGuard': False,
+                    'budget': {'maxNodes': 40, 'cacheTtl': '1h'}, 'lists': {'slices': [{'key': 'parser'}]}, 'nodes': nodes}
+
+        self.assertEqual(cg.validate(loop(None), CONTRACTS), [])
+        for member in ('fix', 'check', 'merge', 'review'):
+            with self.subTest(member=member):
+                found = self.issues(loop(member))
+                self.assertEqual(len(found), 1, found)
+                self.assertIn(repr(member), found[0])
+        # A node that follows the loop can declare it, and the loop is not in its reach.
+        self.assertEqual(self.issues(loop('verdict')), [])
+        self.assertEqual(cg.no_resume_reach(loop('verdict')), {'verdict': ['verdict']})
+
     def test_the_field_changes_nothing_about_a_first_launch(self):
         self.assertFalse(cg.replay_features(graph()))
         with_flag, without = run(graph()), run(graph(flag=False))
@@ -226,6 +269,8 @@ class RecordedRun(unittest.TestCase):
                       {'results': {'lenses': []}, 'provenance': [{'node': 'lenses', 'status': 'DEAD', 'detail': '0/3 returned'}]},
                       {'provenance': [{'node': 'lenses:b', 'status': 'WRONG-BASE', 'detail': ''}]},
                       {'callRecords': [{'opts': {'label': 'lenses:a'}, 'mode': 'live'}]},
+                      {'memoRecords': [{'node': 'lenses', 'mode': 'live', 'result': None, 'callIndex': 4}]},
+                      {'memoRecords': [{'node': 'verdict', 'mode': 'memo', 'result': DESIGN}]},
                       {'callRecords': [{'opts': {'label': 'verdict'}, 'mode': 'live'}]}):
             with self.subTest(holds=holds):
                 found = self.refusal(dict({'results': {}, 'provenance': []}, **holds))
@@ -234,6 +279,9 @@ class RecordedRun(unittest.TestCase):
                       {'results': {'lenses': None, 'verdict': None}},
                       {'results': {'lenses': []}, 'provenance': [{'node': 'lenses', 'status': 'SKIPPED', 'detail': 'budget floor'}]},
                       {'provenance': [{'node': 'lenses', 'status': 'BLOCKED', 'detail': 'blocked on sign-off'}]},
+                      {'provenance': [{'node': 'lenses', 'status': 'NO-CANDIDATES', 'detail': 'no surviving design seat'}]},
+                      {'provenance': [{'node': 'lenses', 'status': 'INVALID-CANDIDATES', 'detail': 'no unique keys'}]},
+                      {'memoRecords': [{'node': 'lenses', 'mode': 'live', 'result': None, 'callIndex': None}]},
                       {'provenance': [{'node': 'verdict', 'status': 'DEAD', 'detail': 'node returned nothing'}]},
                       {'callRecords': [{'opts': {'label': 'tree-check:before lenses'}, 'mode': 'live'}]}):
             with self.subTest(holds=holds):
@@ -252,6 +300,81 @@ class RecordedRun(unittest.TestCase):
         found = self.refusal(summary, labels=['build', 'lenses:b'])
         self.assertTrue(found and found.startswith(CODE), found)
         self.assertIsNone(self.refusal(summary, labels=['build', 'tree-check:before lenses']))
+
+
+class ScheduledRuntime(unittest.TestCase):
+    """A graph with lanes runs under the scheduled runtime, which files its own records."""
+
+    def lanes(self, review):
+        # An audit and a sweep run side by side; the review joins them, and a verdict follows it.
+        nodes = [{'id': 'audit', 'lane': 'a', 'prompt': 'audit', 'contract': 'DesignV1'},
+                 {'id': 'find', 'lane': 'b', 'prompt': 'find defects', 'contract': 'FindingsV1', 'verify': 'panel:3',
+                  'verifyOver': 'findings', 'expectItems': 1},
+                 dict(review, after=['find', 'audit'], resume='never'),
+                 {'id': 'verdict', 'after': review['id'], 'prompt': 'judge {{prev}}', 'contract': 'DesignV1'}]
+        return {'version': 1, 'name': 'once', 'campaign': 'review once', 'budget': {'maxNodes': 7 if 'foreach' not in review else 9},
+                'lists': {'lens': [{'key': 'a'}, {'key': 'b'}, {'key': 'c'}]}, 'nodes': nodes}
+
+    def scalar(self):
+        return self.lanes({'id': 'review', 'prompt': 'review {{prev.find}} and {{prev.audit}}', 'contract': 'DesignV1'})
+
+    def fan_out(self):
+        return self.lanes({'id': 'review', 'foreach': 'lens', 'prompt': 'review {{item.key}} of {{prev.find}} and {{prev.audit}}',
+                           'contract': 'FindingsV1', 'onRed': 'drop+log'})
+
+    def run_lanes(self, ir, found, dead=()):
+        self.assertEqual(cg.validate(ir, CONTRACTS), [])
+        self.assertTrue(cg.replay_features(ir))
+        js = cg.emit(ir, CONTRACTS, {}).replace('export const meta', 'const meta')
+        args = {'_base': {'sha': 'a' * 40, 'branch': 'main', 'porcelain': '', 'root': '/campaign'},
+                '_launch': {'since': '2026-11-11T00:00:00Z', 'nonce': 'nonce', 'root': '/campaign'},
+                '_replayLaunchNonce': '1' * 64}
+        with tempfile.TemporaryDirectory() as tmp:
+            script, out = Path(tmp) / 'run.mjs', Path(tmp) / 'out.json'
+            script.write_text('\n'.join([
+                "import {writeFileSync} from 'node:fs';",
+                'const calls=[],dead=new Set(' + json.dumps(sorted(dead)) + ');',
+                "let agent=async(p,o)=>{const label=String(o.label||'');calls.push(label);",
+                "  if(label.startsWith('tree-check:'))return {root:'/campaign',head:'a'.repeat(40),porcelain:''};",
+                '  if(dead.has(label))return null;',
+                "  if(label==='find')return {findings:Array.from({length:" + str(found) + "},(_,i)=>({file:'a.py',line:i+1,claim:'defect number '+i+' in the code',failure_path:'path '+i,severity:'LOW'}))};",
+                "  if(/:refute\\d+$/.test(label))return {refuted:false,reason:'the claim stands on reproduction'};",
+                "  if(label.startsWith('review:'))return {findings:[{file:'a.py',line:1,claim:label,failure_path:'p',severity:'LOW'}]};",
+                '  return ' + json.dumps(DESIGN) + '};',
+                'const parallel=async(t)=>Promise.all(t.map(f=>f()));',
+                'const pipeline=async(xs,...ss)=>Promise.all(xs.map(async(x,i)=>{let p=x;for(const s of ss){p=await s(p,x,i)}return p}));',
+                'const log=()=>{},phase=()=>{};', 'let args=' + json.dumps(args) + ';',
+                'const budget={total:null,spent:()=>0,remaining:()=>1e9};', 'const workflow=0;',
+                '(async () => {', js,
+                '})().then(r=>writeFileSync(' + json.dumps(str(out)) + ',JSON.stringify({r,calls})))',
+                '.catch(e=>writeFileSync(' + json.dumps(str(out)) + ',JSON.stringify({err:String(e&&e.stack||e),calls})))',
+            ]), encoding='utf-8')
+            done = subprocess.run(['node', str(script)], capture_output=True, text=True, timeout=120)
+            if not out.exists():
+                raise AssertionError(done.stderr or done.stdout)
+            doc = json.loads(out.read_text(encoding='utf-8'))
+        if 'err' in doc:
+            raise AssertionError(doc['err'])
+        return doc
+
+    def test_a_review_the_budget_declined_did_not_start(self):
+        # The sweep found six defects where the plan expected one, and its refuters
+        # spent the node ceiling before the review was reached.
+        for ir in (self.scalar(), self.fan_out()):
+            with self.subTest(review='fan-out' if 'foreach' in ir['nodes'][2] else 'scalar'):
+                doc = self.run_lanes(ir, found=6)
+                self.assertFalse([label for label in doc['calls'] if label.split(':')[0] in ('review', 'verdict')])
+                self.assertGreater(doc['r']['declined'], 0)
+                self.assertIsNone(cg.resume_refusal(ir, doc['r']))
+
+    def test_a_review_that_ran_is_refused_and_one_that_was_never_reached_is_not(self):
+        ran = self.run_lanes(self.scalar(), found=1, dead={'verdict'})
+        self.assertIn('review', ran['calls'])
+        found = cg.resume_refusal(self.scalar(), ran['r'])
+        self.assertTrue(found and found.startswith('RESUME-PAST-NO-RESUME-NODE: review'), found)
+        before = self.run_lanes(self.scalar(), found=1, dead={'audit'})
+        self.assertNotIn('review', before['calls'])
+        self.assertIsNone(cg.resume_refusal(self.scalar(), before['r']))
 
 
 class CompiledScript(unittest.TestCase):

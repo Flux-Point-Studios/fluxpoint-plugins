@@ -144,7 +144,10 @@ and the run's journal and refuses with `RESUME-PAST-NO-RESUME-NODE: <node>`
 when either shows that the node, or a node that depends on it, started.
 `compile-graph.py --plan --resume` refuses with the same code. A node that
 was blocked behind a park, or declined by the budget before any call, did
-not start, so a run that stopped earlier resumes as usual.
+not start, so a run that stopped earlier resumes as usual. The compiler
+holds the declaration to that: a node that declares the field has to wait
+on every park in the graph, and neither a parked node nor a node of a
+repair loop can declare it.
 
 For a graph with such a node the launcher adds `_resumeReach` to the launch
 arguments: the node ids the source run started. The compiled script checks
