@@ -562,7 +562,7 @@
   "requirements": [
     {
       "id": "panel-judges-lens-claims",
-      "statement": "A red-team panel judges one claim per key the upstream reduce declares, shows the refuters every lens's wording of it, takes the worst severity any lens gave, and judges a finding that lacks a key field on its own; a node that only starts the panel adds no claim, its own findings are kept in the receipt unjudged, and record-run.py accepts a receipt only when every lens claim's exact wording was in a class the panel judged",
+      "statement": "A red-team panel judges one claim per key that a reduce between the lenses and the panel declares, shows the refuters every lens's wording of it, takes the worst severity any lens gave, and judges a finding that lacks a key field on its own; a node that only starts the panel adds no claim, whatever it returns that no lens wrote word for word is kept in the receipt unjudged, and record-run.py accepts a receipt only when every lens claim's exact wording was in a class the panel judged, comparing a key field that holds a structure by its content",
       "decisions": [
         "claim-key-source",
         "collector-findings"
@@ -574,7 +574,7 @@
     },
     {
       "id": "gate-contract-and-commit",
-      "statement": "A prove: node may return any contract that requires gate, exit, attestId and a 40-hex sha typed as ExecutionV1 types them, a contract missing one is refused whatever it is called, attest.py checks the node by its prove: tier, and a node that declares sameShaAs halts the run when its commit differs from the named earlier node's or either is missing",
+      "statement": "A prove: node may return any contract that requires gate, exit, attestId and a 40-hex sha typed as ExecutionV1 types them, a contract missing one is refused whatever it is called, attest.py checks the node by its prove: tier, and a node that declares sameShaAs halts the run when its commit differs from the named earlier node's or either is missing, and a sameShaAs that names a node running beside it in another lane is refused when the graph compiles",
       "decisions": [
         "prove-contract-check"
       ],
@@ -585,7 +585,7 @@
     },
     {
       "id": "token-cap-holds-the-run",
-      "statement": "A compiled graph declines a call that would take its priced spend past budget.maxEstimatedTokens, files it SKIPPED and names the token ceiling, charges a run that follows its plan exactly its estimate, and --check prints what budget.maxNodes would allow at the dearest planned call",
+      "statement": "A compiled graph declines a call that would take its priced spend past budget.maxEstimatedTokens, files it SKIPPED and names the token ceiling, charges a run that follows its plan exactly its estimate for every shipped template including the repair diff review, names in the summary any call the plan did not price, and --check prints what budget.maxNodes would allow at the dearest planned call",
       "decisions": [
         "token-cap-enforcement"
       ],
@@ -596,7 +596,7 @@
     },
     {
       "id": "no-resume-past-a-declared-node",
-      "statement": "A run whose record or journal shows that a node declaring \"resume\": \"never\", or a node that depends on it, started is refused with RESUME-PAST-NO-RESUME-NODE by resume.py --run, by compile-graph.py --plan --resume, by the compiled script before its first call and by record-run.py for a later attempt under the same run id; a node blocked behind a park or declined by the budget did not start, and a run that stopped before the node resumes",
+      "statement": "A run whose record or journal shows that a node declaring \"resume\": \"never\", or a node that depends on it, started is refused with RESUME-PAST-NO-RESUME-NODE by resume.py --run, by compile-graph.py --plan --resume, by the compiled script before its first call and by record-run.py for a later attempt under the same run id; a node blocked behind a park or declined by the budget did not start, in graphs with lanes as well as without, and a run that stopped before the node resumes; a node that declares the field has to wait on every park in the graph, and neither a parked node nor a node of a repair loop can declare it",
       "decisions": [
         "no-resume-evidence"
       ],
@@ -607,7 +607,7 @@
     },
     {
       "id": "ignored-flag-is-said",
-      "statement": "record-run.py names the verdict it kept and the flag it ignored whenever --red-team is given over a summary that carries a verdict, and compile-graph.py --check warns, with the line, when a graph file's prose records a verdict by a flag the recorder will ignore",
+      "statement": "record-run.py names the verdict it kept and the flag it ignored whenever --red-team is given over a summary that carries a verdict, and compile-graph.py --check warns, with the line, when a graph file's prose records a verdict by a flag the recorder will ignore, whether the value is written out or taken from the shell, and leaves alone a line that says not to use the flag",
       "decisions": [
         "post-run-downgrade"
       ],
@@ -708,11 +708,11 @@
         "{python}",
         "plugins/fluxpoint/tests/token-ceiling-test.py"
       ],
-      "scope": "The emitted sweep executed under stubs with and without a cap, and the compiler's --check line",
+      "scope": "The emitted sweep executed under stubs with and without a cap, every shipped template run on its plan with the cap at its estimate, and the compiler's --check line",
       "assumptions": [
         "The charge is the compiler's estimate; real token spend is not measured"
       ],
-      "timeoutSeconds": 120
+      "timeoutSeconds": 300
     },
     {
       "id": "no-resume-tests",
@@ -721,7 +721,7 @@
         "{python}",
         "plugins/fluxpoint/tests/no-resume-test.py"
       ],
-      "scope": "The validator, the rule over recorded summaries, resume.py, compile-graph.py --plan, the compiled script and record-run.py",
+      "scope": "The validator, the rule over recorded summaries from both runtimes, resume.py, compile-graph.py --plan, the compiled script and record-run.py",
       "assumptions": [
         "Replay memo construction is mocked in the launcher cases; the journal is a file in the runtime's layout"
       ],
