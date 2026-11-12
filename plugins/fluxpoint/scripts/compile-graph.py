@@ -502,6 +502,21 @@ def _sibling(name):
     return mod
 
 
+_STORE_LAYOUT = []
+
+
+def _store_layout(load=_sibling):
+    """run_artifacts, for where a run's records are and how its campaign is read.
+
+    Loaded once, by the loader this module was defined with. A caller that
+    stands in for the reader of one artifact, as the plan's tests do, does
+    not stand in for the layout of a store.
+    """
+    if not _STORE_LAYOUT:
+        _STORE_LAYOUT.append(load("run_artifacts"))
+    return _STORE_LAYOUT[0]
+
+
 def load_gates(root):
     """Declared gate names, or None when the repo declares no manifest.
 
@@ -799,7 +814,7 @@ def run_stores(root, graph=None):
     """
     if root is None:
         return []
-    artifacts = _sibling("run_artifacts")
+    artifacts = _store_layout()
     shared = []
     try:
         shared = [_sibling("memory").runs_path(start) for start in dict.fromkeys(
@@ -820,7 +835,7 @@ def run_attempts(root, run_id, unread=None, stores=None):
     """
     if root is None and not stores:
         return []
-    artifacts = _sibling("run_artifacts")
+    artifacts = _store_layout()
     paths = artifacts.records(stores or [artifacts.store(root)], run_id)
     found = []
     for path in paths:
@@ -856,7 +871,7 @@ def resume_reach(ir, summary, run_id, projects=None, root=None, graph=None):
     """
     unread = []
     stores = run_stores(root, graph)
-    members = _sibling("run_artifacts").lineage(stores, run_id) if stores else [run_id]
+    members = _store_layout().lineage(stores, run_id) if stores else [run_id]
     attempts = [(run_id, summary)]
     for member in members:
         attempts += [(member, a) for a in run_attempts(root, member, unread, stores) if a != summary]
