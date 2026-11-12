@@ -597,18 +597,18 @@
     },
     {
       "id": "no-resume-past-a-declared-node",
-      "statement": "A run whose record or journal shows that a node declaring \"resume\": \"never\", or a node that depends on it, started is refused with RESUME-PAST-NO-RESUME-NODE by resume.py --run, by compile-graph.py --plan --resume, by the compiled script before its first call and by record-run.py for a result that started the node when an earlier attempt under the same run id, or a run joined to it by a resume, had started it too; every attempt recorded under the run id and under each run joined to it by a resume is read, the latest and those kept in its history, from the root's store and those above the graph, by the launcher as by the recorder; a copy of the result already on file excuses nothing, an attempt on file that cannot be read is refused as RESUME-REACH-UNKNOWN, and an attempt that did not start the node itself is filed; a node blocked behind a park or declined by the budget did not start, in graphs with lanes as well as without, a repair loop that waits on a park is blocked with it, and a run that stopped before the node resumes; a node that declares the field has to wait on every park in the graph, and neither a parked node nor a node of a repair loop can declare it",
+      "statement": "A run whose record or journal shows that a node declaring \"resume\": \"never\", or a node that depends on it, started is refused with RESUME-PAST-NO-RESUME-NODE by resume.py --run, by compile-graph.py --plan --resume, by the compiled script before its first call and by record-run.py for a result that started the node when an earlier attempt under the same run id, or a run joined to it by a resume, had started it too; every attempt recorded under the run id and under each run joined to it by a resume is read, the latest and those kept in its history, from the root's store and those above the graph, by the launcher as by the recorder; a copy of the result already on file excuses nothing, an attempt on file that cannot be read is refused as RESUME-REACH-UNKNOWN, an attempt that did not start the node itself is filed, and records into one work file are taken one at a time, so of two rolls recorded at the same moment one is refused; a node blocked behind a park or declined by the budget did not start, in graphs with lanes as well as without, a repair loop that waits on a park is blocked with it, and a run that stopped before the node resumes; a node that declares the field has to wait on every park in the graph, and neither a parked node nor a node of a repair loop can declare it",
       "decisions": [
         "no-resume-evidence"
       ],
       "checks": [
         "no-resume-tests"
       ],
-      "counterexample": "A red-team fan-out halted by a dead lens is resumed, the lenses after it run again, one that had raised claims comes back clean, and the run is recorded SHIP; or the second roll is first recorded against a graph one directory up and then recorded in the project"
+      "counterexample": "A red-team fan-out halted by a dead lens is resumed, the lenses after it run again, one that had raised claims comes back clean, and the run is recorded SHIP; or the second roll is first recorded against a graph one directory up and then recorded in the project; or both rolls are recorded at the same moment and both are filed"
     },
     {
       "id": "ignored-flag-is-said",
-      "statement": "record-run.py names the verdict it kept and the flag it ignored whenever --red-team is given over a summary that carries a verdict, and compile-graph.py --check warns, with the line, when a graph file's prose records a verdict by a flag the recorder will ignore, whether the value is written out or taken from the shell, leaves alone a line whose negation governs the flag's own verb, and reads --harness as the recorder's only where record-run is named before it in the same command, sentence or list item",
+      "statement": "record-run.py names the verdict it kept and the flag it ignored whenever --red-team is given over a summary that carries a verdict, and compile-graph.py --check warns, with the line, when a graph file's prose records a verdict by a flag the recorder will ignore, whether the value is written out or taken from the shell, leaves alone a line whose negation stands in the flag's own clause and governs the flag's own verb, a clause ending at punctuation and at then, so, but, otherwise and instead, and reads --harness as the recorder's only where record-run is named before it in the same command, sentence or list item",
       "decisions": [
         "post-run-downgrade"
       ],
@@ -620,7 +620,7 @@
     },
     {
       "id": "veto-only-lowers",
-      "statement": "record-run.py --veto with --veto-evidence records BLOCK, keeps the derived verdict and the evidence's sha256 and bytes beside it, refuses a veto without a reason or without readable non-empty evidence and then writes nothing, never yields SHIP, keeps a filed veto on the run id when the run is recorded again, when the record that carried it is refused afterwards, when two vetoes are given at once and when the run is recorded under any other root above the graph, reading the stores above the graph and the Evidence file as well as the root's, and refuses before anything is written a --graph or --evidence file that really sits outside --root, in a clone as anywhere and a link to such a file included",
+      "statement": "record-run.py --veto with --veto-evidence records BLOCK, keeps the derived verdict and the evidence's sha256 and bytes beside it, refuses a veto without a reason or without readable non-empty evidence and then writes nothing, never yields SHIP, keeps a filed veto on the run id when the run is recorded again, when the record that carried it is refused afterwards, when two vetoes are given at once, when a plain record is made in the same moment and when the run is recorded under any other root above the graph, reading the stores above the graph and the Evidence file as well as the root's, and refuses before anything is written a --graph or --evidence file that really sits outside --root, in a clone as anywhere and a link to such a file included, naming the way out by where the files really are",
       "decisions": [
         "post-run-downgrade"
       ],
@@ -631,14 +631,14 @@
     },
     {
       "id": "lock-freezes-what-is-on-disk",
-      "statement": "No path in a plugin state store is a packet input whether it is a file or a directory, the root's store and a package directory's alike, except what Git tracks under a package's store-shaped directory, which is a fixture and is frozen, and a working-directory flag that names a store sets no package directory; an untracked, unignored file under an input directory refuses --lock and is a warning at --check, only a compiled cache inside __pycache__ and a desktop's folder metadata are passed over, and a nested repository is named as one; a relative JS import that names no repository file is warned about with its file and line, and one that leaves the repository still refuses",
+      "statement": "No path in a plugin state store is a packet input whether it is a file or a directory, the root's store and a package directory's alike, except what Git tracks under a package's store-shaped directory, which is a fixture and is frozen, and a working-directory flag that names a store sets no package directory; an untracked, unignored file under an input directory refuses --lock and is a warning at --check, one beside a committed fixture in such a directory included, only a compiled cache inside __pycache__ and a desktop's folder metadata are passed over, and a nested repository is named as one; a relative JS import that names no repository file is warned about with its file and line, and one that leaves the repository still refuses",
       "decisions": [
         "lock-follows-disk"
       ],
       "checks": [
         "packet-inputs-tests"
       ],
-      "counterexample": "Recording a run turns a passing specification.py --check red in the same checkout, a new test file under a locked directory is never frozen, a check that runs in the store freezes nothing at all, or an untracked module under node_modules that a locked test loads is left out of the lock"
+      "counterexample": "Recording a run turns a passing specification.py --check red in the same checkout, a new test file under a locked directory is never frozen, a check that runs in the store freezes nothing at all, an untracked module under node_modules that a locked test loads is left out of the lock, or a recorded run nobody staged beside a committed fixture is read by a locked test and left out without a word"
     },
     {
       "id": "retire-leaves-a-record",
@@ -653,14 +653,14 @@
     },
     {
       "id": "markers-in-their-own-spelling",
-      "statement": "The hygiene scan flags TODO, FIXME, XXX, Admitted and Dafny's attributes wherever they appear in that spelling, flags todo and fixme in another case only where a comment opens with the word as a marker, flags the @todo and \\todo documentation tags inside a comment, reads those comments in every form the hedge is read in and also as # in build files and configuration, as a line that starts with ; in .ini-style files and as <!-- -->, takes a // inside a URL for none, takes --todo for a flag except where -- opens a comment, flags sorry in .lean and .thy files only, and keeps flagging Rust's todo!, unimplemented!, #[ignore] and .unwrap() in any case",
+      "statement": "The hygiene scan flags TODO, FIXME, XXX, Admitted and Dafny's attributes wherever they appear in that spelling, flags todo and fixme in another case only where a comment opens with the word as a marker, flags the @todo and \\todo documentation tags inside a comment, reads those comments in every form the hedge is read in and also as # in build files and configuration, where a # that opens a word is read whatever stands before it on the line and a # inside a value or a URL is none, as a line that starts with ; in .ini-style files and as <!-- -->, takes a // inside a URL for none, takes --todo for a flag except where -- opens a comment, flags sorry in .lean and .thy files only, and keeps flagging Rust's todo!, unimplemented!, #[ignore] and .unwrap() in any case",
       "decisions": [
         "marker-spelling"
       ],
       "checks": [
         "hygiene-scope-tests"
       ],
-      "counterexample": "The record was re-admitted, a todo list, a masked phone number or an apology in prose turns the gate red, or a comment that opens with todo: passes because it is in lower case"
+      "counterexample": "The record was re-admitted, a todo list, a masked phone number or an apology in prose turns the gate red, a comment that opens with todo: passes because it is in lower case, or a # todo after a long option in a Dockerfile passes"
     },
     {
       "id": "gate-shell-is-git-bash-or-a-fault",
