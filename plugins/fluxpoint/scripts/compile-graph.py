@@ -4694,8 +4694,11 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
     if guard:
         check = (f"{json.dumps(dep)}.some(id => BLOCKED.has(id))" if isinstance(dep, list) else f"BLOCKED.has({js_str(dep)})")
         a(f"if ({check}) {{")
-        a(f"  note({js_str(nid)}, 'BLOCKED', 'blocked on {dep}')")
-        a(f"  log(`BLOCKED at {nid}: inherited from {dep}`)")
+        # A join names every parent it waits on. Pasting the list into the
+        # string emitted a quote inside a quoted string, which did not parse.
+        waits_on = ", ".join(dep) if isinstance(dep, list) else dep
+        a(f"  note({js_str(nid)}, 'BLOCKED', {js_str('blocked on ' + waits_on)})")
+        a(f"  log({js_str('BLOCKED at ' + nid + ': inherited from ' + waits_on)})")
         a(f"  BLOCKED.add({js_str(nid)})")
         a("  INCOMPLETE = true")
         a(f"  RESULTS[{js_str(nid)}] = null")
