@@ -156,8 +156,9 @@ path as `shell`, and `"exit": null`. `--run` and `--await` answer 4 and print
 of an exit.
 
 The test runs as a process tree of its own. A shell that hangs is stopped
-together with whatever it started, and `--cancel` during the test stops it at
-once: the run ends `CANCELLED` with nothing attested.
+together with whatever it started, and so is one whose runner is interrupted.
+`--cancel` during the test stops it at once: the run ends `CANCELLED` with
+nothing attested.
 
 A shell fault row is no pass and no red. A `prove:` node that cites it is
 `STALE`. It does not attest or contradict an observed claim. It does not stand
@@ -175,8 +176,9 @@ For a shell fault this starts one ordinary run of the gate. There is no pair
 and no reference leg, because no execution of the gate failed. The named row
 must be a shell fault, and its retained completion record and log must be
 unchanged. It is run again under the nonce it was minted under: a row from a
-run with a nonce needs that `--nonce`, and a row from a run started without
-one is run again without one. Cite the new run's attestation.
+run with a nonce needs that nonce, as `--nonce` or in `FPL_ATTEST_NONCE`, and
+a row from a run started without one is run again without the flag. Cite the
+new run's attestation.
 
 One shell fault is settled where it happens. The native leg of a crash's
 rerun pair goes through the same test, and a leg whose shell cannot run a

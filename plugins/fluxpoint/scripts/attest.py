@@ -1115,6 +1115,15 @@ def shell_problem(shell, cwd, cancelled=None):
             if code is None or tree.running():
                 tree.terminate()
                 tree.proc.wait()
+        except BaseException:
+            # An interrupt reaches the runner and not the shell, which has a
+            # session of its own. The shell goes with the runner.
+            try:
+                tree.terminate()
+                tree.proc.wait()
+            except Exception:  # noqa: BLE001 - the interrupt is what is reported
+                pass
+            raise
         finally:
             tree.close()
         out.seek(0)
@@ -1389,12 +1398,13 @@ def rerun_shell_fault(root, original_id, nonce, detach=False, tree=None):
     other. What is checked is that the row named is this run's shell fault
     and that its retained completion and log still say so. A red, a row
     from another run and an edited record are refused. A row minted under
-    a nonce is run again under that nonce, and one minted without a nonce
-    is run again without one. A leg of a fault rerun pair is refused: the
-    pair settled it.
+    a nonce is run again under that nonce, given as --nonce or carried in
+    FPL_ATTEST_NONCE. One minted without a nonce is run again without the
+    flag, as a plain --run of the gate would be. A leg of a fault rerun
+    pair is refused: the pair settled it.
     """
     root = os.path.abspath(root)
-    nonce = nonce or os.environ.get("FPL_ATTEST_NONCE", "")
+    given = nonce or ""
     try:
         import fault_attempts
         hits = [row for row in read(root) if isinstance(row, dict) and row.get('attestId') == original_id]
@@ -1402,15 +1412,18 @@ def rerun_shell_fault(root, original_id, nonce, detach=False, tree=None):
             raise ValueError('the row is not one shell fault')
         if hits[0].get('attempt'):
             raise ValueError('the row is a leg of a fault rerun pair, which the pair settled')
-        if (hits[0].get('nonce') or '') != nonce:
-            raise ValueError("a shell fault is run again under the nonce it was minted under, and this one "
-                             + ("was minted under another run's" if hits[0].get('nonce')
-                                else "was minted without one: pass no --nonce"))
+        minted = hits[0].get('nonce') or ''
+        if minted and (given or os.environ.get("FPL_ATTEST_NONCE", "")) != minted:
+            raise ValueError("a shell fault is run again under the nonce it was minted under, "
+                             "and this one was minted under another run's")
+        if not minted and given:
+            raise ValueError("a shell fault is run again under the nonce it was minted under, "
+                             "and this one was minted without one: pass no --nonce")
         fault_attempts.witnessed(_api(), root, hits[0])
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"attest: shell fault rerun refused: {exc}", file=sys.stderr)
         return 2
-    return run_gate(root, hits[0]['gate'], detach, None, nonce, tree or hits[0].get('tree'))
+    return run_gate(root, hits[0]['gate'], detach, None, minted, tree or hits[0].get('tree'))
 
 
 def _alive(pid, started=""):
