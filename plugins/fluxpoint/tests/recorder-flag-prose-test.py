@@ -78,6 +78,36 @@ class Prose(unittest.TestCase):
         self.assertEqual(self.found(graph('RedTeamV1'),
                                     '`--red-team` is ignored when the summary carries a verdict; use `--veto`.'), [])
 
+    def test_a_line_that_says_not_to_use_the_flag_is_not_an_instruction_to_use_it(self):
+        for line in ('Never pass `--red-team BLOCK`: the recorder ignores it.',
+                     'Do not record the refusal with `--red-team BLOCK`; file a veto.',
+                     "Don't use `--red-team BLOCK` here."):
+            with self.subTest(line=line):
+                self.assertEqual(self.found(graph('RedTeamV1'), line), [])
+        # A negation about something else on the line does not excuse the instruction.
+        for line in ('If the certifier does not pass, record `--red-team BLOCK`.',
+                     'The certifier cannot be skipped; on exit 1 record `--red-team BLOCK`.'):
+            with self.subTest(line=line):
+                self.assertEqual(len(self.found(graph('RedTeamV1'), line)), 1)
+
+    def test_a_value_taken_from_the_shell_is_still_the_flag(self):
+        for line in ('record-run.py --run-id "$RUN" --red-team "$VERDICT"', "record-run.py --red-team 'BLOCK'",
+                     'record-run.py --red-team ${VERDICT}'):
+            with self.subTest(line=line):
+                self.assertEqual(len(self.found(graph('RedTeamV1'), '```', line, '```')), 1)
+        for line in ('record-run.py --harness $?', 'record-run.py --harness "$rc"', 'record-run.py --harness=$rc'):
+            with self.subTest(line=line):
+                self.assertEqual(len(self.found(graph('HarnessCheckV1'), '```', line, '```')), 1)
+
+    def test_filed_rows_are_not_prose_whatever_their_heading_is_called(self):
+        ir = graph('RedTeamV1')
+        row = '| 2026-11-01 00:00 | graph | COMPLETE | recorded with --red-team BLOCK | n/a |'
+        for heading in ('## Evidence log', '## Run history', 'Evidence\n--------'):
+            with self.subTest(heading=heading):
+                text = ('# Campaign\n\n```json graph-ir\n' + json.dumps(ir) + '\n```\n\n' + heading + '\n\n'
+                        '| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n' + row + '\n')
+                self.assertEqual(cg.recorder_flag_warnings(text, ir), [])
+
     def test_the_ir_and_the_filed_evidence_are_not_prose(self):
         ir = graph('RedTeamV1')
         ir['nodes'][1]['prompt'] = 'judge {{prev}}; the operator may pass --red-team BLOCK'

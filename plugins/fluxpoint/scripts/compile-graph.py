@@ -5544,11 +5544,16 @@ def prose_pin_findings(text, ir):
 
 # record-run.py flags that are a fallback for a summary carrying no such
 # verdict, with the contracts whose results the recorder reads it from.
+SHELL_VALUE = r"\$\?|\$\{?\w+\}?"       # $?, $rc, ${VERDICT}: a value the step computed
 RECORDER_FLAGS = (
-    ("--red-team", r"SHIP|BLOCK", ("RedTeamV1",), "red-team verdict"),
-    ("--harness", r"-?\d+|<[^>\s]+>", ("HarnessCheckV1", "FixCheckV1"), "harness exit"),
-    ("--proof-audit", r"SOUND|WEAKENED|UNPROVEN|NOT-APPLICABLE", ("ProofV1",), "proof-audit verdict"),
+    ("--red-team", r"SHIP|BLOCK|" + SHELL_VALUE, ("RedTeamV1",), "red-team verdict"),
+    ("--harness", r"-?\d+|<[^>\s]+>|" + SHELL_VALUE, ("HarnessCheckV1", "FixCheckV1"), "harness exit"),
+    ("--proof-audit", r"SOUND|WEAKENED|UNPROVEN|NOT-APPLICABLE|" + SHELL_VALUE, ("ProofV1",), "proof-audit verdict"),
 )
+# A line that tells the reader not to use the flag is not a step that uses it.
+# Only a negation in the same clause counts: "if it does not pass, record ..."
+# is still an instruction.
+NOT_AN_INSTRUCTION = re.compile(r"\b(?:never|do not|don't|must not|should not|shouldn't|cannot|can't)\b[^.;:]*$", re.I)
 
 
 def recorder_flag_warnings(text, ir):
@@ -5559,7 +5564,9 @@ def recorder_flag_warnings(text, ir):
     and reads its flags only when none did. A graph file whose prose tells
     the operator to record a post-run check with one of those flags
     therefore describes a step that changes nothing. Command blocks count
-    as prose; the IR block and the filed Evidence and Decisions rows do not.
+    as prose. The IR block does not, and neither does a table row or
+    anything under an Evidence or Decisions heading: those are what was
+    filed, whatever the section is called.
     """
     lines, fence, in_ir, filed = [], None, False, None
     for line in text.splitlines():
@@ -5582,14 +5589,15 @@ def recorder_flag_warnings(text, ir):
                 filed = None
             if title in ('evidence', 'decisions'):
                 filed = level
-        lines.append('' if filed is not None else line)
+        lines.append('' if filed is not None or line.lstrip().startswith('|') else line)
     found = []
     for flag, values, contracts, what in RECORDER_FLAGS:
         nodes = [n.get("id") for n in ir.get("nodes") or [] if isinstance(n, dict) and n.get("contract") in contracts]
         if not nodes:
             continue
-        pattern = re.compile(r'(?<![\w-])' + re.escape(flag) + r'(?:[ \t]+|=)(' + values + r')(?![\w-])')
-        hits = [(number, match.group(0)) for number, line in enumerate(lines, 1) for match in pattern.finditer(line)]
+        pattern = re.compile(r'(?<![\w-])' + re.escape(flag) + r'(?:[ \t]+|=)["\']?(?:' + values + r')["\']?(?![\w-])')
+        hits = [(number, match.group(0)) for number, line in enumerate(lines, 1) for match in pattern.finditer(line)
+                if not NOT_AN_INSTRUCTION.search(line[:match.start()])]
         if not hits:
             continue
         numbers = sorted({number for number, _ in hits})
