@@ -24,6 +24,7 @@
     "plugins/fluxpoint/scripts/compile-graph.py",
     "plugins/fluxpoint/scripts/record-run.py",
     "plugins/fluxpoint/scripts/resume.py",
+    "plugins/fluxpoint/scripts/run_artifacts.py",
     "plugins/fluxpoint/scripts/attest.py",
     "plugins/fluxpoint/scripts/specification.py",
     "plugins/fluxpoint/scripts/packet_inputs.py",
@@ -344,7 +345,7 @@
           }
         ],
         "chosen": "logged-veto",
-        "rationale": "The precedence stays: a verdict the summary carries beats the flag. The recorder now says when it ignores the flag, --check warns when a graph's prose relies on it, and --veto with evidence lowers the recorded red-team verdict to BLOCK. A veto never raises a verdict and stays on the run id: it is journaled when it is accepted, and a run's vetoes are read from every store that can hold them: the root's, those above the graph and the Evidence file, and the clone-wide one.",
+        "rationale": "The precedence stays: a verdict the summary carries beats the flag. The recorder now says when it ignores the flag, --check warns when a graph's prose relies on it, and --veto with evidence lowers the recorded red-team verdict to BLOCK. A veto never raises a verdict and stays on the run id: it is journaled when it is accepted, and a run's vetoes are read from every store that can hold them: the root's and those above the graph and the Evidence file. The clone-wide store is read as well, and nothing is decided on its being there.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
@@ -596,18 +597,18 @@
     },
     {
       "id": "no-resume-past-a-declared-node",
-      "statement": "A run whose record or journal shows that a node declaring \"resume\": \"never\", or a node that depends on it, started is refused with RESUME-PAST-NO-RESUME-NODE by resume.py --run, by compile-graph.py --plan --resume, by the compiled script before its first call and by record-run.py for a result that started the node when an earlier attempt under the same run id, or a run joined to it by a resume, had started it too; every attempt recorded under the run id and under each run joined to it by a resume is read, the latest and those kept in its history, an attempt on file that cannot be read is refused as RESUME-REACH-UNKNOWN, and an attempt that did not start the node itself is filed; a node blocked behind a park or declined by the budget did not start, in graphs with lanes as well as without, a repair loop that waits on a park is blocked with it, and a run that stopped before the node resumes; a node that declares the field has to wait on every park in the graph, and neither a parked node nor a node of a repair loop can declare it",
+      "statement": "A run whose record or journal shows that a node declaring \"resume\": \"never\", or a node that depends on it, started is refused with RESUME-PAST-NO-RESUME-NODE by resume.py --run, by compile-graph.py --plan --resume, by the compiled script before its first call and by record-run.py for a result that started the node when an earlier attempt under the same run id, or a run joined to it by a resume, had started it too; every attempt recorded under the run id and under each run joined to it by a resume is read, the latest and those kept in its history, from the root's store and those above the graph, by the launcher as by the recorder; a copy of the result already on file excuses nothing, an attempt on file that cannot be read is refused as RESUME-REACH-UNKNOWN, and an attempt that did not start the node itself is filed; a node blocked behind a park or declined by the budget did not start, in graphs with lanes as well as without, a repair loop that waits on a park is blocked with it, and a run that stopped before the node resumes; a node that declares the field has to wait on every park in the graph, and neither a parked node nor a node of a repair loop can declare it",
       "decisions": [
         "no-resume-evidence"
       ],
       "checks": [
         "no-resume-tests"
       ],
-      "counterexample": "A red-team fan-out halted by a dead lens is resumed, the lenses after it run again, one that had raised claims comes back clean, and the run is recorded SHIP"
+      "counterexample": "A red-team fan-out halted by a dead lens is resumed, the lenses after it run again, one that had raised claims comes back clean, and the run is recorded SHIP; or the second roll is first recorded against a graph one directory up and then recorded in the project"
     },
     {
       "id": "ignored-flag-is-said",
-      "statement": "record-run.py names the verdict it kept and the flag it ignored whenever --red-team is given over a summary that carries a verdict, and compile-graph.py --check warns, with the line, when a graph file's prose records a verdict by a flag the recorder will ignore, whether the value is written out or taken from the shell, leaves alone a line whose negation governs the flag's own verb, and reads --harness as the recorder's only where record-run is named before it in the same command or paragraph",
+      "statement": "record-run.py names the verdict it kept and the flag it ignored whenever --red-team is given over a summary that carries a verdict, and compile-graph.py --check warns, with the line, when a graph file's prose records a verdict by a flag the recorder will ignore, whether the value is written out or taken from the shell, leaves alone a line whose negation governs the flag's own verb, and reads --harness as the recorder's only where record-run is named before it in the same command, sentence or list item",
       "decisions": [
         "post-run-downgrade"
       ],
@@ -619,7 +620,7 @@
     },
     {
       "id": "veto-only-lowers",
-      "statement": "record-run.py --veto with --veto-evidence records BLOCK, keeps the derived verdict and the evidence's sha256 and bytes beside it, refuses a veto without a reason or without readable non-empty evidence and then writes nothing, never yields SHIP, keeps a filed veto on the run id when the run is recorded again, when the record that carried it is refused afterwards, when two vetoes are given at once and when the run is recorded under another root or from another checkout of the clone, reading the stores above the graph and the Evidence file and the clone-wide store as well as the root's, and refuses before anything is written a --graph or --evidence file that really sits outside --root and in no checkout of the same clone",
+      "statement": "record-run.py --veto with --veto-evidence records BLOCK, keeps the derived verdict and the evidence's sha256 and bytes beside it, refuses a veto without a reason or without readable non-empty evidence and then writes nothing, never yields SHIP, keeps a filed veto on the run id when the run is recorded again, when the record that carried it is refused afterwards, when two vetoes are given at once and when the run is recorded under any other root above the graph, reading the stores above the graph and the Evidence file as well as the root's, and refuses before anything is written a --graph or --evidence file that really sits outside --root, in a clone as anywhere and a link to such a file included",
       "decisions": [
         "post-run-downgrade"
       ],
@@ -630,7 +631,7 @@
     },
     {
       "id": "lock-freezes-what-is-on-disk",
-      "statement": "No path in a plugin state store is a packet input whether it is a file or a directory, the root's store and a package directory's alike, and a working-directory flag that names a store sets no package directory; an untracked, unignored file under an input directory refuses --lock and is a warning at --check, only a compiled cache inside __pycache__ and a desktop's folder metadata are passed over, and a nested repository is named as one; a relative JS import that names no repository file is warned about with its file and line, and one that leaves the repository still refuses",
+      "statement": "No path in a plugin state store is a packet input whether it is a file or a directory, the root's store and a package directory's alike, except what Git tracks under a package's store-shaped directory, which is a fixture and is frozen, and a working-directory flag that names a store sets no package directory; an untracked, unignored file under an input directory refuses --lock and is a warning at --check, only a compiled cache inside __pycache__ and a desktop's folder metadata are passed over, and a nested repository is named as one; a relative JS import that names no repository file is warned about with its file and line, and one that leaves the repository still refuses",
       "decisions": [
         "lock-follows-disk"
       ],
@@ -652,7 +653,7 @@
     },
     {
       "id": "markers-in-their-own-spelling",
-      "statement": "The hygiene scan flags TODO, FIXME, XXX, Admitted and Dafny's attributes wherever they appear in that spelling, flags todo and fixme in another case only where a comment opens with the word as a marker, flags the @todo and \\todo documentation tags inside a comment, reads those comments in the #, ;, //, /* */, --, (* *) and <!-- --> forms of the files that use each, takes neither a // inside a URL nor a flag such as --todo for one, flags sorry in .lean and .thy files only, and keeps flagging Rust's todo!, unimplemented!, #[ignore] and .unwrap() in any case",
+      "statement": "The hygiene scan flags TODO, FIXME, XXX, Admitted and Dafny's attributes wherever they appear in that spelling, flags todo and fixme in another case only where a comment opens with the word as a marker, flags the @todo and \\todo documentation tags inside a comment, reads those comments in every form the hedge is read in and also as # in build files and configuration, as a line that starts with ; in .ini-style files and as <!-- -->, takes a // inside a URL for none, takes --todo for a flag except where -- opens a comment, flags sorry in .lean and .thy files only, and keeps flagging Rust's todo!, unimplemented!, #[ignore] and .unwrap() in any case",
       "decisions": [
         "marker-spelling"
       ],
@@ -663,7 +664,7 @@
     },
     {
       "id": "gate-shell-is-git-bash-or-a-fault",
-      "statement": "On Windows a wrapper gate starts under Git Bash resolved without System32 or WindowsApps and never by a relative path, and refuses with NO-GIT-BASH when none exists; on every platform a shell that cannot run the wrapper's one-word command attests a row with fault shell and a null exit and does not start the declared command, the test stops with whatever it started, at once on cancellation and when its runner is interrupted, the fault line names a rerun that works for a run with a nonce and for one without, and a leg of a fault rerun pair whose shell cannot run did not pass, while a gate that started is judged by its exit; and the prove preamble tells the node to run the witness command exactly as written",
+      "statement": "On Windows a wrapper gate starts under Git Bash resolved without System32 or WindowsApps and never by a relative path, and refuses with NO-GIT-BASH when none exists; on every platform a shell that cannot run the wrapper's one-word command attests a row with fault shell and a null exit and does not start the declared command, the test stops with whatever it started, at once on cancellation and when its runner is interrupted, terminated or loses its terminal, the fault line names a rerun that works for a run with a nonce and for one without, and a leg of a fault rerun pair whose shell cannot run did not pass, while a gate that started is judged by its exit; and the prove preamble tells the node to run the witness command exactly as written",
       "decisions": [
         "gate-shell"
       ],
