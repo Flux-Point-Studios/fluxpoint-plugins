@@ -586,8 +586,13 @@ def resumed_past(root, run_id, summary):
         except (OSError, ValueError):
             continue
         prior = row.get("summary") if isinstance(row, dict) else None
-        if isinstance(prior, dict) and not same(prior, summary):
-            earlier.append((row.get("runId"), prior))
+        if not isinstance(prior, dict):
+            continue
+        if same(prior, summary) and row.get("runId") == run_id:
+            # This attempt is already on file under this run id. Filing it
+            # again is not a later attempt, whatever was filed after it.
+            return None
+        earlier.append((row.get("runId"), prior))
     if not earlier:
         return None
     import importlib.util
@@ -681,7 +686,20 @@ def main():
     except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
         print(f"record-run: ledger append failed: {e}", file=sys.stderr)
 
-    # 0a. A post-run veto is checked here, and its evidence filed, before
+    # 0a. A node that runs once per run is not filed twice. Checked before
+    # anything else is read or written, a veto included, so the earlier
+    # attempt's record is left exactly as it is.
+    if isinstance(summary, dict):
+        rerolled = resumed_past(args.root, args.run_id, summary)
+        if rerolled:
+            print(f"record-run: {rerolled} No run artifact, Evidence row or veto written.", file=sys.stderr)
+            if ledger_written:
+                print(f"record-run: the once-only ledger still recorded "
+                      f"{len(ledger_written)} irreversible effect(s) from this run",
+                      file=sys.stderr)
+            return 2
+
+    # 0b. A post-run veto is checked here, and its evidence filed, before
     # anything below writes. A veto that cannot be accounted for records
     # nothing about the run: no artifact, no Evidence row, no inbox item.
     # Refusing it must not drop the veto and file the run at its derived
@@ -700,18 +718,6 @@ def main():
         except ValueError as e:
             print(f"record-run: veto refused, no run artifact or Evidence row written: {e}",
                   file=sys.stderr)
-            if ledger_written:
-                print(f"record-run: the once-only ledger still recorded "
-                      f"{len(ledger_written)} irreversible effect(s) from this run",
-                      file=sys.stderr)
-            return 2
-
-    # 0b. A node that runs once per run is not filed twice. Checked before
-    # anything below writes, so the earlier attempt's record is left as it is.
-    if isinstance(summary, dict):
-        rerolled = resumed_past(args.root, args.run_id, summary)
-        if rerolled:
-            print(f"record-run: {rerolled} No run artifact or Evidence row written.", file=sys.stderr)
             if ledger_written:
                 print(f"record-run: the once-only ledger still recorded "
                       f"{len(ledger_written)} irreversible effect(s) from this run",

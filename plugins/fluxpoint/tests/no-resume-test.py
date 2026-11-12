@@ -436,10 +436,11 @@ class Recorder(unittest.TestCase):
         subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
         subprocess.run(['git', 'commit', '-qm', 'base'], cwd=self.root, check=True)
 
-    def record(self, summary, run_id='wf_review', want=0):
+    def record(self, summary, run_id='wf_review', want=0, flags=()):
         (self.root / 'result.json').write_text(json.dumps(summary), encoding='utf-8')
         done = subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'), '--root', str(self.root), '--graph',
-                               str(self.root / 'WORK.md'), '--run-id', run_id, '--result', str(self.root / 'result.json')],
+                               str(self.root / 'WORK.md'), '--run-id', run_id, '--result', str(self.root / 'result.json'),
+                               *flags],
                               cwd=self.root, capture_output=True, text=True, encoding='utf-8', timeout=60)
         self.assertEqual(done.returncode, want, done.stdout + done.stderr)
         return done
@@ -469,6 +470,28 @@ class Recorder(unittest.TestCase):
         self.record(recorded(dead={'build'}))
         self.record(recorded())
         self.assertEqual(self.filed()['summary']['outcome'], 'COMPLETE')
+
+    def test_an_attempt_already_on_file_is_recorded_again_whatever_followed_it(self):
+        # The first attempt stopped at the build, the second ran the review.
+        # Filing the first again is not a third attempt: it is already on file.
+        first = recorded(dead={'build'})
+        self.record(first)
+        self.record(recorded())
+        self.record(first)
+        self.assertEqual(self.filed()['summary']['outcome'], 'NODE-DEAD')
+
+    def test_a_refused_attempt_files_nothing_at_all(self):
+        # The refusal comes before the veto is read, so its evidence is not filed either.
+        self.record(recorded(dead={'lenses:b'}))
+        evidence = self.root / 'certifier.txt'
+        evidence.write_text('certifier exit 1\n', encoding='utf-8')
+        runs = self.root / '.claude/fluxpoint/runs'
+        before = sorted(str(path.relative_to(runs)) for path in runs.rglob('*') if path.is_file())
+        latest = (runs / 'wf_review.json').read_bytes()
+        done = self.record(recorded(), want=2, flags=('--veto', 'the certifier refused', '--veto-evidence', str(evidence)))
+        self.assertIn(CODE, done.stderr)
+        self.assertEqual(sorted(str(path.relative_to(runs)) for path in runs.rglob('*') if path.is_file()), before)
+        self.assertEqual((runs / 'wf_review.json').read_bytes(), latest)
 
     def test_a_new_launch_has_its_own_run_id_and_its_own_record(self):
         self.record(recorded(dead={'lenses:b'}), run_id='wf_first')
