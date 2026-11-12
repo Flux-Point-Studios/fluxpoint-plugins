@@ -155,6 +155,7 @@ class Inputs:
         self.search = {self.root, self.root / 'src'}
         self.test_roots, self.warnings, self.directories = set(), set(), set()
         self._tracked = None
+        self._fixtures = None
         self._untracked = None
         self._packages = None
         self._queue = deque()
@@ -201,13 +202,31 @@ class Inputs:
     def store(self, path):
         """A plugin state store holds what a run leaves behind. A recorded run or
         decision must never move a lock, so no file or directory in one is an input.
-        The root has one, and so has every directory below it that a session was
-        rooted in: `.claude/fluxpoint` is a store wherever it sits in the repository."""
+        The root has one, by its path alone. So has every directory below the root
+        that a session was rooted in, for everything Git does not track there. What
+        is committed under a `.claude/fluxpoint` deeper in the tree is a fixture
+        somebody put there, and source like any other."""
         try:
             parts = Path(os.path.abspath(path)).relative_to(self.root).parts
         except ValueError:
             return False
-        return any(parts[i:i + 2] == STORE for i in range(len(parts) - 1))
+        if parts[:2] == STORE:
+            return True
+        return any(parts[i:i + 2] == STORE for i in range(1, len(parts) - 1)) and not self.fixture(path)
+
+    def fixture(self, path):
+        """Whether Git tracks this path, or a file under it, inside a store-shaped
+        directory below the root's own store."""
+        if self._fixtures is None:
+            self._fixtures = {name for name in self.tracked()
+                              if '/.claude/fluxpoint/' in '/' + name and not name.startswith('.claude/fluxpoint/')}
+        if not self._fixtures:
+            return False
+        try:
+            rel = '/'.join(Path(os.path.abspath(path)).relative_to(self.root).parts)
+        except ValueError:
+            return False
+        return any(name == rel or name.startswith(rel + '/') for name in self._fixtures)
 
     def tracked(self):
         if self._tracked is None:
@@ -286,9 +305,14 @@ class Inputs:
             return None
         path = Path(text)
         # A store path is never an input, decided by where the argument points
-        # and before asking whether it exists: below the root, or below the
-        # package directory the check runs in, which has a store of its own.
-        if self.store(self.root / path) or (cwd is not None and self.store(cwd / path)):
+        # and before asking whether it exists: below the package directory the
+        # check runs in, which has a store of its own, or below the root. A
+        # fixture committed in the package is the package's file, whatever
+        # the same spelling would name at the root.
+        placed = cwd / path if cwd is not None and not path.is_absolute() else None
+        if placed is not None and self.store(placed):
+            return None
+        if self.store(self.root / path) and not (placed is not None and self.fixture(placed)):
             return None
         # Win32 strips a component's trailing dots and spaces, so on Windows Go's
         # './...' exists: it names the directory it is spelled under.

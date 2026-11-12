@@ -756,6 +756,36 @@ class PacketInputsTests(unittest.TestCase):
         self.assertEqual(refused.returncode, 1, refused.stdout)
         self.assertIn('state store', refused.stderr)
 
+    def test_a_tracked_file_under_a_store_shaped_directory_is_a_fixture(self):
+        # A project that tests tooling for this plugin keeps a recorded run as
+        # a fixture, and commits it. What Git tracks under a `.claude/fluxpoint`
+        # deeper in the tree is source: only what a session leaves there
+        # untracked is state. The root's own store is state either way.
+        fixture = 'tests/fixtures/app/.claude/fluxpoint/runs/r1.json'
+        self.write(fixture, '{"runId": "r1"}')
+        self.write('pkg/run.py', 'print("pkg")\n')
+        self.write('pkg/.claude/fluxpoint/fixture.json', '{}')
+        self.write('.claude/fluxpoint/decisions.jsonl', '{"id": "first"}\n')
+        self.doc['harnessInputs'] = ['tests']
+        self.doc['checks'][0]['argv'] = ['{python}', 'run.py', '--cwd', 'pkg', '--path', '.claude/fluxpoint/fixture.json']
+        self.save()
+        self.commit()
+        # A run recorded in the package after the commit is state beside the fixture.
+        self.write('pkg/.claude/fluxpoint/runs/later.json', '{}')
+        harness = self.lock()['harness']
+        self.assertIn(fixture, harness)
+        self.assertIn('pkg/.claude/fluxpoint/fixture.json', harness)
+        self.assertEqual([rel for rel in harness if rel.startswith('.claude/') or 'later.json' in rel], [])
+        self.write(fixture, '{"runId": "r1", "edited": true}')
+        drifted = self.cli('--check', '--strict-harness')
+        self.assertEqual(drifted.returncode, 1, drifted.stdout)
+        self.assertIn(fixture, drifted.stderr)
+        # Named from the root, the package's tracked fixture is the same file.
+        self.write(fixture, '{"runId": "r1"}')
+        self.doc['checks'][0]['argv'] = ['{python}', 'pkg/run.py', 'pkg/.claude/fluxpoint/fixture.json']
+        self.save()
+        self.assertIn('pkg/.claude/fluxpoint/fixture.json', self.lock()['harness'])
+
     def test_directory_inputs_and_the_state_store_follow_one_coherent_rule(self):
         # No ignore rule covers the store here: the rule is the path, never the ignore file.
         self.root = self.root.resolve()

@@ -164,7 +164,9 @@ package directory and the check's other arguments resolve as they would without
 it. A directory named `.claude/fluxpoint` is a store wherever it sits in the
 repository: the root's, and that of a package directory a session was rooted
 in, so a check that runs in the package and reads `pkg/.claude/fluxpoint/`
-freezes nothing there either.
+freezes nothing a session left there. What Git tracks under such a directory
+below the root's own store is a fixture somebody committed, and it is frozen
+like any other file.
 A recorded run or decision therefore moves no lock. A `harnessInputs` entry in
 the store refuses. A store path that an older lock froze leaves the harness map
 at the next `--lock` or `--lock-harness`, which prints each one. Package cwd
