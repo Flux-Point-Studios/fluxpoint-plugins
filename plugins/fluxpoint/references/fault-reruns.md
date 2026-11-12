@@ -156,9 +156,9 @@ path as `shell`, and `"exit": null`. `--run` and `--await` answer 4 and print
 of an exit.
 
 The test runs as a process tree of its own. A shell that hangs is stopped
-together with whatever it started, and so is one whose runner is interrupted.
-`--cancel` during the test stops it at once: the run ends `CANCELLED` with
-nothing attested.
+together with whatever it started, and so is one whose runner is interrupted,
+terminated or loses its terminal. `--cancel` during the test stops it at
+once: the run ends `CANCELLED` with nothing attested.
 
 A shell fault row is no pass and no red. A `prove:` node that cites it is
 `STALE`. It does not attest or contradict an observed claim. It does not stand

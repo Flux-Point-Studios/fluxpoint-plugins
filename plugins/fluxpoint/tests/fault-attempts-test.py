@@ -747,35 +747,39 @@ class ShellFaults(unittest.TestCase):
         self.assertFalse(bg.alive(pid), 'the hung shell left its child running')
 
     @unittest.skipIf(os.name == 'nt', 'the hung shell is stood in for by a shell script here')
-    def test_an_interrupted_shell_test_takes_its_shell_with_it(self):
-        # The shell test runs in a session of its own, so an interrupt that
-        # reaches the runner does not reach it. The runner has to stop it.
-        child = Path(self.tmp.name) / 'child.pid'
-        hung = Path(self.tmp.name) / 'hung-bash'
-        hung.write_text('#!/bin/sh\nsleep 300 &\necho $! > ' + shlex.quote(str(child)) + '\nsleep 300\n')
-        hung.chmod(0o755)
-        runner = subprocess.Popen([sys.executable, str(SCRIPTS / 'attest.py'), '--root', str(self.root), '--run', 'green'],
-                                  env=dict(os.environ, FPL_BASH=str(hung)), stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, start_new_session=True)
-        try:
-            deadline = time.monotonic() + 30
-            while not (child.exists() and child.read_text().strip()) and time.monotonic() < deadline:
-                time.sleep(0.05)
-            pid = int(child.read_text())
-            os.killpg(runner.pid, signal.SIGINT)
-            runner.wait(timeout=30)
-        finally:
-            if runner.poll() is None:
-                runner.kill()
-                runner.wait()
-        deadline = time.monotonic() + 10
-        while bg.alive(pid) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        left = bg.alive(pid)
-        if left:
-            os.kill(pid, signal.SIGKILL)
-        self.assertFalse(left, 'the interrupted shell test left its child running')
-        self.assertEqual(self.rows(), [])
+    def test_a_stopped_runner_takes_its_shell_test_with_it(self):
+        # The shell test runs in a session of its own, so a signal sent to the
+        # runner and its group does not reach it. The runner has to stop it:
+        # on an interrupt, when it is terminated, and when its terminal closes.
+        for name in ('SIGINT', 'SIGTERM', 'SIGHUP'):
+            with self.subTest(signal=name):
+                child = Path(self.tmp.name) / ('child-' + name + '.pid')
+                hung = Path(self.tmp.name) / ('hung-bash-' + name)
+                hung.write_text('#!/bin/sh\nsleep 300 &\necho $! > ' + shlex.quote(str(child)) + '\nsleep 300\n')
+                hung.chmod(0o755)
+                runner = subprocess.Popen(
+                    [sys.executable, str(SCRIPTS / 'attest.py'), '--root', str(self.root), '--run', 'green'],
+                    env=dict(os.environ, FPL_BASH=str(hung)), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
+                try:
+                    deadline = time.monotonic() + 30
+                    while not (child.exists() and child.read_text().strip()) and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    pid = int(child.read_text())
+                    os.killpg(runner.pid, getattr(signal, name))
+                    runner.wait(timeout=30)
+                finally:
+                    if runner.poll() is None:
+                        runner.kill()
+                        runner.wait()
+                deadline = time.monotonic() + 10
+                while bg.alive(pid) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                left = bg.alive(pid)
+                if left:
+                    os.kill(pid, signal.SIGKILL)
+                self.assertFalse(left, 'the stopped runner left its shell test running')
+                self.assertEqual(self.rows(), [])
 
     @unittest.skipIf(os.name == 'nt', 'the hung shell is stood in for by a shell script here')
     def test_a_run_cancelled_while_its_shell_is_tested_stops_at_once(self):

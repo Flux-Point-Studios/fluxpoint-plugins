@@ -75,6 +75,7 @@ corner of bash. Evidence that must hold against a deliberate forger is the
 forge's own: prove:ci.
 """
 import argparse
+import contextlib
 import datetime
 import hashlib
 import json
@@ -1076,6 +1077,38 @@ SHELL_ANSWER = 'FPL-SHELL-OK'
 SHELL_PROBE_SECONDS = 60
 
 
+@contextlib.contextmanager
+def _stops_as_exceptions():
+    """While the shell is tested, a runner that is terminated or loses its terminal exits by an exception.
+
+    Python ends on SIGTERM and SIGHUP without running any handler of its
+    own, and the test's process tree, in a session of its own, would be
+    left behind. A signal the caller chose to ignore stays ignored, and
+    outside the main thread nothing is changed.
+    """
+    import signal
+    held = {}
+
+    def stop(signum, frame):
+        raise SystemExit(128 + signum)
+
+    for name in ('SIGTERM', 'SIGHUP') if os.name != 'nt' else ():
+        number = getattr(signal, name, None)
+        try:
+            if number is not None and signal.getsignal(number) is signal.SIG_DFL:
+                held[number] = signal.signal(number, stop)
+        except (ValueError, OSError):
+            pass
+    try:
+        yield
+    finally:
+        for number, previous in held.items():
+            try:
+                signal.signal(number, previous)
+            except (ValueError, OSError):
+                pass
+
+
 def shell_problem(shell, cwd, cancelled=None):
     """None when `shell` runs a one-word command, else what it did instead.
 
@@ -1092,7 +1125,7 @@ def shell_problem(shell, cwd, cancelled=None):
     """
     import subprocess
     import tempfile
-    with tempfile.TemporaryFile() as out:
+    with tempfile.TemporaryFile() as out, _stops_as_exceptions():
         try:
             tree = process_tree.ProcessTree([shell, '-c', 'printf %s ' + SHELL_ANSWER], cwd, out)
         except OSError as exc:
@@ -1116,8 +1149,9 @@ def shell_problem(shell, cwd, cancelled=None):
                 tree.terminate()
                 tree.proc.wait()
         except BaseException:
-            # An interrupt reaches the runner and not the shell, which has a
-            # session of its own. The shell goes with the runner.
+            # A signal reaches the runner and not the shell, which has a
+            # session of its own. The shell goes with the runner: on an
+            # interrupt, and on the two signals turned into exceptions here.
             try:
                 tree.terminate()
                 tree.proc.wait()
