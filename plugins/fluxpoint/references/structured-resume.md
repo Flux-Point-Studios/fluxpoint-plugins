@@ -139,9 +139,10 @@ authorize dispatch by itself.
 
 A node declares `"resume": "never"` when it must run once per run. The
 shipped feature and verified templates declare it on `red-team-lenses`.
-Before it plans or compiles, `resume.py --run` reads the recorded summary
-and the run's journal and refuses with `RESUME-PAST-NO-RESUME-NODE: <node>`
-when either shows that the node, or a node that depends on it, started.
+Before it plans or compiles, `resume.py --run` reads every attempt recorded
+under the run id, the latest and those kept in its history, and the run's
+journal. It refuses with `RESUME-PAST-NO-RESUME-NODE: <node>` when any of
+them shows that the node, or a node that depends on it, started.
 `compile-graph.py --plan --resume` refuses with the same code. A node that
 was blocked behind a park, or declined by the budget before any call, did
 not start, so a run that stopped earlier resumes as usual. The compiler

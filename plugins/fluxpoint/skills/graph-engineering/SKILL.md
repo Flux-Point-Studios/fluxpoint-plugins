@@ -176,11 +176,13 @@ depends on it, is not resumed: `resume.py --run` and `compile-graph.py
 anything is planned or compiled, and the compiled script refuses before
 its first call. Started means the record shows the node ran: a result it
 produced, a provenance row that is neither a wait nor a decline, or a call
-under its label in the summary or the runtime journal. A node that depends
-on it counts by a result or a call only, because a reduce is code and
-files OK over lenses that never ran. A node that was
-blocked behind a park, or that the budget declined before any call, did not
-start, so a resume that stops before the node is still allowed. The
+under its label in the summary or the runtime journal. Every attempt
+recorded under the run id is read, the latest and the ones kept in its
+history, so recording an earlier attempt again hides nothing. A node that
+depends on it counts by a result or a call only, because a reduce is code
+and files OK over lenses that never ran. A node that was blocked behind a
+park, or that the budget declined before any call, did not start, so a
+resume that stops before the node is still allowed. The
 declaration rides out in the summary as `noResume`, and a later resume is
 held to it even when the field has since been deleted from the graph. The
 launcher tells the script what the source run started in
@@ -339,7 +341,8 @@ Four consequences worth knowing:
 
 - **Blocked is inherited.** A node whose `after` is blocked is blocked too,
   not handed the `null` that reads like a failure. A dependent chain parks
-  as a unit; unrelated branches finish.
+  as a unit, a repair loop with its fixer and its integration review
+  included; unrelated branches finish.
 - **A parked run can never read COMPLETE.** It is `INCOMPLETE`, and the
   Evidence row names the blocked nodes.
 - **Releases are proof, not assent.** `/fluxpoint:release` validates what
@@ -795,14 +798,16 @@ estimate inside the node ceiling. The compiled script prices each call it
 makes at the figure the estimate used for that node and that kind of call,
 and declines one that would pass `maxEstimatedTokens` the way it declines
 one past `maxNodes`: the work is filed SKIPPED, the run is INCOMPLETE, and
-a halting node ends it BUDGET-EXHAUSTED. A run that follows its plan is
-charged exactly its estimate, so a cap set from the estimate never stops
-it. The price is found from the call's label: the node's id, the shape of
-a refuter's or an advisor's label for that node, and for the repair diff
-review the slice it names. A call whose label the plan did not price is
-charged at the dearest planned call, logged, and listed in the summary as
-`unpriced`. The charge is the compiler's estimate, not the runtime's meter; the
-summary carries it as `estimatedSpend` beside `spent`. `--check` also
+a halting node ends it BUDGET-EXHAUSTED. Each call is charged what the
+plan priced it at, so a run that makes the calls its plan priced is
+charged its estimate, one that makes fewer is charged less, and a cap set
+from the estimate never stops either. The price is found from the call's
+label: the node's id, the shape of a refuter's or an advisor's label for
+that node, and for the repair diff review the slice it names. A call whose
+label the plan did not price is charged at the dearest planned call,
+logged, and listed in the summary as `unpriced`. The charge is the
+compiler's estimate, not the runtime's meter; the summary carries it as
+`estimatedSpend` beside `spent`. `--check` also
 prices the node ceiling, `maxNodes` times the dearest planned call, and
 says when that is more than the cap or when no cap bounds it.
 

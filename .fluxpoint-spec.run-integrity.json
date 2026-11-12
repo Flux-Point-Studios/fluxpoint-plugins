@@ -224,7 +224,7 @@
           }
         ],
         "chosen": "decline-at-run-time",
-        "rationale": "The compiled script prices each call it spawns at the figure the estimate used for that node and that kind of call, and declines one that would pass the cap the way it declines one past the node ceiling. A run that follows its plan is charged exactly its estimate. --check prints what the node ceiling would allow at the dearest planned call instead of failing on it.",
+        "rationale": "The compiled script prices each call it spawns at the figure the estimate used for that node and that kind of call, and declines one that would pass the cap the way it declines one past the node ceiling. A run that makes the calls its plan priced is charged its estimate, and one that makes fewer is charged less. --check prints what the node ceiling would allow at the dearest planned call instead of failing on it.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
@@ -344,7 +344,7 @@
           }
         ],
         "chosen": "logged-veto",
-        "rationale": "The precedence stays: a verdict the summary carries beats the flag. The recorder now says when it ignores the flag, --check warns when a graph's prose relies on it, and --veto with evidence lowers the recorded red-team verdict to BLOCK. A veto never raises a verdict and stays on the run id.",
+        "rationale": "The precedence stays: a verdict the summary carries beats the flag. The recorder now says when it ignores the flag, --check warns when a graph's prose relies on it, and --veto with evidence lowers the recorded red-team verdict to BLOCK. A veto never raises a verdict and stays on the run id: it is journaled when it is accepted, and the files a record is about must sit under the root whose store holds the run.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
@@ -464,7 +464,7 @@
           }
         ],
         "chosen": "language-spelling-and-file-type",
-        "rationale": "TODO, FIXME, XXX, Coq's Admitted and Dafny's attributes match in the one spelling their language or convention defines. Calls, attributes and flags keep matching in any case, with Rust's todo! now named. sorry is lower case in Lean and in English, so the file type decides: it is flagged in .lean and .thy files only.",
+        "rationale": "TODO, FIXME, XXX, Coq's Admitted and Dafny's attributes match in the one spelling their language or convention defines. A comment that opens with todo or fixme in any case is still a marker, and so are the @todo and \\todo documentation tags, both read in the comment alone. Calls, attributes and flags keep matching in any case, with Rust's todo! now named. sorry is lower case in Lean and in English, so the file type decides: it is flagged in .lean and .thy files only.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
@@ -523,7 +523,7 @@
           }
         ],
         "chosen": "git-bash-or-refuse-and-shell-fault",
-        "rationale": "Git Bash is resolved from the environment, PATH outside System32 and WindowsApps, the prefix git reports and the usual install directories, and WSL's launcher is never used. Before the declared command is handed over the wrapper has the shell print one word. A shell that cannot is a shell fault: the row carries fault shell and a null exit, so it is rerunnable and no node can read it as the gate's verdict.",
+        "rationale": "Git Bash is resolved from the environment, PATH outside System32 and WindowsApps, the prefix git reports and the usual install directories, only by a path that names its drive or share, and WSL's launcher is never used. Before the declared command is handed over the wrapper has the shell print one word. A shell that cannot is a shell fault: the row carries fault shell and a null exit, so it is rerunnable and no node can read it as the gate's verdict.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
@@ -585,7 +585,7 @@
     },
     {
       "id": "token-cap-holds-the-run",
-      "statement": "A compiled graph declines a call that would take its priced spend past budget.maxEstimatedTokens, files it SKIPPED and names the token ceiling, charges a run that follows its plan exactly its estimate for every shipped template including the repair diff review, names in the summary any call the plan did not price, and --check prints what budget.maxNodes would allow at the dearest planned call",
+      "statement": "A compiled graph declines a call that would take its priced spend past budget.maxEstimatedTokens, files it SKIPPED and names the token ceiling, charges each call what the plan priced it at, so that a run of any shipped template that makes the calls its plan priced is charged its estimate, the repair diff review included, and one that makes fewer is charged less, names in the summary any call the plan did not price, and --check prints what budget.maxNodes would allow at the dearest planned call",
       "decisions": [
         "token-cap-enforcement"
       ],
@@ -596,7 +596,7 @@
     },
     {
       "id": "no-resume-past-a-declared-node",
-      "statement": "A run whose record or journal shows that a node declaring \"resume\": \"never\", or a node that depends on it, started is refused with RESUME-PAST-NO-RESUME-NODE by resume.py --run, by compile-graph.py --plan --resume, by the compiled script before its first call and by record-run.py for a later attempt under the same run id; a node blocked behind a park or declined by the budget did not start, in graphs with lanes as well as without, and a run that stopped before the node resumes; a node that declares the field has to wait on every park in the graph, and neither a parked node nor a node of a repair loop can declare it",
+      "statement": "A run whose record or journal shows that a node declaring \"resume\": \"never\", or a node that depends on it, started is refused with RESUME-PAST-NO-RESUME-NODE by resume.py --run, by compile-graph.py --plan --resume, by the compiled script before its first call and by record-run.py for a later attempt under the same run id; every attempt recorded under the run id is read, the latest and those kept in its history; a node blocked behind a park or declined by the budget did not start, in graphs with lanes as well as without, a repair loop that waits on a park is blocked with it, and a run that stopped before the node resumes; a node that declares the field has to wait on every park in the graph, and neither a parked node nor a node of a repair loop can declare it",
       "decisions": [
         "no-resume-evidence"
       ],
@@ -607,7 +607,7 @@
     },
     {
       "id": "ignored-flag-is-said",
-      "statement": "record-run.py names the verdict it kept and the flag it ignored whenever --red-team is given over a summary that carries a verdict, and compile-graph.py --check warns, with the line, when a graph file's prose records a verdict by a flag the recorder will ignore, whether the value is written out or taken from the shell, and leaves alone a line that says not to use the flag",
+      "statement": "record-run.py names the verdict it kept and the flag it ignored whenever --red-team is given over a summary that carries a verdict, and compile-graph.py --check warns, with the line, when a graph file's prose records a verdict by a flag the recorder will ignore, whether the value is written out or taken from the shell, leaves alone a line that says not to use the flag, and reads --harness as the recorder's only on a line that names record-run",
       "decisions": [
         "post-run-downgrade"
       ],
@@ -619,25 +619,25 @@
     },
     {
       "id": "veto-only-lowers",
-      "statement": "record-run.py --veto with --veto-evidence records BLOCK, keeps the derived verdict and the evidence's sha256 and bytes beside it, refuses a veto without a reason or without readable non-empty evidence and then writes nothing, never yields SHIP, and keeps a filed veto on the run id when the run is recorded again",
+      "statement": "record-run.py --veto with --veto-evidence records BLOCK, keeps the derived verdict and the evidence's sha256 and bytes beside it, refuses a veto without a reason or without readable non-empty evidence and then writes nothing, never yields SHIP, keeps a filed veto on the run id when the run is recorded again and when the record that carried it is refused afterwards, and refuses a --graph or --evidence file outside --root before anything is written",
       "decisions": [
         "post-run-downgrade"
       ],
       "checks": [
         "record-location-tests"
       ],
-      "counterexample": "A second record without the flag erases a filed veto, or a veto over a BLOCK is used to file SHIP"
+      "counterexample": "A second record without the flag erases a filed veto, a veto over a BLOCK is used to file SHIP, or the run is recorded from another directory and filed SHIP beside its own BLOCK"
     },
     {
       "id": "lock-freezes-what-is-on-disk",
-      "statement": "No path in the plugin's state store is a packet input whether it is a file or a directory; an untracked, unignored file under an input directory refuses --lock and is a warning at --check; a relative JS import that names no repository file is warned about with its file and line, and one that leaves the repository still refuses",
+      "statement": "No path in the plugin's state store is a packet input whether it is a file or a directory, a working-directory flag that names the store sets no package directory, and a path of the same shape under a package directory is the package's own; an untracked, unignored file under an input directory refuses --lock and is a warning at --check, what running the checks leaves behind does not count, and a nested repository is named as one; a relative JS import that names no repository file is warned about with its file and line, and one that leaves the repository still refuses",
       "decisions": [
         "lock-follows-disk"
       ],
       "checks": [
         "packet-inputs-tests"
       ],
-      "counterexample": "Recording a run turns a passing specification.py --check red in the same checkout, or a new test file under a locked directory is never frozen"
+      "counterexample": "Recording a run turns a passing specification.py --check red in the same checkout, a new test file under a locked directory is never frozen, or a check that runs in the store freezes nothing at all"
     },
     {
       "id": "retire-leaves-a-record",
@@ -652,18 +652,18 @@
     },
     {
       "id": "markers-in-their-own-spelling",
-      "statement": "The hygiene scan flags TODO, FIXME, XXX, Admitted and Dafny's attributes in that spelling only, flags sorry in .lean and .thy files only, and keeps flagging Rust's todo!, unimplemented!, #[ignore] and .unwrap() in any case",
+      "statement": "The hygiene scan flags TODO, FIXME, XXX, Admitted and Dafny's attributes wherever they appear in that spelling, flags todo and fixme in another case only where a comment opens with the word as a marker, flags the @todo and \\todo documentation tags inside a comment, flags sorry in .lean and .thy files only, and keeps flagging Rust's todo!, unimplemented!, #[ignore] and .unwrap() in any case",
       "decisions": [
         "marker-spelling"
       ],
       "checks": [
         "hygiene-scope-tests"
       ],
-      "counterexample": "The record was re-admitted, a todo list, a masked phone number or an apology in prose turns the gate red"
+      "counterexample": "The record was re-admitted, a todo list, a masked phone number or an apology in prose turns the gate red, or a comment that opens with todo: passes because it is in lower case"
     },
     {
       "id": "gate-shell-is-git-bash-or-a-fault",
-      "statement": "On Windows a wrapper gate starts under Git Bash resolved without System32 or WindowsApps and refuses with NO-GIT-BASH when none exists; on every platform a shell that cannot run the wrapper's one-word command attests a row with fault shell and a null exit and does not start the declared command, while a gate that started is judged by its exit; and the prove preamble tells the node to run the witness command exactly as written",
+      "statement": "On Windows a wrapper gate starts under Git Bash resolved without System32 or WindowsApps and never by a relative path, and refuses with NO-GIT-BASH when none exists; on every platform a shell that cannot run the wrapper's one-word command attests a row with fault shell and a null exit and does not start the declared command, the test stops with whatever it started and at once on cancellation, the fault line names a rerun that works for a run with a nonce and for one without, and a leg of a fault rerun pair whose shell cannot run did not pass, while a gate that started is judged by its exit; and the prove preamble tells the node to run the witness command exactly as written",
       "decisions": [
         "gate-shell"
       ],
@@ -809,6 +809,14 @@
     {
       "claim": "Refusing --lock over an untracked file will red ordinary work in progress.",
       "resolution": "--lock is the moment the set is frozen, so a difference from disk is refused there and named. --check and --run only warn."
+    },
+    {
+      "claim": "Matching the markers in one spelling stops flagging the comments people write in lower case.",
+      "resolution": "A comment that opens with todo or fixme in any case, and the @todo and \\todo tags, are still flagged. Only the word inside a sentence, in code or in a string passes, which is what the issue asked for."
+    },
+    {
+      "claim": "Refusing a graph file outside --root breaks recording from a subdirectory.",
+      "resolution": "Only when --root is left out or names another project. With --root <project-root> every directory works, as the run command already says, and the refusal comes before anything is read or written."
     }
   ]
 }
