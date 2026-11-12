@@ -666,6 +666,31 @@ class PacketInputsTests(unittest.TestCase):
         self.assertIn(self.UNTRACKED + 'preflight/check_b.py', refused.stderr)
         self.assertNotIn('pyc', refused.stderr)
 
+    def test_a_file_a_locked_test_can_load_is_never_passed_over_as_a_byproduct(self):
+        # A compiled module beside the sources is imported when no source is,
+        # and node_modules or a virtual environment is where a require or an
+        # import looks. Passing those over left out of the lock a file that a
+        # locked test runs, and an edit to it was no drift.
+        self.doc['harnessInputs'] = ['preflight']
+        self.doc['checks'][0]['argv'] = ['{python}', 'preflight/check_a.py']
+        self.write('preflight/check_a.py', 'print("a")\n')
+        self.write('.gitignore', '.claude/\n')
+        self.save()
+        self.gate()
+        self.lock()
+        for rel in ('preflight/oracle.pyc', 'preflight/venv/test_extra.py', 'preflight/.venv/test_extra.py',
+                    'preflight/node_modules/helper/index.js', 'preflight/.tox/test_extra.py',
+                    'preflight/__pycache__/hidden.py'):
+            with self.subTest(rel=rel):
+                path = self.root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('x', encoding='utf-8')
+                refused = self.cli('--lock')
+                self.assertEqual(refused.returncode, 1, refused.stdout)
+                self.assertIn(self.UNTRACKED + rel, refused.stderr)
+                self.assertIn(self.UNTRACKED + rel, self.cli('--check').stderr)
+                path.unlink()
+
     def test_an_untracked_nested_repository_is_named_as_what_it_is(self):
         # git reports a nested repository as one path. Staging it does not make
         # it a file a lock can freeze, so the advice has to say something else.
@@ -704,14 +729,32 @@ class PacketInputsTests(unittest.TestCase):
                     self.assertIn('tools/check_runs.py', harness)
                     self.assertEqual([p for p in harness if p.startswith('.claude/')], [])
 
-    def test_a_package_directory_named_like_the_store_is_not_the_store(self):
-        # pkg/.claude/fluxpoint is a directory of the package, reached through its cwd.
+    def test_a_packages_own_state_store_is_never_an_input_either(self):
+        # A session rooted in a package keeps its state in pkg/.claude/fluxpoint.
+        # A root packet whose check runs in the package and reads that store
+        # must not freeze it: the next run recorded there would be drift.
         self.write('pkg/run.py', 'print("pkg")\n')
-        self.write('pkg/.claude/fluxpoint/fixture.json', '{}')
-        self.doc['checks'][0]['argv'] = ['{python}', 'run.py', '--cwd', 'pkg', '--path', '.claude/fluxpoint/fixture.json']
+        self.write('pkg/.claude/fluxpoint/runs/first.json', '{}')
+        self.write('pkg/.claude/fluxpoint/ledger.jsonl', '{"n": 1}\n')
+        self.doc['checks'][0]['argv'] = ['{python}', 'run.py', '--cwd', 'pkg', '--runs-dir', '.claude/fluxpoint/runs',
+                                         '--ledger', '.claude/fluxpoint/ledger.jsonl']
         self.save()
         harness = self.lock()['harness']
-        self.assertIn('pkg/.claude/fluxpoint/fixture.json', harness)
+        self.assertIn('pkg/run.py', harness)
+        self.assertEqual([rel for rel in harness if '.claude/fluxpoint' in rel], [])
+        self.write('pkg/.claude/fluxpoint/runs/second.json', '{}')
+        self.write('pkg/.claude/fluxpoint/ledger.jsonl', '{"n": 1}\n{"n": 2}\n')
+        checked = self.cli('--check', '--strict-harness')
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        # Named from the root as well, and declared outright it refuses as the root's store does.
+        self.doc['checks'][0]['argv'] = ['{python}', 'pkg/run.py', 'pkg/.claude/fluxpoint/ledger.jsonl']
+        self.save()
+        self.assertEqual([rel for rel in self.lock()['harness'] if '.claude/fluxpoint' in rel], [])
+        self.doc['harnessInputs'] = ['pkg/.claude/fluxpoint/ledger.jsonl']
+        self.save()
+        refused = self.cli('--lock')
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn('state store', refused.stderr)
 
     def test_directory_inputs_and_the_state_store_follow_one_coherent_rule(self):
         # No ignore rule covers the store here: the rule is the path, never the ignore file.

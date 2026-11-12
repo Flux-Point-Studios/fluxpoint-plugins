@@ -17,9 +17,10 @@ PATH_FLAGS = {'--path', '--config', '-c'}
 PATTERN_FLAGS = {'--testPathPattern', '--testPathPatterns'}
 CWD_FLAGS = {'--prefix', '--dir', '--cwd'}
 IGNORED_DIRS = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', '.tox'}
-STORE = ('.claude', 'fluxpoint')  # The plugin's state store, below the root.
-# What running a check or opening a folder leaves behind. Never source, so never
-# a reason to refuse a lock in a repository that happens not to ignore it.
+STORE = ('.claude', 'fluxpoint')  # A plugin state store: the root's, or a package's.
+# What running Python or opening a folder leaves behind, and nothing a locked
+# test can load: a compiled cache inside __pycache__, which Python reads only
+# beside its source, and a desktop's folder metadata.
 BYPRODUCT_NAMES = {'.DS_Store', 'Thumbs.db', 'desktop.ini'}
 BYPRODUCT_SUFFIXES = ('.pyc', '.pyo')
 
@@ -198,9 +199,15 @@ class Inputs:
         return path
 
     def store(self, path):
-        """The plugin's state store holds what a run leaves behind. A recorded run or
-        decision must never move a lock, so no file or directory in it is an input."""
-        return Path(os.path.abspath(path)).is_relative_to(self.root.joinpath(*STORE))
+        """A plugin state store holds what a run leaves behind. A recorded run or
+        decision must never move a lock, so no file or directory in one is an input.
+        The root has one, and so has every directory below it that a session was
+        rooted in: `.claude/fluxpoint` is a store wherever it sits in the repository."""
+        try:
+            parts = Path(os.path.abspath(path)).relative_to(self.root).parts
+        except ValueError:
+            return False
+        return any(parts[i:i + 2] == STORE for i in range(len(parts) - 1))
 
     def tracked(self):
         if self._tracked is None:
@@ -246,16 +253,20 @@ class Inputs:
 
     @staticmethod
     def byproduct(rel):
+        # Narrow on purpose. A compiled module beside the sources is imported
+        # when no source is, and a file under node_modules or a virtual
+        # environment is where a require or an import looks, so each of those
+        # is untracked source like any other.
         parts = rel.rstrip('/').split('/')
-        return (any(part in IGNORED_DIRS for part in parts) or parts[-1] in BYPRODUCT_NAMES
-                or parts[-1].endswith(BYPRODUCT_SUFFIXES))
+        return parts[-1] in BYPRODUCT_NAMES or (
+            len(parts) > 1 and parts[-2] == '__pycache__' and parts[-1].endswith(BYPRODUCT_SUFFIXES))
 
     def untracked(self, skip=()):
         """Paths under an input directory that Git neither tracks nor ignores. A directory
         input means the tracked files under it, so these sit on disk outside every lock.
         Git lists a nested repository as one path ending in a slash, and it stays that way
-        here: it is not a file a lock can freeze. Interpreter caches and folder metadata
-        are left out, since running the checks writes them."""
+        here: it is not a file a lock can freeze. Python's compiled caches and a desktop's
+        folder metadata are left out, since running the checks and opening a folder write them."""
         if self._untracked is None:
             self._untracked = set()
             if self.directories:
@@ -275,12 +286,9 @@ class Inputs:
             return None
         path = Path(text)
         # A store path is never an input, decided by where the argument points
-        # and before asking whether it exists. Under a package cwd it points
-        # into the package first: pkg/.claude/fluxpoint is the package's own.
-        placed = cwd / path if cwd is not None and not path.is_absolute() else None
-        if placed is not None and self.store(placed):
-            return None
-        if self.store(self.root / path) and not (placed is not None and placed.exists()):
+        # and before asking whether it exists: below the root, or below the
+        # package directory the check runs in, which has a store of its own.
+        if self.store(self.root / path) or (cwd is not None and self.store(cwd / path)):
             return None
         # Win32 strips a component's trailing dots and spaces, so on Windows Go's
         # './...' exists: it names the directory it is spelled under.
