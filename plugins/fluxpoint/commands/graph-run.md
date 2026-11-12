@@ -298,15 +298,18 @@ Workflow tool requires.
    Run artifacts always go to `<root>/.claude/fluxpoint/runs`, even when
    recording from a subdirectory; pass `--root <project-root>` explicitly.
    `--graph` and `--evidence` must name files that really sit under that
-   root, with links followed, or in a linked worktree of the same clone:
-   started in another directory without `--root`, or given a root that
-   does not hold those files, the recorder exits 2 before anything is
-   written. A run's earlier attempts and its vetoes are read from the
-   root's store, from the store of every directory above the graph and
-   the Evidence file, and from the clone-wide store that linked worktrees
-   share. A root chosen above or below the project, or another checkout
-   of the same clone, therefore still finds them, and one run id is one
-   run across those stores.
+   root, with links followed: started in another directory without
+   `--root`, or given a root that does not hold those files, the recorder
+   exits 2 before anything is written, in a clone as anywhere else. A
+   `WORK.md` that is a link to a file kept outside the project is refused
+   the same way, since rows are written to the file a link resolves to:
+   keep the file itself in the project. A run's earlier attempts and its
+   vetoes are read from the root's store and from the store of every
+   directory above the graph and the Evidence file, so a root chosen
+   above the project still finds them, and one run id is one run across
+   those stores. The clone-wide store is read as well. It lets one linked
+   worktree see what another recorded while both use the same store, and
+   `FPL_MEMORY_HOME` moves it, so nothing is decided on its being there.
    `--state-dir` may only name that canonical directory. Exit 3 retains the
    artifact but means the Evidence row was NOT appended: add the canonical
    five-column header and separator, or pass `--evidence WORK.md`, then

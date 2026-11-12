@@ -128,7 +128,7 @@ def assemble(args):
     prior, source_sha = _artifact(root, args.run) if resuming else (None, None)
     # Before anything is planned or compiled: a run that started a
     # "resume": "never" node is not resumed, whatever else would pass.
-    reach = compiler.resume_reach(ir, prior, args.run, args.projects, root) if resuming else None
+    reach = compiler.resume_reach(ir, prior, args.run, args.projects, root, graph) if resuming else None
     if resuming and (prior.get("plugin") is not None or prior.get("prove") or prior.get("cites")):
         import plugin_identity
         pinned = plugin_identity.verify(prior.get("plugin"))

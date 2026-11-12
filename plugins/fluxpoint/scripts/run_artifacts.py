@@ -112,3 +112,133 @@ def write(root, run_id, row):
         if os.path.exists(temporary):
             os.unlink(temporary)
     return str(latest), digest
+
+
+# ---- where a run's earlier records can be -----------------------------------
+#
+# A record is accepted only when the graph and the Evidence file really sit
+# under its root. Whichever root an earlier record of the same file was given,
+# its store is therefore under a directory above that file, and reading every
+# such store finds it. The readers below only add to what is read, and every
+# decision made from them only refuses or lowers, so reading one store more
+# can never file a run that reading one store fewer refused.
+
+def store(root):
+    return os.path.join(str(root), '.claude', 'fluxpoint', 'runs')
+
+
+def stores(root, *files, shared=None):
+    """Every runs directory that can hold an earlier record of a run about these files.
+
+    The store under `root`, the store of every directory above each file
+    once its links are followed, and `shared`: the clone-wide store when the
+    caller has one. That last one is extra. It moves with FPL_MEMORY_HOME,
+    so nothing is decided on its being there.
+    """
+    found = [store(root)]
+    for named in files:
+        if not named:
+            continue
+        current = os.path.dirname(os.path.realpath(str(named)))
+        while True:
+            found.append(store(current))
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+    found += [path for path in (shared or ()) if path]
+    unique = []
+    for path in found:
+        real = os.path.realpath(path)
+        if real not in unique:
+            unique.append(real)
+    return unique
+
+
+def _safe(run_id):
+    try:
+        return _name(run_id)
+    except ValueError:
+        return None
+
+
+def records(run_stores, run_id):
+    """Each file an attempt of this run id may be in: per store, the latest and its history."""
+    paths = []
+    if not _safe(run_id):
+        return paths
+    for runs in run_stores:
+        paths.append(os.path.join(runs, run_id + '.json'))
+        history = os.path.join(runs, 'history', run_id)
+        try:
+            names = sorted(os.listdir(history))
+        except OSError:
+            continue
+        paths += [os.path.join(history, name) for name in names if name.endswith('.json')]
+    return paths
+
+
+def absent(error):
+    """An OSError that says nothing is there: no file, or a file where a directory was expected."""
+    return isinstance(error, (FileNotFoundError, NotADirectoryError))
+
+
+def lineage(run_stores, run_id, source_id=None):
+    """Run ids joined to this one by a resume, this one first.
+
+    A resumed run that gets an id of its own names the run it was resumed
+    from, so the runs of one campaign form a tree. The links are read from
+    every attempt on file, the latest and the history: a later attempt
+    under a run id may name no source. Only ids that are safe file names
+    are followed.
+    """
+    links = {}
+
+    def join(child, source):
+        if _safe(child) and _safe(source) and child != source:
+            links.setdefault(child, set()).add(source)
+            links.setdefault(source, set()).add(child)
+
+    def read(path, fallback):
+        try:
+            with open(path, 'rb') as handle:
+                raw = handle.read()
+            if b'"resumeSource"' not in raw:
+                return
+            row = json.loads(raw.decode('utf-8'))
+        except (OSError, ValueError, RecursionError):
+            return
+        summary = row.get('summary') if isinstance(row, dict) else None
+        source = summary.get('resumeSource') if isinstance(summary, dict) else None
+        join(row.get('runId') if isinstance(row.get('runId'), str) else fallback,
+             source.get('runId') if isinstance(source, dict) else None)
+
+    for runs in run_stores:
+        try:
+            names = sorted(os.listdir(runs))
+        except OSError:
+            continue
+        for name in names:
+            if name.endswith('.json'):
+                read(os.path.join(runs, name), name[:-5])
+        history = os.path.join(runs, 'history')
+        try:
+            ids = sorted(os.listdir(history))
+        except OSError:
+            continue
+        for held in ids:
+            try:
+                snapshots = sorted(os.listdir(os.path.join(history, held)))
+            except OSError:
+                continue
+            for name in snapshots:
+                if name.endswith('.json'):
+                    read(os.path.join(history, held, name), held)
+    join(run_id, source_id)
+    seen, queue = [run_id], [run_id]
+    while queue:
+        for other in sorted(links.get(queue.pop(0), ())):
+            if other not in seen:
+                seen.append(other)
+                queue.append(other)
+    return seen

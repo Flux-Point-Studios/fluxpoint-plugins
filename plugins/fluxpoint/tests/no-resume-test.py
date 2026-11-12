@@ -519,24 +519,31 @@ class Recorder(unittest.TestCase):
         self.assertEqual(self.filed()['summary']['outcome'], 'NODE-DEAD')
         self.assertEqual(len(self.rows()), 1)
 
-    def test_a_second_roll_is_refused_whatever_root_the_recorder_is_given(self):
-        # The earlier attempt sits in the project's store. A root one directory
-        # up still holds the graph and has a store of its own, which is empty.
-        project = self.root / 'outer' / 'project'
+    def nested(self):
+        """outer/project/WORK.md outside any clone, with a recorder for it under any root and directory."""
+        tmp = tempfile.TemporaryDirectory(prefix='no resume nested ')
+        self.addCleanup(tmp.cleanup)
+        project = Path(tmp.name) / 'outer' / 'project'
         project.mkdir(parents=True)
         graph_file = project / 'WORK.md'
         graph_file.write_text((self.root / 'WORK.md').read_text(encoding='utf-8'), encoding='utf-8')
         result = self.root / 'result.json'
 
-        def record(root, cwd, summary):
+        def record(root, cwd, summary, graph=graph_file, run_id='wf_review'):
             result.write_text(json.dumps(summary), encoding='utf-8')
             return subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'), '--root', str(root), '--graph',
-                                   str(graph_file), '--run-id', 'wf_review', '--result', str(result)],
+                                   str(graph), '--run-id', run_id, '--result', str(result)],
                                   cwd=cwd, capture_output=True, text=True, encoding='utf-8', timeout=60)
 
         def rows():
             return [line for line in graph_file.read_text(encoding='utf-8').splitlines() if line.startswith('| 20')]
 
+        return project, record, rows
+
+    def test_a_second_roll_is_refused_whatever_root_the_recorder_is_given(self):
+        # The earlier attempt sits in the project's store. A root one directory
+        # up still holds the graph and has a store of its own, which is empty.
+        project, record, rows = self.nested()
         first = record(project, project, recorded(dead={'lenses:b'}))
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         for root in (project.parent, '..'):
@@ -546,6 +553,53 @@ class Recorder(unittest.TestCase):
                 self.assertIn(CODE, done.stderr)
                 self.assertEqual(len(rows()), 1)
         self.assertFalse((project.parent / '.claude').exists())
+
+    def test_a_second_roll_filed_somewhere_else_first_is_still_a_second_roll(self):
+        # The stores above the graph are read, so a copy of the second roll
+        # left in one of them was taken for "this attempt, already on file"
+        # and the roll was filed. It is left there by recording the result
+        # against a graph one directory up, which the project's store is not
+        # above, so nothing refuses it.
+        project, record, rows = self.nested()
+        first = record(project, project, recorded(dead={'lenses:b'}))
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        second = recorded()
+        self.assertEqual(record(project, project, second).returncode, 2)
+        elsewhere = record(project.parent, project, second, graph=project.parent / 'none.md')
+        self.assertEqual(elsewhere.returncode, 3, elsewhere.stdout + elsewhere.stderr)
+        self.assertTrue((project.parent / '.claude/fluxpoint/runs/wf_review.json').exists())
+        again = record(project, project, second)
+        self.assertEqual(again.returncode, 2, again.stdout + again.stderr)
+        self.assertIn(CODE, again.stderr)
+        self.assertEqual(len(rows()), 1)
+        self.assertEqual(json.loads((project / '.claude/fluxpoint/runs/wf_review.json').read_text(encoding='utf-8'))
+                         ['summary']['outcome'], 'NODE-DEAD')
+
+    def test_a_file_named_like_the_state_directory_above_the_project_is_no_store(self):
+        # Reading the stores above the graph met a file where a directory was
+        # expected and took it for a record that could not be read.
+        project, record, rows = self.nested()
+        (project.parent / '.claude').write_text('not a directory\n', encoding='utf-8')
+        done = record(project, project, recorded())
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(rows()), 1)
+
+    def test_deleting_the_field_from_the_graph_does_not_reopen_the_campaign(self):
+        # The source stopped at the build. A run resumed from it died inside
+        # the review. The field is then deleted from the graph and the source
+        # is resumed by hand, so its result names no source and carries no
+        # declaration, and it holds a second roll of the review.
+        store = self.root / '.claude/fluxpoint/runs'
+        self.record(recorded(dead={'build'}), run_id='wf_first')
+        died = dict(recorded(dead={'lenses:b'}), resumeMode='captured-prefix',
+                    resumeSource={'runId': 'wf_first', 'artifactSha256': 'f' * 64})
+        (store / 'wf_second.json').write_text(json.dumps({'runId': 'wf_second', 'summary': died}), encoding='utf-8')
+        bare = recorded(graph(flag=False))
+        self.assertNotIn('noResume', bare)
+        done = self.record(bare, run_id='wf_first', want=2)
+        self.assertIn(CODE, done.stderr)
+        self.assertIn('wf_second', done.stderr)
+        self.assertEqual(self.filed('wf_first')['summary']['outcome'], 'NODE-DEAD')
 
     def test_an_earlier_record_that_cannot_be_read_is_not_recorded_over(self):
         # Every copy of the attempt that died inside the review is cut short.
@@ -669,17 +723,18 @@ class Launcher(unittest.TestCase):
     def write(self, ir):
         (self.root / 'WORK.md').write_text('```json graph-ir\n' + json.dumps(ir) + '\n```\n', encoding='utf-8')
 
-    def record(self, summary):
+    def record(self, summary, root=None):
+        root = root or self.root
         embedded = {}
         digest = ea.args_hash(embedded)
         source = ('// immutable executed source\nconst ARGS = ' + ea.canonical(embedded) +
                   ';\nconst ARGS_SHA256 = "' + digest + '";\n').encode('utf-8')
-        archive = self.root / ea.ARCHIVES / (digest + '-' + hashlib.sha256(source).hexdigest() + '.graph.js')
+        archive = root / ea.ARCHIVES / (digest + '-' + hashlib.sha256(source).hexdigest() + '.graph.js')
         archive.parent.mkdir(parents=True, exist_ok=True)
         archive.write_bytes(source)
         summary = dict(copy.deepcopy(summary), argsSha256=digest, inputs={},
-                       launch={'since': '2026-11-11T00:00:00Z', 'nonce': 'original', 'root': str(self.root)})
-        store = self.root / '.claude/fluxpoint/runs'
+                       launch={'since': '2026-11-11T00:00:00Z', 'nonce': 'original', 'root': str(root)})
+        store = root / '.claude/fluxpoint/runs'
         store.mkdir(parents=True, exist_ok=True)
         (store / 'wf_previous.json').write_text(json.dumps({'runId': 'wf_previous', 'summary': summary}), encoding='utf-8')
 
@@ -781,6 +836,41 @@ class Launcher(unittest.TestCase):
         file('wf_other', 'wf_elsewhere', dead={'lenses:b'})
         file('wf_odd', '../wf_previous', dead={'lenses:b'})
         self.assertEqual(resume.assemble(self.args)['args']['_resumeFromRunId'], 'wf_previous')
+
+    def test_a_link_is_read_from_every_attempt_of_a_run(self):
+        # The run resumed from wf_previous died inside the review. A later
+        # result under its id did not reach the review and names no source,
+        # and it is the latest record, so the link is in the history alone.
+        import run_artifacts
+        self.record(recorded(dead={'build'}))
+        died = dict(recorded(dead={'lenses:b'}), resumeMode='captured-prefix',
+                    resumeSource={'runId': 'wf_previous', 'artifactSha256': 'f' * 64})
+        run_artifacts.write(str(self.root), 'wf_later', {'runId': 'wf_later', 'summary': died})
+        run_artifacts.write(str(self.root), 'wf_later', {'runId': 'wf_later', 'summary': recorded(dead={'build'})})
+        latest = json.loads((self.root / '.claude/fluxpoint/runs/wf_later.json').read_text(encoding='utf-8'))
+        self.assertNotIn('resumeSource', latest['summary'])
+        with self.assertRaisesRegex(ValueError, '^' + CODE) as refused:
+            resume.assemble(self.args)
+        self.assertIn('wf_later', str(refused.exception))
+        self.assertEqual(self.compiled, [])
+
+    def test_a_resumed_run_recorded_under_a_root_above_the_project_is_found(self):
+        # The recorder accepts any root above the graph, so the run resumed
+        # from this one may sit in the store of a directory above the project.
+        project = self.root / 'outer' / 'project'
+        project.mkdir(parents=True)
+        (project / 'WORK.md').write_text((self.root / 'WORK.md').read_text(encoding='utf-8'), encoding='utf-8')
+        self.record(recorded(dead={'build'}), root=project)
+        above = self.root / 'outer' / '.claude/fluxpoint/runs'
+        above.mkdir(parents=True)
+        died = dict(recorded(dead={'lenses:b'}), resumeMode='captured-prefix',
+                    resumeSource={'runId': 'wf_previous', 'artifactSha256': 'f' * 64})
+        (above / 'wf_later.json').write_text(json.dumps({'runId': 'wf_later', 'summary': died}), encoding='utf-8')
+        args = argparse.Namespace(**dict(vars(self.args), root=str(project)))
+        with self.assertRaisesRegex(ValueError, '^' + CODE) as refused:
+            resume.assemble(args)
+        self.assertIn('wf_later', str(refused.exception))
+        self.assertEqual(self.compiled, [])
 
     def test_the_journal_of_an_unrecorded_attempt_is_read(self):
         self.record(recorded(dead={'build'}))

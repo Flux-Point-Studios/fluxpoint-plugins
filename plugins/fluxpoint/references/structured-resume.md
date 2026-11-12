@@ -145,8 +145,10 @@ journal. It refuses with `RESUME-PAST-NO-RESUME-NODE: <node>` when any of
 them shows that the node, or a node that depends on it, started. Runs joined
 by a resume are read as one campaign. A resumed run that gets a run id of its
 own names the run it was resumed from, and the launcher follows those links
-both ways, so a second resume of an older run is refused once a run resumed
-from it has started the node. An attempt that is on file and cannot be read
+both ways, reading them from every attempt on file in the root's store and in
+the stores above the graph. A second resume of an older run is therefore
+refused once a run resumed from it has started the node. An attempt that is on
+file and cannot be read
 leaves the reach unknown, and the resume is refused with
 `RESUME-REACH-UNKNOWN`.
 `compile-graph.py --plan --resume` refuses with the same code. A node that
@@ -172,11 +174,13 @@ had started it too, or when the run it names as its source had, or any other
 run joined to that source by a resume. Nothing is written and the earlier
 record stands. Recording the same attempt again is not a later attempt, and
 an attempt that did not start the node itself is no roll of it: it is filed
-whenever it arrives. The earlier attempts are read from the store under
-`--root`, from the store of every directory above the graph and the Evidence
-file, and from the clone-wide store, so a different `--root` or another
-worktree of the clone does not hide them. An earlier record that cannot be
-read is refused as `RESUME-REACH-UNKNOWN`.
+whenever it arrives. A copy of the result already on file is left out and
+excuses nothing, since every other attempt is still weighed. The earlier
+attempts are read from the store under `--root` and from the store of every
+directory above the graph and the Evidence file, so a root chosen above the
+project does not hide them. The clone-wide store is read too, which usually
+shows what another worktree of the clone recorded. An earlier record that
+cannot be read is refused as `RESUME-REACH-UNKNOWN`.
 
 ## Witness version continuity
 

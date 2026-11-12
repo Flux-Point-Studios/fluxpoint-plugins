@@ -461,8 +461,14 @@ def veto_key(entry):
     return entry["reason"], entry["evidence"]["sha256"]
 
 
+def _artifacts():
+    """run_artifacts, which says where a run's records are and reads its campaign."""
+    import run_artifacts
+    return run_artifacts
+
+
 def root_store(root):
-    return os.path.join(root, ".claude", "fluxpoint", "runs")
+    return _artifacts().store(root)
 
 
 def clone_store(start):
@@ -477,43 +483,22 @@ def clone_store(start):
 def run_stores(root, *files):
     """Every runs directory that can hold an earlier record of a run.
 
-    The store under --root is one. So is the store of every directory above
-    the graph and the Evidence file: a record is accepted only when both
-    sit under its root, so whichever root an earlier record was given, its
-    store is on that path. The third is the clone-wide store, which every
-    checkout of one clone shares, so a run recorded in one linked worktree
-    is seen from another. A run's vetoes and earlier attempts are read from
-    all of them. Only the store under --root and the clone-wide store are
-    written to.
+    The store under --root, and the store of every directory above the
+    graph and the Evidence file: a record is accepted only when both really
+    sit under its root, so whichever root an earlier record of the same
+    file was given, its store is one of these. The clone-wide store is read
+    as well, where there is one, so a run recorded in one linked worktree
+    is usually seen from another. That store moves with FPL_MEMORY_HOME,
+    and nothing is decided on its being there. A run's vetoes and earlier
+    attempts are read from all of them. Only the store under --root and
+    the clone-wide store are written to.
     """
-    above = list(dict.fromkeys(os.path.dirname(os.path.realpath(named)) for named in files if named))
-    found = [root_store(root)]
-    found += [clone_store(start) for start in dict.fromkeys([root] + above)]
-    for start in above:
-        while True:
-            found.append(root_store(start))
-            parent = os.path.dirname(start)
-            if parent == start:
-                break
-            start = parent
-    stores = []
-    for path in found:
-        real = os.path.realpath(path) if path else None
-        if real and real not in stores:
-            stores.append(real)
-    return stores
+    starts = dict.fromkeys([root] + [os.path.dirname(os.path.realpath(named)) for named in files if named])
+    return _artifacts().stores(root, *files, shared=[clone_store(start) for start in starts])
 
 
 def run_records(stores, run_id):
-    """Each file an attempt of this run id may be in: per store, the latest and its history."""
-    paths = []
-    for runs in stores:
-        paths.append(os.path.join(runs, run_id + ".json"))
-        history = os.path.join(runs, "history", run_id)
-        if os.path.isdir(history):
-            paths += [os.path.join(history, name) for name in sorted(os.listdir(history))
-                      if name.endswith(".json")]
-    return paths
+    return _artifacts().records(stores, run_id)
 
 
 def veto_journal(runs, run_id):
@@ -665,14 +650,9 @@ def resumed_past(root, run_id, summary, stores=None):
     stores = stores or [root_store(root)]
     source = summary.get("resumeSource")
     source_id = source.get("runId") if isinstance(source, dict) else None
-    compiler = None
-    if summary.get("noResume") or isinstance(source_id, str):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "compile_graph_recorder", os.path.join(os.path.dirname(os.path.abspath(__file__)), "compile-graph.py"))
-        compiler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(compiler)
-    members = compiler.run_lineage(stores, run_id, source_id) if compiler else [run_id]
+    # Always read: the result may carry neither a declaration nor a source,
+    # when the field was deleted from the graph and the run resumed by hand.
+    members = _artifacts().lineage(stores, run_id, source_id)
     paths = [path for member in members for path in run_records(stores, member)]
 
     def same(a, b):
@@ -684,12 +664,9 @@ def resumed_past(root, run_id, summary, stores=None):
         try:
             with open(path, "rb") as fh:
                 raw = fh.read()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            unread.append(path)
-            continue
-        if b'"noResume"' not in raw and not summary.get("noResume"):
+        except OSError as error:
+            if not _artifacts().absent(error):
+                unread.append(path)
             continue
         try:
             row = json.loads(raw.decode("utf-8"))
@@ -701,18 +678,20 @@ def resumed_past(root, run_id, summary, stores=None):
             unread.append(path)
             continue
         if same(prior, summary) and row.get("runId") == run_id:
-            # This attempt is already on file under this run id. Filing it
-            # again is not a later attempt, whatever was filed after it.
-            return None
+            # This result itself, on file under this run id. It is no earlier
+            # attempt, so it is left out, and it excuses nothing either: a
+            # copy can sit in any store that is read, and every other attempt
+            # still has to be weighed.
+            continue
         earlier.append((row.get("runId"), prior))
-    if not earlier and not (unread and summary.get("noResume")):
+    # Nothing to hold when no attempt that can be read declares such a node.
+    if not summary.get("noResume") and not any(prior.get("noResume") for _, prior in earlier):
         return None
-    if compiler is None:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "compile_graph_recorder", os.path.join(os.path.dirname(os.path.abspath(__file__)), "compile-graph.py"))
-        compiler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(compiler)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "compile_graph_recorder", os.path.join(os.path.dirname(os.path.abspath(__file__)), "compile-graph.py"))
+    compiler = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(compiler)
     for prior_id, prior in earlier:
         # Held to what either attempt was compiled with: the field may have
         # been added to the graph, or deleted from it, between the two.
@@ -730,7 +709,9 @@ def resumed_past(root, run_id, summary, stores=None):
                         f"{', '.join(repr(nid) for nid in hit)}, and '{node}' declares "
                         f"\"resume\": \"never\": this result is a second roll of it. The earlier "
                         f"record stands. Launch fresh for a run that can be recorded.")
-    held = compiler.held_no_resume({}, summary)
+    held = dict(compiler.held_no_resume({}, summary))
+    for _, prior in earlier:
+        held.update(compiler.held_no_resume({}, prior))
     rolled = compiler.run_started(summary, (), held)
     if unread and any(nid in rolled for after in held.values() for nid in after):
         # A record that cannot be read may be the one that started the node.
@@ -749,36 +730,15 @@ def under_root(path, root):
     reached through a linked directory holds its files, and a directory
     that only holds a link to a WORK.md kept elsewhere does not hold it.
     """
+    return _inside(os.path.realpath(path), os.path.realpath(root))
+
+
+def _inside(child, parent):
     try:
-        child = os.path.normcase(os.path.realpath(path))
-        parent = os.path.normcase(os.path.realpath(root))
+        child, parent = os.path.normcase(child), os.path.normcase(parent)
         return os.path.commonpath([child, parent]) == parent
     except ValueError:  # two drives on Windows
         return False
-
-
-def git_common_dir(directory):
-    import subprocess
-    try:
-        done = subprocess.run(["git", "-C", directory, "rev-parse", "--git-common-dir"],
-                              text=True, capture_output=True, timeout=5)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    out = done.stdout.strip()
-    return os.path.realpath(os.path.join(directory, out)) if done.returncode == 0 and out else None
-
-
-def same_clone(path, root):
-    """Whether a file sits in another checkout of the clone the root is a checkout of.
-
-    A linked worktree keeps its own files and shares the clone-wide store,
-    so a run recorded with the main checkout as root into a worktree's
-    WORK.md is found again from either. A campaign branch checked out
-    beside the project is recorded this way: the attestations it cites are
-    in the project's log.
-    """
-    theirs = git_common_dir(os.path.dirname(os.path.realpath(path)))
-    return theirs is not None and theirs == git_common_dir(root)
 
 
 def main():
@@ -815,6 +775,7 @@ def main():
     ap.add_argument('--unpinned-ok', action='append', default=[], metavar='ABSOLUTE_PATH',
                     help='explicitly record an input path without a byte pin (repeatable; retained in artifact)')
     args = ap.parse_args()
+    root_as_given = os.path.abspath(args.root)
     args.root = os.path.realpath(args.root)
     canonical_runs = os.path.realpath(os.path.join(args.root, ".claude", "fluxpoint", "runs"))
     if args.state_dir is not None and os.path.realpath(args.state_dir) != canonical_runs:
@@ -831,17 +792,22 @@ def main():
     # --root, the recorder used to read an empty store, and filed the run
     # into the same Evidence table as if nothing had been recorded before.
     # So the files a record is about have to sit under its root, by their
-    # real paths, or in a linked worktree of the same clone, and every store
-    # above them is read as well as the root's and the clone-wide one.
+    # real paths, and every store above them is read as well as the root's.
+    # A root beside or below the graph is refused wherever it is, a clone
+    # included: the clone-wide store moves with FPL_MEMORY_HOME, and the
+    # ledger and the waits would be written where no resume looks for them.
     for flag, named in (("--graph", args.graph), ("--evidence", args.evidence)):
-        if named is not None and not under_root(named, args.root) and not same_clone(named, args.root):
+        if named is not None and not under_root(named, args.root):
             real = os.path.realpath(named)
-            ap.error(f"{flag} {named}"
-                     + (f" (which is {real})" if real != os.path.abspath(named) else "")
-                     + f" is outside the project root {args.root}, whose .claude/fluxpoint/runs "
-                       f"this record goes into, and in no checkout of the same clone: pass "
-                       f"--root <project-root>, the project directory that {os.path.basename(real)} "
-                       f"sits under")
+            if _inside(os.path.abspath(named), root_as_given):
+                # Spelled inside the root and really somewhere else: a link.
+                ap.error(f"{flag} {named} is {real} once its links are followed, which is outside "
+                         f"the project root {args.root}. A row is written to the file a link "
+                         f"resolves to, and a run's earlier records are found from that file, so "
+                         f"keep the file itself inside the project")
+            ap.error(f"{flag} {named} is outside the project root {args.root}, whose "
+                     f".claude/fluxpoint/runs this record goes into: pass --root <project-root>, "
+                     f"the project directory that {os.path.basename(real)} sits under")
     stores = run_stores(args.root, args.graph, evidence_file)
 
     raw = open(args.result, encoding="utf-8").read() if args.result else sys.stdin.read()

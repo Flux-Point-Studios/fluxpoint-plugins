@@ -790,82 +790,45 @@ def resume_refusal(ir, summary, labels=(), joined=None):
     return None
 
 
-RUN_ID = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}")
+def run_stores(root, graph=None):
+    """Every runs directory an earlier record of this graph's runs can be in.
 
-
-def run_lineage(stores, run_id, source_id=None):
-    """Run ids joined to this one by a resume, this one first.
-
-    A resumed run that gets an id of its own names the run it was resumed
-    from, so the runs of one campaign form a tree. A node that declares
-    "resume": "never" runs once in that tree. A second resume of an older
-    run would otherwise start it again from its first call, and the first
-    roll's claims would stay behind in the record of the run that made
-    them. Only ids that are safe file names are followed.
+    The recorder accepts any root that the graph really sits under, so a run
+    may be on file in the store of the root given here or of any directory
+    above the graph. The clone-wide store is read too, where there is one.
     """
-    links = {}
-
-    def join(child, source):
-        if (isinstance(child, str) and isinstance(source, str) and child != source
-                and RUN_ID.fullmatch(child) and RUN_ID.fullmatch(source)):
-            links.setdefault(child, set()).add(source)
-            links.setdefault(source, set()).add(child)
-
-    for runs in stores:
-        try:
-            names = sorted(os.listdir(runs))
-        except OSError:
-            continue
-        for name in names:
-            if not name.endswith(".json"):
-                continue
-            try:
-                with open(os.path.join(runs, name), "rb") as fh:
-                    raw = fh.read()
-                if b'"resumeSource"' not in raw:
-                    continue
-                row = json.loads(raw.decode("utf-8"))
-            except (OSError, ValueError, RecursionError):
-                continue
-            summary = row.get("summary") if isinstance(row, dict) else None
-            source = summary.get("resumeSource") if isinstance(summary, dict) else None
-            join(row.get("runId") if isinstance(row.get("runId"), str) else name[:-5],
-                 source.get("runId") if isinstance(source, dict) else None)
-    join(run_id, source_id)
-    seen, queue = [run_id], [run_id]
-    while queue:
-        for other in sorted(links.get(queue.pop(0), ())):
-            if other not in seen:
-                seen.append(other)
-                queue.append(other)
-    return seen
+    if root is None:
+        return []
+    artifacts = _sibling("run_artifacts")
+    shared = []
+    try:
+        shared = [_sibling("memory").runs_path(start) for start in dict.fromkeys(
+            [root] + ([os.path.dirname(os.path.realpath(graph))] if graph else []))]
+    except Exception:  # noqa: BLE001 - a missing git or module only narrows what is read
+        pass
+    return artifacts.stores(root, graph, shared=shared)
 
 
-def run_attempts(root, run_id, unread=None):
+def run_attempts(root, run_id, unread=None, stores=None):
     """The summary of every attempt on file under a run id: the latest record and each retained one.
 
     The latest record is whichever attempt was filed last, and an earlier
     attempt can be filed again. What a run id has reached is therefore read
-    from all of them. A record that is there and cannot be read adds no
-    summary: its path is appended to `unread`, because what it reached is
-    not known.
+    from all of them, in every store given. A record that is there and
+    cannot be read adds no summary: its path is appended to `unread`,
+    because what it reached is not known.
     """
-    if root is None:
+    if root is None and not stores:
         return []
-    runs = os.path.join(root, ".claude", "fluxpoint", "runs")
-    history = os.path.join(runs, "history", run_id)
-    paths = [os.path.join(runs, run_id + ".json")]
-    if os.path.isdir(history):
-        paths += [os.path.join(history, name) for name in sorted(os.listdir(history)) if name.endswith(".json")]
+    artifacts = _sibling("run_artifacts")
+    paths = artifacts.records(stores or [artifacts.store(root)], run_id)
     found = []
     for path in paths:
         try:
             with open(path, encoding="utf-8") as fh:
                 row = json.load(fh)
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError, RecursionError):
-            if unread is not None:
+        except (OSError, ValueError, RecursionError) as error:
+            if unread is not None and not (isinstance(error, OSError) and artifacts.absent(error)):
                 unread.append(path)
             continue
         attempt = row.get("summary") if isinstance(row, dict) and row.get("runId") == run_id else None
@@ -877,7 +840,7 @@ def run_attempts(root, run_id, unread=None):
     return found
 
 
-def resume_reach(ir, summary, run_id, projects=None, root=None):
+def resume_reach(ir, summary, run_id, projects=None, root=None, graph=None):
     """What a resume of a recorded run is told its source started.
 
     None when no node declares "resume": "never", so a graph without the
@@ -886,14 +849,17 @@ def resume_reach(ir, summary, run_id, projects=None, root=None):
     the run id is read, and so is the runtime journal, which also holds
     an attempt that reached further than any that was recorded. So is
     every run joined to this one by a resume: a run resumed from it that
-    started the node belongs to the same campaign. An attempt on file that
-    cannot be read leaves the reach unknown, and that is refused too.
+    started the node belongs to the same campaign. All of that is read from
+    the stores the recorder may have filed it in, which are the root's and
+    those above the graph. An attempt on file that cannot be read leaves
+    the reach unknown, and that is refused too.
     """
     unread = []
-    members = run_lineage([os.path.join(root, ".claude", "fluxpoint", "runs")], run_id) if root is not None else [run_id]
+    stores = run_stores(root, graph)
+    members = _sibling("run_artifacts").lineage(stores, run_id) if stores else [run_id]
     attempts = [(run_id, summary)]
     for member in members:
-        attempts += [(member, a) for a in run_attempts(root, member, unread) if a != summary]
+        attempts += [(member, a) for a in run_attempts(root, member, unread, stores) if a != summary]
     held = {}
     for _, attempt in attempts:
         held.update(held_no_resume(ir, attempt))
@@ -5820,7 +5786,7 @@ def archive_compiled(root, args, source):
     return target
 
 
-def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, projects=None, imports_resolved=None, artifact_sha256=None):
+def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, projects=None, imports_resolved=None, artifact_sha256=None, graph=None):
     """Render with verified prior results, but never contact a model or forge.
 
     Branch readings are hypothetical matches. That is why a memo row is
@@ -5830,7 +5796,7 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     helper = _sibling('replay_memo')
     source_artifact, source_sha = _sibling('run_artifacts').read(root, run_id, artifact_sha256=artifact_sha256)
     source = source_artifact['summary']
-    reach = resume_reach(ir, source, run_id, projects, root)
+    reach = resume_reach(ir, source, run_id, projects, root, graph)
     launch = source.get('launch')
     if not isinstance(launch, dict):
         raise ValueError('resume source has no immutable launch stamp')
@@ -6146,7 +6112,8 @@ def main():
     if args.plan:
         try:
             rows = rerun_plan(ir, contracts, embedded_args, args.gates_root, args.resume,
-                              specification, args.projects, resolved, args.resume_artifact_sha256)
+                              specification, args.projects, resolved, args.resume_artifact_sha256,
+                              graph=args.graph)
         except (OSError, ValueError, TypeError) as exc:
             print('graph-compile: resume plan refused: ' + str(exc), file=sys.stderr)
             return 1
