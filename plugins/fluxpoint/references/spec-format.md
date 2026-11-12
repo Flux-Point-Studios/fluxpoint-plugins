@@ -147,9 +147,19 @@ ignore sits under an input directory, and name each one: stage it or ignore it.
 `--touches` and `--reach` list them as warnings. An untracked file that the
 packet names outright, or that a locked test imports, is frozen like any other
 input. Explicit inputs must exist inside the repository.
+What running a check leaves behind is not such a file. Anything under
+`__pycache__`, `node_modules`, `.venv`, `venv` or `.tox`, a `.pyc` or `.pyo`
+file, and `.DS_Store`, `Thumbs.db` and `desktop.ini` are passed over, so a
+lock taken after the checks ran is not refused over what they wrote. A
+repository nested under an input directory, or a link to a directory, is
+named as that and not as a file to stage: ignore it or move it out.
 The plugin's state store, `.claude/fluxpoint/`, is runtime state and never a
 packet input. A check may name a file or a directory in it, such as
 `--runs-dir`, and nothing there is frozen, whether the path exists yet or not.
+A working-directory flag that names the store is read the same way: it sets no
+package directory and the check's other arguments resolve as they would without
+it. The store is the one below the repository root. Under a package directory,
+`pkg/.claude/fluxpoint/` is the package's own and is frozen like any other path.
 A recorded run or decision therefore moves no lock. A `harnessInputs` entry in
 the store refuses. A store path that an older lock froze leaves the harness map
 at the next `--lock` or `--lock-harness`, which prints each one. Package cwd

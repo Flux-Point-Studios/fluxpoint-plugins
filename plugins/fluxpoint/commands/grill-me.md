@@ -101,7 +101,8 @@ invalid reference must be resolved before implementation. No empty packet,
 A directory named in a check's arguments or in `harnessInputs` means the
 tracked files under it. Stage a new check file before locking. While an
 untracked file that Git does not ignore sits under such a directory, `--lock`
-refuses and names it, and `--check` warns about it.
+refuses and names it, and `--check` warns about it. Interpreter caches and
+folder metadata that running the checks leaves behind do not count.
 
 A re-lock keeps every path an earlier lock froze. When a recorded decision
 removes a check file, take the file out of the check, then run

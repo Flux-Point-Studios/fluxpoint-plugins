@@ -639,6 +639,80 @@ class PacketInputsTests(unittest.TestCase):
         self.assertIn('specification: ' + self.UNTRACKED + 'notes.txt\n', refused.stderr)
         self.assertEqual(self.cli('--check').stderr.strip(), 'specification: warning: ' + self.UNTRACKED + 'notes.txt')
 
+    def test_byproducts_of_running_the_checks_do_not_refuse_the_lock(self):
+        # Running a Python check writes tests/__pycache__, and a file manager
+        # drops .DS_Store. A repository that ignores neither could not lock
+        # its harness right after the gate that ran its checks.
+        self.doc['harnessInputs'] = ['preflight']
+        self.doc['checks'][0]['argv'] = ['{python}', 'preflight/check_a.py']
+        self.write('preflight/check_a.py', 'print("a")\n')
+        self.write('.gitignore', '.claude/\n')
+        self.save()
+        self.gate()
+        self.lock()
+        self.write('preflight/__pycache__/check_a.cpython-311.pyc', 'bytecode')
+        self.write('preflight/deeper/__pycache__/x.cpython-39.pyc', 'bytecode')
+        self.write('preflight/.DS_Store', 'finder')
+        for args in (('--lock',), ('--lock-harness', '--gate', 'verify')):
+            with self.subTest(args=args):
+                done = self.cli(*args)
+                self.assertEqual(done.returncode, 0, done.stderr)
+        checked = self.cli('--check')
+        self.assertNotIn(self.UNTRACKED, checked.stderr)
+        # A real source file beside them is still named.
+        self.write('preflight/check_b.py', 'print("b")\n')
+        refused = self.cli('--lock')
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn(self.UNTRACKED + 'preflight/check_b.py', refused.stderr)
+        self.assertNotIn('pyc', refused.stderr)
+
+    def test_an_untracked_nested_repository_is_named_as_what_it_is(self):
+        # git reports a nested repository as one path. Staging it does not make
+        # it a file a lock can freeze, so the advice has to say something else.
+        self.doc['harnessInputs'] = ['preflight']
+        self.doc['checks'][0]['argv'] = ['{python}', 'preflight/check_a.py']
+        self.write('preflight/check_a.py', 'print("a")\n')
+        self.save()
+        self.gate()
+        self.lock()
+        nested = self.root / 'preflight' / 'vendored'
+        nested.mkdir()
+        subprocess.run(['git', 'init', '-q'], cwd=nested, check=True, capture_output=True)
+        (nested / 'lib.py').write_text('X = 1\n', encoding='utf-8')
+        subprocess.run(['git', '-c', 'user.name=T', '-c', 'user.email=t@example.invalid', 'add', '.'], cwd=nested, check=True, capture_output=True)
+        subprocess.run(['git', '-c', 'user.name=T', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'x'], cwd=nested, check=True, capture_output=True)
+        refused = self.cli('--lock')
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn('preflight/vendored', refused.stderr)
+        self.assertIn('nested repository', refused.stderr)
+        self.assertNotIn('stage it', refused.stderr)
+
+    def test_a_working_directory_flag_that_names_the_store_drops_nothing_else(self):
+        # A check may run in the store. Its script is still code the lock holds.
+        self.write('tools/check_runs.py', 'print("runs")\n')
+        self.write('.gitignore', '.claude/fluxpoint/\n')
+        for flag in ('--dir', '--cwd', '--prefix'):
+            for present in (False, True):
+                with self.subTest(flag=flag, present=present):
+                    store = self.root / '.claude' / 'fluxpoint' / 'runs'
+                    if present:
+                        store.mkdir(parents=True, exist_ok=True)
+                        (store / 'wf_a.json').write_text('{}', encoding='utf-8')
+                    self.doc['checks'][0]['argv'] = ['{python}', 'tools/check_runs.py', flag, '.claude/fluxpoint/runs']
+                    self.save()
+                    harness = self.lock()['harness']
+                    self.assertIn('tools/check_runs.py', harness)
+                    self.assertEqual([p for p in harness if p.startswith('.claude/')], [])
+
+    def test_a_package_directory_named_like_the_store_is_not_the_store(self):
+        # pkg/.claude/fluxpoint is a directory of the package, reached through its cwd.
+        self.write('pkg/run.py', 'print("pkg")\n')
+        self.write('pkg/.claude/fluxpoint/fixture.json', '{}')
+        self.doc['checks'][0]['argv'] = ['{python}', 'run.py', '--cwd', 'pkg', '--path', '.claude/fluxpoint/fixture.json']
+        self.save()
+        harness = self.lock()['harness']
+        self.assertIn('pkg/.claude/fluxpoint/fixture.json', harness)
+
     def test_directory_inputs_and_the_state_store_follow_one_coherent_rule(self):
         # No ignore rule covers the store here: the rule is the path, never the ignore file.
         self.root = self.root.resolve()

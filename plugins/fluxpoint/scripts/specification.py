@@ -399,6 +399,13 @@ def harness_inputs(root, doc, allow_missing=False, closure=True):
 
 
 UNTRACKED = 'untracked file in a locked directory: stage it or ignore it: '
+# Git lists a repository nested in the tree, or a link to a directory, as one
+# path. Staging it does not make it files a lock can freeze.
+NESTED = 'untracked nested repository or linked directory in a locked directory: ignore it or move it out: '
+
+
+def untracked_message(rel, root):
+    return (NESTED + rel.rstrip('/') if rel.endswith('/') or (Path(root) / rel).is_dir() else UNTRACKED + rel)
 
 
 def untracked_inputs(root, inputs, spec=None, held=()):
@@ -447,7 +454,10 @@ def freeze_harness(root, doc, spec=None, references=None, retire=(), because=Non
     untracked = untracked_inputs(root, inputs, spec, archives or ())
     if untracked:
         # Locking would report success over a set that differs from what is on disk.
-        raise ValueError(UNTRACKED + ', '.join(untracked))
+        nested = [rel.rstrip('/') for rel in untracked if untracked_message(rel, root).startswith(NESTED)]
+        files = [rel for rel in untracked if rel.rstrip('/') not in nested]
+        raise ValueError('; '.join(part for part in (UNTRACKED + ', '.join(files) if files else '',
+                                                     NESTED + ', '.join(nested) if nested else '') if part))
     frozen = inputs.hashes()
     for rel in sorted(kept - set(frozen)):
         # Only a state store path leaves this way; every other frozen path is retained.
@@ -489,7 +499,7 @@ def input_report(root, doc, identity, spec=None, closure=False):
     for rel in identity.get('references', {}):
         for cid in checks:
             inputs.add(inputs.path(rel), 'references', cid)
-    inputs.warnings.update(UNTRACKED + rel for rel in inputs.untracked())
+    inputs.warnings.update(untracked_message(rel, root) for rel in inputs.untracked())
     rows = inputs.rows()
     for row in rows:
         row['frozen'] = (row['path'] in lock.get('harness', {})
@@ -989,7 +999,7 @@ def main():
         # A warning here and a refusal at --lock: an unstaged scratch file must not turn a gate red.
         live = packet_inputs.Inputs(root, doc, closure=False, allow_missing=True)
         for rel in untracked_inputs(root, live, spec, {**identity.get('references', {}), **lock.get('harness', {})}):
-            print('specification: warning: ' + UNTRACKED + rel, file=sys.stderr)
+            print('specification: warning: ' + untracked_message(rel, root), file=sys.stderr)
         if args.run:
             stack = json.loads(os.environ.get('FPL_SPEC_STACK', '[]'))
             if not strings(stack, nonempty=False) or str(root) in stack:

@@ -18,6 +18,10 @@ PATTERN_FLAGS = {'--testPathPattern', '--testPathPatterns'}
 CWD_FLAGS = {'--prefix', '--dir', '--cwd'}
 IGNORED_DIRS = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', '.tox'}
 STORE = ('.claude', 'fluxpoint')  # The plugin's state store, below the root.
+# What running a check or opening a folder leaves behind. Never source, so never
+# a reason to refuse a lock in a repository that happens not to ignore it.
+BYPRODUCT_NAMES = {'.DS_Store', 'Thumbs.db', 'desktop.ini'}
+BYPRODUCT_SUFFIXES = ('.pyc', '.pyo')
 
 
 def trust_paths(root, doc, frozen=None):
@@ -240,9 +244,18 @@ class Inputs:
             return [self.path(p) for p in names]
         return [path]
 
+    @staticmethod
+    def byproduct(rel):
+        parts = rel.rstrip('/').split('/')
+        return (any(part in IGNORED_DIRS for part in parts) or parts[-1] in BYPRODUCT_NAMES
+                or parts[-1].endswith(BYPRODUCT_SUFFIXES))
+
     def untracked(self, skip=()):
-        """Files under an input directory that Git neither tracks nor ignores. A directory
-        input means the tracked files under it, so these sit on disk outside every lock."""
+        """Paths under an input directory that Git neither tracks nor ignores. A directory
+        input means the tracked files under it, so these sit on disk outside every lock.
+        Git lists a nested repository as one path ending in a slash, and it stays that way
+        here: it is not a file a lock can freeze. Interpreter caches and folder metadata
+        are left out, since running the checks writes them."""
         if self._untracked is None:
             self._untracked = set()
             if self.directories:
@@ -253,15 +266,22 @@ class Inputs:
                     self._untracked = {v.decode('utf-8', 'replace') for v in result.stdout.split(b'\0') if v}
         # A file the packet or its closure names is frozen whether or not it is tracked.
         return sorted(rel for rel in self._untracked
-                      if rel not in self.reasons and rel not in skip and not self.store(self.root / rel))
+                      if rel not in self.reasons and rel not in skip and not self.store(self.root / rel)
+                      and not self.byproduct(rel))
 
     def locate(self, text, cwd=None, explicit=False):
         text = text.split('::', 1)[0]
         if not text or text.startswith('-'):
             return None
         path = Path(text)
-        if self.store(self.root / path) or (cwd is not None and self.store(cwd / path)):
-            return None  # Decided by the path alone, before asking whether it exists.
+        # A store path is never an input, decided by where the argument points
+        # and before asking whether it exists. Under a package cwd it points
+        # into the package first: pkg/.claude/fluxpoint is the package's own.
+        placed = cwd / path if cwd is not None and not path.is_absolute() else None
+        if placed is not None and self.store(placed):
+            return None
+        if self.store(self.root / path) and not (placed is not None and placed.exists()):
+            return None
         # Win32 strips a component's trailing dots and spaces, so on Windows Go's
         # './...' exists: it names the directory it is spelled under.
         if os.name == 'nt' and any(p != '..' and p != p.rstrip('. ') for p in path.parts):
@@ -335,6 +355,10 @@ class Inputs:
                             self.warnings.add('unplaced command option ' + flag + ' ' + value + '; declare real inputs with harnessInputs')
                     if flag in CWD_FLAGS:
                         value = value if sep else (argv[i + 1] if i + 1 < len(argv) else '')
+                        if self.store(self.path(value)):
+                            # A check may run in the store. It is no package, so nothing
+                            # is looked up under it, and it need not exist before a run does.
+                            continue
                         cwd = self.path(value)
                         if not cwd.is_dir():
                             raise ValueError('check working directory does not exist: ' + value)
