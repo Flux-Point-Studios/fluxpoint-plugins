@@ -783,23 +783,53 @@ def resume_refusal(ir, summary, labels=()):
     return None
 
 
-def resume_reach(ir, summary, run_id, projects=None):
+def run_attempts(root, run_id):
+    """The summary of every attempt on file under a run id: the latest record and each retained one.
+
+    The latest record is whichever attempt was filed last, and an earlier
+    attempt can be filed again. What a run id has reached is therefore read
+    from all of them. A record that cannot be read adds nothing.
+    """
+    if root is None:
+        return []
+    runs = os.path.join(root, ".claude", "fluxpoint", "runs")
+    history = os.path.join(runs, "history", run_id)
+    paths = [os.path.join(runs, run_id + ".json")]
+    if os.path.isdir(history):
+        paths += [os.path.join(history, name) for name in sorted(os.listdir(history)) if name.endswith(".json")]
+    found = []
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                row = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        attempt = row.get("summary") if isinstance(row, dict) and row.get("runId") == run_id else None
+        if isinstance(attempt, dict) and attempt not in found:
+            found.append(attempt)
+    return found
+
+
+def resume_reach(ir, summary, run_id, projects=None, root=None):
     """What a resume of a recorded run is told its source started.
 
     None when no node declares "resume": "never", so a graph without the
     field launches exactly as before. Raises ValueError, with the named
-    code, when the run started such a node. The runtime journal is read
-    as well as the record, because it also holds an attempt that reached
-    further than the last one anybody recorded.
+    code, when the run started such a node. Every attempt on file under
+    the run id is read, and so is the runtime journal, which also holds
+    an attempt that reached further than any that was recorded.
     """
-    held = held_no_resume(ir, summary)
-    if not held:
+    attempts = [summary] + [a for a in run_attempts(root, run_id) if a != summary]
+    if not any(held_no_resume(ir, attempt) for attempt in attempts):
         return None
     labels = journal_labels(run_id, projects)
-    refusal = resume_refusal(ir, summary, labels)
-    if refusal:
-        raise ValueError(refusal)
-    return sorted(run_started(summary, labels, held))
+    started = set()
+    for attempt in attempts:
+        refusal = resume_refusal(ir, attempt, labels)
+        if refusal:
+            raise ValueError(refusal)
+        started |= run_started(attempt, labels, held_no_resume(ir, attempt))
+    return sorted(started)
 
 
 def journal_labels(run_id, projects=None):
@@ -2271,9 +2301,13 @@ def warnings(ir, agents=None, specification=None, gates=None):
                 f"Each gate resolves its commit when it runs, so a branch that moves between them is "
                 f"certified at two heads and the run still records COMPLETE. Add "
                 f"\"sameShaAs\": \"{first}\" to halt when the two commits differ.")
+    parks = {x.get("id") for x in ir.get("nodes") or [] if isinstance(x, dict) and x.get("actor", "agent") != "agent"}
     for node in ir.get("nodes") or []:
         if (isinstance(node, dict) and node.get("contract") == "RedTeamV1" and node.get("foreach")
-                and node.get("resume") != "never"):
+                and node.get("resume") != "never"
+                # Where the field would be refused there is nothing to advise.
+                and not parks - ancestors(node, by_id)
+                and node not in repair_loops(ir) and node.get("id") not in repair_owned(ir)):
             w.append(
                 f"node '{node.get('id', '?')}': a red-team fan-out a resume can pass. Replay is the longest "
                 f"unchanged prefix of calls, so after one dead lens every later lens runs again and the review "
@@ -5241,7 +5275,22 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     a(f"  note({js_str(nid)}, 'INCOMPLETE', 'repair round cap reached', {{ rounds: round_{var}, pending: pending_{var}.map(x => x.item.key) }})")
     a("  return summary('INCOMPLETE')")
     a("}")
-    return "\n".join(L)
+    body = "\n".join(L)
+    # A loop waits on a park like any other node. Without this its fixer was
+    # handed the null of a step nobody had taken, and everything after the
+    # loop ran in the run that parked.
+    members = [nid, fixer["id"], *repair_integrations(n)]
+    upstream = [d for d in dict.fromkeys(d for m in members for d in after_ids(by_id.get(m) or {})) if d not in members]
+    if not upstream or not any(o.get("actor", "agent") != "agent" for o in ir["nodes"]):
+        return body
+    waits_on = ", ".join(upstream)
+    return "\n".join([
+        f"if ({json.dumps(upstream)}.some(id => BLOCKED.has(id))) {{",
+        f"  note({js_str(nid)}, 'BLOCKED', {js_str('blocked on ' + waits_on)})",
+        f"  log({js_str('BLOCKED at ' + nid + ': inherited from ' + waits_on)})",
+        f"  for (const id of {json.dumps(members)}) {{ BLOCKED.add(id); RESULTS[id] = null }}",
+        "  INCOMPLETE = true",
+        "} else {", body, "}"])
 
 
 def emit_repeat(n, ir, prompt, phase, panel, over):
@@ -5642,7 +5691,7 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     helper = _sibling('replay_memo')
     source_artifact, source_sha = _sibling('run_artifacts').read(root, run_id, artifact_sha256=artifact_sha256)
     source = source_artifact['summary']
-    reach = resume_reach(ir, source, run_id, projects)
+    reach = resume_reach(ir, source, run_id, projects, root)
     launch = source.get('launch')
     if not isinstance(launch, dict):
         raise ValueError('resume source has no immutable launch stamp')

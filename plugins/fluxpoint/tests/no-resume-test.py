@@ -68,16 +68,21 @@ def graph(flag=True, max_nodes=12, parked=False, reduced=False):
             'nodes': nodes}
 
 
-def run(ir, args=None, dead=(), replay_state=None):
-    """Execute the emitted graph under stubs. A label in `dead` returns nothing."""
+def run(ir, args=None, dead=(), replay_state=None, answers=None):
+    """Execute the emitted graph under stubs. A label in `dead` returns nothing.
+
+    `answers` maps a label prefix to what a call under it returns.
+    """
     js = cg.emit(ir, CONTRACTS, {}, replay_state=replay_state).replace('export const meta', 'const meta')
     with tempfile.TemporaryDirectory() as tmp:
         script, out = Path(tmp) / 'run.mjs', Path(tmp) / 'out.json'
         script.write_text('\n'.join([
             "import {writeFileSync} from 'node:fs';",
-            'const calls=[],logs=[],dead=new Set(' + json.dumps(sorted(dead)) + ');',
-            "const agent=async(p,o)=>{const label=String(o.label||'');calls.push(label);",
+            'const calls=[],logs=[],dead=new Set(' + json.dumps(sorted(dead)) + '),answers=' + json.dumps(answers or {}) + ';',
+            "let agent=async(p,o)=>{const label=String(o.label||'');calls.push(label);",
             '  if(dead.has(label))return null;',
+            "  if(label.startsWith('tree-check:'))return {root:'/campaign',head:'a'.repeat(40),porcelain:''};",
+            '  for(const [prefix,value] of Object.entries(answers))if(label.startsWith(prefix))return value;',
             "  if(label.startsWith('lenses:'))return {findings:[{file:'a.py',line:1,claim:label,failure_path:'p',severity:'LOW'}]};",
             "  if(label.endsWith(':advice'))return {chosen:'wait',rationale:'r',alternatives:[],overturned_prior:false};",
             '  return ' + json.dumps(DESIGN) + '};',
@@ -169,6 +174,55 @@ class Declared(unittest.TestCase):
         # A node that follows the loop can declare it, and the loop is not in its reach.
         self.assertEqual(self.issues(loop('verdict')), [])
         self.assertEqual(cg.no_resume_reach(loop('verdict')), {'verdict': ['verdict']})
+
+    def test_a_review_after_a_repair_loop_that_waits_on_a_park_does_not_start_early(self):
+        # A sign-off, a repair loop that waits on it, and the review after the
+        # loop, which is where a repair graph has to put the field. The loop
+        # used to run while the sign-off was still open, so the review started
+        # in the run that parked and the resume after the release was refused.
+        ir = {'version': 1, 'name': 'repair-then-review', 'campaign': 'repair then review once',
+              'budget': {'maxNodes': 12, 'cacheTtl': '1h'}, 'lists': {'slices': [{'key': 'parser'}]},
+              'nodes': [
+                  {'id': 'plan', 'prompt': 'plan the repair', 'contract': 'DesignV1'},
+                  {'id': 'sign', 'after': 'plan', 'actor': 'human', 'prompt': 'approve {{prev}}', 'contract': 'DesignV1',
+                   'release': {'instructions': 'sign the repair plan', 'proofContract': 'DesignV1', 'whyNotAgent': 'a person signs'}},
+                  {'id': 'fix', 'after': 'sign', 'foreach': 'slices', 'mutates': True, 'contract': 'SliceV1',
+                   'prompt': 'fix {{item.key}} as approved in {{prev}}: {{lastCheck}} in {{roundDir}}'},
+                  {'id': 'check', 'foreach': 'slices', 'after': 'fix', 'independent': True, 'verifies': 'fix',
+                   'isolation': 'measure', 'prompt': 'check {{prev}}', 'contract': 'HarnessCheckV1',
+                   'repeat': {'until': 'exit == 0', 'maxRounds': 2}},
+                  {'id': 'verdict', 'after': 'check', 'prompt': 'review the repaired tree: {{prev}}', 'contract': 'DesignV1',
+                   'resume': 'never'}]}
+        self.assertEqual(cg.validate(ir, CONTRACTS), [])
+        launch = {'_base': {'sha': 'a' * 40, 'branch': 'main', 'porcelain': '', 'root': '/campaign'},
+                  '_launch': {'since': '2026-11-11T00:00:00Z', 'nonce': 'n', 'root': '/campaign'}, '_replayLaunchNonce': '1' * 64}
+        answers = {'fix:': {'baseSeen': 'a' * 40, 'branch': 'b', 'diffSummary': 'd', 'testsAdded': [], 'sharedResources': [],
+                            'siblings': [], 'packetEdits': [], 'harnessCommand': 't', 'harnessExit': 0, 'evidence': ['e']},
+                   'check:': {'exit': 0, 'command': 'c', 'tail': 't'}}
+
+        def work(doc):
+            self.assertNotIn('err', doc, doc)
+            return [label for label in doc['calls'] if not label.startswith('tree-check:')]
+
+        parked = run(ir, args=dict(launch, _releases={}), answers=answers)
+        self.assertEqual(work(parked), ['plan', 'sign:advice'])
+        rows = {(row['node'], row['status']) for row in parked['r']['provenance']}
+        for waiting in ('check', 'verdict'):
+            self.assertIn((waiting, 'BLOCKED'), rows)
+        self.assertIsNone(cg.resume_refusal(ir, parked['r']))
+        released = run(ir, args=dict(launch, _releases={'sign': {'proof': DESIGN, 'by': 'operator'}}), answers=answers)
+        self.assertEqual(work(released), ['plan', 'fix:parser:r1', 'check:parser:r1', 'verdict'])
+        self.assertEqual(released['r']['outcome'], 'COMPLETE')
+
+    def test_check_does_not_ask_for_the_field_where_it_would_be_refused(self):
+        # A review, a verdict, then a person signs. The field cannot be declared
+        # here, so --check must not advise it.
+        ir = graph(flag=False, parked=True)
+        ir['nodes'][2].update(contract='RedTeamV1', after='build')
+        ir['nodes'][1]['after'] = 'verdict'
+        self.assertEqual([w for w in cg.warnings(ir) if '"resume": "never"' in w], [])
+        ir['nodes'][2]['resume'] = 'never'
+        self.assertEqual(len(self.issues(ir)), 1)
 
     def test_the_field_changes_nothing_about_a_first_launch(self):
         self.assertFalse(cg.replay_features(graph()))
@@ -583,6 +637,23 @@ class Launcher(unittest.TestCase):
         # The compiled script accepts exactly what the launcher assembled.
         doc = run(graph(), args={key: workflow['args'][key] for key in ('_resumeFromRunId', '_resumeReach')})
         self.assertEqual((doc.get('r') or {}).get('outcome'), 'COMPLETE', doc)
+
+    def test_every_attempt_on_file_is_read_and_not_only_the_latest(self):
+        # The first attempt stopped at the build. The second died inside the
+        # review. Then the first was filed again, which makes it the latest
+        # record, and it is the latest record a resume starts from.
+        import run_artifacts
+        first = recorded(dead={'build'})
+        self.record(first)
+        for summary in (recorded(dead={'lenses:b'}), first):
+            row = json.loads((self.root / '.claude/fluxpoint/runs/wf_previous.json').read_text(encoding='utf-8'))
+            run_artifacts.write(str(self.root), 'wf_previous', dict(row, summary=dict(row['summary'], **copy.deepcopy(summary))))
+        latest = json.loads((self.root / '.claude/fluxpoint/runs/wf_previous.json').read_text(encoding='utf-8'))
+        self.assertEqual(latest['summary']['outcome'], 'NODE-DEAD')
+        self.assertNotIn('lenses', latest['summary']['results'])
+        with self.assertRaisesRegex(ValueError, '^' + CODE):
+            resume.assemble(self.args)
+        self.assertEqual(self.compiled, [])
 
     def test_the_journal_of_an_unrecorded_attempt_is_read(self):
         self.record(recorded(dead={'build'}))
