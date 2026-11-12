@@ -173,7 +173,8 @@ def red_team_review_receipts(summary):
         # list. Those are compared by content, as the compiled panel
         # compares them, and a dict cannot be a set member as it is.
         if isinstance(value, (dict, list)):
-            return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            # Tagged, so a string that merely spells the structure is not it.
+            return ("structure", json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
         return value
 
     text = lambda f: tuple(held(f.get(k)) for k in prose)

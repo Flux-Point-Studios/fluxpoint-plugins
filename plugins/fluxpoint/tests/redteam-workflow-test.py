@@ -438,11 +438,16 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push(label);prompts.p
         self.assertEqual(len(receipt['rows'][0]['restatements']), 1)
         art, _, err = record({}, summary=doc['r'])
         self.assertEqual((art['outcome'], art['redTeam']), ('COMPLETE', 'SHIP'), err)
-        # The recheck still bites: move one lens's claim to another line.
+        # The recheck still bites: move one lens's claim to another line, or
+        # swap its target for a string that merely spells the structure.
         moved = copy.deepcopy(doc['r'])
         moved['results']['red-team-lenses'][1]['findings'][0]['target']['line'] = 41
-        art, _, _ = record({}, summary=moved)
-        self.assertEqual((art['outcome'], art['redTeam']), ('BLOCKED-REDTEAM', 'BLOCK'))
+        spelled = copy.deepcopy(doc['r'])
+        claim = spelled['results']['red-team-lenses'][1]['findings'][0]
+        claim['target'] = json.dumps(claim['target'], sort_keys=True, separators=(',', ':'))
+        for forged in (moved, spelled):
+            art, _, _ = record({}, summary=forged)
+            self.assertEqual((art['outcome'], art['redTeam']), ('BLOCKED-REDTEAM', 'BLOCK'))
 
     def test_the_claim_key_is_read_between_the_lenses_and_the_panel_only(self):
         # A reduce over a sweep that runs before the lenses dedupes the sweep's
@@ -480,6 +485,13 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push(label);prompts.p
         self.assertEqual(self.cg.validate(between, self.contracts), [])
         self.assertEqual(key(between), ['target', 'class'])
         self.assertEqual(warned(between), [])
+        # A panel that also reads the upstream reduce directly reaches it by a
+        # second path that does not pass through the lenses.
+        two = graph(True)
+        panel = next(n for n in two['nodes'] if n['id'] == 'refute')
+        panel.update(after=['lenses', 'distinct-defects'], prompt='start the panel over {{prev.lenses}} given {{prev.distinct-defects}}')
+        self.assertIsNone(key(two))
+        self.assertEqual(len(warned(two)), 1, self.cg.warnings(two))
 
     def test_the_record_refuses_a_malformed_receipt_of_unjudged_claims(self):
         valid = self.compiled('collector-novel')['r']

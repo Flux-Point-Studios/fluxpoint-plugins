@@ -2270,6 +2270,9 @@ def red_team_key(n, ir):
             seen.add(dep)
             if producer.get("contract") == "RedTeamV1" and producer.get("foreach"):
                 continue
+            if not red_team_sources(producer, ir):
+                # A branch the lenses do not feed, reached by a second path.
+                continue
             keys = (producer.get("reduce") or {}).get("dedupeBy") if is_reduce(producer) else None
             if isinstance(keys, list) and keys and all(isinstance(k, str) and k for k in keys):
                 return list(keys)
