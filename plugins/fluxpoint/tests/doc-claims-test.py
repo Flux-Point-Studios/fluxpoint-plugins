@@ -452,6 +452,11 @@ report("sorry is flagged in Lean and Isabelle files only, as the plugin README s
        not _hygiene("notes.py", _sorry) and bool(_hygiene("Proof.lean", "  sorry\n"))
        and bool(_hygiene("Proof.thy", "  sorry\n")) and "flagged in `.lean` and `.thy` files only" in PLUGIN_README,
        ".lean and .thy")
+report("a comment that opens with todo or fixme, and the @todo tag, are markers as the plugin README says",
+       bool(_hygiene("app.js", "// todo: handle the error\n")) and bool(_hygiene("util.py", "# fixme\n"))
+       and bool(_hygiene("app.js", "/** @todo handle the error */\n")) and not _hygiene("app.js", "// a todo list\n")
+       and "A comment that opens with `todo` or `fixme`" in PLUGIN_README and "`@todo`" in PLUGIN_README,
+       "opening word and tag")
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

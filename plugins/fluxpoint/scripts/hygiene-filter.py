@@ -26,6 +26,12 @@ CALL = re.compile(
 # the same lower case, so the file type decides.
 SORRY = re.compile(r'\bsorry\b')
 HEDGE = re.compile(r'\bfor now\b', re.I)
+# A comment that opens with the word is a marker in any case: `// todo: x`,
+# `# fixme`, `/* fixme */`. So are the tags JSDoc, PHPDoc and Doxygen spell in
+# lower case, `@todo` and `\todo`. Both are read in the comment alone, which
+# leaves out "a todo list" in a sentence, a name in code and a decorator.
+OPENS = re.compile(r'^(?:\s|[#/*!;(-])*(?:todo|fixme)(?=\s*(?:[:(]|\*/|\*\)|$))', re.I)
+TAG = re.compile(r'(?:^|(?<=[\s*/!(]))[@\\]todo(?=[\s:*]|$)')
 STRINGS = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`')
 
 
@@ -76,7 +82,9 @@ def main():
             return 1
     suffix = Path(path).suffix
     for n, line in enumerate(sys.stdin, 1):
-        if marked(line, suffix.lower()) or HEDGE.search(comments(line, suffix)):
+        comment = comments(line, suffix)
+        if (marked(line, suffix.lower()) or HEDGE.search(comment)
+                or OPENS.search(comment) or TAG.search(comment)):
             if not any(p.search(line) for p in allow):
                 print(f'{path}:{n}: {line.rstrip()}')
     return 0

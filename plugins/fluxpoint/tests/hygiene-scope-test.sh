@@ -136,6 +136,11 @@ check "the ignore list is not scanned as its own violation" 0 "$n"
 # comment still matches, because the `--` before it may sit inside a string.
 # The rows wanting 1 for a call, an attribute or a flag pin what must not
 # change: those keep matching in any case.
+# Dropping the case-insensitive match also dropped comments people do write:
+# `// todo: handle the error path`, `# fixme`, and the `@todo` and `\todo`
+# tags that JSDoc, PHPDoc and Doxygen define in lower case. A comment that
+# opens with the word as a marker is one, in any case, and so is the tag.
+# The word in the middle of a sentence, in code or in a string is not.
 PY="$( . "$PLUGIN/scripts/python-env.sh" >/dev/null 2>&1; printf '%s' "$FPL_PY" )"
 mkdir -p "$WORK/empty"
 flagged() {
@@ -177,6 +182,28 @@ done <<'ROWS'
 1|ci.sh|git commit --no-verify -m wip
 1|ci.sh|git commit --NO-VERIFY -m wip
 1|deploy.ps1|Try { Publish } Catch { }
+1|app.js|// todo: handle the error path
+1|util.py|# todo: validate input
+1|app.js|// Fixme: off by one
+1|util.py|# fixme
+1|util.py|x = 1  # ToDo(alice): later
+1|app.js|/* fixme */
+1|app.js| * todo: move this into the parser
+1|query.sql|-- todo: add the index
+1|app.js|/** @todo handle the error path */
+1|app.js| * @todo: handle the error path
+1|lib.php|/// @todo
+1|vec.hpp|/* \todo bounds check */
+1|vec.hpp|//! \todo
+0|app.js|// a todo list
+0|app.js|// todo items are kept in order
+0|util.py|# the fixme tag is described in the README
+0|util.py|todo = load()  # the list a user keeps
+0|util.py|    @todo.setter
+0|util.py|    @todo
+0|app.js|const email = "me@todo.example" // contact
+0|app.js|open("C:\todo\list.txt")
+0|notes.txt|write a todo: buy milk
 ROWS
 
 # The same rule through the scan the gate runs. The path reaches the filter on

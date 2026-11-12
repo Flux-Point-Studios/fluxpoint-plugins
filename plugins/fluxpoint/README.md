@@ -179,7 +179,12 @@ The hygiene scan reads added lines and untracked source. The hedge `for now`
 is checked in comments, so Python loop variables named `now` do not match.
 `TODO`, `FIXME`, `XXX`, Coq's `Admitted` and Dafny's `{:axiom}` and
 `{:verify false}` match in that exact spelling, so `a todo list` and
-`re-admitted` pass. `sorry` is a keyword in Lean and Isabelle and an English
+`re-admitted` pass. A comment that opens with `todo` or `fixme` in any case
+and follows it with a colon, a parenthesis or nothing, as in
+`// todo: handle the error` and `# fixme`, is a marker too, and so are the
+`@todo` and `\todo` documentation tags inside a comment. The same words in
+the middle of a sentence, in code or in a string pass.
+`sorry` is a keyword in Lean and Isabelle and an English
 word elsewhere, so it is flagged in `.lean` and `.thy` files only. A Lean line
 that starts with `--` and holds no `"` or `-/` cannot contain code, so the
 word does not count there; a trailing comment or a string holding the word
