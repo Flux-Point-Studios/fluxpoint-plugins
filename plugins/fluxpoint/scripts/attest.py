@@ -32,6 +32,17 @@ sees is recorded too), and `forge` (--ci, which asks the forge for the
 statuses on a commit, the least forgeable evidence a merge rests on,
 because the agent produces none of it).
 
+A wrapper gate starts under bash. On Windows that is Git Bash: FPL_BASH,
+which py.sh exports, then CLAUDE_CODE_GIT_BASH_PATH, a bash on PATH, the
+prefix `git --exec-path` reports, and the usual install directories. WSL's
+launcher in System32 is never used, and with no Git Bash --run refuses with
+NO-GIT-BASH before the gate starts. Before the declared command is handed
+over, the wrapper has the shell print one word. A shell that cannot is a
+shell fault: the declared command is not started, and the row carries
+`fault: shell` and a null exit. Such a row is no verdict and no red, and
+`--rerun-fault` on it runs the gate again. A gate that did start is judged
+by its exit, 127 from a missing program included.
+
 Dormant by design: a repo with no `.fluxpoint-gates.json` attests nothing
 and says nothing, exactly like the DoD gate in a repo with no harness.
 
@@ -66,8 +77,10 @@ import datetime
 import hashlib
 import json
 import math
+import ntpath
 import os
 import re
+import shutil
 import sys
 import time
 
@@ -77,7 +90,7 @@ import forge_evidence as forge
 import fault_policy
 import plugin_identity
 PRODUCER = plugin_identity.current()
-from process_tree import bash_path
+import process_tree
 
 GATES = ".fluxpoint-gates.json"
 ATTEST = os.path.join(".claude", "fluxpoint", "attest.jsonl")
@@ -967,6 +980,117 @@ def _bg_write(root, rec):
     return bg.Store(root, BACKGROUND).write(rec)
 
 
+def windows_bash(env, which, exists, git_exec_path):
+    """Git Bash for a gate started on Windows, from these inputs alone.
+
+    `env` is the environment, `which(name, path)` a PATH search, `exists` a
+    file test and `git_exec_path()` what `git --exec-path` prints, or None.
+    The sources, in order: FPL_BASH (py.sh exports the bash it runs under),
+    CLAUDE_CODE_GIT_BASH_PATH, a bash on PATH, `bin\\bash.exe` then
+    `usr\\bin\\bash.exe` under the prefix git reports, and the directories
+    Git for Windows installs into.
+
+    WSL's launcher is never the answer, whatever names it. It lives in
+    System32 and among the WindowsApps aliases, CreateProcess finds it before
+    PATH for a bare "bash", and it runs the gate in another toolchain or not
+    at all. So a bash in a directory named System32, Sysnative or SysWOW64,
+    or under WindowsApps, is passed over, and there is no bare "bash" to fall
+    back to: with no Git Bash this raises ValueError naming NO-GIT-BASH, and
+    the gate is not started.
+    """
+    env = {str(key).upper(): value for key, value in env.items()}
+
+    def launchers(directory):
+        folded = ntpath.normcase(ntpath.normpath(directory))
+        return ntpath.basename(folded) in ('system32', 'sysnative', 'syswow64') or 'windowsapps' in folded
+
+    def usable(path):
+        return bool(path) and exists(path) and not launchers(ntpath.dirname(path))
+
+    for name in ('FPL_BASH', 'CLAUDE_CODE_GIT_BASH_PATH'):
+        if usable(env.get(name)):
+            return env[name]
+    found = which('bash', ';'.join(d for d in (env.get('PATH') or '').split(';') if d and not launchers(d)))
+    if usable(found):
+        return found
+    prefixes = []
+    prefix = ntpath.normpath(git_exec_path() or '')
+    for _ in range(4 if prefix != '.' else 0):
+        # <prefix>/mingw64/libexec/git-core: the install root is three up.
+        prefixes.append(prefix)
+        prefix = ntpath.dirname(prefix)
+    prefixes += [ntpath.join(env[name], 'Git') for name in ('PROGRAMW6432', 'PROGRAMFILES', 'PROGRAMFILES(X86)')
+                 if env.get(name)]
+    if env.get('LOCALAPPDATA'):
+        prefixes.append(ntpath.join(env['LOCALAPPDATA'], 'Programs', 'Git'))
+    for parts in (('bin',), ('usr', 'bin')):
+        for prefix in prefixes:
+            candidate = ntpath.join(prefix, *parts, 'bash.exe')
+            if usable(candidate):
+                return candidate
+    raise ValueError('NO-GIT-BASH: no Git Bash to start the gate under. Tried FPL_BASH, '
+                     'CLAUDE_CODE_GIT_BASH_PATH, PATH outside System32 and WindowsApps, the prefix '
+                     'git --exec-path reports and the usual install directories; WSL\'s bash.exe is '
+                     'never used. Run attest.py through py.sh from Git Bash, or set '
+                     'CLAUDE_CODE_GIT_BASH_PATH to <Git>\\bin\\bash.exe')
+
+
+def _git_exec_path():
+    import subprocess
+    try:
+        done = subprocess.run(['git', '--exec-path'], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (done.stdout.strip() or None) if done.returncode == 0 else None
+
+
+def bash_path():
+    """The shell a wrapper gate, and its host probe, start under.
+
+    Anywhere but Windows this is process_tree's resolver, unchanged. On
+    Windows it is windows_bash: Git Bash, or a refusal.
+    """
+    if os.name != 'nt':
+        return process_tree.bash_path()
+    return windows_bash(os.environ, lambda name, path: shutil.which(name, path=path),
+                        os.path.isfile, _git_exec_path)
+
+
+# What the wrapper asks a shell to print before it hands it a gate.
+SHELL_ANSWER = 'FPL-SHELL-OK'
+SHELL_PROBE_SECONDS = 60
+
+
+def shell_problem(shell, cwd):
+    """None when `shell` runs a one-word command, else what it did instead.
+
+    This is the whole test for a shell fault, and it is the wrapper's own
+    observation: made before the declared command is handed over, in the
+    gate's directory and environment. Nothing the declared command prints or
+    exits with is read here, so a gate that starts can never be taken for a
+    shell that did not.
+    """
+    import subprocess
+    try:
+        done = subprocess.run([shell, '-c', 'printf %s ' + SHELL_ANSWER], cwd=cwd, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=SHELL_PROBE_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        return {'exit': None, 'output': exc.stdout or b'',
+                'why': f'gave no answer within {SHELL_PROBE_SECONDS} seconds'}
+    except OSError as exc:
+        return {'exit': None, 'output': b'', 'why': f'could not be started: {exc}'}
+    if done.returncode == 0 and SHELL_ANSWER.encode('ascii') in done.stdout:
+        return None
+    return {'exit': done.returncode, 'output': done.stdout,
+            'why': f'exited {done.returncode} without running a one-word command'}
+
+
+def _shell_fault_line(gate, attest_id, why):
+    return (f"attest: {gate}: SHELL-FAULT {attest_id}: the shell {why}, so the declared command "
+            f"was not started. This is not the gate's verdict and carries no exit to cite. "
+            f"Run the gate again with attest.py --rerun-fault {attest_id} --nonce <nonce>")
+
+
 def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
     """Run a declared gate and attest its exit. Returns the gate's exit code.
 
@@ -982,6 +1106,11 @@ def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
 
     `root` is where the manifest and the log live; `tree` is where the gate
     runs (root when not given) — a worktree of the campaign branch, say.
+
+    Two answers are not a gate exit. 2 is a refusal before anything started,
+    NO-GIT-BASH among them. 4 is a runner error or a shell fault: the shell
+    could not run the wrapper's one-word command, the declared command was
+    not started, and the row minted carries `fault: shell` and no exit.
     """
     root = os.path.abspath(root)
     tree = os.path.abspath(tree or root)
@@ -1009,6 +1138,14 @@ def run_gate(root, gate, detach=False, token=None, nonce="", tree=None):
               f"it) — a run there would be attested against this project's HEAD",
               file=sys.stderr)
         return 2
+    # A gate with no shell to start under is refused here, before a record or
+    # a row exists. A deployed lane starts its interpreter directly.
+    if not any(lane['gate'] == gate for lane in getattr(gates, 'deployed', {}).values()):
+        try:
+            bash_path()
+        except ValueError as exc:
+            print(f"attest: {exc}", file=sys.stderr)
+            return 2
     started = now()
     token = token or "bg_" + sha(f"{gate}|{started}|{os.getpid()}|{time.monotonic_ns()}")[:12]
     if detach:
@@ -1072,11 +1209,25 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
     print(f"attest: running {gate} as {token} — collect it with "
           f"attest.py --await {token}", flush=True)
     gates, problems = load_gates(root)
-    host = fault_policy.host_for(_api(), tree, gates, gate) if not problems and not reference else None
     deployed = any(lane['gate'] == gate for lane in getattr(gates, 'deployed', {}).values())
+    # A gate that goes through a shell is handed over only once that shell has
+    # run the wrapper's own one-word command. A shell that cannot is a shell
+    # fault: the declared command is not started, and the row carries no exit.
+    shell = shell_fault = None
+    if not problems and not reference and not deployed:
+        shell = bash_path()
+        # A tree that is gone is not the shell's doing: left to the launch.
+        shell_fault = shell_problem(shell, tree) if os.path.isdir(tree) else None
+    host = (fault_policy.host_for(_api(), tree, gates, gate)
+            if not problems and not reference and not shell_fault else None)
     pins_hashes, dependencies, pin_findings = deployed_resolution(root, tree, gate, gates) if not problems and not reference else ({}, {}, problems)
     store = bg.Store(root, BACKGROUND)
-    if pin_findings:
+    if shell_fault:
+        note = f"\nattest: the shell {shell_fault['why']}. Declared command not started.\n"
+        with open(log, "wb") as out:
+            out.write(shell_fault['output'] + note.encode("utf-8"))
+        code = None
+    elif pin_findings:
         with open(log, "wb") as out:
             out.write(("\n".join(pin_findings) + "\nSuite not started.\n").encode("utf-8"))
         code = 1
@@ -1089,12 +1240,12 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
                 raw_reference = 'cd ' + shlex.quote(reference['projectPrefix']) + ' && ' + raw_reference
             command, cwd = fault_policy.reference_argv(gates.reference, tree, raw_reference), tree
         else:
-            command, cwd, _ = deployed_invocation(tree, gates, gate) if deployed else ([bash_path(), '-c', raw], tree, [])
+            command, cwd, _ = deployed_invocation(tree, gates, gate) if deployed else ([shell, '-c', raw], tree, [])
         code = bg.run_command(store, control_token or token, command, cwd, log)
-    if code is None:
-        bg.finish(store, token, None)
-        print(f"attest: {gate} cancelled before command launch; nothing attested", flush=True)
-        return 130
+        if code is None:
+            bg.finish(store, token, None)
+            print(f"attest: {gate} cancelled before command launch; nothing attested", flush=True)
+            return 130
     with open(log, "rb") as fh:
         log_bytes = fh.read()
     text = log_bytes.decode("utf-8", "replace")
@@ -1112,6 +1263,10 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
         'dirty': any(p['kind'] == 'content' for p in observed_dirt),
         'dirtyPaths': observed_dirt,
     }
+    if shell_fault:
+        # No gate exit exists, so `exit` stays null: the row is neither a
+        # pass nor a red to any reader, and no node can cite it as a verdict.
+        row.update(fault='shell', shell=shell, shellExit=shell_fault['exit'])
     if attempt:
         row['attempt'] = attempt
     if reference:
@@ -1137,9 +1292,15 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
         # not relabel that completed failure as an interrupted race loser.
         row['cancelled'] = row['cancelRequested'] and (code == 0 or code in fault_policy.CANCELLATION_EXITS)
         import fault_attempts
-        classification = fault_policy.classify(gates, row, text, fault_attempts.load_launch(root, nonce))
-        if classification:
-            row['fault'] = classification
+        if shell_fault:
+            # A run cancelled before its command started attests nothing.
+            if rec.get('cancelRequested'):
+                return
+            rec.update(fault='shell', shellExit=shell_fault['exit'], shellWhy=shell_fault['why'])
+        else:
+            classification = fault_policy.classify(gates, row, text, fault_attempts.load_launch(root, nonce))
+            if classification:
+                row['fault'] = classification
         if not rec.get('cancelRequested') or code != 0:
             rec.update(fault_attempts.runner_facts(row))
             append_row(root, row)
@@ -1148,10 +1309,38 @@ def _execute(root, gate, started, token, nonce="", tree=None, control_token=None
                           nonce=nonce, treeSha=tree_head, manifestSha256=manifest_hash,
                           logSha256=row['logSha256'], attempt=attempt, dirty=row['dirty'], tree=row['tree'])
     if not completed.get('attestId'):
-        print(f"attest: {gate} cancelled; command exit {code}; nothing attested", flush=True)
+        print(f"attest: {gate} cancelled before command launch; nothing attested" if shell_fault else
+              f"attest: {gate} cancelled; command exit {code}; nothing attested", flush=True)
         return 130
+    if shell_fault:
+        print(_shell_fault_line(gate, row['attestId'], shell_fault['why']), flush=True)
+        return 4
     print(f"attest: {gate} exit {code} -> {row['attestId']} sha {tree_head}", flush=True)
     return code
+
+
+def rerun_shell_fault(root, original_id, nonce, detach=False, tree=None):
+    """Run a gate again after a shell fault. Returns what that run returns.
+
+    A shell fault left no gate exit, so there is nothing to settle and no
+    pair: the next run is the gate's first, and its exit stands like any
+    other. What is checked is that the row named is this run's shell fault
+    and that its retained completion and log still say so. A red, a row
+    from another run and an edited record are refused.
+    """
+    root = os.path.abspath(root)
+    try:
+        import fault_attempts
+        hits = [row for row in read(root) if isinstance(row, dict) and row.get('attestId') == original_id]
+        if len(hits) != 1 or hits[0].get('fault') != 'shell' or hits[0].get('exit') is not None:
+            raise ValueError('the row is not one shell fault')
+        if not nonce or hits[0].get('nonce') != nonce:
+            raise ValueError("only a shell fault minted under this run's nonce can be run again")
+        fault_attempts.witnessed(_api(), root, hits[0])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"attest: shell fault rerun refused: {exc}", file=sys.stderr)
+        return 2
+    return run_gate(root, hits[0]['gate'], detach, None, nonce, tree or hits[0].get('tree'))
 
 
 def _alive(pid, started=""):
@@ -1188,7 +1377,10 @@ def await_gate(root, ref, timeout, until=None):
     except ValueError as exc:
         print(f"attest: {exc}", file=sys.stderr)
         return 2
-    if rec.get("status") == "DONE" and rec.get("attestId"):
+    if rec.get("fault") == "shell" and rec.get("attestId"):
+        # Status 4, as for any run that left no gate exit.
+        print(_shell_fault_line(rec.get("gate"), rec["attestId"], rec.get("shellWhy") or "could not run a command"))
+    elif rec.get("status") == "DONE" and rec.get("attestId"):
         print(f"attest: {rec['gate']} exit {rec['exit']} -> {rec['attestId']}")
     else:
         print(f"attest: {rec.get('gate')} ({rec['token']}) {rec.get('status')}; "
@@ -1356,6 +1548,10 @@ def _check_cited(rows, node, gate, r, launch=None, head=None, used=None, root=No
         return {**base, "status": "MISMATCH",
                 "detail": (f"cites {cited}, which attests gate "
                            f"'{row.get('gate')}', not the declared '{gate}'")}
+    if row.get("fault") == "shell":
+        return {**base, "status": "STALE",
+                "detail": (f"cites {cited}, a shell fault: the declared command never "
+                           f"started, so the row holds no gate exit and is no verdict")}
     if type(row.get("exit")) is not int or row.get("exit") != claimed:
         return {**base, "status": "MISMATCH",
                 "detail": (f"claims exit {claimed} citing {cited}, but the hook "
@@ -1593,7 +1789,10 @@ def verify_claims(root, summary):
             if not gate:
                 continue
             claimed = r.get("exit")
-            mine = [a for a in rows if a.get("commandSha") == sha(normalize(r["command"]))]
+            # A shell fault is not an execution of the gate: it neither
+            # attests a claim nor contradicts one.
+            mine = [a for a in rows if a.get("commandSha") == sha(normalize(r["command"]))
+                    and a.get("fault") != "shell"]
             hit = next((a for a in mine if a.get("exit") == claimed and a.get("dirty") is False and not a.get("cancelled")), None)
             if hit:
                 checks.append({
@@ -1655,7 +1854,9 @@ def main():
     g.add_argument("--list", action="store_true")
     g.add_argument("--verify", action="store_true")
     g.add_argument("--run", metavar="GATE")
-    g.add_argument("--rerun-fault", metavar="ATTEST_ID", help="settle one classified crash with one native/reference pair")
+    g.add_argument("--rerun-fault", metavar="ATTEST_ID",
+                   help="settle one classified crash with one native/reference pair; "
+                        "for a shell fault, run the gate again")
     g.add_argument("--await", dest="await_", metavar="TOKEN")
     g.add_argument("--cancel", metavar="TOKEN")
     g.add_argument("--ci", action="store_true")
@@ -1693,6 +1894,9 @@ def main():
         tree = a.tree or (None if a.token else tree_for(a.root, "."))
         return run_gate(a.root, a.run, a.detach, a.token, a.nonce, tree)
     if a.rerun_fault:
+        if any(isinstance(row, dict) and row.get("attestId") == a.rerun_fault
+               and row.get("fault") == "shell" for row in read(a.root)):
+            return rerun_shell_fault(a.root, a.rerun_fault, a.nonce, a.detach, a.tree)
         import fault_attempts
         return fault_attempts.rerun(_api(), a.root, a.rerun_fault, a.nonce,
                                     a.detach, a.token, a.tree)
@@ -1714,7 +1918,8 @@ def main():
                     "through attest.py --run", file=sys.stderr)
             return 1
         r = mine[-1]
-        print(f"{r['attestId']} gate {r['gate']} exit {r['exit']} when {r.get('when')} "
+        verdict = "fault shell" if r.get("fault") == "shell" else f"exit {r['exit']}"
+        print(f"{r['attestId']} gate {r['gate']} {verdict} when {r.get('when')} "
               f"witness {r.get('witness') or 'hook'} nonce {r.get('nonce') or '-'} "
               f"sha {r.get('treeSha') or r.get('headSha') or 'unknown'}")
         return 0
@@ -1756,8 +1961,9 @@ def main():
         print(f"attest: {len(gates)} declared gate(s), {len(rows)} attested execution(s)")
         for name, cmd in sorted(gates.items()):
             mine = [r for r in rows if r.get("gate") == name]
-            last = (f"last {mine[-1]['when']} exit {mine[-1]['exit']} -> "
-                    f"{mine[-1].get('attestId')}") if mine else "never run"
+            last = (f"last {mine[-1]['when']} "
+                    + ("fault shell" if mine[-1].get("fault") == "shell" else f"exit {mine[-1]['exit']}")
+                    + f" -> {mine[-1].get('attestId')}") if mine else "never run"
             print(f"  {name:<16} {cmd}")
             print(f"  {'':<16} {len(mine)} run(s), {last}")
         ci = load_ci(a.root)

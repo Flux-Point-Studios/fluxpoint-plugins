@@ -119,3 +119,54 @@ This is a gate-execution exception, not a node retry setting. Commands run outsi
 attestation remain unwitnessed. Compiler warnings identify schema-only exit
 gates whose prompt repeats a declared gate command verbatim; use `prove:<gate>`
 to enforce this history.
+
+## Shell faults
+
+A gate that goes through a shell can fail before its declared command starts.
+On Windows, `attest.py --run` started from PowerShell without `py.sh` once ran
+its gate under System32's `bash.exe`, which is WSL's launcher. The launcher
+printed `execvpe(/bin/bash) failed` and exited 1, and that exit was attested
+as the gate's.
+
+The wrapper now resolves the shell and tests it before it hands the gate over.
+
+On Windows the shell is Git Bash. The sources, in order, are `FPL_BASH`, which
+`py.sh` exports, then `CLAUDE_CODE_GIT_BASH_PATH`, a `bash` on `PATH`,
+`bin\bash.exe` and `usr\bin\bash.exe` under the prefix `git --exec-path`
+reports, and the directories Git for Windows installs into. A path in
+`System32`, `Sysnative`, `SysWOW64` or `WindowsApps` is never used, whatever
+names it. With no Git Bash, `--run` prints `NO-GIT-BASH` and exits 2. No record
+and no row are written. On other platforms the shell is resolved as before.
+
+Before the declared command is handed over, the wrapper has the shell run
+`printf %s FPL-SHELL-OK` in the gate's directory. A shell that cannot be
+started, exits non-zero, prints something else, or gives no answer within 60
+seconds is a shell fault. The declared command is not started. The wrapper row
+carries `"fault": "shell"`, the shell's own status as `shellExit`, the shell's
+path as `shell`, and `"exit": null`. `--run` and `--await` answer 4 and print
+`SHELL-FAULT` with the attestation id. `--last` prints `fault shell` in place
+of an exit.
+
+A shell fault row is no pass and no red. A `prove:` node that cites it is
+`STALE`. It does not attest or contradict an observed claim. It does not stand
+against a later run of the gate, so that run is judged on its own exit.
+
+Run the gate again with the command a crash uses:
+
+```bash
+bash "$ROOT/scripts/py.sh" attest.py --rerun-fault <attestId> --root "$PROJECT" --nonce "$NONCE" --detach
+bash "$ROOT/scripts/py.sh" attest.py --await <token> --root "$PROJECT"
+```
+
+For a shell fault this starts one ordinary run of the gate. There is no pair
+and no reference leg, because no execution of the gate failed. The named row
+must be a shell fault minted under this run's nonce, and its retained
+completion record and log must be unchanged. Cite the new run's attestation.
+
+Only the wrapper's own test makes a shell fault. Once the shell has answered,
+the gate runs and its exit is its verdict. Exit 127 from a declared command
+whose program is missing is such a verdict: a gate script exits 127 as well
+when a tool it calls is missing, and the status does not tell the two apart.
+A red from a gate that started stays red and is never run again as a fault.
+A deployed lane starts its interpreter without a shell and is not tested this
+way.

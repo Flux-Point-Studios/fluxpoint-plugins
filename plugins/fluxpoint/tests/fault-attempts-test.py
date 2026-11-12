@@ -407,5 +407,326 @@ sys.exit(subprocess.call(command,cwd=root,env=env))
         self.assertIn('1 verified host crash event(s) retained', graph.read_text())
 
 
+class GateShell(unittest.TestCase):
+    """The shell a wrapper gate starts under on Windows, from its inputs alone.
+
+    `attest.py --run` started from PowerShell without py.sh has no FPL_BASH.
+    A bare "bash" there is resolved by CreateProcess in System32 first, which
+    with WSL installed is WSL's launcher: the gate never ran and its exit was
+    attested as the gate's. The resolver is a function of an environment, a
+    PATH search, a file test and `git --exec-path`, so it runs here on fakes.
+    """
+
+    LAUNCHER = r'C:\Windows\System32\bash.exe'
+    GIT_BASH = r'C:\Program Files\Git\bin\bash.exe'
+    EXEC_PATH = 'C:/Program Files/Git/mingw64/libexec/git-core'
+
+    def resolve(self, env=None, files=(), exec_path=None):
+        import ntpath
+        present = {ntpath.normcase(name) for name in files}
+
+        def which(name, path):
+            for directory in (path or '').split(';'):
+                candidate = ntpath.join(directory, name + '.exe')
+                if directory and ntpath.normcase(candidate) in present:
+                    return candidate
+            return None
+
+        return at.windows_bash(env or {}, which, lambda name: ntpath.normcase(name) in present, lambda: exec_path)
+
+    def test_git_bash_is_found_from_git_when_system32_leads_the_path(self):
+        found = self.resolve({'PATH': r'C:\Windows\System32;C:\Program Files\Git\cmd'},
+                             [self.LAUNCHER, self.GIT_BASH], self.EXEC_PATH)
+        self.assertEqual(found, self.GIT_BASH)
+
+    def test_the_wsl_launcher_is_never_the_answer(self):
+        cases = {
+            'on PATH': {'PATH': r'C:\Windows\System32'},
+            'named by FPL_BASH': {'FPL_BASH': self.LAUNCHER},
+            'named by the Claude Code setting': {'CLAUDE_CODE_GIT_BASH_PATH': self.LAUNCHER},
+            'in another case': {'FPL_BASH': r'c:\windows\SYSTEM32\BASH.EXE'},
+        }
+        for name, env in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(ValueError) as refused:
+                    self.resolve(env, [self.LAUNCHER])
+                self.assertTrue(str(refused.exception).startswith('NO-GIT-BASH'), refused.exception)
+                self.assertEqual(self.resolve(env, [self.LAUNCHER, self.GIT_BASH], self.EXEC_PATH), self.GIT_BASH)
+        alias = r'C:\Users\me\AppData\Local\Microsoft\WindowsApps\bash.exe'
+        with self.assertRaises(ValueError):
+            self.resolve({'PATH': r'C:\Users\me\AppData\Local\Microsoft\WindowsApps', 'FPL_BASH': alias}, [alias])
+        for elsewhere in (r'D:\WINNT\System32\bash.exe', r'C:\Windows\Sysnative\bash.exe'):
+            with self.subTest(elsewhere=elsewhere), self.assertRaises(ValueError):
+                self.resolve({'PATH': elsewhere.rsplit('\\', 1)[0], 'FPL_BASH': elsewhere}, [elsewhere])
+
+    def test_an_explicit_shell_comes_first(self):
+        theirs = r'C:\Program Files\Git\usr\bin\bash.exe'
+        env = {'FPL_BASH': theirs, 'CLAUDE_CODE_GIT_BASH_PATH': self.GIT_BASH, 'PATH': r'C:\msys64\usr\bin'}
+        files = [theirs, self.GIT_BASH, r'C:\msys64\usr\bin\bash.exe']
+        self.assertEqual(self.resolve(env, files, self.EXEC_PATH), theirs)
+        del env['FPL_BASH']
+        self.assertEqual(self.resolve(env, files, self.EXEC_PATH), self.GIT_BASH)
+        # A setting that names nothing is passed over.
+        self.assertEqual(self.resolve({'FPL_BASH': r'C:\gone\bash.exe'}, [self.GIT_BASH], self.EXEC_PATH), self.GIT_BASH)
+
+    def test_a_bash_on_path_outside_the_launcher_directories_is_used(self):
+        msys = r'C:\msys64\usr\bin\bash.exe'
+        found = self.resolve({'PATH': r'C:\Windows\system32;C:\msys64\usr\bin'}, [self.LAUNCHER, msys], self.EXEC_PATH)
+        self.assertEqual(found, msys)
+
+    def test_known_install_paths_stand_in_when_git_is_not_on_path(self):
+        for env, bash in (({'ProgramFiles': r'C:\Program Files'}, self.GIT_BASH),
+                          ({'ProgramW6432': r'D:\Apps'}, r'D:\Apps\Git\bin\bash.exe'),
+                          ({'LOCALAPPDATA': r'C:\Users\me\AppData\Local'},
+                           r'C:\Users\me\AppData\Local\Programs\Git\bin\bash.exe')):
+            with self.subTest(bash=bash):
+                self.assertEqual(self.resolve(env, [self.LAUNCHER, bash]), bash)
+
+    def test_the_prefix_git_reports_is_searched_for_bin_then_usr_bin(self):
+        scoop = r'C:\Users\me\scoop\apps\git\current'
+        self.assertEqual(self.resolve({}, [scoop + r'\bin\bash.exe', scoop + r'\usr\bin\bash.exe'],
+                                      scoop.replace('\\', '/') + '/mingw64/libexec/git-core'),
+                         scoop + r'\bin\bash.exe')
+        self.assertEqual(self.resolve({}, [scoop + r'\usr\bin\bash.exe'], scoop + r'\mingw64\libexec\git-core'),
+                         scoop + r'\usr\bin\bash.exe')
+        # A git that reports a path with no bash beside it settles nothing.
+        with self.assertRaises(ValueError):
+            self.resolve({}, [self.LAUNCHER], '/usr/lib/git-core')
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX keeps the resolver every other caller uses')
+    def test_posix_resolution_is_unchanged(self):
+        import process_tree
+        with tempfile.NamedTemporaryFile() as named:
+            for env in ({'FPL_BASH': named.name}, {'CLAUDE_CODE_GIT_BASH_PATH': named.name}, {}):
+                with self.subTest(env=env), patch.dict(os.environ, env):
+                    if not env:
+                        os.environ.pop('FPL_BASH', None)
+                        os.environ.pop('CLAUDE_CODE_GIT_BASH_PATH', None)
+                    self.assertEqual(at.bash_path(), process_tree.bash_path())
+
+
+class ShellFaults(unittest.TestCase):
+    """A gate whose shell cannot run a command is a fault row, and only that is.
+
+    Before the declared command is handed to the shell, the wrapper asks that
+    shell to print one word. A shell that cannot do that never starts the
+    declared command, and the row says so: `fault: shell`, no gate exit. A
+    shell that answers runs the gate, and whatever the gate then exits with is
+    the gate's own verdict. A fault row can be run again; a red cannot.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='fpl-shell-test-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'repo'
+        self.root.mkdir()
+        self.git('init', '-q')
+        self.git('config', 'user.name', 'shell fixture')
+        self.git('config', 'user.email', 'fixture@example.invalid')
+        (self.root / '.gitignore').write_text('.claude/\n')
+        (self.root / 'green.py').write_text('print("the declared command ran")\n')
+        (self.root / 'red.py').write_text('import sys\nprint("the declared command ran and failed")\nsys.exit(3)\n')
+        (self.root / 'flaky.py').write_text(
+            'import pathlib, sys\nstate = pathlib.Path(".claude/flaky-state")\n'
+            'state.parent.mkdir(parents=True, exist_ok=True)\nfirst = not state.exists()\nstate.write_text("ran")\n'
+            'print("the declared command ran")\nsys.exit(3 if first else 0)\n')
+        exe = shlex.quote(sys.executable.replace('\\', '/'))
+        (self.root / '.fluxpoint-gates.json').write_text(json.dumps({'version': 1, 'gates': {
+            'green': exe + ' green.py', 'red': exe + ' red.py', 'flaky': exe + ' flaky.py',
+            'absent': 'fpl-no-such-program --version'}}))
+        self.git('add', '.')
+        self.git('commit', '-qm', 'gates')
+        self.launch = at.stamp(str(self.root))
+        # A stand-in, on every platform, for a shell that cannot run a
+        # command: this interpreter. Handed `-c 'printf ...'` it stops on a
+        # syntax error and exits 1, as WSL's bash.exe exits 1 when it has no
+        # distribution to start.
+        self.dead = sys.executable
+
+    def git(self, *args):
+        return subprocess.run(['git', '-C', str(self.root), *args], capture_output=True, text=True, check=True).stdout.strip()
+
+    def rows(self):
+        return at.read(str(self.root))
+
+    def named(self, shell):
+        """FPL_BASH for a run under `shell`; nothing for a run under the machine's own."""
+        if not shell:
+            return {}
+        if os.name == 'nt' and 'windowsapps' in str(shell).lower():
+            self.skipTest('this interpreter sits among the launchers the resolver passes over')
+        return {'FPL_BASH': str(shell)}
+
+    def run_gate(self, gate, shell=None):
+        with patch.dict(os.environ, self.named(shell)):
+            code = at.run_gate(str(self.root), gate, nonce=self.launch['nonce'])
+        return code, self.rows()[-1]
+
+    def cli(self, *args, shell=None):
+        return subprocess.run([sys.executable, str(SCRIPTS / 'attest.py'), '--root', str(self.root), *args],
+                              capture_output=True, text=True, env=dict(os.environ, **self.named(shell)), timeout=120)
+
+    def log(self, row):
+        return (self.root / '.claude/fluxpoint/attest-bg' / (row['token'] + '.log')).read_text(errors='replace')
+
+    def check(self, gate, row, claimed=None):
+        summary = {'launch': self.launch, 'tree': {'baseline': {'head': self.git('rev-parse', 'HEAD')}},
+                   'contracts': {'node': 'HarnessCheckV1'}, 'prove': {'node': gate},
+                   'results': {'node': {'gate': gate, 'exit': row['exit'] if claimed is None else claimed,
+                                        'attestId': row['attestId'], 'sha': row['treeSha']}}}
+        checks, findings = at.verify_claims(str(self.root), summary)
+        self.assertFalse(findings)
+        return checks[0]
+
+    # ---- one side: the declared command never started -----------------------
+
+    def test_a_shell_that_cannot_exec_is_a_fault_row_with_no_gate_exit(self):
+        code, row = self.run_gate('green', self.dead)
+        self.assertEqual(code, 4)
+        self.assertIsNone(row['exit'])
+        self.assertEqual((row['fault'], row['shellExit'], row['witness']), ('shell', 1, 'wrapper'))
+        self.assertEqual(row['shell'], str(self.dead))
+        self.assertIn('the shell exited 1 without running a one-word command. Declared command not started.',
+                      self.log(row))
+        self.assertNotIn('the declared command ran', self.log(row))
+        rec = bg.Store(str(self.root), at.BACKGROUND).read(row['token'])
+        self.assertEqual((rec['status'], rec['exit'], rec.get('fault'), rec['attestId']),
+                         ('DONE', None, 'shell', row['attestId']))
+
+    @unittest.skipIf(os.name == 'nt', 'the launcher is stood in for by a shell script here')
+    def test_the_wsl_launchers_own_failure_is_that_fault(self):
+        # What the issue saw: the launcher prints this, exits 1, and that 1
+        # was attested as the gate's exit over a log holding only this line.
+        launcher = Path(self.tmp.name) / 'bash'
+        launcher.write_text('#!/bin/sh\necho "execvpe(/bin/bash) failed: No such file or directory"\nexit 1\n')
+        launcher.chmod(0o755)
+        code, row = self.run_gate('green', launcher)
+        self.assertEqual((code, row['exit'], row['fault'], row['shellExit']), (4, None, 'shell', 1))
+        self.assertIn('execvpe(/bin/bash) failed', self.log(row))
+        self.assertNotIn('the declared command ran', self.log(row))
+
+    def test_a_shell_that_cannot_be_started_at_all_is_the_same_fault(self):
+        missing = str(Path(self.tmp.name) / 'no-such-shell')
+        with patch.object(at, 'bash_path', return_value=missing):
+            code = at.run_gate(str(self.root), 'green', nonce=self.launch['nonce'])
+        row = self.rows()[-1]
+        self.assertEqual((code, row['exit'], row['fault'], row['shellExit']), (4, None, 'shell', None))
+        self.assertNotIn('the declared command ran', self.log(row))
+
+    def test_a_fault_row_does_not_stand_against_the_gates_real_run(self):
+        _, fault = self.run_gate('green', self.dead)
+        code, green = self.run_gate('green')
+        self.assertEqual((code, green['exit'], green.get('fault')), (0, 0, None))
+        self.assertIn('the declared command ran', self.log(green))
+        self.assertEqual(self.check('green', green)['status'], 'ATTESTED')
+        # The fault row itself is no verdict, whatever exit a node pairs it with.
+        for claimed in (0, 1):
+            with self.subTest(claimed=claimed):
+                cited = self.check('green', fault, claimed)
+                self.assertEqual(cited['status'], 'STALE')
+                self.assertIn('shell fault', cited['detail'])
+
+    def test_a_fault_row_neither_attests_nor_contradicts_an_observed_claim(self):
+        gates = json.loads((self.root / '.fluxpoint-gates.json').read_text())['gates']
+        self.run_gate('green', self.dead)
+        self.run_gate('red')
+
+        def observed(gate):
+            summary = {'contracts': {'node': 'HarnessCheckV1'},
+                       'results': {'node': {'command': gates[gate], 'exit': 0}}}
+            checks, findings = at.verify_claims(str(self.root), summary)
+            self.assertFalse(findings)
+            return checks[0]['status']
+
+        # Nothing ran the green gate, so its claim rests on the node alone. The
+        # red gate did run, and a claimed pass contradicts that.
+        self.assertEqual(observed('green'), 'UNATTESTED')
+        self.assertEqual(observed('red'), 'MISMATCH')
+
+    def test_rerun_fault_runs_the_gate_again(self):
+        _, fault = self.run_gate('green', self.dead)
+        p = self.cli('--rerun-fault', fault['attestId'], '--nonce', self.launch['nonce'])
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        again = self.rows()[-1]
+        self.assertEqual((again['gate'], again['exit'], again.get('fault')), ('green', 0, None))
+        self.assertNotEqual(again['attestId'], fault['attestId'])
+        self.assertEqual(self.check('green', again)['status'], 'ATTESTED')
+
+    def test_await_and_last_name_the_fault_and_offer_no_exit_to_cite(self):
+        p = self.cli('--run', 'green', '--nonce', self.launch['nonce'], shell=self.dead)
+        self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+        self.assertIn('SHELL-FAULT', p.stdout)
+        p = self.cli('--run', 'green', '--detach', '--nonce', self.launch['nonce'], shell=self.dead)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        token = p.stdout.split(' as ', 1)[1].split()[0]
+        p = self.cli('--await', token, '--timeout', '60')
+        self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+        self.assertIn('SHELL-FAULT', p.stdout)
+        self.assertIn('--rerun-fault ' + self.rows()[-1]['attestId'], p.stdout)
+        self.assertNotIn(' exit None', p.stdout)
+        self.assertNotIn(' exit 1 ->', p.stdout)
+        p = self.cli('--last', 'green', '--nonce', self.launch['nonce'])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('fault shell', p.stdout)
+        self.assertNotIn(' exit ', p.stdout)
+
+    # ---- the other side: a gate that started is judged by its exit ----------
+
+    def test_a_gate_that_starts_and_fails_stays_a_plain_red(self):
+        # 127 is what bash gives a declared command whose program is missing,
+        # and also what a gate script gives when a tool it calls is missing.
+        for gate, want in (('red', 3), ('absent', 127)):
+            with self.subTest(gate=gate):
+                code, row = self.run_gate(gate)
+                self.assertEqual((code, row['exit']), (want, want))
+                self.assertNotIn('fault', row)
+                self.assertNotIn('shellExit', row)
+
+    def test_a_real_red_still_stands_against_a_later_green(self):
+        # A fault and its rerun settle nothing about a red the gate earned.
+        code, red = self.run_gate('flaky')
+        self.assertEqual((code, red['exit'], red.get('fault')), (3, 3, None))
+        _, fault = self.run_gate('flaky', self.dead)
+        self.assertEqual(fault['fault'], 'shell')
+        self.assertEqual(at.rerun_shell_fault(str(self.root), fault['attestId'], self.launch['nonce']), 0)
+        green = self.rows()[-1]
+        self.assertEqual((green['exit'], green.get('fault')), (0, None))
+        self.assertEqual(self.check('flaky', green)['status'], 'SUPERSEDED-RED')
+
+    def test_rerun_fault_refuses_a_red_another_run_and_altered_evidence(self):
+        _, fault = self.run_gate('green', self.dead)
+        _, red = self.run_gate('red')
+        before = len(self.rows())
+        for label, ident, nonce in (('a plain red', red['attestId'], self.launch['nonce']),
+                                    ("another run's nonce", fault['attestId'], 'another-run'),
+                                    ('no nonce', fault['attestId'], '')):
+            with self.subTest(label):
+                p = self.cli('--rerun-fault', ident, *(['--nonce', nonce] if nonce else []))
+                self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        with open(self.root / '.claude/fluxpoint/attest-bg' / (fault['token'] + '.log'), 'ab') as log:
+            log.write(b'edited after the fact\n')
+        p = self.cli('--rerun-fault', fault['attestId'], '--nonce', self.launch['nonce'])
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertEqual(len(self.rows()), before)
+
+    def test_a_tree_that_is_gone_is_a_runner_error_and_no_shell_fault(self):
+        plain = Path(self.tmp.name) / 'no-repository'
+        plain.mkdir()
+        (plain / '.fluxpoint-gates.json').write_text(json.dumps({'version': 1, 'gates': {'green': 'echo ok'}}))
+        code = at.run_gate(str(plain), 'green', tree=str(plain / 'gone'))
+        self.assertEqual(code, 4)
+        self.assertEqual(at.read(str(plain)), [])
+        records = [bg.Store(str(plain), at.BACKGROUND).read(p.stem)
+                   for p in (plain / '.claude/fluxpoint/attest-bg').glob('bg_*.json')]
+        self.assertEqual([(rec['status'], rec.get('fault')) for rec in records], [('ERROR', None)])
+
+    def test_no_shell_is_refused_before_anything_is_started(self):
+        with patch.object(at, 'bash_path', side_effect=ValueError('NO-GIT-BASH: nothing to start a gate under')):
+            code = at.run_gate(str(self.root), 'green', nonce=self.launch['nonce'])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(sorted(p.name for p in (self.root / '.claude/fluxpoint/attest-bg').glob('bg_*')), [])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
