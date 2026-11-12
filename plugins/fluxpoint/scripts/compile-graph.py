@@ -817,6 +817,29 @@ def journal_labels(run_id, projects=None):
         return []
 
 
+def runs_beside(ir, earlier, later):
+    """True when `earlier` may still be running as `later` returns.
+
+    Declared earlier is not enough in a graph with lanes: two nodes in
+    different lanes of one fork start together, and nothing orders them
+    unless one waits on the other.
+    """
+    by_id = {n.get("id"): n for n in ir.get("nodes") or [] if isinstance(n, dict)}
+    if earlier in ancestors(by_id.get(later) or {}, by_id):
+        return False
+    try:
+        stages = execution_stages(ir)
+    except (KeyError, TypeError, AttributeError):
+        return False        # a malformed graph is reported by its own findings
+    for kind, stage in stages:
+        if kind != "lanes":
+            continue
+        where = {n.get("id"): index for index, lane in enumerate(stage) for n in lane}
+        if earlier in where and later in where:
+            return where[earlier] != where[later]
+    return False
+
+
 def replay_features(ir, embedded_args=None):
     return (any(n.get('irreversible') or n.get('contract') == 'NativeReadingsV1' or any(key in n for key in ("lane", "replay", "fresh", "pushes", "repository", "branch")) or isinstance(n.get('after'), list) for n in ir.get("nodes", []))
             or bool((embedded_args or {}).get("rejudge")))
@@ -1355,6 +1378,10 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
                 f.append(f"{where}: sameShaAs '{same}' names no earlier node — the commit to "
                          f"compare with has to exist when this node returns")
             else:
+                if runs_beside(ir, same, nid):
+                    f.append(f"{where}: sameShaAs '{same}' runs beside this node in another lane, so its "
+                             f"commit may not exist when this node returns — make this node wait on "
+                             f"'{same}' (after), or put the two in one lane")
                 for label, node in ((where, n), (f"node '{same}'", target)):
                     if is_reduce(node) or node.get("foreach") or node.get("repeat") or judge_size(node):
                         f.append(f"{where}: sameShaAs compares one commit with one commit, and "
@@ -2227,7 +2254,12 @@ def warnings(ir, agents=None, specification=None, gates=None):
     for node in ir.get("nodes") or []:
         if not isinstance(node, dict) or not prove_gate(node) or node.get("sameShaAs"):
             continue
-        earlier = [nid for nid in ancestors(node, by_id) if prove_gate(by_id.get(nid) or {})]
+        waits_on = ancestors(node, by_id)
+        # A node that commits between two gates moves the commit by design:
+        # the second gate judges what the first never saw.
+        moved = {nid for mid in waits_on if (by_id.get(mid) or {}).get("mutates")
+                 for nid in ancestors(by_id[mid], by_id)}
+        earlier = [nid for nid in waits_on if prove_gate(by_id.get(nid) or {}) and nid not in moved]
         if earlier:
             first = next(x.get("id") for x in ir["nodes"] if x.get("id") in earlier)
             w.append(

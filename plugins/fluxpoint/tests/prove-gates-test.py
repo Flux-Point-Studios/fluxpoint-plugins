@@ -200,6 +200,53 @@ class OneCommit(unittest.TestCase):
         fanned['nodes'][2].update(foreach='targets', prompt='rerun {{item.key}} after {{prev}}')
         self.assertEqual(len(refused(fanned)), 1)
 
+    def test_a_gate_running_beside_this_one_cannot_be_the_commit_to_share(self):
+        # Two gates in two lanes start together. Whichever returns second finds
+        # the other's commit; the first finds none and used to halt the run on
+        # timing alone, with the same commit on both.
+        def lanes(**second):
+            return {'version': 1, 'campaign': 'two gates, two lanes', 'budget': {'maxNodes': 8}, 'nodes': [
+                {'id': 'unit', 'lane': 'a', 'prompt': 'run the unit gate', 'contract': 'ExecutionV1',
+                 'verify': 'prove:harness', 'haltWhen': 'exit != 0'},
+                dict({'id': 'e2e', 'lane': 'b', 'prompt': 'run the end-to-end gate', 'contract': 'ExecutionV1',
+                      'verify': 'prove:reruns', 'haltWhen': 'exit != 0', 'sameShaAs': 'unit'}, **second),
+                {'id': 'report', 'after': ['unit', 'e2e'], 'prompt': 'report {{prev.unit}} and {{prev.e2e}}',
+                 'contract': 'DesignV1'}]}
+
+        def refused(ir):
+            return [f for f in cg.validate(ir, SHIPPED, gates=GATES) if 'sameShaAs' in f]
+
+        found = refused(lanes())
+        self.assertEqual(len(found), 1, found)
+        for part in ("'e2e'", "'unit'", 'lane'):
+            self.assertIn(part, found[0])
+        # In one lane, or after it, the earlier gate has returned by the time this one does.
+        self.assertEqual(refused(lanes(lane='a')), [])
+        joined = lanes(after='unit', prompt='run the end-to-end gate after {{prev}}')
+        joined['nodes'][1].pop('lane')
+        joined['nodes'][2].update(after='e2e', prompt='report {{prev}}')
+        self.assertEqual(refused(joined), [])
+
+    def test_check_does_not_ask_for_one_commit_across_a_node_that_commits(self):
+        # Build, gate, then a prover that commits proofs, then a second gate.
+        # The commit moves between the gates by design.
+        ir = {'version': 1, 'campaign': 'build, gate, prove, gate', 'treeGuard': False, 'budget': {'maxNodes': 8}, 'nodes': [
+            {'id': 'build', 'prompt': 'build', 'contract': 'SliceV1', 'mutates': True},
+            {'id': 'gate', 'after': 'build', 'independent': True, 'verifies': 'build', 'prompt': 'gate {{prev}}',
+             'contract': 'ExecutionV1', 'verify': 'prove:harness', 'haltWhen': 'exit != 0'},
+            {'id': 'prover', 'after': 'gate', 'prompt': 'add proofs on top of {{prev}} and commit them',
+             'contract': 'SliceV1', 'mutates': True},
+            {'id': 'gate-proof', 'after': 'prover', 'independent': True, 'verifies': 'prover', 'prompt': 'gate {{prev}}',
+             'contract': 'ExecutionV1', 'verify': 'prove:harness', 'haltWhen': 'exit != 0'}]}
+        self.assertEqual(cg.validate(ir, SHIPPED, gates=GATES), [])
+        self.assertEqual([w for w in cg.warnings(ir, gates=GATES) if 'sameShaAs' in w], [])
+        # Without the node that commits, the same two gates are warned about.
+        ir['nodes'][2].pop('mutates')
+        ir['nodes'][2]['contract'] = 'DesignV1'
+        ir['nodes'][3].pop('verifies')
+        ir['nodes'][3].pop('independent')
+        self.assertEqual(len([w for w in cg.warnings(ir, gates=GATES) if 'sameShaAs' in w]), 1)
+
     def test_check_warns_about_a_second_gate_that_names_no_commit(self):
         def about(ir):
             return [w for w in cg.warnings(ir, gates=GATES) if 'sameShaAs' in w]

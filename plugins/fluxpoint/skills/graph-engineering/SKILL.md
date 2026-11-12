@@ -586,8 +586,11 @@ commit when it runs, so a branch that moves between them leaves a verdict
 about one head and a gate pass about another, and the run still records
 COMPLETE. `"sameShaAs": "<node id>"` on the later node halts the run when
 its `sha` differs from the earlier node's. Both contracts must require a
-40-hex `sha`. `--check` warns about a second `prove:` node in a chain that
-names none.
+40-hex `sha`, and the earlier node has to have returned: a gate in
+another lane of the same fork runs beside this one and is refused, so
+make the later gate wait on it. `--check` warns about a second `prove:`
+node in a chain that names none, unless a node that commits sits between
+the two, where the commit moves by design.
 
 A citation is also bound to the run that cites it. The compiled graph
 refuses to start without the launch stamp `/fluxpoint:graph-run` passes in
