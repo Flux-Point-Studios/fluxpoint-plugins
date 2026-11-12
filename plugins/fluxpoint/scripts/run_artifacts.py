@@ -208,7 +208,9 @@ def lineage(run_stores, run_id, source_id=None):
             row = json.loads(raw.decode('utf-8'))
         except (OSError, ValueError, RecursionError):
             return
-        summary = row.get('summary') if isinstance(row, dict) else None
+        if not isinstance(row, dict):
+            return  # some other JSON file that holds the word: no run record, so no link
+        summary = row.get('summary')
         source = summary.get('resumeSource') if isinstance(summary, dict) else None
         join(row.get('runId') if isinstance(row.get('runId'), str) else fallback,
              source.get('runId') if isinstance(source, dict) else None)

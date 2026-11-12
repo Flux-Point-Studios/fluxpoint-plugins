@@ -309,6 +309,118 @@ class PostRunVetoTests(unittest.TestCase):
         self.assertEqual(target.read_text(encoding='utf-8'), HEADER)
         self.assertFalse((self.store / 'kept.json').exists())
 
+    def test_the_refusal_names_the_way_out_by_where_the_files_really_are(self):
+        # Which advice is given used to follow the spelling: a linked graph
+        # named through another spelling of its project was told to pass
+        # another root, and a root spelled through a link and back out of it
+        # made a plain file in the project look like a link.
+        link = self.root.parent / (self.root.name + '-link')
+        elsewhere = self.root.parent / (self.root.name + '-elsewhere')
+        (elsewhere / 'deep').mkdir(parents=True)
+        self.addCleanup(lambda: __import__('shutil').rmtree(elsewhere, ignore_errors=True))
+        target = elsewhere / 'kept.md'
+        target.write_text(HEADER, encoding='utf-8')
+        try:
+            link.symlink_to(self.root, target_is_directory=True)
+            (self.root / 'KEPT.md').symlink_to(target)
+            (self.root / 'lnkdir').symlink_to(elsewhere / 'deep', target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest('this platform cannot create a link')
+        self.addCleanup(link.unlink)
+
+        def refused(root, graph):
+            done = subprocess.run([sys.executable, str(SCRIPT), '--root', str(root), '--graph', str(graph), '--run-id', 'kept'],
+                                  input=json.dumps(verdict('SHIP')), cwd=self.root, capture_output=True, text=True,
+                                  env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
+            self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+            self.assertFalse((self.root / '.claude').exists())
+            return done.stderr
+
+        # The graph's own directory is the project, so the graph is a link to keep inside it.
+        for root, graph in ((self.root, self.root / 'KEPT.md'), (link, self.root / 'KEPT.md'),
+                            (self.root, link / 'KEPT.md'), (link, link / 'KEPT.md'), ('.', 'KEPT.md')):
+            with self.subTest(root=str(root), graph=str(graph)):
+                said = refused(root, graph)
+                self.assertIn('inside the project', said)
+                self.assertIn(str(target.resolve()), said)
+                self.assertNotIn('pass --root', said)
+        # The root is where its links lead, and the graph is no link at all.
+        said = refused(os.path.join('lnkdir', '..'), 'WORK.md')
+        self.assertIn('pass --root', said)
+        self.assertNotIn('links are followed', said)
+        self.assertNotIn('inside the project', said)
+
+    def test_a_json_file_in_a_store_that_is_no_run_record_is_passed_over(self):
+        # Any file in a store above the project is read for the campaign's
+        # links. One that holds the word and is no object ended the record.
+        above = self.root.parent / (self.root.name + '-above')
+        project = above / 'project'
+        project.mkdir(parents=True)
+        self.addCleanup(lambda: __import__('shutil').rmtree(above, ignore_errors=True))
+        (project / 'WORK.md').write_text(HEADER, encoding='utf-8')
+        for holder in (above, project):
+            runs = holder / '.claude' / 'fluxpoint' / 'runs'
+            (runs / 'history' / 'notes').mkdir(parents=True)
+            for name, body in (('notes.json', ['see "resumeSource" in the artifacts', {'k': 'resumeSource'}]),
+                               ('word.json', 'resumeSource'), ('nothing.json', None), ('number.json', 7),
+                               ('history/notes/1.json', ['resumeSource']),
+                               ('odd.json', {'runId': ['resumeSource'], 'summary': {'resumeSource': ['x']}})):
+                (runs / name).write_text(json.dumps(body) + '\n', encoding='utf-8')
+        done = subprocess.run([sys.executable, str(SCRIPT), '--graph', 'WORK.md', '--run-id', 'plain'],
+                              input=json.dumps(verdict('SHIP')), cwd=project, capture_output=True, text=True,
+                              env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn('Traceback', done.stderr)
+
+    def test_a_record_waits_for_the_one_in_progress(self):
+        # A record reads what is on file and then adds to it. Nothing held the
+        # two together, so a record started while another was between its
+        # check and its row passed a check that record was about to fail. One
+        # record at a time takes the work file, from its first check to its row.
+        sys.path.insert(0, str(SCRIPT.parent))
+        self.addCleanup(sys.path.remove, str(SCRIPT.parent))
+        from workfile_lock import workfile_lock
+        with workfile_lock(os.path.realpath(self.graph) + '.record'):
+            proc = subprocess.Popen([sys.executable, str(SCRIPT), '--root', str(self.root), '--graph', str(self.graph),
+                                     '--run-id', 'waits'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, cwd=self.root,
+                                    env=dict(os.environ, FPL_MEMORY_INDEX='0'))
+            proc.stdin.write(json.dumps(verdict('SHIP')))
+            proc.stdin.close()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                proc.wait(timeout=3)
+            self.assertFalse((self.store / 'waits.json').exists())
+            self.assertEqual(self.rows(), [])
+        try:
+            self.assertEqual(proc.wait(timeout=60), 0, proc.stderr.read())
+        finally:
+            proc.stdout.close()
+            proc.stderr.close()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.artifact('waits')['redTeam'], 'SHIP')
+
+    def test_a_veto_and_a_plain_record_at_the_same_moment_end_in_block(self):
+        # The plain record read no veto, the veto was filed, and the plain
+        # record's SHIP row landed above the veto's BLOCK.
+        for n in range(3):
+            run_id = f'race{n}'
+            argv = [sys.executable, str(SCRIPT), '--root', str(self.root), '--graph', str(self.graph), '--run-id', run_id]
+            started = [subprocess.Popen(argv + flags, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True, cwd=self.root, env=dict(os.environ, FPL_MEMORY_INDEX='0'))
+                       for flags in ([], ['--veto', 'certifier exit 1', '--veto-evidence', str(self.log)])]
+            for proc in started:
+                proc.stdin.write(json.dumps(verdict('SHIP')))
+                proc.stdin.close()
+            for proc in started:
+                try:
+                    self.assertEqual(proc.wait(timeout=120), 0, proc.stderr.read())
+                finally:
+                    proc.stdout.close()
+                    proc.stderr.close()
+            newest = next(row for row in self.rows() if f'| {run_id} |' in row)
+            self.assertIn('BLOCKED-REDTEAM', newest)
+            self.assertEqual(self.artifact(run_id)['redTeam'], 'BLOCK')
+
     def nested(self):
         """outer/project/camp/WORK.md, and a recorder for it under any root and directory."""
         outer = self.root / 'outer'

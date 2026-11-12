@@ -203,8 +203,10 @@ when an earlier attempt under the same run id had started it too, and the
 earlier record stands. Runs joined by a resume are one campaign: a resumed
 run that has a run id of its own names its source, and neither the launcher
 nor the recorder lets the node start a second time anywhere in that line.
-These checks read recorded attempts, so one limit remains: an attempt that
-died inside the node and was never recorded leaves nothing to compare. A
+These checks read the attempts recorded under the run ids of one campaign,
+so two limits remain: an attempt that died inside the node and was never
+recorded leaves nothing to compare, and a result filed under a new run id
+that names no source is a new run. A
 recorded attempt that cannot be read is refused as `RESUME-REACH-UNKNOWN`.
 Record every attempt, and assemble every resume with `resume.py`. The fix
 after a refusal is a fresh launch, which is a new run with its own record.

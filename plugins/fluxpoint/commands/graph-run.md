@@ -310,6 +310,11 @@ Workflow tool requires.
    those stores. The clone-wide store is read as well. It lets one linked
    worktree see what another recorded while both use the same store, and
    `FPL_MEMORY_HOME` moves it, so nothing is decided on its being there.
+   One record at a time is made into a work file: a recorder started while
+   another is still recording into the same file waits for it, so neither
+   passes a check the other is about to fail. A record is tied to earlier
+   ones by its run id and, for a resumed run, by the source it names. The
+   same result recorded under a new run id is a new run to the recorder.
    `--state-dir` may only name that canonical directory. Exit 3 retains the
    artifact but means the Evidence row was NOT appended: add the canonical
    five-column header and separator, or pass `--evidence WORK.md`, then

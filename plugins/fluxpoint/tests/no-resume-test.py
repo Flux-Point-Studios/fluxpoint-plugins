@@ -519,6 +519,29 @@ class Recorder(unittest.TestCase):
         self.assertEqual(self.filed()['summary']['outcome'], 'NODE-DEAD')
         self.assertEqual(len(self.rows()), 1)
 
+    def test_two_rolls_recorded_at_the_same_moment_file_one(self):
+        # Each record checked what was on file and then added to it, so two
+        # started together both passed: the roll that died and the roll that
+        # followed it were filed side by side. One record at a time takes the
+        # work file now, and whichever of the two comes second is refused.
+        rolls = [recorded(dead={'lenses:b'}), recorded()]
+        started = [subprocess.Popen([sys.executable, str(SCRIPTS / 'record-run.py'), '--root', str(self.root), '--graph',
+                                     str(self.root / 'WORK.md'), '--run-id', 'wf_review'], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8',
+                                    cwd=self.root) for _ in rolls]
+        for proc, summary in zip(started, rolls):
+            proc.stdin.write(json.dumps(summary))
+            proc.stdin.close()
+        codes, said = [], []
+        for proc in started:
+            codes.append(proc.wait(timeout=120))
+            said.append(proc.stderr.read())
+            proc.stdout.close()
+            proc.stderr.close()
+        self.assertEqual(sorted(codes), [0, 2], said)
+        self.assertIn(CODE, said[codes.index(2)])
+        self.assertEqual(len(self.rows()), 1)
+
     def nested(self):
         """outer/project/WORK.md outside any clone, with a recorder for it under any root and directory."""
         tmp = tempfile.TemporaryDirectory(prefix='no resume nested ')

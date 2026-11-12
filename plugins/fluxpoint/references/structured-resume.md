@@ -180,7 +180,15 @@ attempts are read from the store under `--root` and from the store of every
 directory above the graph and the Evidence file, so a root chosen above the
 project does not hide them. The clone-wide store is read too, which usually
 shows what another worktree of the clone recorded. An earlier record that
-cannot be read is refused as `RESUME-REACH-UNKNOWN`.
+cannot be read is refused as `RESUME-REACH-UNKNOWN`. Records into one work
+file are taken one at a time, so of two rolls recorded at the same moment
+the second is refused like any later one.
+
+Two things stay outside what the recorder can tie together. A result
+recorded under a run id of its own that names no source is a new run, so
+the same result filed under a second run id is not seen as a second roll.
+And the work file is known by where it really is: a second name for it
+made with a hard link in another directory has no earlier records above it.
 
 ## Witness version continuity
 

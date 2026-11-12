@@ -775,7 +775,6 @@ def main():
     ap.add_argument('--unpinned-ok', action='append', default=[], metavar='ABSOLUTE_PATH',
                     help='explicitly record an input path without a byte pin (repeatable; retained in artifact)')
     args = ap.parse_args()
-    root_as_given = os.path.abspath(args.root)
     args.root = os.path.realpath(args.root)
     canonical_runs = os.path.realpath(os.path.join(args.root, ".claude", "fluxpoint", "runs"))
     if args.state_dir is not None and os.path.realpath(args.state_dir) != canonical_runs:
@@ -799,8 +798,11 @@ def main():
     for flag, named in (("--graph", args.graph), ("--evidence", args.evidence)):
         if named is not None and not under_root(named, args.root):
             real = os.path.realpath(named)
-            if _inside(os.path.abspath(named), root_as_given):
-                # Spelled inside the root and really somewhere else: a link.
+            # Which way out is named is decided on the real paths as well.
+            # The directory the file is entered in is in the project and
+            # the file is somewhere else: the entry is a link.
+            holder = os.path.realpath(os.path.dirname(named) or os.curdir)
+            if _inside(os.path.join(holder, os.path.basename(named)), args.root):
                 ap.error(f"{flag} {named} is {real} once its links are followed, which is outside "
                          f"the project root {args.root}. A row is written to the file a link "
                          f"resolves to, and a run's earlier records are found from that file, so "
@@ -833,9 +835,62 @@ def main():
     except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
         print(f"record-run: ledger append failed: {e}", file=sys.stderr)
 
+    # A veto nobody can account for is refused here, before the record takes
+    # the work file, so the refusal leaves nothing behind it. The ledger above
+    # is the one thing already written, for the reason it gives.
+    new_veto = evidence_bytes = None
+    if args.veto is not None or args.veto_evidence is not None:
+        try:
+            new_veto, evidence_bytes = read_veto(
+                args.veto, args.veto_evidence,
+                datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+        except ValueError as e:
+            return veto_refused(e, ledger_written)
+
+    # One record at a time into a work file. The checks below read what is
+    # on file and the writes after them add to it, and nothing held the two
+    # together: of two records started at the same moment each passed the
+    # check the other was about to fail. A second roll of a once-only node
+    # was filed beside the first, and a plain record landed above a veto
+    # given in the same moment.
+    import contextlib
+    from workfile_lock import workfile_lock
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(workfile_lock(record_lock(evidence_file)))
+        except OSError as e:
+            print(f"record-run: {evidence_file} could not be taken for this record, so no run artifact "
+                  f"or Evidence row was written: {e}", file=sys.stderr)
+            if ledger_written:
+                print(f"record-run: the once-only ledger still recorded "
+                      f"{len(ledger_written)} irreversible effect(s) from this run",
+                      file=sys.stderr)
+            return 1
+        return record(args, summary, evidence_file, stores, ledger_written, new_veto, evidence_bytes)
+
+
+def veto_refused(why, ledger_written):
+    print(f"record-run: veto refused, no run artifact or Evidence row written: {why}",
+          file=sys.stderr)
+    if ledger_written:
+        print(f"record-run: the once-only ledger still recorded "
+              f"{len(ledger_written)} irreversible effect(s) from this run",
+              file=sys.stderr)
+    return 2
+
+
+def record_lock(evidence_file):
+    """What one record at a time is held on: the work file's real name, so
+    every root and every spelling of it meet on the same lock. It is kept
+    beside the file, where the lock for the row itself already is."""
+    return os.path.realpath(evidence_file) + ".record"
+
+
+def record(args, summary, evidence_file, stores, ledger_written, new_veto, evidence_bytes):
+    """Check the run against what is on file and file it, the work file held throughout."""
     # 0a. A node that runs once per run is not filed twice. Checked before
-    # anything else is read or written, a veto included, so the earlier
-    # attempt's record is left exactly as it is.
+    # anything else is read or written, a veto's evidence included, so the
+    # earlier attempt's record is left exactly as it is.
     if isinstance(summary, dict):
         rerolled = resumed_past(args.root, args.run_id, summary, stores)
         if rerolled:
@@ -846,34 +901,20 @@ def main():
                       file=sys.stderr)
             return 2
 
-    # 0b. A post-run veto is checked here, and its evidence filed, before
-    # anything below writes. A veto that cannot be accounted for records
-    # nothing about the run: no artifact, no Evidence row, no inbox item.
-    # Refusing it must not drop the veto and file the run at its derived
-    # verdict either, so the whole record is refused. The ledger above is
-    # the one thing already written, for the reason it gives.
-    new_veto = None
+    # 0b. A post-run veto's evidence is filed here, before anything below
+    # writes. A veto that cannot be accounted for records nothing about the
+    # run: no artifact, no Evidence row, no inbox item. Refusing it must not
+    # drop the veto and file the run at its derived verdict either, so the
+    # whole record is refused.
     # Read before this record's own veto is journaled, so it is told apart
     # from one that was already on file.
     earlier_vetoes = filed_vetoes(args.root, args.run_id, stores)
-    if args.veto is not None or args.veto_evidence is not None:
+    if new_veto is not None:
         try:
-            new_veto, evidence_bytes = read_veto(
-                args.veto, args.veto_evidence,
-                datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
-            try:
-                file_veto_evidence(args.root, new_veto["evidence"]["sha256"], evidence_bytes)
-                journal_veto(args.root, args.run_id, new_veto, stores)
-            except (OSError, ValueError) as e:
-                raise ValueError(f"VETO-EVIDENCE-UNFILED: {e}")
-        except ValueError as e:
-            print(f"record-run: veto refused, no run artifact or Evidence row written: {e}",
-                  file=sys.stderr)
-            if ledger_written:
-                print(f"record-run: the once-only ledger still recorded "
-                      f"{len(ledger_written)} irreversible effect(s) from this run",
-                      file=sys.stderr)
-            return 2
+            file_veto_evidence(args.root, new_veto["evidence"]["sha256"], evidence_bytes)
+            journal_veto(args.root, args.run_id, new_veto, stores)
+        except (OSError, ValueError) as e:
+            return veto_refused(f"VETO-EVIDENCE-UNFILED: {e}", ledger_written)
 
     waits = summary.get("waits") or []
     wait_names = [wait_filename(summary.get("campaign", ""), w.get("node", "")) for w in waits]
