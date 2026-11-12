@@ -768,8 +768,13 @@ def held_no_resume(ir, summary):
     return reach
 
 
-def resume_refusal(ir, summary, labels=()):
-    """Why a recorded run cannot be resumed, or None."""
+def resume_refusal(ir, summary, labels=(), joined=None):
+    """Why a recorded run cannot be resumed, or None.
+
+    `joined` names the run the summary belongs to when that is another run
+    of the same campaign: one resumed from the run being resumed, or the
+    run that one was resumed from.
+    """
     reach = held_no_resume(ir, summary)
     if not reach:
         return None
@@ -777,18 +782,73 @@ def resume_refusal(ir, summary, labels=()):
     for node, after in reach.items():
         hit = [nid for nid in after if nid in started]
         if hit:
-            return (f"RESUME-PAST-NO-RESUME-NODE: {node} — the recorded run started "
+            who = (f"{joined}, a run joined to this one by a resume," if joined else "the recorded run")
+            where = "in the same campaign" if joined else "under the same record"
+            return (f"RESUME-PAST-NO-RESUME-NODE: {node} — {who} started "
                     f"{', '.join(repr(nid) for nid in hit)}, and '{node}' declares \"resume\": \"never\": "
-                    f"a resume would run it a second time under the same record. Launch fresh.")
+                    f"a resume would run it a second time {where}. Launch fresh.")
     return None
 
 
-def run_attempts(root, run_id):
+RUN_ID = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}")
+
+
+def run_lineage(stores, run_id, source_id=None):
+    """Run ids joined to this one by a resume, this one first.
+
+    A resumed run that gets an id of its own names the run it was resumed
+    from, so the runs of one campaign form a tree. A node that declares
+    "resume": "never" runs once in that tree. A second resume of an older
+    run would otherwise start it again from its first call, and the first
+    roll's claims would stay behind in the record of the run that made
+    them. Only ids that are safe file names are followed.
+    """
+    links = {}
+
+    def join(child, source):
+        if (isinstance(child, str) and isinstance(source, str) and child != source
+                and RUN_ID.fullmatch(child) and RUN_ID.fullmatch(source)):
+            links.setdefault(child, set()).add(source)
+            links.setdefault(source, set()).add(child)
+
+    for runs in stores:
+        try:
+            names = sorted(os.listdir(runs))
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(runs, name), "rb") as fh:
+                    raw = fh.read()
+                if b'"resumeSource"' not in raw:
+                    continue
+                row = json.loads(raw.decode("utf-8"))
+            except (OSError, ValueError, RecursionError):
+                continue
+            summary = row.get("summary") if isinstance(row, dict) else None
+            source = summary.get("resumeSource") if isinstance(summary, dict) else None
+            join(row.get("runId") if isinstance(row.get("runId"), str) else name[:-5],
+                 source.get("runId") if isinstance(source, dict) else None)
+    join(run_id, source_id)
+    seen, queue = [run_id], [run_id]
+    while queue:
+        for other in sorted(links.get(queue.pop(0), ())):
+            if other not in seen:
+                seen.append(other)
+                queue.append(other)
+    return seen
+
+
+def run_attempts(root, run_id, unread=None):
     """The summary of every attempt on file under a run id: the latest record and each retained one.
 
     The latest record is whichever attempt was filed last, and an earlier
     attempt can be filed again. What a run id has reached is therefore read
-    from all of them. A record that cannot be read adds nothing.
+    from all of them. A record that is there and cannot be read adds no
+    summary: its path is appended to `unread`, because what it reached is
+    not known.
     """
     if root is None:
         return []
@@ -802,10 +862,17 @@ def run_attempts(root, run_id):
         try:
             with open(path, encoding="utf-8") as fh:
                 row = json.load(fh)
-        except (OSError, ValueError):
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, RecursionError):
+            if unread is not None:
+                unread.append(path)
             continue
         attempt = row.get("summary") if isinstance(row, dict) and row.get("runId") == run_id else None
-        if isinstance(attempt, dict) and attempt not in found:
+        if not isinstance(attempt, dict):
+            if unread is not None:
+                unread.append(path)
+        elif attempt not in found:
             found.append(attempt)
     return found
 
@@ -817,18 +884,34 @@ def resume_reach(ir, summary, run_id, projects=None, root=None):
     field launches exactly as before. Raises ValueError, with the named
     code, when the run started such a node. Every attempt on file under
     the run id is read, and so is the runtime journal, which also holds
-    an attempt that reached further than any that was recorded.
+    an attempt that reached further than any that was recorded. So is
+    every run joined to this one by a resume: a run resumed from it that
+    started the node belongs to the same campaign. An attempt on file that
+    cannot be read leaves the reach unknown, and that is refused too.
     """
-    attempts = [summary] + [a for a in run_attempts(root, run_id) if a != summary]
-    if not any(held_no_resume(ir, attempt) for attempt in attempts):
+    unread = []
+    members = run_lineage([os.path.join(root, ".claude", "fluxpoint", "runs")], run_id) if root is not None else [run_id]
+    attempts = [(run_id, summary)]
+    for member in members:
+        attempts += [(member, a) for a in run_attempts(root, member, unread) if a != summary]
+    held = {}
+    for _, attempt in attempts:
+        held.update(held_no_resume(ir, attempt))
+    if not held:
         return None
-    labels = journal_labels(run_id, projects)
+    journals = {member: journal_labels(member, projects) for member in members}
     started = set()
-    for attempt in attempts:
-        refusal = resume_refusal(ir, attempt, labels)
+    for member, attempt in attempts:
+        refusal = resume_refusal(ir, attempt, journals[member], None if member == run_id else member)
         if refusal:
             raise ValueError(refusal)
-        started |= run_started(attempt, labels, held_no_resume(ir, attempt))
+        if member == run_id:
+            started |= run_started(attempt, journals[member], held_no_resume(ir, attempt))
+    if unread:
+        node = sorted(held)[0]
+        raise ValueError(f"RESUME-REACH-UNKNOWN: {node} — an attempt on file for {run_id} cannot be read "
+                         f"({unread[0]}), so what the run reached is not known, and '{node}' declares "
+                         f"\"resume\": \"never\". Launch fresh.")
     return sorted(started)
 
 

@@ -21,6 +21,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -31,6 +32,10 @@ from unittest import mock
 
 PLUGIN = Path(__file__).resolve().parents[1]
 SCRIPTS = PLUGIN / 'scripts'
+# The recorder reads a run's earlier attempts from the clone-wide store too.
+# A memory home shared by the whole machine would carry one case's run into
+# the next, since the cases reuse one run id.
+os.environ.pop('FPL_MEMORY_HOME', None)
 sys.path.insert(0, str(SCRIPTS))
 import embedded_args as ea
 import resume
@@ -514,6 +519,48 @@ class Recorder(unittest.TestCase):
         self.assertEqual(self.filed()['summary']['outcome'], 'NODE-DEAD')
         self.assertEqual(len(self.rows()), 1)
 
+    def test_a_second_roll_is_refused_whatever_root_the_recorder_is_given(self):
+        # The earlier attempt sits in the project's store. A root one directory
+        # up still holds the graph and has a store of its own, which is empty.
+        project = self.root / 'outer' / 'project'
+        project.mkdir(parents=True)
+        graph_file = project / 'WORK.md'
+        graph_file.write_text((self.root / 'WORK.md').read_text(encoding='utf-8'), encoding='utf-8')
+        result = self.root / 'result.json'
+
+        def record(root, cwd, summary):
+            result.write_text(json.dumps(summary), encoding='utf-8')
+            return subprocess.run([sys.executable, str(SCRIPTS / 'record-run.py'), '--root', str(root), '--graph',
+                                   str(graph_file), '--run-id', 'wf_review', '--result', str(result)],
+                                  cwd=cwd, capture_output=True, text=True, encoding='utf-8', timeout=60)
+
+        def rows():
+            return [line for line in graph_file.read_text(encoding='utf-8').splitlines() if line.startswith('| 20')]
+
+        first = record(project, project, recorded(dead={'lenses:b'}))
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        for root in (project.parent, '..'):
+            with self.subTest(root=str(root)):
+                done = record(root, project, recorded())
+                self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+                self.assertIn(CODE, done.stderr)
+                self.assertEqual(len(rows()), 1)
+        self.assertFalse((project.parent / '.claude').exists())
+
+    def test_an_earlier_record_that_cannot_be_read_is_not_recorded_over(self):
+        # Every copy of the attempt that died inside the review is cut short.
+        # Whether it started the review is unknown, so a later attempt is not
+        # filed as if it had not.
+        self.record(recorded(dead={'lenses:b'}))
+        copies = [path for path in self.root.rglob('*.json')
+                  if path.name == 'wf_review.json' or path.parent.name == 'wf_review']
+        self.assertTrue(copies)
+        for path in copies:
+            path.write_bytes(path.read_bytes()[:60])
+        done = self.record(recorded(), want=2)
+        self.assertIn('RESUME-REACH-UNKNOWN', done.stderr)
+        self.assertEqual(len(self.rows()), 1)
+
     def test_the_same_attempt_is_recorded_again_without_complaint(self):
         summary = recorded()
         self.record(summary)
@@ -558,6 +605,27 @@ class Recorder(unittest.TestCase):
         done = self.record(resumed, run_id='wf_resumed', want=2)
         self.assertIn(CODE, done.stderr)
         self.assertFalse((self.root / '.claude/fluxpoint/runs/wf_resumed.json').exists())
+
+    def test_a_second_resume_of_one_source_is_not_filed_either(self):
+        # The source stopped at the build. One resume of it reached the review
+        # and died there, under a run id of its own. A second resume of the
+        # same source ran the review again from its first lens.
+        store = self.root / '.claude/fluxpoint/runs'
+        source = {'runId': 'wf_first', 'artifactSha256': 'f' * 64}
+        self.record(recorded(dead={'build'}), run_id='wf_first')
+        died = dict(recorded(dead={'lenses:b'}), resumeMode='captured-prefix', resumeSource=source)
+        (store / 'wf_second.json').write_text(json.dumps({'runId': 'wf_second', 'summary': died}), encoding='utf-8')
+        done = self.record(dict(recorded(), resumeMode='captured-prefix', resumeSource=source), run_id='wf_third', want=2)
+        self.assertIn(CODE, done.stderr)
+        self.assertIn('wf_second', done.stderr)
+        self.assertFalse((store / 'wf_third.json').exists())
+        self.assertEqual(len(self.rows()), 1)
+        # The source filed late is no roll of the review: it never reached it.
+        (store / 'wf_first.json').unlink()
+        for copy_ in self.root.rglob('wf_first.json'):
+            copy_.unlink()
+        late = self.record(recorded(dead={'build'}), run_id='wf_first')
+        self.assertEqual(late.returncode, 0, late.stderr)
 
     def test_a_graph_without_the_field_records_every_attempt(self):
         self.record(recorded(graph(flag=False), dead={'lenses:b'}))
@@ -654,6 +722,65 @@ class Launcher(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '^' + CODE):
             resume.assemble(self.args)
         self.assertEqual(self.compiled, [])
+
+    def test_an_attempt_on_file_that_cannot_be_read_leaves_the_reach_unknown(self):
+        # The attempt that died inside the review is on file, cut short. What
+        # the run reached is not known, and an unknown reach is not resumed.
+        import run_artifacts
+        first = recorded(dead={'build'})
+        self.record(first)
+        for summary in (recorded(dead={'lenses:b'}), first):
+            row = json.loads((self.root / '.claude/fluxpoint/runs/wf_previous.json').read_text(encoding='utf-8'))
+            run_artifacts.write(str(self.root), 'wf_previous', dict(row, summary=dict(row['summary'], **copy.deepcopy(summary))))
+        kept = sorted((self.root / '.claude/fluxpoint/runs/history/wf_previous').glob('*.json'))
+        self.assertTrue(kept)
+        for path in kept:
+            path.write_bytes(path.read_bytes()[:40])
+        with self.assertRaisesRegex(ValueError, '^RESUME-REACH-UNKNOWN'):
+            resume.assemble(self.args)
+        self.assertEqual(self.compiled, [])
+        # A graph with no such node does not depend on its history.
+        plain = graph()
+        for node in plain['nodes']:
+            node.pop('resume', None)
+        self.write(plain)
+        row = json.loads((self.root / '.claude/fluxpoint/runs/wf_previous.json').read_text(encoding='utf-8'))
+        row['summary'].pop('noResume', None)
+        (self.root / '.claude/fluxpoint/runs/wf_previous.json').write_text(json.dumps(row), encoding='utf-8')
+        self.assertEqual(resume.assemble(self.args)['args']['_resumeFromRunId'], 'wf_previous')
+
+    def test_a_run_resumed_from_this_one_is_part_of_the_same_campaign(self):
+        # wf_previous stopped at the build. It was resumed under a new run id,
+        # and the review died there. Resuming wf_previous a second time would
+        # run the review again from its first lens, with the first roll's
+        # claims left in the other run's record.
+        self.record(recorded(dead={'build'}))
+        store = self.root / '.claude/fluxpoint/runs'
+
+        def file(run_id, source, **how):
+            summary = dict(recorded(**how), resumeMode='captured-prefix',
+                           resumeSource={'runId': source, 'artifactSha256': 'f' * 64})
+            (store / (run_id + '.json')).write_text(json.dumps({'runId': run_id, 'summary': summary}), encoding='utf-8')
+
+        file('wf_later', 'wf_previous', dead={'lenses:b'})
+        with self.assertRaisesRegex(ValueError, '^' + CODE) as refused:
+            resume.assemble(self.args)
+        self.assertIn('wf_later', str(refused.exception))
+        self.assertEqual(self.compiled, [])
+        # Two resumes away is the same campaign.
+        file('wf_later', 'wf_previous', dead={'build'})
+        file('wf_last', 'wf_later', dead={'verdict'})
+        with self.assertRaisesRegex(ValueError, '^' + CODE) as refused:
+            resume.assemble(self.args)
+        self.assertIn('wf_last', str(refused.exception))
+        self.assertEqual(self.compiled, [])
+        # A run resumed from this one that stopped before the review holds nothing back.
+        (store / 'wf_last.json').unlink()
+        self.assertEqual(resume.assemble(self.args)['args']['_resumeFromRunId'], 'wf_previous')
+        # Nor does a run of another campaign, or a source id that is no file name.
+        file('wf_other', 'wf_elsewhere', dead={'lenses:b'})
+        file('wf_odd', '../wf_previous', dead={'lenses:b'})
+        self.assertEqual(resume.assemble(self.args)['args']['_resumeFromRunId'], 'wf_previous')
 
     def test_the_journal_of_an_unrecorded_attempt_is_read(self):
         self.record(recorded(dead={'build'}))

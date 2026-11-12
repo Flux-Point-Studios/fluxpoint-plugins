@@ -198,10 +198,14 @@ follows the loop. `--check` warns about a
 `RedTeamV1` fan-out that omits it. A native resume launched by hand with
 the first launch's exact arguments names no source, and the script cannot
 tell it from a first launch. It keeps its run id, so the record is held
-instead: `record-run.py` refuses to file a later attempt under a run id
-whose earlier attempt had started the node, and the earlier record stands.
-That check reads recorded attempts, so one limit remains: an attempt that
-died inside the node and was never recorded leaves nothing to compare.
+instead: `record-run.py` refuses to file a result that started the node
+when an earlier attempt under the same run id had started it too, and the
+earlier record stands. Runs joined by a resume are one campaign: a resumed
+run that has a run id of its own names its source, and neither the launcher
+nor the recorder lets the node start a second time anywhere in that line.
+These checks read recorded attempts, so one limit remains: an attempt that
+died inside the node and was never recorded leaves nothing to compare. A
+recorded attempt that cannot be read is refused as `RESUME-REACH-UNKNOWN`.
 Record every attempt, and assemble every resume with `resume.py`. The fix
 after a refusal is a fresh launch, which is a new run with its own record.
 
@@ -997,8 +1001,9 @@ must be able to refuse the run belongs in the graph, as a `prove:` node
 after the verdict. A refusal that arrives after the run is filed with
 `record-run.py --veto <reason> --veto-evidence <file>`, which lowers the
 recorded red-team verdict to BLOCK and never raises one. The veto stays on
-the run id, read from the store under `--root`, so the recorder refuses a
-`--graph` or `--evidence` file that sits outside that root.
+the run id. It is read from the store under `--root`, from the stores above
+the graph and the Evidence file and from the clone-wide store, and the
+recorder refuses a `--graph` or `--evidence` file that sits outside the root.
 
 Two caches share a vocabulary and are different mechanisms. **Memoized
 resume** is the executor replaying completed `agent()` calls whose

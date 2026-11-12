@@ -297,10 +297,16 @@ Workflow tool requires.
    its check later is a new launch with its own run id.
    Run artifacts always go to `<root>/.claude/fluxpoint/runs`, even when
    recording from a subdirectory; pass `--root <project-root>` explicitly.
-   `--graph` and `--evidence` must name files under that root. A run's
-   earlier attempts and its vetoes are read from the root's store, so the
-   recorder started in another directory without `--root`, or given a
-   root that does not hold those files, exits 2 before anything is written.
+   `--graph` and `--evidence` must name files that really sit under that
+   root, with links followed, or in a linked worktree of the same clone:
+   started in another directory without `--root`, or given a root that
+   does not hold those files, the recorder exits 2 before anything is
+   written. A run's earlier attempts and its vetoes are read from the
+   root's store, from the store of every directory above the graph and
+   the Evidence file, and from the clone-wide store that linked worktrees
+   share. A root chosen above or below the project, or another checkout
+   of the same clone, therefore still finds them, and one run id is one
+   run across those stores.
    `--state-dir` may only name that canonical directory. Exit 3 retains the
    artifact but means the Evidence row was NOT appended: add the canonical
    five-column header and separator, or pass `--evidence WORK.md`, then

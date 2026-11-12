@@ -11,6 +11,10 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/record-run.py'
+# Every recorded run is also kept in the clone-wide store, and a run's vetoes
+# are read from there. A memory home shared by the whole machine would carry
+# one case's run into the next, since the cases reuse their run ids.
+os.environ.pop('FPL_MEMORY_HOME', None)
 HEADER = '| When (UTC) | Source | Outcome | Claim | Proof |\n|---|---|---|---|---|\n'
 COVERAGE = {'subject': [{'repository': 'repo', 'base': 'a' * 40, 'head': 'b' * 40,
                          'files': 2, 'additions': 10, 'deletions': 3}],
@@ -284,6 +288,9 @@ class PostRunVetoTests(unittest.TestCase):
                                  input=json.dumps(verdict('SHIP')), cwd=self.root, capture_output=True, text=True,
                                  env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
         self.assertEqual(through.returncode, 0, through.stderr)
+        # A graph that is itself a link to a file kept elsewhere is where that
+        # file is. Its rows land outside the root, in a table another root's
+        # store may already have recorded into.
         kept = self.root / 'kept-elsewhere.md'
         target = self.root.parent / (self.root.name + '-kept.md')
         target.write_text(HEADER, encoding='utf-8')
@@ -293,7 +300,193 @@ class PostRunVetoTests(unittest.TestCase):
                                  '--graph', str(kept), '--run-id', 'kept'],
                                 input=json.dumps(verdict('SHIP')), cwd=self.root, capture_output=True, text=True,
                                 env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
-        self.assertEqual(linked.returncode, 0, linked.stderr)
+        self.assertEqual(linked.returncode, 2, linked.stdout + linked.stderr)
+        self.assertIn(str(target.resolve()), linked.stderr)
+        self.assertEqual(target.read_text(encoding='utf-8'), HEADER)
+        self.assertFalse((self.store / 'kept.json').exists())
+
+    def nested(self):
+        """outer/project/camp/WORK.md, and a recorder for it under any root and directory."""
+        outer = self.root / 'outer'
+        project = outer / 'project'
+        camp = project / 'camp'
+        camp.mkdir(parents=True)
+        graph = camp / 'WORK.md'
+        graph.write_text(HEADER, encoding='utf-8')
+
+        def record(root, cwd, *flags, run_id='vetoed', summary=None):
+            return subprocess.run([sys.executable, str(SCRIPT), *(['--root', str(root)] if root else []),
+                                   '--graph', str(graph), '--run-id', run_id, *flags],
+                                  input=json.dumps(summary or verdict('SHIP')), cwd=cwd, capture_output=True,
+                                  text=True, env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
+
+        def rows():
+            return [line for line in graph.read_text(encoding='utf-8').splitlines()[2:] if line.strip()]
+
+        return outer, project, camp, record, rows
+
+    def test_a_veto_is_found_from_a_root_above_or_below_the_project(self):
+        # The graph sits under each of these roots, so each is a root a record
+        # may be given, and each has a store of its own that holds nothing.
+        # A run's vetoes are read from every store above its Evidence file.
+        outer, project, camp, record, rows = self.nested()
+        first = record(project, project, '--veto', 'certifier exit 1', '--veto-evidence', str(self.log))
+        self.assertEqual(first.returncode, 0, first.stderr)
+        for label, root, cwd in (('a root above', outer, project), ('the same root, spelled ..', '..', project),
+                                 ('a root below', None, camp)):
+            with self.subTest(label):
+                again = record(root, cwd)
+                self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+                self.assertIn('still applies', again.stderr)
+                self.assertEqual([row for row in rows() if '| vetoed | BLOCKED-REDTEAM |' not in row], [])
+        for store in (outer, camp):
+            art = json.loads((store / '.claude/fluxpoint/runs/vetoed.json').read_text(encoding='utf-8'))
+            self.assertEqual((art['outcome'], art['redTeam'], len(art['vetoes'])), ('BLOCKED-REDTEAM', 'BLOCK', 1))
+
+    def test_a_veto_whose_record_was_refused_is_found_from_another_root(self):
+        outer, project, camp, record, rows = self.nested()
+        twice = verdict('SHIP', waits=[{'node': 'sign', 'check': 'true', 'everyMinutes': 5},
+                                       {'node': 'sign', 'check': 'true', 'everyMinutes': 5}])
+        refused = record(project, project, '--veto', 'certifier exit 1', '--veto-evidence', str(self.log), summary=twice)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertEqual(rows(), [])
+        plain = record(outer, project)
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertIn('still applies', plain.stderr)
+        self.assertEqual(len(rows()), 1)
+        self.assertIn('| vetoed | BLOCKED-REDTEAM |', rows()[0])
+
+    def test_a_veto_is_found_from_a_linked_worktree_of_the_same_clone(self):
+        # A campaign branch is often checked out twice. The second checkout has
+        # its own store and the same WORK.md, and the row filed there is merged
+        # like any other. Every recorded run is also kept clone-wide.
+        project = self.root / 'clone'
+        project.mkdir()
+
+        def git(*argv, cwd=project):
+            return subprocess.run(['git', *argv], cwd=cwd, check=True, capture_output=True, text=True)
+
+        git('init', '-q')
+        git('config', 'user.name', 'fixture')
+        git('config', 'user.email', 'fixture@example.invalid')
+        (project / '.gitignore').write_text('.claude/\n', encoding='utf-8')
+        (project / 'WORK.md').write_text(HEADER, encoding='utf-8')
+        git('add', '.')
+        git('commit', '-qm', 'base')
+        twin = self.root / 'twin'
+        git('worktree', 'add', '-q', str(twin), '-b', 'twin')
+
+        def record(tree, *flags, summary=None, run_id='vetoed'):
+            return subprocess.run([sys.executable, str(SCRIPT), '--root', str(tree), '--graph', str(tree / 'WORK.md'),
+                                   '--run-id', run_id, *flags], input=json.dumps(summary or verdict('SHIP')), cwd=tree,
+                                  capture_output=True, text=True, env=dict(os.environ, FPL_MEMORY_INDEX='0'),
+                                  timeout=30)
+
+        first = record(project, '--veto', 'certifier exit 1', '--veto-evidence', str(self.log))
+        self.assertEqual(first.returncode, 0, first.stderr)
+        again = record(twin)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn('still applies', again.stderr)
+        self.assertIn('| vetoed | BLOCKED-REDTEAM |', (twin / 'WORK.md').read_text(encoding='utf-8'))
+        self.assertNotIn('| vetoed | COMPLETE |', (twin / 'WORK.md').read_text(encoding='utf-8'))
+        # The same holds for a veto whose own record was refused.
+        twice = verdict('SHIP', waits=[{'node': 'sign', 'check': 'true', 'everyMinutes': 5},
+                                       {'node': 'sign', 'check': 'true', 'everyMinutes': 5}])
+        refused = record(project, '--veto', 'certifier exit 1', '--veto-evidence', str(self.log), summary=twice,
+                         run_id='refused')
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        later = record(twin, run_id='refused')
+        self.assertEqual(later.returncode, 0, later.stdout + later.stderr)
+        self.assertIn('| refused | BLOCKED-REDTEAM |', (twin / 'WORK.md').read_text(encoding='utf-8'))
+
+    def test_a_graph_in_a_linked_worktree_is_recorded_into_the_main_checkout(self):
+        # A campaign branch checked out beside the project, recorded with the
+        # project as root, which is where its attestations are. The worktree
+        # is a checkout of the same clone and shares its clone-wide store, so
+        # this is one of the roots a record may be given.
+        project = self.root / 'clone'
+        project.mkdir()
+
+        def git(*argv):
+            return subprocess.run(['git', *argv], cwd=project, check=True, capture_output=True, text=True)
+
+        git('init', '-q')
+        git('config', 'user.name', 'fixture')
+        git('config', 'user.email', 'fixture@example.invalid')
+        (project / '.gitignore').write_text('.claude/\n', encoding='utf-8')
+        (project / 'WORK.md').write_text(HEADER, encoding='utf-8')
+        git('add', '.')
+        git('commit', '-qm', 'base')
+        twin = self.root / 'twin'
+        git('worktree', 'add', '-q', str(twin), '-b', 'twin')
+
+        def record(root, graph, cwd, *flags):
+            return subprocess.run([sys.executable, str(SCRIPT), '--root', str(root), '--graph', str(graph),
+                                   '--run-id', 'vetoed', *flags], input=json.dumps(verdict('SHIP')), cwd=cwd,
+                                  capture_output=True, text=True, env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
+
+        first = record(project, twin / 'WORK.md', twin, '--veto', 'certifier exit 1', '--veto-evidence', str(self.log))
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertTrue((project / '.claude/fluxpoint/runs/vetoed.json').exists())
+        self.assertIn('| vetoed | BLOCKED-REDTEAM |', (twin / 'WORK.md').read_text(encoding='utf-8'))
+        # Recorded again with the worktree as its own root, the veto is still found.
+        again = record(twin, twin / 'WORK.md', twin)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn('still applies', again.stderr)
+        # A directory that is no checkout of this clone is still outside the root.
+        other = self.root / 'elsewhere'
+        other.mkdir()
+        (other / 'WORK.md').write_text(HEADER, encoding='utf-8')
+        refused = record(project, other / 'WORK.md', project)
+        self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+        self.assertEqual((other / 'WORK.md').read_text(encoding='utf-8'), HEADER)
+
+    def test_vetoes_given_at_the_same_moment_are_all_kept(self):
+        # Each recorder read the journal, added its veto and replaced the file,
+        # so two at once could leave one. The records are refused on purpose:
+        # the journal is then the only place their vetoes are.
+        twice = verdict('SHIP', waits=[{'node': 'sign', 'check': 'true', 'everyMinutes': 5},
+                                       {'node': 'sign', 'check': 'true', 'everyMinutes': 5}])
+        reasons = [f'check {n} refused' for n in range(8)]
+        started = []
+        for n, reason in enumerate(reasons):
+            log = self.root / f'check-{n}.log'
+            log.write_text(reason + '\n', encoding='utf-8')
+            started.append(subprocess.Popen(
+                [sys.executable, str(SCRIPT), '--root', str(self.root), '--graph', str(self.graph), '--run-id', 'vetoed',
+                 '--veto', reason, '--veto-evidence', str(log)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, cwd=self.root, env=dict(os.environ, FPL_MEMORY_INDEX='0')))
+        for proc in started:
+            proc.stdin.write(json.dumps(twice))
+            proc.stdin.close()
+        for proc in started:
+            self.assertEqual(proc.wait(timeout=120), 2, proc.stderr.read())
+            proc.stdout.close()
+            proc.stderr.close()
+        plain = self.record(verdict('SHIP'))
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertEqual(sorted(v['reason'] for v in self.artifact()['vetoes']), reasons)
+
+    def test_a_directory_that_only_links_to_the_graph_is_not_its_root(self):
+        # An empty directory holding a link to the project's WORK.md, used as
+        # the root: the row landed in the project's table from a store that
+        # had never seen the run.
+        self.assertEqual(self.veto(verdict('SHIP')).returncode, 0)
+        aside = self.root.parent / (self.root.name + '-aside')
+        aside.mkdir()
+        self.addCleanup(lambda: __import__('shutil').rmtree(aside, ignore_errors=True))
+        try:
+            (aside / 'WORK.md').symlink_to(self.graph)
+        except (OSError, NotImplementedError):
+            self.skipTest('this platform cannot create a link')
+        before = self.rows()
+        linked = subprocess.run([sys.executable, str(SCRIPT), '--graph', 'WORK.md', '--run-id', 'vetoed'],
+                                input=json.dumps(verdict('SHIP')), cwd=aside, capture_output=True, text=True,
+                                env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
+        self.assertEqual(linked.returncode, 2, linked.stdout + linked.stderr)
+        self.assertIn('--root', linked.stderr)
+        self.assertFalse((aside / '.claude').exists())
+        self.assertEqual(self.rows(), before)
 
     def test_a_veto_outlives_a_record_that_is_refused_for_another_reason(self):
         # Two waits on one node refuse the record after the veto was read. The

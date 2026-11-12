@@ -142,7 +142,13 @@ shipped feature and verified templates declare it on `red-team-lenses`.
 Before it plans or compiles, `resume.py --run` reads every attempt recorded
 under the run id, the latest and those kept in its history, and the run's
 journal. It refuses with `RESUME-PAST-NO-RESUME-NODE: <node>` when any of
-them shows that the node, or a node that depends on it, started.
+them shows that the node, or a node that depends on it, started. Runs joined
+by a resume are read as one campaign. A resumed run that gets a run id of its
+own names the run it was resumed from, and the launcher follows those links
+both ways, so a second resume of an older run is refused once a run resumed
+from it has started the node. An attempt that is on file and cannot be read
+leaves the reach unknown, and the resume is refused with
+`RESUME-REACH-UNKNOWN`.
 `compile-graph.py --plan --resume` refuses with the same code. A node that
 was blocked behind a park, or declined by the budget before any call, did
 not start, so a run that stopped earlier resumes as usual. The compiler
@@ -160,10 +166,17 @@ declaration as well as the current graph's.
 
 A native `resumeFromRunId` launched by hand with the first launch's exact
 arguments names no source run, so none of those checks can see it. It keeps
-its run id. `record-run.py` therefore refuses, with the same code, a later
-attempt under a run id whose earlier recorded attempt had started the node,
-and a resume whose named source run had. Nothing is written and the earlier
-record stands. Recording the same attempt again is not a later attempt.
+its run id. `record-run.py` therefore refuses, with the same code, a result
+that started the node when an earlier recorded attempt under the same run id
+had started it too, or when the run it names as its source had, or any other
+run joined to that source by a resume. Nothing is written and the earlier
+record stands. Recording the same attempt again is not a later attempt, and
+an attempt that did not start the node itself is no roll of it: it is filed
+whenever it arrives. The earlier attempts are read from the store under
+`--root`, from the store of every directory above the graph and the Evidence
+file, and from the clone-wide store, so a different `--root` or another
+worktree of the clone does not hide them. An earlier record that cannot be
+read is refused as `RESUME-REACH-UNKNOWN`.
 
 ## Witness version continuity
 
