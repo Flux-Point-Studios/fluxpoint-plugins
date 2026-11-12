@@ -97,9 +97,22 @@ class Prose(unittest.TestCase):
                      'Do not file the run as shippable - record `--red-team BLOCK`.'):
             with self.subTest(line=line):
                 self.assertEqual(len(self.found(graph('RedTeamV1'), line)), 1)
-        # A noun that is spelled like a verb gives no instruction.
+        # A noun that is spelled like a verb gives no instruction. Neither does
+        # a second verb joined to the negated one, a verb that is part of a
+        # hyphenated name, or a verb inside a quotation.
         for line in ('Never record the run with `--red-team BLOCK`.',
-                     'Do not record this run or its file with `--red-team BLOCK`.'):
+                     'Do not record this run or its file with `--red-team BLOCK`.',
+                     'Do not add or pass `--red-team BLOCK`.',
+                     'Never use or rely on `--red-team BLOCK`.',
+                     'You must not set and record `--red-team SHIP` yourself.',
+                     "Don't use record-run's `--red-team BLOCK` for this.",
+                     'Never write "record `--red-team BLOCK`" in a step.',
+                     # The recorder's file name holds a full stop and is no end of a sentence.
+                     'Never call record-run.py with `--red-team BLOCK`.',
+                     'Do not run `record-run.py --red-team BLOCK` to lower a verdict; file a veto.',
+                     'You must not give record-run.py `--red-team SHIP`.',
+                     # "or" carries the negation on to the next verb, wherever it stands.
+                     'Do not pass `--harness 1` or run record-run.py with `--red-team BLOCK`.'):
             with self.subTest(line=line):
                 self.assertEqual(self.found(graph('RedTeamV1'), line), [])
 
@@ -144,6 +157,18 @@ class Prose(unittest.TestCase):
         self.assertEqual(self.found(ir, '| Step | Command |', '|---|---|', '| 1 | `record-run.py --run-id <id>` |',
                                     '| 2 | `./ci/run-suite.sh --harness 1` |'), [])
         self.assertEqual(self.found(ir, '```', 'SUITE=./ci/run-suite.sh', '$SUITE --harness 1', '```'), [])
+        # The next sentence of a paragraph is another step too.
+        self.assertEqual(self.found(ir, 'Record with record-run.py. Then, in a second step,',
+                                    'start the bench with `bench.sh --harness 1`.'), [])
+        self.assertEqual(len(self.found(ir, 'First run the probe. Then record with record-run.py',
+                                        'and pass `--harness 1` if it was red.')), 1)
+        # Each item of a list is a step of its own, and its later lines belong to it.
+        self.assertEqual(self.found(ir, '1. Record the run with `record-run.py --run-id <id>`.',
+                                    '2. Start the bench with `bench.sh --harness 1`.'), [])
+        self.assertEqual(self.found(ir, '- record: `record-run.py --run-id <id>`', '- bench: `bench.sh --harness 1`'), [])
+        self.assertEqual(len(self.found(ir, '1. Record the run with `record-run.py --run-id <id>`',
+                                        '   and pass `--harness 1` when the probe is red.',
+                                        '2. Start the bench with `bench.sh`.')), 1)
 
     def test_a_table_of_operator_steps_is_prose(self):
         steps = ('| Step | Command |', '|---|---|', '| 1 | run `check_reruns.py` |',

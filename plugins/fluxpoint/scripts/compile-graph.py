@@ -5663,13 +5663,16 @@ RECORDER_FLAGS = (
 # A negation about something else is still an instruction: "if the checks do
 # not pass, record ...", "do not forget to record ...". So is a negated verb
 # that another verb follows before the flag: "if the checks do not pass then
-# record ...". A noun spelled like a verb follows a determiner and gives no
-# instruction: "never record the run with ...".
-INSTRUCTION_VERB = r"\b(?:pass|use|record|add|give|supply|set|run|call|write|file|put|rely\s+on)\b"
+# record ...". Four things that look like a second verb give no instruction:
+# a noun after a determiner ("never record the run with ..."), a verb joined
+# to the negated one ("do not add or pass ..."), part of a hyphenated name
+# ("don't use record-run's ...") and a word inside a quotation.
+INSTRUCTION_VERB = r"(?<![\w-])(?:pass|use|record|add|give|supply|set|run|call|write|file|put|rely\s+on)(?![\w-])"
 NOT_AN_INSTRUCTION = re.compile(
     r"\b(?:never|do not|don't|must not|should not|shouldn't|cannot|can't)\s+" + INSTRUCTION_VERB
-    + r"([^.;:,]*)$", re.I)
-DETERMINER = re.compile(r"\b(?:the|a|an|this|that|its|your|each|every|any|one|same)\s+$", re.I)
+    + r"((?:[^.;:,]|\.(?=\w))*)$", re.I)  # a full stop inside a file name ends no sentence
+DETERMINER = re.compile(r"(?:\b(?:the|a|an|this|that|its|your|each|every|any|one|same|or|nor)\s+|[\"'`])$", re.I)
+JOINED_VERBS = re.compile(r"(?:\s+(?:or|nor|and)\s+" + INSTRUCTION_VERB + r")+", re.I)
 
 
 def says_not_to_use(prefix):
@@ -5678,6 +5681,9 @@ def says_not_to_use(prefix):
     if not match:
         return False
     tail = match.group(1)
+    joined = JOINED_VERBS.match(tail)
+    if joined:
+        tail = tail[joined.end():]
     return all(DETERMINER.search(tail[:verb.start()]) for verb in re.finditer(INSTRUCTION_VERB, tail, re.I))
 
 
@@ -5727,11 +5733,12 @@ def recorder_flag_warnings(text, ir):
             table = None
         lines.append('' if filed is not None or table else line)
     # What precedes each line inside its own command or paragraph. A row of a
-    # table stands alone: the row above it is another step.
+    # table and an item of a list stand alone: the one above is another step.
     before = []
     for index, line in enumerate(lines):
         earlier = lines[index - 1] if index else ''
-        if not earlier.strip() or line.lstrip().startswith('|'):
+        if (not earlier.strip() or line.lstrip().startswith('|')
+                or (not fenced[index] and re.match(r'\s*(?:[-*+]|\d+[.)])\s', line))):
             before.append('')
         elif fenced[index]:
             before.append(before[index - 1] + earlier + ' ' if earlier.rstrip().endswith('\\') else '')
@@ -5739,7 +5746,11 @@ def recorder_flag_warnings(text, ir):
             before.append(before[index - 1] + earlier + ' ')
     holders = set(re.findall(r'(?m)^[ \t]*(?:export[ \t]+)?([A-Za-z_]\w*)=.*record-run', '\n'.join(lines)))
 
-    def names_recorder(fragment):
+    def names_recorder(fragment, prose):
+        if prose:
+            # The sentence the flag stands in: what follows the last full stop
+            # that ends one. The stop in record-run.py is followed by a letter.
+            fragment = re.split(r'[.!?](?:\s+|$)', fragment)[-1]
         return 'record-run' in fragment or any(
             re.search(r'\$\{?' + re.escape(name) + r'(?!\w)', fragment) for name in holders)
 
@@ -5751,7 +5762,8 @@ def recorder_flag_warnings(text, ir):
         pattern = re.compile(r'(?<![\w-])' + re.escape(flag) + r'(?:[ \t]+|=)["\']?(?:' + values + r')["\']?(?![\w-])')
         hits = [(number, match.group(0)) for number, line in enumerate(lines, 1) for match in pattern.finditer(line)
                 if not says_not_to_use(line[:match.start()])
-                and (flag != "--harness" or names_recorder(before[number - 1] + line[:match.start()]))]
+                and (flag != "--harness"
+                     or names_recorder(before[number - 1] + line[:match.start()], not fenced[number - 1]))]
         if not hits:
             continue
         numbers = sorted({number for number, _ in hits})
