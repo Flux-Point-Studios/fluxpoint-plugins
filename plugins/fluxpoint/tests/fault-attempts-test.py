@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Crash-only reruns execute real processes; image adapter is an explicit test double."""
+import contextlib
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -242,6 +244,28 @@ sys.exit(subprocess.call(command,cwd=root,env=env))
         self.assertEqual(self.check(pair)['status'], 'MISMATCH')
         self.assertEqual(attempts.rerun(at, str(self.root), original['attestId'], self.launch['nonce']), 2)
 
+    def test_a_pair_leg_whose_shell_is_dead_fails_the_pair_and_is_settled_by_it(self):
+        # A crash gets one pair, and a leg that never started did not pass.
+        # The leg's row says why. It is no shell fault to run again: the line
+        # it prints offers no rerun, and --rerun-fault on it is refused.
+        if os.name == 'nt' and 'windowsapps' in sys.executable.lower():
+            self.skipTest('this interpreter sits among the launchers the resolver passes over')
+        original = self.crash()
+        said = io.StringIO()
+        with patch.dict(os.environ, {'FPL_BASH': sys.executable}), contextlib.redirect_stdout(said):
+            code, pair = self.pair(original)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.check(pair)['status'], 'MISMATCH')
+        leg = next(row for row in self.rows() if row['attestId'] == pair['faultPair']['native'])
+        self.assertEqual((leg['fault'], leg['exit'], leg['attempt']['role']), ('shell', None, 'native'))
+        line = next(line for line in said.getvalue().splitlines() if 'SHELL-FAULT' in line)
+        self.assertNotIn('--rerun-fault', line)
+        self.assertIn('the pair is filed red', line)
+        before = len(self.rows())
+        self.assertEqual(at.rerun_shell_fault(str(self.root), leg['attestId'], self.launch['nonce']), 2)
+        self.assertEqual(len(self.rows()), before)
+        self.assertEqual(attempts.rerun(at, str(self.root), original['attestId'], self.launch['nonce']), 2)
+
     def test_reference_failure_stays_red(self):
         original = self.crash()
         with patch.dict(os.environ, {'FPL_REFERENCE_RED': '1'}):
@@ -414,7 +438,7 @@ class GateShell(unittest.TestCase):
     A bare "bash" there is resolved by CreateProcess in System32 first, which
     with WSL installed is WSL's launcher: the gate never ran and its exit was
     attested as the gate's. The resolver is a function of an environment, a
-    PATH search, a file test and `git --exec-path`, so it runs here on fakes.
+    file test and `git --exec-path`, so it runs here on fakes.
     """
 
     LAUNCHER = r'C:\Windows\System32\bash.exe'
@@ -424,15 +448,7 @@ class GateShell(unittest.TestCase):
     def resolve(self, env=None, files=(), exec_path=None):
         import ntpath
         present = {ntpath.normcase(name) for name in files}
-
-        def which(name, path):
-            for directory in (path or '').split(';'):
-                candidate = ntpath.join(directory, name + '.exe')
-                if directory and ntpath.normcase(candidate) in present:
-                    return candidate
-            return None
-
-        return at.windows_bash(env or {}, which, lambda name: ntpath.normcase(name) in present, lambda: exec_path)
+        return at.windows_bash(env or {}, lambda name: ntpath.normcase(name) in present, lambda: exec_path)
 
     def test_git_bash_is_found_from_git_when_system32_leads_the_path(self):
         found = self.resolve({'PATH': r'C:\Windows\System32;C:\Program Files\Git\cmd'},
@@ -473,6 +489,33 @@ class GateShell(unittest.TestCase):
         msys = r'C:\msys64\usr\bin\bash.exe'
         found = self.resolve({'PATH': r'C:\Windows\system32;C:\msys64\usr\bin'}, [self.LAUNCHER, msys], self.EXEC_PATH)
         self.assertEqual(found, msys)
+
+    def test_a_bash_in_the_gates_own_directory_is_never_the_one_found(self):
+        # A PATH search on Windows looks in the current directory first, and
+        # that directory is the gate's tree. Only a directory named in full
+        # is searched, and only for bash.exe: a batch file is no shell.
+        git_bin = r'C:\Program Files\Git\bin'
+        planted = ['bash.exe', r'.\bash.exe', r'tools\bash.exe', r'\tools\bash.exe', r'C:bash.exe']
+        for path in ('.;' + git_bin, ';' + git_bin, 'tools;' + git_bin, r'\tools;' + git_bin, 'C:;' + git_bin):
+            with self.subTest(path=path):
+                self.assertEqual(self.resolve({'PATH': path}, planted + [self.GIT_BASH]), self.GIT_BASH)
+        for path in ('.', 'tools', ''):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                self.resolve({'PATH': path}, planted)
+        with self.assertRaises(ValueError):
+            self.resolve({'PATH': r'C:\tools'}, [r'C:\tools\bash.cmd', r'C:\tools\bash.bat'])
+        # A setting that names a file by a relative path is passed over too.
+        for name in ('FPL_BASH', 'CLAUDE_CODE_GIT_BASH_PATH'):
+            with self.subTest(name=name):
+                self.assertEqual(self.resolve({name: 'bash.exe', 'PATH': git_bin}, planted + [self.GIT_BASH]),
+                                 self.GIT_BASH)
+        # A quoted entry and a trailing separator name the directory they name.
+        for path in ('"' + git_bin + '"', git_bin + '\\', '"' + git_bin + '\\"'):
+            with self.subTest(path=path):
+                self.assertEqual(self.resolve({'PATH': path}, [self.GIT_BASH]), self.GIT_BASH)
+        # A share is a place named in full.
+        share = r'\\build\tools\git\bin'
+        self.assertEqual(self.resolve({'PATH': share}, [share + r'\bash.exe']), share + r'\bash.exe')
 
     def test_known_install_paths_stand_in_when_git_is_not_on_path(self):
         for env, bash in (({'ProgramFiles': r'C:\Program Files'}, self.GIT_BASH),
@@ -651,6 +694,68 @@ class ShellFaults(unittest.TestCase):
         self.assertEqual((again['gate'], again['exit'], again.get('fault')), ('green', 0, None))
         self.assertNotEqual(again['attestId'], fault['attestId'])
         self.assertEqual(self.check('green', again)['status'], 'ATTESTED')
+
+    def test_a_fault_from_a_run_without_a_nonce_is_run_again_without_one(self):
+        # The line used to name `--nonce <nonce>` for a run that had none, and
+        # the rerun was then refused whatever nonce it was given.
+        p = self.cli('--run', 'green', shell=self.dead)
+        self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+        fault = self.rows()[-1]
+        self.assertEqual((fault['fault'], fault['nonce']), ('shell', ''))
+        line = next(line for line in p.stdout.splitlines() if 'SHELL-FAULT' in line)
+        self.assertIn('--rerun-fault ' + fault['attestId'], line)
+        self.assertNotIn('--nonce', line)
+        # It was minted under no run, so no run's nonce reaches it.
+        p = self.cli('--rerun-fault', fault['attestId'], '--nonce', self.launch['nonce'])
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        p = self.cli('--rerun-fault', fault['attestId'])
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        again = self.rows()[-1]
+        self.assertEqual((again['gate'], again['exit'], again.get('fault'), again['nonce']), ('green', 0, None, ''))
+        # A run that has a nonce is told its own.
+        p = self.cli('--run', 'green', '--nonce', self.launch['nonce'], shell=self.dead)
+        self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+        line = next(line for line in p.stdout.splitlines() if 'SHELL-FAULT' in line)
+        self.assertIn('--rerun-fault ' + self.rows()[-1]['attestId'] + ' --nonce ' + self.launch['nonce'], line)
+
+    @unittest.skipIf(os.name == 'nt', 'the hung shell is stood in for by a shell script here')
+    def test_a_probe_that_hangs_is_stopped_with_what_it_started(self):
+        # The probe used to stop the shell alone and leave its child running.
+        child = Path(self.tmp.name) / 'child.pid'
+        hung = Path(self.tmp.name) / 'hung-bash'
+        hung.write_text('#!/bin/sh\nsleep 300 &\necho $! > ' + shlex.quote(str(child)) + '\nsleep 300\n')
+        hung.chmod(0o755)
+        with patch.object(at, 'SHELL_PROBE_SECONDS', 1):
+            problem = at.shell_problem(str(hung), str(self.root))
+        self.assertIsNone(problem['exit'])
+        self.assertIn('gave no answer within 1 seconds', problem['why'])
+        pid = int(child.read_text())
+        deadline = time.monotonic() + 10
+        while bg.alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(bg.alive(pid), 'the hung shell left its child running')
+
+    @unittest.skipIf(os.name == 'nt', 'the hung shell is stood in for by a shell script here')
+    def test_a_run_cancelled_while_its_shell_is_tested_stops_at_once(self):
+        # --cancel used to answer "pending" until the probe gave up by itself.
+        hung = Path(self.tmp.name) / 'hung-bash'
+        hung.write_text('#!/bin/sh\nsleep 300\n')
+        hung.chmod(0o755)
+        p = self.cli('--run', 'green', '--detach', '--nonce', self.launch['nonce'], shell=hung)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        token = p.stdout.split(' as ', 1)[1].split()[0]
+        store = bg.Store(str(self.root), at.BACKGROUND)
+        deadline = time.monotonic() + 20
+        while not (store.read(token) or {}).get('headSha') and time.monotonic() < deadline:
+            time.sleep(0.05)  # the runner has written its record and is testing the shell
+        time.sleep(0.5)
+        began = time.monotonic()
+        p = self.cli('--cancel', token)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertLess(time.monotonic() - began, 15)
+        self.assertIn('CANCELLED', p.stdout)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(store.read(token)['status'], 'CANCELLED')
 
     def test_await_and_last_name_the_fault_and_offer_no_exit_to_cite(self):
         p = self.cli('--run', 'green', '--nonce', self.launch['nonce'], shell=self.dead)
