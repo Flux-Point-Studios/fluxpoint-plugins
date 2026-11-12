@@ -50,6 +50,7 @@ NODE_FIELDS = {
     "verifyOver", "expectItems", "haltWhen", "haltReason", "onRed", "isolation",
     "repeat", "irreversible", "actor", "release", "wake", "decides", "honors",
     "memory", "reduce", "lane", "pushes", "repository", "branch", "replay", "fresh", "cites", "probe",
+    "sameShaAs", "resume",
 }
 # The two failure policies. Anything else used to fall back to a default
 # silently — a misspelled 'Halt' weakened the declared policy in the
@@ -501,6 +502,21 @@ def _sibling(name):
     return mod
 
 
+_STORE_LAYOUT = []
+
+
+def _store_layout(load=_sibling):
+    """run_artifacts, for where a run's records are and how its campaign is read.
+
+    Loaded once, by the loader this module was defined with. A caller that
+    stands in for the reader of one artifact, as the plan's tests do, does
+    not stand in for the layout of a store.
+    """
+    if not _STORE_LAYOUT:
+        _STORE_LAYOUT.append(load("run_artifacts"))
+    return _STORE_LAYOUT[0]
+
+
 def load_gates(root):
     """Declared gate names, or None when the repo declares no manifest.
 
@@ -546,6 +562,61 @@ def prove_gate(n):
 def judge_size(n):
     m = TIER.match(str(n.get("verify", "schema-only")))
     return int(m.group(5)) if m and m.group(5) else 0
+
+
+EXACT_SHA = "^[0-9a-f]{40}$"
+_PROVE_BASE = []
+
+
+def _typed(shape, kind):
+    """`shape` admits only values of JSON type `kind`: by its type, or by an enum or const of them."""
+    python = {"string": str, "integer": int}[kind]
+    is_kind = lambda value: isinstance(value, python) and not isinstance(value, bool)
+    if shape.get("type") == kind:
+        return True
+    if isinstance(shape.get("enum"), list) and shape["enum"]:
+        return all(is_kind(value) for value in shape["enum"])
+    return "const" in shape and is_kind(shape["const"])
+
+
+def prove_contract_issue(schema):
+    """Why this contract cannot back a `prove:` node, or None.
+
+    The attest check reads four fields of the node's result. A contract
+    that requires them, typed as the shipped ExecutionV1 types them, can
+    carry a prove: node whatever it is called, so each gate's contract
+    says only what that gate returns. The name used to be the whole test:
+    a second gate had to be folded into one overloaded schema, and a
+    repository's own copy named ExecutionV1 passed whatever it dropped.
+    """
+    if not _PROVE_BASE:
+        shipped = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "contracts", "ExecutionV1.schema.json")
+        with open(shipped, encoding="utf-8") as fh:
+            _PROVE_BASE.append(json.load(fh))
+    base = _PROVE_BASE[0]
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return "is not an object schema"
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = schema.get("required") if isinstance(schema.get("required"), list) else []
+    for field in base["required"]:
+        want, mine = base["properties"][field], props.get(field)
+        if field not in required or not isinstance(mine, dict):
+            return f"does not require '{field}'"
+        if not _typed(mine, want["type"]):
+            return f"does not type '{field}' as {want['type']}"
+        if "pattern" in want and mine.get("pattern") != want["pattern"]:
+            return f"does not hold '{field}' to the pattern {want['pattern']}"
+    return None
+
+
+def carries_exact_sha(schema):
+    """The contract requires a full 40-hex commit in `sha`."""
+    if not isinstance(schema, dict):
+        return False
+    sha = (schema.get("properties") or {}).get("sha")
+    return ("sha" in (schema.get("required") or []) and isinstance(sha, dict)
+            and sha.get("type") == "string" and sha.get("pattern") == EXACT_SHA)
 
 
 def is_reduce(n):
@@ -622,6 +693,250 @@ def ancestors(n, by_id):
                 visit(by_id[dep])
     visit(n)
     return found
+
+
+# What a record files for a node that did not run: an inherited or parked
+# wait, work the budget declined, an effect nobody confirmed, a council
+# with no candidates to judge. Anything else filed against a node means it
+# started.
+NOT_STARTED = {"BLOCKED", "SKIPPED", "REFUSED", "LEDGER-CONFLICT", "NO-CANDIDATES", "INVALID-CANDIDATES"}
+
+
+def no_resume_reach(ir):
+    """Each "resume": "never" node with the ids that show a run reached it.
+
+    That is the node itself and every node that depends on it, through
+    `after`, a reduce's `from` or `verifies`. A node declared later that
+    does not depend on it is left out: behind a park it runs while this
+    one still waits, and in another lane it runs beside it.
+    """
+    nodes = [n for n in ir.get("nodes") or [] if isinstance(n, dict) and isinstance(n.get("id"), str)]
+    declared = [n["id"] for n in nodes if n.get("resume") == "never"]
+    if not declared:
+        return {}
+    needs = {}
+    for n in nodes:
+        deps = after_ids(n) + [(n.get("reduce") or {}).get("from") if isinstance(n.get("reduce"), dict) else None,
+                               n.get("verifies")]
+        needs[n["id"]] = {d for d in deps if isinstance(d, str)}
+    def depends(nid, target, seen):
+        return any(d == target or (d in needs and d not in seen and not seen.add(d) and depends(d, target, seen))
+                   for d in needs[nid])
+    return {target: [n["id"] for n in nodes if n["id"] == target or depends(n["id"], target, set())]
+            for target in declared}
+
+
+def run_started(summary, labels=(), declared=()):
+    """Ids of the nodes a recorded run started, read from its own record.
+
+    A node started when the record holds a result it produced, or a call
+    under its label in the summary's call records or in `labels` read
+    from the runtime journal. An advisor call belongs to a parked node
+    that is still waiting, so it starts nothing.
+
+    For the ids in `declared`, the "resume": "never" nodes themselves, a
+    provenance row that is neither a wait nor a decline counts as well: a
+    fan-out whose workers all died produced nothing and still ran. That
+    row is not enough for any other node. A reduce is code and files OK
+    over a source that never ran, so a bare row from a dependent says
+    nothing about whether the review started.
+    """
+    started = set()
+    results = summary.get("results")
+    for nid, value in (results.items() if isinstance(results, dict) else ()):
+        if value is not None and value != []:
+            started.add(nid)
+    rows = summary.get("provenance")
+    for row in rows if isinstance(rows, list) else ():
+        if isinstance(row, dict) and isinstance(row.get("node"), str) and row.get("status") not in NOT_STARTED:
+            owner = row["node"].split(":")[0]
+            if owner in declared:
+                started.add(owner)
+    calls = summary.get("callRecords")
+    seen = [((call.get("opts") or {}).get("label") if isinstance(call.get("opts"), dict) else None)
+            for call in (calls if isinstance(calls, list) else ()) if isinstance(call, dict)]
+    memos = summary.get("memoRecords")
+    for memo in memos if isinstance(memos, list) else ():
+        # The scheduled runtime files a record for a spawn the budget declined
+        # too, with no call and no result. Only a record of a call, or of a
+        # result replayed from a memo or the ledger, shows the node ran.
+        if isinstance(memo, dict) and (type(memo.get("callIndex")) is int or memo.get("result") is not None):
+            seen.append(memo.get("node"))
+    for label in [*seen, *labels]:
+        if isinstance(label, str) and label and not label.endswith(":advice"):
+            started.add(label.split(":")[0])
+    return started
+
+
+def held_no_resume(ir, summary):
+    """The "resume": "never" nodes a resume of this run is held to.
+
+    The current graph's, and the ones the run itself was compiled with:
+    deleting the field from the graph afterwards does not make an old
+    review resumable.
+    """
+    reach = dict(no_resume_reach(ir))
+    recorded = summary.get("noResume") if isinstance(summary, dict) else None
+    for node, after in (recorded.items() if isinstance(recorded, dict) else ()):
+        if isinstance(after, list):
+            reach.setdefault(node, [nid for nid in after if isinstance(nid, str)])
+    return reach
+
+
+def resume_refusal(ir, summary, labels=(), joined=None):
+    """Why a recorded run cannot be resumed, or None.
+
+    `joined` names the run the summary belongs to when that is another run
+    of the same campaign: one resumed from the run being resumed, or the
+    run that one was resumed from.
+    """
+    reach = held_no_resume(ir, summary)
+    if not reach:
+        return None
+    started = run_started(summary, labels, reach)
+    for node, after in reach.items():
+        hit = [nid for nid in after if nid in started]
+        if hit:
+            who = (f"{joined}, a run joined to this one by a resume," if joined else "the recorded run")
+            where = "in the same campaign" if joined else "under the same record"
+            return (f"RESUME-PAST-NO-RESUME-NODE: {node} — {who} started "
+                    f"{', '.join(repr(nid) for nid in hit)}, and '{node}' declares \"resume\": \"never\": "
+                    f"a resume would run it a second time {where}. Launch fresh.")
+    return None
+
+
+def run_stores(root, graph=None):
+    """Every runs directory an earlier record of this graph's runs can be in.
+
+    The recorder accepts any root that the graph really sits under, so a run
+    may be on file in the store of the root given here or of any directory
+    above the graph. The clone-wide store is read too, where there is one.
+    """
+    if root is None:
+        return []
+    artifacts = _store_layout()
+    shared = []
+    try:
+        shared = [_sibling("memory").runs_path(start) for start in dict.fromkeys(
+            [root] + ([os.path.dirname(os.path.realpath(graph))] if graph else []))]
+    except Exception:  # noqa: BLE001 - a missing git or module only narrows what is read
+        pass
+    return artifacts.stores(root, graph, shared=shared)
+
+
+def run_attempts(root, run_id, unread=None, stores=None):
+    """The summary of every attempt on file under a run id: the latest record and each retained one.
+
+    The latest record is whichever attempt was filed last, and an earlier
+    attempt can be filed again. What a run id has reached is therefore read
+    from all of them, in every store given. A record that is there and
+    cannot be read adds no summary: its path is appended to `unread`,
+    because what it reached is not known.
+    """
+    if root is None and not stores:
+        return []
+    artifacts = _store_layout()
+    paths = artifacts.records(stores or [artifacts.store(root)], run_id)
+    found = []
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                row = json.load(fh)
+        except (OSError, ValueError, RecursionError) as error:
+            if unread is not None and not (isinstance(error, OSError) and artifacts.absent(error)):
+                unread.append(path)
+            continue
+        attempt = row.get("summary") if isinstance(row, dict) and row.get("runId") == run_id else None
+        if not isinstance(attempt, dict):
+            if unread is not None:
+                unread.append(path)
+        elif attempt not in found:
+            found.append(attempt)
+    return found
+
+
+def resume_reach(ir, summary, run_id, projects=None, root=None, graph=None):
+    """What a resume of a recorded run is told its source started.
+
+    None when no node declares "resume": "never", so a graph without the
+    field launches exactly as before. Raises ValueError, with the named
+    code, when the run started such a node. Every attempt on file under
+    the run id is read, and so is the runtime journal, which also holds
+    an attempt that reached further than any that was recorded. So is
+    every run joined to this one by a resume: a run resumed from it that
+    started the node belongs to the same campaign. All of that is read from
+    the stores the recorder may have filed it in, which are the root's and
+    those above the graph. An attempt on file that cannot be read leaves
+    the reach unknown, and that is refused too.
+    """
+    unread = []
+    stores = run_stores(root, graph)
+    members = _store_layout().lineage(stores, run_id) if stores else [run_id]
+    attempts = [(run_id, summary)]
+    for member in members:
+        attempts += [(member, a) for a in run_attempts(root, member, unread, stores) if a != summary]
+    held = {}
+    for _, attempt in attempts:
+        held.update(held_no_resume(ir, attempt))
+    if not held:
+        return None
+    journals = {member: journal_labels(member, projects) for member in members}
+    started = set()
+    for member, attempt in attempts:
+        refusal = resume_refusal(ir, attempt, journals[member], None if member == run_id else member)
+        if refusal:
+            raise ValueError(refusal)
+        if member == run_id:
+            started |= run_started(attempt, journals[member], held_no_resume(ir, attempt))
+    if unread:
+        node = sorted(held)[0]
+        raise ValueError(f"RESUME-REACH-UNKNOWN: {node} — an attempt on file for {run_id} cannot be read "
+                         f"({unread[0]}), so what the run reached is not known, and '{node}' declares "
+                         f"\"resume\": \"never\". Launch fresh.")
+    return sorted(started)
+
+
+def journal_labels(run_id, projects=None):
+    """Labels of every call the runtime journal holds for a run, or [] with no journal.
+
+    The journal is the runtime's own list, so it covers an attempt that
+    reached further than the last one anybody recorded.
+    """
+    helper = _sibling("replay_memo")
+    try:
+        rows = helper._rows(helper._run_dir(run_id, projects) / "journal.jsonl")
+        return [row.get("label", (row.get("opts") or {}).get("label") if isinstance(row.get("opts"), dict) else None)
+                for row in rows if isinstance(row, dict) and row.get("type") == "started"]
+    except (helper.ReplayError, OSError, ValueError):
+        return []
+
+
+def runs_beside(ir, earlier, later):
+    """True when `earlier` may still be running as `later` returns.
+
+    Declared earlier is not enough in a graph with lanes: two nodes in
+    different lanes of one fork start together, and nothing orders them
+    unless one waits on the other.
+    """
+    by_id = {n.get("id"): n for n in ir.get("nodes") or [] if isinstance(n, dict)}
+    if earlier in ancestors(by_id.get(later) or {}, by_id):
+        return False
+    try:
+        stages = execution_stages(ir)
+        # The schedule lists a repair loop under its checker alone. Its fixer
+        # and its integration nodes run inside the loop, in the loop's lane.
+        loop_of = {owned: loop["id"] for loop in repair_loops(ir)
+                   for owned in [loop.get("verifies"), *repair_integrations(loop)] if isinstance(owned, str)}
+    except (KeyError, TypeError, AttributeError):
+        return False        # a malformed graph is reported by its own findings
+    earlier, later = loop_of.get(earlier, earlier), loop_of.get(later, later)
+    for kind, stage in stages:
+        if kind != "lanes":
+            continue
+        where = {n.get("id"): index for index, lane in enumerate(stage) for n in lane}
+        if earlier in where and later in where:
+            return where[earlier] != where[later]
+    return False
 
 
 def replay_features(ir, embedded_args=None):
@@ -1131,6 +1446,48 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
             f.append(f"{where}: id must be lowercase kebab-case")
         if nid in seen:
             f.append(f"{where}: duplicate id")
+        if "resume" in n:
+            parks = [x for x in ir.get("nodes") or [] if isinstance(x, dict) and x.get("actor", "agent") != "agent"
+                     and isinstance(x.get("id"), str)]
+            by_id = {x.get("id"): x for x in ir.get("nodes") or [] if isinstance(x, dict)}
+            if n["resume"] != "never" or not isinstance(n["resume"], str):
+                f.append(f"{where}: resume takes one value, \"never\": a run that started this node "
+                         f"cannot be resumed")
+            elif n.get("actor", "agent") != "agent":
+                f.append(f"{where}: resume \"never\" on a {n.get('actor')} node contradicts the park — "
+                         f"the campaign continues by resuming past it")
+            elif n in repair_loops(ir) or nid in repair_owned(ir):
+                f.append(f"{where}: resume \"never\" on a node of a repair loop — the loop files its rounds "
+                         f"under its checker and is continued by a resume, so the record cannot show which of "
+                         f"its nodes started. Declare it on the review that follows the loop")
+            else:
+                waits_on = ancestors(n, by_id)
+                beside = [x["id"] for x in parks if x["id"] not in waits_on]
+                if beside:
+                    f.append(f"{where}: resume \"never\" with a park it does not wait on "
+                             f"({', '.join(repr(p) for p in beside)}) — the run parks there after this node may "
+                             f"have started, and the resume that continues past the park would be refused. "
+                             f"Make this node depend on the park, or drop the field")
+        same = n.get("sameShaAs")
+        if same is not None:
+            target = seen.get(same) if isinstance(same, str) else None
+            if not isinstance(same, str) or not same:
+                f.append(f"{where}: sameShaAs must be the id of one earlier node")
+            elif target is None:
+                f.append(f"{where}: sameShaAs '{same}' names no earlier node — the commit to "
+                         f"compare with has to exist when this node returns")
+            else:
+                if runs_beside(ir, same, nid):
+                    f.append(f"{where}: sameShaAs '{same}' runs beside this node in another lane, so its "
+                             f"commit may not exist when this node returns — make this node wait on "
+                             f"'{same}' (after), or put the two in one lane")
+                for label, node in ((where, n), (f"node '{same}'", target)):
+                    if is_reduce(node) or node.get("foreach") or node.get("repeat") or judge_size(node):
+                        f.append(f"{where}: sameShaAs compares one commit with one commit, and "
+                                 f"{label} yields several results")
+                    elif not carries_exact_sha(contracts.get(node.get("contract"))):
+                        f.append(f"{where}: sameShaAs needs an exact commit on both nodes, and "
+                                 f"{label}'s contract {node.get('contract')} does not require a 40-hex sha")
 
         # Reduce nodes are deterministic code, not agents: they carry none of
         # the agent-node machinery, so they validate on their own path.
@@ -1239,11 +1596,13 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
                     f"(declared: {', '.join(sorted(gates)) or 'none'})"
                     + (" — prove:ci needs a top-level 'ci' section naming the "
                        "forge and the contexts that decide" if gate == "ci" else ""))
-            if c != "ExecutionV1":
+            problem = prove_contract_issue(contracts[c]) if c in contracts else None
+            if problem:
                 f.append(
-                    f"{where}: verify prove:{gate} requires contract ExecutionV1 "
-                    f"(has '{c}') — the attestId is what makes the exit code "
-                    f"checkable, and no other contract carries one")
+                    f"{where}: verify prove:{gate} needs a contract that requires gate, exit, "
+                    f"attestId and sha as the shipped ExecutionV1 types them, and '{c}' "
+                    f"{problem} — the attestId is what makes the exit code checkable, and "
+                    f"the sha is what ties it to a commit")
             if n.get("verifyOver"):
                 f.append(f"{where}: verify prove:{gate} verifies the node's own "
                          f"execution, not an array — drop verifyOver")
@@ -1280,10 +1639,14 @@ def validate(ir, contracts, gates=None, agents=None, specification=None, embedde
                     f.append(f"{where}: after join '{dep}' is never consumed; use {{{{prev.{dep}}}}} or {{{{prev.{dep}.<field>}}}}")
             if 'prev' in tokens:
                 f.append(f"{where}: a list after requires named {{{{prev.<id>}}}} projections, not an ambiguous whole prev")
-        elif after and not (_uses_prev(n.get("prompt", "")) or uses_winner):
+        elif after and not (_uses_prev(n.get("prompt", "")) or uses_winner) and not panel_over_sources(n, ir):
             # Nodes already run in declaration order, so an `after` whose
             # output is never consumed is a phantom edge: it reads as a
             # dependency in the spec and constrains nothing in the run.
+            # The exception is a red-team panel node over lens producers:
+            # the emitted code reads its sources through this edge, the
+            # node's own output is fixed, and making it paste every lens
+            # result into its prompt bought the largest prompt in the graph.
             f.append(
                 f"{where}: after '{after}' but the prompt never uses {{{{prev}}}} — "
                 f"declaration order already sequences nodes, so `after` means "
@@ -1944,11 +2307,105 @@ def red_team_sources(n, ir):
     return found
 
 
+# The four fields a shipped RedTeamV1 finding always carries. All prose but
+# the severity: two reviewers who see one defect word it twice.
+RED_TEAM_PROSE_KEY = ("severity", "finding", "exploit_path", "minimal_fix")
+
+
+def red_team_key(n, ir):
+    """The claim identity a red-team panel judges by, or None for exact text.
+
+    A `reduce` with `dedupeBy` between the lenses and the panel is the
+    graph author's statement of when two findings are one defect. The
+    panel used to ignore it and key every raw lens claim on its exact
+    text, so the reduce changed what the collector read and nothing about
+    what was refuted. The walk stops at the lenses: a reduce upstream of
+    them dedupes what the lenses were given, and says nothing about their
+    own findings.
+    """
+    by_id = {x.get("id"): x for x in ir.get("nodes", [])}
+    seen, pending = set(), [n]
+    while pending:
+        current = pending.pop(0)
+        for dep in after_ids(current) + ([(current.get("reduce") or {}).get("from")] if is_reduce(current) else []):
+            producer = by_id.get(dep)
+            if not producer or dep in seen:
+                continue
+            seen.add(dep)
+            if producer.get("contract") == "RedTeamV1" and producer.get("foreach"):
+                continue
+            if not red_team_sources(producer, ir):
+                # A branch the lenses do not feed, reached by a second path.
+                continue
+            keys = (producer.get("reduce") or {}).get("dedupeBy") if is_reduce(producer) else None
+            if isinstance(keys, list) and keys and all(isinstance(k, str) and k for k in keys):
+                return list(keys)
+            pending.append(producer)
+    return None
+
+
+def panel_over_sources(n, ir):
+    """A RedTeamV1 panel node whose claims come from lens producers upstream."""
+    return bool(not is_reduce(n) and n.get("contract") == "RedTeamV1" and panel_size(n)
+                and n.get("verifyOver") and not n.get("foreach") and red_team_sources(n, ir))
+
+
 def warnings(ir, agents=None, specification=None, gates=None):
     """Non-blocking findings: shapes that compile but will predictably
     disappoint. Returned separately from validate() so they inform without
     refusing to build."""
     w = []
+    by_id = {x.get("id"): x for x in ir.get("nodes") or [] if isinstance(x, dict)}
+    ceiling = (ir.get("budget") or {}).get("maxNodes")
+    for node in ir.get("nodes") or []:
+        if not isinstance(node, dict) or not prove_gate(node) or node.get("sameShaAs"):
+            continue
+        waits_on = ancestors(node, by_id)
+        # A node that commits after the earlier gate read its commit moves the
+        # commit by design: the second gate judges what the first never saw.
+        # That is any committing node this gate waits on and the earlier one
+        # did not, whether it sits between the two or beside the first.
+        commits = {mid for mid in waits_on if (by_id.get(mid) or {}).get("mutates")}
+        earlier = [nid for nid in waits_on if prove_gate(by_id.get(nid) or {})
+                   and not commits - ancestors(by_id[nid], by_id)]
+        if earlier:
+            first = next(x.get("id") for x in ir["nodes"] if x.get("id") in earlier)
+            w.append(
+                f"node '{node.get('id', '?')}': a second attested gate after '{first}' with no sameShaAs. "
+                f"Each gate resolves its commit when it runs, so a branch that moves between them is "
+                f"certified at two heads and the run still records COMPLETE. Add "
+                f"\"sameShaAs\": \"{first}\" to halt when the two commits differ.")
+    parks = {x.get("id") for x in ir.get("nodes") or [] if isinstance(x, dict) and x.get("actor", "agent") != "agent"}
+    for node in ir.get("nodes") or []:
+        if (isinstance(node, dict) and node.get("contract") == "RedTeamV1" and node.get("foreach")
+                and node.get("resume") != "never"
+                # Where the field would be refused there is nothing to advise.
+                and not parks - ancestors(node, by_id)
+                and node not in repair_loops(ir) and node.get("id") not in repair_owned(ir)):
+            w.append(
+                f"node '{node.get('id', '?')}': a red-team fan-out a resume can pass. Replay is the longest "
+                f"unchanged prefix of calls, so after one dead lens every later lens runs again and the review "
+                f"is rolled a second time under one record. Add \"resume\": \"never\" to refuse a resume of "
+                f"any run that started it; prose in a prompt does not hold.")
+    for node in ir.get("nodes") or []:
+        if not isinstance(ceiling, int) or isinstance(ceiling, bool) or not panel_over_sources(node, ir):
+            continue
+        lenses = sum(len((ir.get("lists") or {}).get((by_id.get(sid) or {}).get("foreach"), []))
+                     for sid in red_team_sources(node, ir))
+        key = red_team_key(node, ir)
+        if lenses < 2 or (key and not set(key) & set(RED_TEAM_PROSE_KEY[1:])):
+            continue
+        refuters, expected = panel_size(node), node.get("expectItems")
+        worst = (f"at expectItems {expected} that is {lenses * expected * refuters} refuter calls "
+                 if isinstance(expected, int) and not isinstance(expected, bool)
+                 else f"each defect is {lenses * refuters} refuter calls ")
+        w.append(
+            f"node '{node.get('id', '?')}': {lenses} lenses feed a panel:{refuters} whose claims are keyed on "
+            f"{'prose (dedupeBy ' + ', '.join(key) + ')' if key else 'their exact text'}, so one defect every lens "
+            f"words differently is {lenses} claims; {worst}against budget.maxNodes {ceiling}, and a run that "
+            f"spends the ceiling ends BUDGET-EXHAUSTED before the verdict. Put a reduce between the lenses and "
+            f"the panel whose dedupeBy names structured fields (RedTeamV1 findings carry target and class for "
+            f"this), or size maxNodes for lenses times defects.")
     for node in ir.get('nodes') or []:
         if SUBST.findall(str(node.get("prompt", ""))).count("prev") > 1:
             w.append(f"node '{node.get('id', '?')}': whole {{{{prev}}}} expands more than once; project only the needed fields")
@@ -2417,7 +2874,7 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
     # shared text is cached.
     tracks = {}
     calls, cold = 0, 0
-    per_node, raw = {}, {}
+    per_node, raw, by_kind = {}, {}, {}
     # One token per ASCII serialization byte is deliberately conservative.
     # Do not assume the packet, after a varying preamble, shares the cache.
     projected_spec = project_specification(specification, ir)
@@ -2465,6 +2922,10 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
                 cold += 1
                 warm.add(key)
             raw[nid] = raw.get(nid, 0.0) + cost
+            share = by_kind.setdefault(nid, {}).setdefault(
+                "sentinel" if g.get("sentinel") else g.get("kind") or "work", [0.0, 0])
+            share[0] += cost
+            share[1] += 1
             rec = per_node.setdefault(nid, {"calls": 0, "estimatedTokens": 0, "effort": effort,
                                             "model": model or "default", "specificationInputTokens": 0 if g.get("sentinel") else spec_input})
             rec["calls"] += 1
@@ -2477,6 +2938,11 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
         "total": sum(r["estimatedTokens"] for r in per_node.values()),
         "calls": calls, "cold": cold, "ttl": ttl,
         "perNode": per_node,
+        # The same total by what each call was: a node's own work, a
+        # refuter of it, an advisor, a sentinel. The compiled script prices
+        # the calls it actually makes from this.
+        "byKind": {nid: {kind: {"estimatedTokens": cost, "calls": count} for kind, (cost, count) in kinds.items()}
+                   for nid, kinds in by_kind.items()},
         "unpriced": unpriced_expansions(source_ir, embedded_args),
         "assumptions": {"prefixTokens": PREFIX_TOKENS,
                         "specificationInputTokens": spec_input,
@@ -2487,6 +2953,80 @@ def estimate_tokens(ir, contracts=None, specification=None, embedded_args=None):
                         "workTokens": WORK_TOKENS, "effortMult": EFFORT_MULT,
                         "modelMult": dict(MODEL_MULT)},
     }
+
+
+def call_prices(est):
+    """({profile id: {kind: tokens per call}}, tokens charged up front) for the run-time cap.
+
+    The estimate is a sum over planned calls, so pricing each call the run
+    makes at its node's planned figure for that kind of call makes a run
+    that follows its plan spend the estimate exactly, and one that outgrows
+    it spend more. Prices are scaled so each node's calls add up to its
+    rounded figure in the profile: a cap set to the estimate must never
+    decline a planned call over a fraction of a token. Sentinel calls do
+    not pass through the spawn wrapper, so their planned cost is charged
+    before the first call. A node may carry a sentinel's name, so an id
+    is split by kind: only its sentinel calls are charged up front.
+    """
+    prices, upfront = {}, 0.0
+    for nid, kinds in est["byKind"].items():
+        planned = est["perNode"][nid]["estimatedTokens"]
+        raw = sum(row["estimatedTokens"] for row in kinds.values())
+        scale = planned / raw if raw else 1.0
+        row = {}
+        for kind, cost in kinds.items():
+            if kind == "sentinel":
+                upfront += cost["estimatedTokens"] * scale
+            elif cost["calls"]:
+                row[kind] = cost["estimatedTokens"] * scale / cost["calls"]
+        if row:
+            prices[nid] = row
+    return prices, upfront
+
+
+DIFF_TIER = (("attack", ":diff-attack", "work"), ("refute", ":diff-refute", "refute"))
+
+
+def diff_tier_prices(ir, est):
+    """({'attack'|'refute': {item key: tokens per call}}, the plan ids they came from).
+
+    The repair diff review spawns as repair-diff:<item>:r<round>:attack:<lens>
+    and ...:refute:<claim>:<lens>. That label names the slice it reviews.
+    The plan prices the same calls under the checker that owns them, as
+    <checker>:diff-attack and <checker>:diff-refute, so a lookup by label
+    prefix finds nothing and the call was charged at the dearest one. The
+    table is keyed the way the label is: by the item, with `_integration`
+    for the merged tree. Two loops that share an item key are charged the
+    mean over their planned calls, which still adds up to the plan.
+    """
+    prices, _ = call_prices(est)
+    lists = ir.get("lists") or {}
+    by_id = {n.get("id"): n for n in ir.get("nodes") or [] if isinstance(n, dict)}
+    owners = {}
+    for loop in repair_loops(ir):
+        for work in (by_id.get(loop.get("verifies")) or {}, loop):
+            if work.get("contract") == "FixCheckV1":
+                for item in lists.get(loop.get("foreach"), []):
+                    owners.setdefault(str(item.get("key")) if isinstance(item, dict) else str(item), []).append(work["id"])
+        for nid in repair_integrations(loop):
+            if (by_id.get(nid) or {}).get("contract") == "FixCheckV1":
+                owners.setdefault("_integration", []).append(nid)
+    table, used = {seat: {} for seat, _, _ in DIFF_TIER}, set()
+    for item, ids in owners.items():
+        for seat, suffix, kind in DIFF_TIER:
+            rows = [(prices[nid + suffix][kind], est["byKind"][nid + suffix][kind]["calls"])
+                    for nid in ids if kind in prices.get(nid + suffix, {})]
+            calls = sum(count for _, count in rows)
+            if calls:
+                table[seat][item] = sum(price * count for price, count in rows) / calls
+                used.update(nid + suffix for nid in ids)
+    return table, used
+
+
+def dearest_call(est):
+    """The most any one planned call is priced at."""
+    prices, _ = call_prices(est)
+    return max((price for row in prices.values() for price in row.values()), default=0.0)
 
 
 def unpriced_expansions(ir, embedded_args=None):
@@ -3027,6 +3567,33 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         condition = f"!Object.prototype.hasOwnProperty.call(A, {js_str(k)})" if embedded_args is not None else f"!A[{js_str(k)}]"
         a(f"if ({condition}) A[{js_str(k)}] = {js_str(v)}")
     a(f"const campaign = {js_str(ir['campaign'])}")
+    no_resume = no_resume_reach(ir)
+    if no_resume:
+        a("// --- resume: never ---")
+        a("// Each node below is a review that runs once. A resume replays the longest")
+        a("// unchanged prefix of calls and runs the rest again, so resuming a run that")
+        a("// started one rolls it a second time under the same record. This launch")
+        a("// names a source run when it is a resume; what that run started comes from")
+        a("// the launcher's reading of its record, from prior results carried in, and")
+        a("// from the replay state compiled into this script, which is read whether or")
+        a("// not a source is named. A resume that does not say what its source started")
+        a("// cannot be shown to stop short, and is refused.")
+        a("const NO_RESUME = " + json.dumps(no_resume, sort_keys=True))
+        a("{")
+        a("  const resumed = A._resumeFromRunId !== undefined && A._resumeFromRunId !== null")
+        a("  const held = new Set(), owner = label => typeof label === 'string' && label && !label.endsWith(':advice') ? label.split(':')[0] : null")
+        a("  for (const entry of Array.isArray(A._prefix) ? A._prefix : []) { const id = owner(entry && entry.label); if (id) held.add(id) }")
+        a("  for (const entry of Object.values(A._memo && typeof A._memo === 'object' ? A._memo : {})) { const id = owner(entry && (entry.node || (entry.payload || {}).id)); if (id) held.add(id) }")
+        a("  for (const entry of Object.values(A._ledgerCalls && typeof A._ledgerCalls === 'object' ? A._ledgerCalls : {})) { const id = owner(entry && entry.node); if (id) held.add(id) }")
+        a("  for (const [id, value] of Object.entries(A._priorResults && typeof A._priorResults === 'object' ? A._priorResults : {})) if (value !== null && value !== undefined && !(Array.isArray(value) && !value.length)) held.add(id)")
+        a("  const reach = Array.isArray(A._resumeReach) ? A._resumeReach : null")
+        a("  for (const id of reach || []) held.add(String(id))")
+        a("  for (const [node, after] of Object.entries(NO_RESUME)) {")
+        a("    const hit = after.filter(id => held.has(id))")
+        a("    if (hit.length) throw new Error(`RESUME-PAST-NO-RESUME-NODE: ${node} — the run this launch resumes${resumed ? ' (' + A._resumeFromRunId + ')' : ''} started ${hit.join(', ')}, and '${node}' declares \"resume\": \"never\". Launch fresh.`)")
+        a("  }")
+        a("  if (resumed && reach === null) throw new Error(`RESUME-REACH-UNKNOWN: this launch resumes ${A._resumeFromRunId} and does not say which nodes that run started (args._resumeReach), so nothing shows it stops before ${Object.keys(NO_RESUME).join(', ')}, which declare${Object.keys(NO_RESUME).length > 1 ? '' : 's'} \"resume\": \"never\". Assemble the resume with resume.py, which reads the recorded run.`)")
+        a("}")
     a("// {{item...}} / {{A...}} render text as itself and structure as JSON.")
     a("function tokenText(v) { return v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v) }")
     a("function longPreamble() { return " + js_str(LONG_PREAMBLE) + "; }")
@@ -3137,7 +3704,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("function provePreamble(gate) {")
         a("  return longPreamble() + (gate === 'ci'")
         a("    ? `PROVE GATE ci — ask the forge, never choose the commit yourself: run ${ATTEST} --ci${ROOT_ARG} --pr <the pull request> --wait --nonce ${LAUNCH.nonce} (or --ref <branch>), and return gate 'ci', the exit and attestId it prints, and the sha it names. Whatever merges after this gate must pin that sha (gh pr merge --match-head-commit <sha>).\\n\\n`")
-        a("    : `PROVE GATE ${gate} — use the pinned witness command, which verifies the compiler identity before executing the declared gate: ${ATTEST} --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground ${ATTEST} --await <token>${ROOT_ARG}. A red whose wrapper row carries fault can be settled only by ${ATTEST} --rerun-fault <attestId>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}; await its one sequential native/reference pair and cite the pair. Every other red stays red. Never rerun until green: a later pass does not erase any unsettled red at the same tree and nonce. Return gate '${gate}', the exit, the full judged commit sha, and the attestId the witness recorded (${ATTEST} --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it).\\n\\n`)")
+        a("    : `PROVE GATE ${gate} — use the pinned witness command, which verifies the compiler identity before executing the declared gate: ${ATTEST} --run ${gate}${ROOT_ARG} --detach --nonce ${LAUNCH.nonce} and collect it with foreground ${ATTEST} --await <token>${ROOT_ARG}. A red whose wrapper row carries fault can be settled only by ${ATTEST} --rerun-fault <attestId>${ROOT_ARG} --detach --nonce ${LAUNCH.nonce}; await its one sequential native/reference pair and cite the pair. Every other red stays red. Never rerun until green: a later pass does not erase any unsettled red at the same tree and nonce. Return gate '${gate}', the exit, the full judged commit sha, and the attestId the witness recorded (${ATTEST} --last ${gate}${ROOT_ARG} --nonce ${LAUNCH.nonce} prints it). Run each of these commands exactly as written. They begin with bash and the plugin's py.sh, which is the spelling the isolation check accepts and the one that picks the right shell on Windows; if another spelling is refused, come back to this one and never start attest.py with python directly.\\n\\n`)")
         a("}")
         a("const CITES = " + json.dumps({n['id']: n['cites'] for n in cited_nodes}, sort_keys=True))
         a("function citesPreamble(gates) {")
@@ -3222,7 +3789,14 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             terminals[gate["id"]] = {"sources": sources, "stages": stages}
         a("const RED_TEAM_TERMINALS = " + json.dumps(terminals))
 
-        a("const redTeamClaimKey = f => JSON.stringify(['severity','finding','exploit_path','minimal_fix'].map(k => f && f[k]))")
+        a("// A claim's identity for the panel. `by` is the dedupeBy of a reduce the graph put between the")
+        a("// lenses and the panel. A claim missing any of those fields keeps its exact text as its key, so")
+        a("// an absent field never merges two claims.")
+        a(f"const RED_TEAM_PROSE_KEY = {json.dumps(list(RED_TEAM_PROSE_KEY))}")
+        a("const redTeamClaimKey = (f, by) => {")
+        a("  const keyed = Array.isArray(by) && by.length && by.every(k => f && f[k] !== undefined && f[k] !== null && String(f[k]).trim() !== '')")
+        a("  return JSON.stringify([keyed ? 'key' : 'text', ...(keyed ? by : RED_TEAM_PROSE_KEY).map(k => f && f[k])])")
+        a("}")
         a("function redTeamClaims(ids) { return ids.flatMap(id => (Array.isArray(RESULTS[id]) ? RESULTS[id] : []).flatMap(r => Array.isArray(r && r.findings) ? r.findings : [])) }")
 
         a("function redTeamPreamble(ids) { return 'RAW LENS COVERAGE — bind the final verdict to these completed source reviews. Missing coverage, blockers, mismatched snapshots or incomplete sampling must be stated and cannot silently become full coverage.\\n' + JSON.stringify(ids.map(id => ({ node: id, reviews: (Array.isArray(RESULTS[id]) ? RESULTS[id] : [RESULTS[id]]).filter(Boolean).map(r => ({ verdict: r.verdict, findingCount: (r.findings || []).length, coverage: r.coverage || null, blockers: (r.review || {}).blockers || [] })) }))) + '\\n'; }")
@@ -3232,7 +3806,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("  if (checks.some(c => c.unresolved || c.rows.some(v => v.unverified || v.cast !== c.requested || v.kills !== c.requested))) return 'final verdict drops a surviving or unverified claim'")
         a("  if (checks.some(c => c.rows.some(v => ['MEDIUM','HIGH','CRITICAL'].includes(v.severity) && c.requested < 3))) return 'MEDIUM+ claim requires three independent refuters'")
         a("  for (const claim of redTeamClaims(ids)) {")
-        a("    const votes = checks.flatMap(c => c.rows).filter(v => redTeamClaimKey(v) === redTeamClaimKey(claim))")
+        a("    const votes = checks.flatMap(c => c.rows.filter(v => redTeamClaimKey(v, c.keyBy) === redTeamClaimKey(claim, c.keyBy)))")
         a("    if (!votes.length || votes.some(v => v.unverified || v.kills < v.cast)) return 'final verdict drops an unchecked, surviving or unverified claim'")
         a("  }")
         a("  for (const id of ids) {")
@@ -3422,6 +3996,13 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("const WINNERS = {}")
     a("const RESULTS = {}")
     a("const PROVENANCE = []")
+    if any(n.get("sameShaAs") for n in nodes):
+        a("// Two nodes that must certify one head: this node's commit against an earlier node's.")
+        a("function sameSha(id, r, other) {")
+        a("  const exact = /^[0-9a-f]{40}$/, mine = r && r.sha, theirs = RESULTS[other] && RESULTS[other].sha")
+        a("  if (!exact.test(mine || '') || !exact.test(theirs || '')) return `${id}: sameShaAs '${other}' needs an exact commit on both nodes, and one of them returned none`")
+        a("  return mine === theirs ? null : `${id} judged ${mine} and '${other}' judged ${theirs}: the commit moved between the two, so they do not certify one head`")
+        a("}")
     a("const RECURRING_CLASSES = []")
     a("// The optional data arg is structured, not prose: round counts, worker")
     a("// tallies, reduce before/after. metrics.py aggregates these across runs,")
@@ -3490,6 +4071,10 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         extra += ", argsSha256: ARGS_SHA256, evidenceUnpinned: A._evidenceUnpinned || []"
         if not modern and not prove_nodes and not repair_loops(ir):
             extra += ", launch: A._launch || null"
+    if no_resume:
+        # The declaration rides out in the record, so a later resume is held
+        # to what this run was compiled with whatever the graph says by then.
+        extra += ", noResume: NO_RESUME"
     reducers = [n["id"] for n in nodes if is_reduce(n)]
     if reducers:
         # Named so a consumer counting produced items can tell a reducer's
@@ -3500,7 +4085,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     # spent is the runtime's own token meter. Without these in the artifact,
     # fan-out efficiency and budget accuracy are vibes, not numbers.
     if (ir.get("budget") or {}).get("maxNodes") is not None:
-        extra += ", spawned: SPAWNED, declined: DECLINED"
+        extra += ", spawned: SPAWNED, declined: DECLINED, declinedByTokens: DECLINED_BY_TOKENS, estimatedSpend: Math.round(SPENT_ESTIMATE), unpriced: UNPRICED"
     # spent is guarded: it is a newer runtime API than the rest of the
     # budget surface, and a summary that throws on an older runtime loses
     # the entire run record over a nice-to-have number.
@@ -3543,17 +4128,67 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("// is neither success nor failure — never DEAD, never a halt reason.")
         a("let DECLINED = 0")
         a("const DECLINED_LABELS = new Set()")
-        a("// Every agent in this graph is spawned through here, so the ceiling")
-        a("// counts what actually ran.")
+        a("// Which ceiling declined the last call, for the notes that file it.")
+        a("let DECLINED_BY = 'node ceiling'")
+        a("// budget.maxEstimatedTokens was compared with the plan when the graph")
+        a("// compiled and never reached this script, so what a run could spend was")
+        a("// MAX_NODES times whatever each call cost. Every call is priced here at")
+        a("// the figure the estimate used for that node and that kind of call, and")
+        a("// one that would pass the cap is declined like one past the node ceiling.")
+        a("// A run that follows its plan is charged exactly its estimate.")
+        cap_tokens = budget_cfg.get("maxEstimatedTokens")
+        prices, upfront = call_prices(est)
+        diff_prices, diff_ids = diff_tier_prices(ir, est)
+        a("const MAX_TOKENS = " + (str(int(cap_tokens)) if isinstance(cap_tokens, int) and not isinstance(cap_tokens, bool) else "null"))
+        a("const PRICES = " + json.dumps({nid: row for nid, row in prices.items() if nid not in diff_ids}, sort_keys=True))
+        a("// The repair diff review is labelled by the slice it reviews, so it has its")
+        a("// own table, keyed the way its labels are.")
+        a("const DIFF_PRICES = " + json.dumps(diff_prices, sort_keys=True))
+        a("const DEAREST = " + json.dumps(dearest_call(est)))
+        a("let SPENT_ESTIMATE = " + json.dumps(upfront))
+        a("let DECLINED_BY_TOKENS = 0")
+        a("// A call the plan did not price is charged at the dearest planned call, and")
+        a("// named: charging it there in silence is how a mispriced label hid.")
+        a("const UNPRICED = []")
+        a("function unpriced(label) {")
+        a("  if (!UNPRICED.includes(label)) { UNPRICED.push(label); log(`${label} is not priced by the plan — charged at the dearest planned call (~${Math.round(DEAREST)})`) }")
+        a("  return DEAREST")
+        a("}")
+        a("function priceOf(label) {")
+        a("  const diff = /^repair-diff:(.*):r\\d+:(attack|refute):/.exec(label)")
+        a("  if (diff) { const price = DIFF_PRICES[diff[2]][diff[1]]; return price === undefined ? unpriced(label) : price }")
+        a("  let id = null")
+        a("  for (const key of Object.keys(PRICES)) if ((label === key || label.startsWith(key + ':')) && (id === null || key.length > id.length)) id = key")
+        a("  if (id === null) return unpriced(label)")
+        a("  // The kind of call is read from the label's shape for this node, never from")
+        a("  // its last word alone: a list item may be keyed 'advice' or 'refute1'.")
+        a("  const row = PRICES[id]")
+        a("  const kind = row.advise !== undefined && label === id + ':advice' ? 'advise' : row.refute !== undefined && /:\\d+:refute\\d+$/.test(label) ? 'refute' : 'work'")
+        a("  return row[kind] !== undefined ? row[kind] : Math.max(...Object.values(row))")
+        a("}")
+        a("// Every agent in this graph is spawned through here, so the ceilings")
+        a("// count what actually ran.")
         a("async function spawn(prompt, opts) {")
         a("  if (SPAWNED >= MAX_NODES) {")
         a("    log(`budget ceiling: ${opts.label} NOT RUN — ${SPAWNED}/${MAX_NODES} agent call(s) already spawned`)")
         a("    INCOMPLETE = true")
         a("    DECLINED++")
+        a("    DECLINED_BY = 'node ceiling'")
+        a("    DECLINED_LABELS.add(String(opts.label))")
+        a("    return null")
+        a("  }")
+        a("  const price = priceOf(String(opts.label))")
+        a("  if (MAX_TOKENS !== null && SPENT_ESTIMATE + price > MAX_TOKENS + 1e-6) {")
+        a("    log(`token ceiling: ${opts.label} NOT RUN — ~${Math.round(SPENT_ESTIMATE)} of ${MAX_TOKENS} estimated tokens are spent and this call is priced at ~${Math.round(price)}`)")
+        a("    INCOMPLETE = true")
+        a("    DECLINED++")
+        a("    DECLINED_BY_TOKENS++")
+        a("    DECLINED_BY = 'token ceiling'")
         a("    DECLINED_LABELS.add(String(opts.label))")
         a("    return null")
         a("  }")
         a("  SPAWNED++")
+        a("  SPENT_ESTIMATE += price")
         a("  return agent(prompt, opts)")
         a("}")
     a("// True when there is room to spawn work. Anything declined is announced")
@@ -3611,7 +4246,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     if needs_panel:
         a("// --- verification: refuters attack the claim; majority kills it ---")
         a(f"const VERIFY_FLOOR = {int(floor)}")
-        a("async function refute(claimText, label, phase, n, priors, codeReview = false) {")
+        a("async function refute(claimText, label, phase, n, priors, codeReview = false, restated = 0) {")
         a("  if (budget.total && budget.remaining() < VERIFY_FLOOR) {")
         a("    log(`budget floor reached — ${label} left UNVERIFIED (no silent caps)`)")
         a("    return { kills: 0, cast: 0, unverified: true }")
@@ -3625,7 +4260,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("      `Attempt to REFUTE this claim. ${claimText}\\n\\n` + (priors || '') +")
         a("        `Re-read the underlying code or evidence YOURSELF; do not trust the claim's own summary. ` +")
         a("        `Hunt for the reason it is wrong: a guard upstream, a type that forbids the state, a test that pins it. ` +")
-        a("        (codeReview ? `Your independent lens is ${['reproduce the minimal case and valid control', 'establish attacker reachability and impact', 'check scope and severity'][i % 3]}. Return refuted=true only with contradictory executable evidence; default refuted=false when uncertain, the fixture breaks or tools are missing.` : `Default to refuted=true when uncertain.`),")
+        a("        (codeReview ? `Your independent lens is ${['reproduce the minimal case and valid control', 'establish attacker reachability and impact', 'check scope and severity'][i % 3]}. Return refuted=true only with contradictory executable evidence; default refuted=false when uncertain, the fixture breaks or tools are missing.` + (restated ? ` This claim carries ${restated} restatement(s): other reviewers' wordings that the graph keys as the same defect. Return refuted=true only when your evidence contradicts every one of them; if any wording describes a defect that stands, the claim stands.` : '') : `Default to refuted=true when uncertain.`),")
         a("      { label: `${label}:refute${i + 1}`, phase, schema: C.VerdictV1, effort: 'low' }")
         a("    )")
         a("  ))")
@@ -3648,15 +4283,41 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("")
         a("// Applies a node's declared tier to every item it produced. Used by")
         a("// fan-out and single nodes alike, so a declared tier always runs.")
-        a("async function verifyItems(result, field, label, phase, n, need, sink, codeReview = false, sourceIds = []) {")
+        a("async function verifyItems(result, field, label, phase, n, need, sink, codeReview = false, sourceIds = [], keyBy = null) {")
         a("  if (!result) return []")
-        a("  const produced = codeReview && sourceIds.length ? [...new Map([...redTeamClaims(sourceIds), ...(result[field] || [])].map(f => [redTeamClaimKey(f), f])).values()] : result[field] || []")
+        a("  let produced = result[field] || [], dropped = []")
+        if any(n.get("contract") == "RedTeamV1" for n in nodes):
+            a("  if (codeReview && sourceIds.length) {")
+            a("    // The panel judges what the source lenses claimed, one class per key. This node read the")
+            a("    // lenses' output and reviewed nothing itself, so what it returns adds no claim: a reworded")
+            a("    // copy used to become a second claim at n refuters out of the node ceiling. Whatever it")
+            a("    // returned that no lens wrote is kept in the receipt, unjudged, for a reader to see. That")
+            a("    // is decided by the wording: a finding that names a lens claim's place and kind and says")
+            a("    // something else about it was read by no refuter either.")
+            a("    const classes = new Map(), wordings = new Set()")
+            a("    for (const claim of redTeamClaims(sourceIds)) {")
+            a("      const k = redTeamClaimKey(claim, keyBy)")
+            a("      if (!classes.has(k)) classes.set(k, [])")
+            a("      classes.get(k).push(claim)")
+            a("      wordings.add(redTeamClaimKey(claim))")
+            a("    }")
+            a("    dropped = (Array.isArray(result[field]) ? result[field] : []).filter(f => !wordings.has(redTeamClaimKey(f)))")
+            a("    if (dropped.length) log(`${label}: ${dropped.length} finding(s) of its own not judged — the panel judges the source lenses' claims, and a collector adds none`)")
+            a("    // A class takes the worst severity any reviewer gave it and keeps every other wording, so")
+            a("    // the refuters see them all and the record shows what was merged.")
+            a("    produced = [...classes.values()].map(group => {")
+            a("      const worst = group.reduce((x, y) => (SEVERITY_RANK[y.severity] || 0) > (SEVERITY_RANK[x.severity] || 0) ? y : x)")
+            a("      const texts = new Set([redTeamClaimKey(worst)])")
+            a("      const restatements = group.filter(c => { const t = redTeamClaimKey(c); if (texts.has(t)) return false; texts.add(t); return true })")
+            a("      return restatements.length ? { ...worst, restatements } : worst")
+            a("    })")
+            a("  }")
         a("  const judged = await parallel(produced.map((it, i) => () =>")
-        a("    refute(JSON.stringify(it), `${label}:${i}`, phase, n, undefined, codeReview).then(v => ({ ...it, ...v }))")
+        a("    refute(JSON.stringify(it), `${label}:${i}`, phase, n, undefined, codeReview, Array.isArray(it && it.restatements) ? it.restatements.length : 0).then(v => ({ ...it, ...v }))")
         a("  ))")
         a("  const all = judged.filter(Boolean)")
         if any(n.get("contract") == "RedTeamV1" for n in nodes):
-            a("  if (codeReview) RED_TEAM_CHECKS[label] = { ids: sourceIds, requested: n, rows: all, unresolved: redTeamUnresolved(result) }")
+            a("  if (codeReview) RED_TEAM_CHECKS[label] = { ids: sourceIds, requested: n, rows: all, unresolved: redTeamUnresolved(result), ...(sourceIds.length ? { dropped } : {}), ...(sourceIds.length && keyBy ? { keyBy } : {}) }")
 
         a("  // The sink sees every verdict, including the kills the filter")
         a("  // below drops: what a panel rejected, and why, is the half a")
@@ -4058,9 +4719,15 @@ def emit_reduce(n, ir):
     if red.get("dedupeBy"):
         keyexpr = " + '|' + ".join(
             f"String(it[{js_str(k)}])" for k in red["dedupeBy"])
+        # A field the contract declares can still be absent from an item.
+        # Keyed as String(undefined), every such item would collapse into
+        # one and the note would file the loss as deduplication, so an item
+        # missing any key field is kept as its own.
+        present = " && ".join(
+            f"it[{js_str(k)}] !== undefined && it[{js_str(k)}] !== null" for k in red["dedupeBy"])
         a("{")
         a("  const seen = new Set()")
-        a(f"  {var} = {var}.filter(it => {{ const k = {keyexpr}; "
+        a(f"  {var} = {var}.filter(it => {{ if (!(it && {present})) return true; const k = {keyexpr}; "
           f"if (seen.has(k)) return false; seen.add(k); return true }})")
         a("}")
     if red.get("sortBy"):
@@ -4135,8 +4802,11 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
     if guard:
         check = (f"{json.dumps(dep)}.some(id => BLOCKED.has(id))" if isinstance(dep, list) else f"BLOCKED.has({js_str(dep)})")
         a(f"if ({check}) {{")
-        a(f"  note({js_str(nid)}, 'BLOCKED', 'blocked on {dep}')")
-        a(f"  log(`BLOCKED at {nid}: inherited from {dep}`)")
+        # A join names every parent it waits on. Pasting the list into the
+        # string emitted a quote inside a quoted string, which did not parse.
+        waits_on = ", ".join(dep) if isinstance(dep, list) else dep
+        a(f"  note({js_str(nid)}, 'BLOCKED', {js_str('blocked on ' + waits_on)})")
+        a(f"  log({js_str('BLOCKED at ' + nid + ': inherited from ' + waits_on)})")
         a(f"  BLOCKED.add({js_str(nid)})")
         a("  INCOMPLETE = true")
         a(f"  RESULTS[{js_str(nid)}] = null")
@@ -4177,7 +4847,7 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
                     f"      if (!prev) {{\n"
                     f"        if (DECLINED_LABELS.has(`{nid}:${{item.key || i}}`)) {{\n"
                     f"          skipped_{var}++; note({js_str(nid)}, 'SKIPPED', "
-                    f"`${{item.key || i}} declined by the node ceiling`)\n"
+                    f"`${{item.key || i}} declined by the ${{DECLINED_BY}}`)\n"
                     f"        }} else {{\n"
                     f"          dead_{var}++; note({js_str(nid)}, 'DEAD', `${{item.key || i}} produced nothing`)\n"
                     f"          log(`node {nid} died for ${{item.key || i}} — dropped`)\n"
@@ -4226,7 +4896,7 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
                   f"${{dead_{var}}} node(s) died — see provenance`)")
         if has_ceiling:
             a(f"  if (skipped_{var}) note({js_str(nid)}, 'SKIPPED', "
-              f"`${{skipped_{var}}} spawn(s) declined by the node ceiling — "
+              f"`${{skipped_{var}}} spawn(s) declined by the ${{DECLINED_BY}} — "
               f"coverage incomplete, not worker death`)")
         if on_red == "halt":
             a(f"  if (dead_{var}) {{")
@@ -4332,9 +5002,9 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         a("  // declined by the token floor above — nothing died")
         if has_ceiling:
             a(f"}} else if (!{raw} && DECLINED > d0_{var}) {{")
-            a(f"  note({js_str(nid)}, 'SKIPPED', 'spawn declined by the node ceiling')")
+            a(f"  note({js_str(nid)}, 'SKIPPED', `spawn declined by the ${{DECLINED_BY}}`)")
             if on_red == "halt":
-                a(f"  log(`node {nid} not run — node ceiling reached; halting as exhausted, not as dead`)")
+                a(f"  log(`node {nid} not run — ${{DECLINED_BY}} reached; halting as exhausted, not as dead`)")
                 a("  return summary('BUDGET-EXHAUSTED')")
             a(f"}} else if (!{raw}) {{")
         else:
@@ -4365,7 +5035,8 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
             sink = (", " + lesson_sink(n, need)
                     if (n.get("memory") or {}).get("emit") else "")
             if n.get("contract") == "RedTeamV1":
-                sink = (sink or ", undefined") + ", true, " + json.dumps(red_team_sources(n, ir))
+                sink = ((sink or ", undefined") + ", true, " + json.dumps(red_team_sources(n, ir))
+                        + ", " + json.dumps(red_team_key(n, ir)))
             a(f"const {var} = await verifyItems({raw}, {js_str(over)}, "
               f"{js_str(nid)}, {js_str(phase)}, {panel}, {need}{sink})")
             a(f"log(`{nid}: ${{{var}.length}} item(s) survived {tier}`)")
@@ -4380,6 +5051,18 @@ def emit_node(n, ir, specification=False, replay_runtime=False):
         a(f"  log(`UNPROVEN ${{cite_{var}}}`)")
         a(f"  note({js_str(nid)}, 'UNPROVEN', cite_{var})")
         a("  INCOMPLETE = true")
+        a("}")
+    if n.get("sameShaAs"):
+        # Each gate resolves its commit when it runs. Two gates that are
+        # meant to certify one head are compared here, in code, because a
+        # branch that moves between them is otherwise recorded COMPLETE
+        # with a verdict about one commit and a gate pass about another.
+        a(f"const same_{var} = sameSha({js_str(nid)}, {var}, {js_str(n['sameShaAs'])})")
+        a(f"if (same_{var}) {{")
+        a(f"  log(`HALT at {nid}: ${{same_{var}}}`)")
+        a(f"  note({js_str(nid)}, 'HALTED', same_{var})")
+        a(f"  RESULTS[{js_str(nid)}] = {var}")
+        a("  return summary('HALTED')")
         a("}")
     a(f"RESULTS[{js_str(nid)}] = {var}")
     if n.get("decides"):
@@ -4420,7 +5103,7 @@ def emit_judges(n, ir, prompt, phase):
     a(f"const votes_{var} = await parallel(Array.from({{ length: {seats} }}, (_, i) => () =>")
     a(f"  spawn({prompt} + '\\n\\nCOUNCIL BALLOT: choose one exact key from ' + JSON.stringify(choices_{var}) + '. Return JudgmentV1. Rank every key, including none, exactly once with winner first. strongest_objection maps EVERY key to its strongest substantive objection, including your winner. No prose aliases, inferred ids or fallback candidates. Judge independently; you do not see other votes.', {opts(n, ir, phase, label, 'schema_' + var)})")
     a("))")
-    a(f"if (DECLINED > d0_{var}) {{ note({js_str(nid)}, 'SKIPPED', 'judge seat declined by node ceiling'); return summary('BUDGET-EXHAUSTED') }}")
+    a(f"if (DECLINED > d0_{var}) {{ note({js_str(nid)}, 'SKIPPED', `judge seat declined by ${{DECLINED_BY}}`); return summary('BUDGET-EXHAUSTED') }}")
     a(f"const valid_{var} = vote => !!vote && typeof vote === 'object' && !Array.isArray(vote) &&")
     a("  Object.keys(vote).every(k => " + json.dumps(['winner', 'ranking', 'rationale', 'strongest_objection'] + (['baseSeen'] if worktree_base_node(n) else [])) + ".includes(k)) &&")
     a(f"  choices_{var}.includes(vote.winner) && Array.isArray(vote.ranking) && vote.ranking.length === choices_{var}.length &&")
@@ -4666,7 +5349,22 @@ def emit_repair(n, ir, specification=False, replay_runtime=False):
     a(f"  note({js_str(nid)}, 'INCOMPLETE', 'repair round cap reached', {{ rounds: round_{var}, pending: pending_{var}.map(x => x.item.key) }})")
     a("  return summary('INCOMPLETE')")
     a("}")
-    return "\n".join(L)
+    body = "\n".join(L)
+    # A loop waits on a park like any other node. Without this its fixer was
+    # handed the null of a step nobody had taken, and everything after the
+    # loop ran in the run that parked.
+    members = [nid, fixer["id"], *repair_integrations(n)]
+    upstream = [d for d in dict.fromkeys(d for m in members for d in after_ids(by_id.get(m) or {})) if d not in members]
+    if not upstream or not any(o.get("actor", "agent") != "agent" for o in ir["nodes"]):
+        return body
+    waits_on = ", ".join(upstream)
+    return "\n".join([
+        f"if ({json.dumps(upstream)}.some(id => BLOCKED.has(id))) {{",
+        f"  note({js_str(nid)}, 'BLOCKED', {js_str('blocked on ' + waits_on)})",
+        f"  log({js_str('BLOCKED at ' + nid + ': inherited from ' + waits_on)})",
+        f"  for (const id of {json.dumps(members)}) {{ BLOCKED.add(id); RESULTS[id] = null }}",
+        "  INCOMPLETE = true",
+        "} else {", body, "}"])
 
 
 def emit_repeat(n, ir, prompt, phase, panel, over):
@@ -4738,10 +5436,10 @@ def emit_repeat(n, ir, prompt, phase, panel, over):
         a(f"  const declined_{var} = DECLINED - d0r_{var}")
         a(f"  if (declined_{var}) {{")
         a(f"    note({js_str(nid)}, 'SKIPPED', `round ${{round_{var}}}: "
-          f"${{declined_{var}}} spawn(s) declined by the node ceiling — "
+          f"${{declined_{var}}} spawn(s) declined by the ${{DECLINED_BY}} — "
           f"discovery INCOMPLETE`, {{ round: round_{var}, declined: declined_{var} }})")
         if on_red == "halt":
-            a(f"    log(`node {nid}: node ceiling reached in round ${{round_{var}}} — "
+            a(f"    log(`node {nid}: ${{DECLINED_BY}} reached in round ${{round_{var}}} — "
               f"halting as exhausted, not as dead`)")
             a(f"    RESULTS[{js_str(nid)}] = {var}")
             a("    return summary('BUDGET-EXHAUSTED')")
@@ -4967,6 +5665,141 @@ def prose_pin_findings(text, ir):
     return findings
 
 
+# record-run.py flags that are a fallback for a summary carrying no such
+# verdict, with the contracts whose results the recorder reads it from.
+SHELL_VALUE = r"\$\?|\$\{?\w+\}?"       # $?, $rc, ${VERDICT}: a value the step computed
+RECORDER_FLAGS = (
+    ("--red-team", r"SHIP|BLOCK|" + SHELL_VALUE, ("RedTeamV1",), "red-team verdict"),
+    ("--harness", r"-?\d+|<[^>\s]+>|" + SHELL_VALUE, ("HarnessCheckV1", "FixCheckV1"), "harness exit"),
+    ("--proof-audit", r"SOUND|WEAKENED|UNPROVEN|NOT-APPLICABLE|" + SHELL_VALUE, ("ProofV1",), "proof-audit verdict"),
+)
+# A line that tells the reader not to use the flag is not a step that uses it.
+# The negation has to govern the using: "never pass", "do not record with".
+# A negation about something else is still an instruction: "if the checks do
+# not pass, record ...", "do not forget to record ...". So the negation is
+# looked for in the flag's own clause, which begins after the last comma,
+# colon, semicolon or full stop, or after a word that opens a new clause:
+# "if the checks do not pass then record ...". Inside that clause a negated
+# verb that another verb follows before the flag gives the instruction to the
+# second one: "do not file the run as shippable - record ...". Four things
+# that look like a second verb give no instruction: a noun after a determiner
+# ("never record the run with ..."), a verb joined to the negated one ("do
+# not add or pass ..."), part of a hyphenated name ("don't use record-run's
+# ...") and a word inside a quotation.
+INSTRUCTION_VERB = r"(?<![\w-])(?:pass|use|record|add|give|supply|set|run|call|write|file|put|rely\s+on)(?![\w-])"
+# A full stop inside a file name ends no clause, and "and then" carries on with the same one.
+CLAUSE_END = re.compile(r"[;:,]|\.(?!\w)|(?<![\w-])(?:(?<!\band )(?<!\bor )then|so|but|otherwise|instead|else)(?![\w-])", re.I)
+NEGATED_VERB = re.compile(
+    r"\b(?:never|do not|don't|must not|should not|shouldn't|cannot|can't)\s+" + INSTRUCTION_VERB, re.I)
+DETERMINER = re.compile(r"(?:\b(?:the|a|an|this|that|its|your|each|every|any|one|same|or|nor)\s+|[\"'])$", re.I)
+JOINED_VERBS = re.compile(r"(?:\s+(?:or|nor|and)\s+" + INSTRUCTION_VERB + r")+", re.I)
+
+
+def says_not_to_use(prefix):
+    """Whether the text before a flag tells the reader not to use it."""
+    clause = CLAUSE_END.split(prefix)[-1]
+    match = NEGATED_VERB.search(clause)
+    if not match:
+        return False
+    tail = clause[match.end():]
+    joined = JOINED_VERBS.match(tail)
+    if joined:
+        tail = tail[joined.end():]
+    return all(DETERMINER.search(tail[:verb.start()]) for verb in re.finditer(INSTRUCTION_VERB, tail, re.I))
+
+
+def recorder_flag_warnings(text, ir):
+    """Prose that records a verdict with a flag the recorder will ignore.
+
+    record-run.py takes the harness exit, the red-team verdict and the
+    proof-audit verdict from the run summary whenever a node returned one,
+    and reads its flags only when none did. A graph file whose prose tells
+    the operator to record a post-run check with one of those flags
+    therefore describes a step that changes nothing. Command blocks and
+    tables of steps count as prose. The IR block does not, and neither does
+    anything under an Evidence or Decisions heading or in a table whose
+    first column is "When (UTC)": those are what was filed, whatever the
+    section is called. --harness is a common flag name, so it counts only
+    where record-run is named before it: on its line, on an earlier line
+    of the same command in a block (one that ends in a backslash), or
+    earlier in the same paragraph of prose. A shell variable assigned a
+    value that names record-run stands for it.
+    """
+    lines, fenced, fence, in_ir, filed, table = [], [], None, False, None, None
+    for line in text.splitlines():
+        marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+        fenced.append(fence is not None)
+        if fence is not None:
+            if marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence) and not marker.group(2).strip():
+                fence, in_ir = None, False
+                lines.append('')
+            else:
+                lines.append('' if in_ir else line)
+            continue
+        if marker:
+            fence, in_ir = marker.group(1), bool(re.match(r'json\s+graph-ir\s*$', marker.group(2).strip()))
+            lines.append('')
+            continue
+        heading = re.match(r'^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$', line)
+        if heading:
+            level, title = len(heading.group(1)), heading.group(2).strip().lower()
+            if filed is not None and level <= filed:
+                filed = None
+            if title in ('evidence', 'decisions'):
+                filed = level
+        if line.lstrip().startswith('|'):
+            if table is None:
+                table = bool(re.match(r'^\s*\|\s*When \(UTC\)\s*\|', line))
+        else:
+            table = None
+        lines.append('' if filed is not None or table else line)
+    # What precedes each line inside its own command or paragraph. A row of a
+    # table and an item of a list stand alone: the one above is another step.
+    before = []
+    for index, line in enumerate(lines):
+        earlier = lines[index - 1] if index else ''
+        if (not earlier.strip() or line.lstrip().startswith('|')
+                or (not fenced[index] and re.match(r'\s*(?:[-*+]|\d+[.)])\s', line))):
+            before.append('')
+        elif fenced[index]:
+            before.append(before[index - 1] + earlier + ' ' if earlier.rstrip().endswith('\\') else '')
+        else:
+            before.append(before[index - 1] + earlier + ' ')
+    holders = set(re.findall(r'(?m)^[ \t]*(?:export[ \t]+)?([A-Za-z_]\w*)=.*record-run', '\n'.join(lines)))
+
+    def names_recorder(fragment, prose):
+        if prose:
+            # The sentence the flag stands in: what follows the last full stop
+            # that ends one. The stop in record-run.py is followed by a letter,
+            # and the one in "e.g." or "i.e." is followed by the rest of its sentence.
+            fragment = re.split(r'(?<!\be\.g)(?<!\bi\.e)[.!?](?:\s+|$)', fragment, flags=re.I)[-1]
+        return 'record-run' in fragment or any(
+            re.search(r'\$\{?' + re.escape(name) + r'(?!\w)', fragment) for name in holders)
+
+    found = []
+    for flag, values, contracts, what in RECORDER_FLAGS:
+        nodes = [n.get("id") for n in ir.get("nodes") or [] if isinstance(n, dict) and n.get("contract") in contracts]
+        if not nodes:
+            continue
+        pattern = re.compile(r'(?<![\w-])' + re.escape(flag) + r'(?:[ \t]+|=)["\']?(?:' + values + r')["\']?(?![\w-])')
+        hits = [(number, match.group(0)) for number, line in enumerate(lines, 1) for match in pattern.finditer(line)
+                if not says_not_to_use(line[:match.start()])
+                and (flag != "--harness"
+                     or names_recorder(before[number - 1] + line[:match.start()], not fenced[number - 1]))]
+        if not hits:
+            continue
+        numbers = sorted({number for number, _ in hits})
+        way_out = ("Make the check a prove: node after the verdict, or record its refusal with "
+                   "--veto <reason> --veto-evidence <file>." if flag == "--red-team"
+                   else "Make the check a prove: node in the graph.")
+        found.append(
+            f"prose line{'s' if len(numbers) > 1 else ''} {', '.join(map(str, numbers))}: `{hits[0][1]}` is named as a "
+            f"way to record the {what}. Node{'s' if len(nodes) > 1 else ''} {', '.join(repr(n) for n in nodes)} "
+            f"return{'' if len(nodes) > 1 else 's'} it in the run summary, and record-run.py takes the summary's and "
+            f"ignores the flag, so a check that runs after the run cannot change the record this way. {way_out}")
+    return found
+
+
 def archive_compiled(root, args, source):
     """Keep the exact executed source recoverable after the output is replaced."""
     import hashlib
@@ -4987,7 +5820,7 @@ def archive_compiled(root, args, source):
     return target
 
 
-def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, projects=None, imports_resolved=None, artifact_sha256=None):
+def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, projects=None, imports_resolved=None, artifact_sha256=None, graph=None):
     """Render with verified prior results, but never contact a model or forge.
 
     Branch readings are hypothetical matches. That is why a memo row is
@@ -4997,6 +5830,7 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
     helper = _sibling('replay_memo')
     source_artifact, source_sha = _sibling('run_artifacts').read(root, run_id, artifact_sha256=artifact_sha256)
     source = source_artifact['summary']
+    reach = resume_reach(ir, source, run_id, projects, root, graph)
     launch = source.get('launch')
     if not isinstance(launch, dict):
         raise ValueError('resume source has no immutable launch stamp')
@@ -5007,6 +5841,8 @@ def rerun_plan(ir, contracts, public_args, root, run_id, specification=None, pro
                 branch=git('branch', '--show-current'), porcelain=subprocess.check_output(['git', '-C', root, 'status', '--porcelain'], text=True, encoding='utf-8'))
     runtime_args = dict(replay, _base=base, _launch=launch, _replayLaunchNonce='plan-hypothetical-live-reading',
                         _resumeFromRunId=run_id, _resumeArtifactSha256=source_sha, _priorResults=source.get('results') or {}, _ledger={}, _releases={})
+    if reach is not None:
+        runtime_args['_resumeReach'] = reach
     if source.get('ledger'):
         runtime_args['_ledger'] = {r['key']: r for r in source['ledger'] if isinstance(r, dict) and 'key' in r}
     if any(n.get('irreversible') for n in ir['nodes']):
@@ -5290,7 +6126,7 @@ def main():
     if args.check and any(worktree_base_node(n) for n in ir.get('nodes', [])):
         worktree_settings = _sibling('worktree_settings')
         print('graph-compile: ' + worktree_settings.describe(worktree_settings.report(args.gates_root)))
-    for w in warnings(ir, agents, specification, gates):
+    for w in warnings(ir, agents, specification, gates) + recorder_flag_warnings(text, ir):
         print(f"graph-compile: warning — {w}", file=sys.stderr)
     if _sibling("evidence_table").locate(text)[0] is None:
         print("graph-compile: warning — graph has no recognized Evidence table with a separator; "
@@ -5310,7 +6146,8 @@ def main():
     if args.plan:
         try:
             rows = rerun_plan(ir, contracts, embedded_args, args.gates_root, args.resume,
-                              specification, args.projects, resolved, args.resume_artifact_sha256)
+                              specification, args.projects, resolved, args.resume_artifact_sha256,
+                              graph=args.graph)
         except (OSError, ValueError, TypeError) as exc:
             print('graph-compile: resume plan refused: ' + str(exc), file=sys.stderr)
             return 1
@@ -5336,6 +6173,20 @@ def main():
                  + f" ({est['cold']} cold prefill(s) of {est['calls']} call(s), "
                  f"prompt-cache TTL {est['ttl']}" + context_line
                  + (f"; {blind}" if blind else "") + ")")
+    # maxNodes bounds calls and the cap bounds their price. Priced at the
+    # dearest planned call, the node ceiling is what the run could spend
+    # with nothing else to stop it, and until the compiled script enforced
+    # the cap nothing else did.
+    node_ceiling = (ir.get("budget") or {}).get("maxNodes")
+    if isinstance(node_ceiling, int) and not isinstance(node_ceiling, bool):
+        dearest = dearest_call(est)
+        allowed = int(round(node_ceiling * dearest))
+        if cap is None:
+            cost_line += (f"; node ceiling: {node_ceiling} call(s) at the dearest planned call (~{int(round(dearest)):,}) "
+                          f"allow ~{allowed:,} estimated tokens, and no budget.maxEstimatedTokens bounds them")
+        elif allowed > cap:
+            cost_line += (f"; node ceiling: {node_ceiling} call(s) at the dearest planned call (~{int(round(dearest)):,}) "
+                          f"would allow ~{allowed:,} estimated tokens, so the run stops at the cap, which the compiled script enforces")
     # --check measures exactly the script compilation would write.
     try:
         graph_rel = os.path.relpath(os.path.abspath(args.graph),

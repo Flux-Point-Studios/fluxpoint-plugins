@@ -82,7 +82,13 @@ Audit checklist, in priority order:
   a `dedupeBy` key too coarse (collapsing distinct findings) or too fine
   (`claim` alone, so a reworded restatement counts as new and the loop
   never goes dry); a `{{seen}}`-less discovery prompt that will re-find
-  the same items every round.
+  the same items every round; red-team lenses whose `reduce` before the
+  refuter panel keys claims on prose, so one defect costs a panel per lens
+  and the node ceiling ends the run before the verdict; a red-team fan-out
+  without `"resume": "never"`, which a resume can pass and so roll the
+  review a second time. Prose in a prompt or in the launch text that says
+  "never resume after the lenses" is not a guard: only the field is
+  enforced in code.
 - Composition: graph output treated as overriding the Stop-hook DoD gate;
   a campaign that ends at "PR opened" rather than merged or explicitly
   parked; red-team verdict collected but not gating anything.

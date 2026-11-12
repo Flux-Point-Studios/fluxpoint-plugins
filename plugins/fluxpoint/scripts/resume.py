@@ -126,6 +126,9 @@ def assemble(args):
         ir = compiler.extract_ir(handle.read())
     resuming = args.run is not None
     prior, source_sha = _artifact(root, args.run) if resuming else (None, None)
+    # Before anything is planned or compiled: a run that started a
+    # "resume": "never" node is not resumed, whatever else would pass.
+    reach = compiler.resume_reach(ir, prior, args.run, args.projects, root, graph) if resuming else None
     if resuming and (prior.get("plugin") is not None or prior.get("prove") or prior.get("cites")):
         import plugin_identity
         pinned = plugin_identity.verify(prior.get("plugin"))
@@ -205,6 +208,10 @@ def assemble(args):
             launch_args["_launch"] = launch
         launch_args["_resumeFromRunId"] = args.run
         launch_args["_resumeArtifactSha256"] = source_sha
+        if reach is not None:
+            # The compiled script refuses a resume that does not say what its
+            # source started; this is the launcher's reading of the record.
+            launch_args["_resumeReach"] = reach
         prior_results = prior.get("results") or {}
         if not isinstance(prior_results, dict):
             raise ValueError("RESUME-RESULTS-INVALID: recorded results must be an object")

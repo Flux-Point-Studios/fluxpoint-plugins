@@ -7,14 +7,30 @@ JSON on stdin (or --result FILE).
 
 Usage:
   record-run.py --run-id wf_abc --graph WORK.md [--harness 0]
-                [--red-team SHIP] [--proof-audit SOUND] [--executor workflow] < result.json
+                [--red-team SHIP] [--proof-audit SOUND] [--executor workflow]
+                [--veto REASON --veto-evidence FILE] < result.json
+
+--red-team is a fallback for a summary that carries no red-team node. It is
+ignored whenever the summary carries a red-team verdict, and the recorder
+says so. A check that runs after the run cannot change the record through
+that flag. Make the check a prove: node in the graph, or file its refusal
+with --veto REASON --veto-evidence FILE. A veto lowers the recorded verdict
+to BLOCK and never raises one, and it stays on the run id when the run is
+recorded again.
+
+A node that declares "resume": "never" runs once per run. A later attempt
+under a run id whose earlier attempt started such a node, or a resume whose
+named source run did, is refused as RESUME-PAST-NO-RESUME-NODE and nothing
+is written: the earlier record stands.
 """
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
 import sys
+import tempfile
 
 # One Evidence discipline for both modes: loop slices write their own rows,
 # graph runs get theirs appended here.
@@ -150,7 +166,25 @@ def red_team_review_receipts(summary):
         return set(), ["invalid red-team stage/refutation receipts"]
     results = summary.get("results") or {}
     exempt, errors = set(), []
-    key = lambda f: tuple(f.get(k) for k in ("severity", "finding", "exploit_path", "minimal_fix"))
+    prose = ("severity", "finding", "exploit_path", "minimal_fix")
+
+    def held(value):
+        # A repository's own contract may type a field as an object or a
+        # list. Those are compared by content, as the compiled panel
+        # compares them, and a dict cannot be a set member as it is.
+        if isinstance(value, (dict, list)):
+            # Tagged, so a string that merely spells the structure is not it.
+            return ("structure", json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+        return value
+
+    text = lambda f: tuple(held(f.get(k)) for k in prose)
+
+    def key(f, by):
+        # The compiled panel's rule, re-derived: the graph's declared
+        # dedupe key when the claim carries every field of it, and the
+        # claim's exact text otherwise, so an absent field merges nothing.
+        keyed = by is not None and all(f.get(k) is not None and str(f.get(k)).strip() != "" for k in by)
+        return ("key" if keyed else "text",) + tuple(held(f.get(k)) for k in (by if keyed else prose))
     identity = lambda c: sorted(tuple(s[k] for k in ("repository", "base", "head", "files", "additions", "deletions")) for s in c["subject"])
     for terminal, info in meta["terminals"].items():
         final = results.get(terminal)
@@ -211,7 +245,9 @@ def red_team_review_receipts(summary):
                         claims.extend(row["findings"])
                     elif "severity" in row:
                         claims.append(row)
-            checked = set()
+            # checked[(key fields, class)] holds every wording the refuters
+            # of that class were shown.
+            checked = {}
             for check in meta["checks"].values():
                 if not isinstance(check, dict) or not isinstance(check.get("ids"), list):
                     raise ValueError("invalid independent-refuter binding")
@@ -224,6 +260,15 @@ def red_team_review_receipts(summary):
                 requested, rows = check.get("requested"), check.get("rows")
                 if type(requested) is not int or requested < 1 or not isinstance(rows, list):
                     raise ValueError("invalid requested refuter count")
+                by = check.get("keyBy")
+                if by is not None and (not isinstance(by, list) or not by
+                                       or not all(isinstance(k, str) and k for k in by)):
+                    raise ValueError("invalid claim key in refuter receipt")
+                by = tuple(by) if by is not None else None
+                dropped = check.get("dropped")
+                if dropped is not None and (not isinstance(dropped, list)
+                                            or not all(isinstance(x, dict) for x in dropped)):
+                    raise ValueError("invalid unjudged-collector-claim receipt")
                 for row in rows:
                     votes = row.get("votes") if isinstance(row, dict) else None
                     if (not isinstance(votes, list) or len(votes) != requested
@@ -233,10 +278,21 @@ def red_team_review_receipts(summary):
                             or any(not isinstance(v, dict) or v.get("refuted") is not True
                                    or not isinstance(v.get("reason"), str) or not v["reason"].strip() for v in votes)):
                         raise ValueError("missing, divided or unresolved independent refuters")
-                    if row.get("severity") in ("MEDIUM", "HIGH", "CRITICAL") and requested < 3:
+                    restated = row.get("restatements", [])
+                    if not isinstance(restated, list) or not all(isinstance(x, dict) for x in restated):
+                        raise ValueError("invalid restatements in refuter receipt")
+                    # A merged class is as severe as its worst wording.
+                    if any(x.get("severity") in ("MEDIUM", "HIGH", "CRITICAL")
+                           for x in [row] + restated) and requested < 3:
                         raise ValueError("MEDIUM+ claim needs three independent refuters")
-                    checked.add(key(row))
-            if any(key(claim) not in checked for claim in claims):
+                    if any(key(x, by) != key(row, by) for x in restated):
+                        raise ValueError("refuter receipt merges claims with different keys")
+                    checked.setdefault((by, key(row, by)), set()).update(text(x) for x in [row] + restated)
+            # A claim is refuted when some panel's class holds its exact
+            # wording: sharing a key with a refuted claim is not enough,
+            # because the refuters never read a wording that is not there.
+            keys = {by for by, _ in checked}
+            if any(not any(text(claim) in checked.get((by, key(claim, by)), ()) for by in keys) for claim in claims):
                 raise ValueError("source/intermediate claim has no unanimous refutation receipt")
             exempt.update(stages)
         except (ValueError, TypeError, KeyError) as e:
@@ -389,6 +445,302 @@ def checked_commits(summary, graph):
     return repair_receipts(summary, graph)[1]
 
 
+# A post-run veto is the logged way to lower a recorded verdict after the
+# run. It can only lower, so nothing below ever yields SHIP.
+def veto_shape(entry):
+    """A veto entry this recorder wrote: a reason, and evidence it can name."""
+    evidence = entry.get("evidence") if isinstance(entry, dict) else None
+    return (isinstance(evidence, dict)
+            and isinstance(entry.get("reason"), str) and bool(entry["reason"].strip())
+            and isinstance(evidence.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"]) is not None
+            and type(evidence.get("bytes")) is int and evidence["bytes"] > 0)
+
+
+def veto_key(entry):
+    return entry["reason"], entry["evidence"]["sha256"]
+
+
+def _artifacts():
+    """run_artifacts, which says where a run's records are and reads its campaign."""
+    import run_artifacts
+    return run_artifacts
+
+
+def root_store(root):
+    return _artifacts().store(root)
+
+
+def clone_store(start):
+    """The clone-wide runs directory the recorder copies every run into, or None."""
+    try:
+        import memory as _memory
+        return _memory.runs_path(start)
+    except Exception:  # noqa: BLE001 - a missing git or module only narrows what is read
+        return None
+
+
+def run_stores(root, *files):
+    """Every runs directory that can hold an earlier record of a run.
+
+    The store under --root, and the store of every directory above the
+    graph and the Evidence file: a record is accepted only when both really
+    sit under its root, so whichever root an earlier record of the same
+    file was given, its store is one of these. The clone-wide store is read
+    as well, where there is one, so a run recorded in one linked worktree
+    is usually seen from another. That store moves with FPL_MEMORY_HOME,
+    and nothing is decided on its being there. A run's vetoes and earlier
+    attempts are read from all of them. Only the store under --root and
+    the clone-wide store are written to.
+    """
+    starts = dict.fromkeys([root] + [os.path.dirname(os.path.realpath(named)) for named in files if named])
+    return _artifacts().stores(root, *files, shared=[clone_store(start) for start in starts])
+
+
+def run_records(stores, run_id):
+    return _artifacts().records(stores, run_id)
+
+
+def veto_journal(runs, run_id):
+    return os.path.join(runs, "vetoes", run_id + ".json")
+
+
+def journal_veto(root, run_id, entry, stores=None):
+    """Put an accepted veto on file under its run id before anything else can refuse.
+
+    A record can still be refused after its veto was read: two waits on one
+    node, a stale packet, an input whose pin no longer holds. The veto is
+    about the run, so it is kept whether or not this record is. It is
+    written under --root and, where there is one, in the clone-wide store,
+    so another checkout of the clone reads it too. Each file is replaced
+    whole and holds every veto the run id has been given.
+    """
+    from workfile_lock import workfile_lock
+    targets = [root_store(root)]
+    shared = clone_store(root)
+    if shared and os.path.realpath(shared) != os.path.realpath(targets[0]):
+        targets.append(shared)
+    for position, runs in enumerate(targets):
+        path = veto_journal(runs, run_id)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # Read, merge and replace as one step: two recorders given a veto
+            # at the same moment each read the file before the other wrote it.
+            with workfile_lock(os.path.join(os.path.dirname(runs), "veto-" + run_id)):
+                kept = {veto_key(old): old for old in filed_vetoes(root, run_id, list(stores or []) + [runs])}
+                kept.setdefault(veto_key(entry), entry)
+                fd, temporary = tempfile.mkstemp(prefix=".veto-", dir=os.path.dirname(path))
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as out:
+                        json.dump({"runId": run_id,
+                                   "vetoes": sorted(kept.values(), key=lambda e: str(e.get("filedAt")))},
+                                  out, indent=2, sort_keys=True)
+                        out.write("\n")
+                    os.replace(temporary, path)
+                finally:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
+        except OSError:
+            if position == 0:
+                raise  # The veto is on file under --root or it is refused.
+
+
+def filed_vetoes(root, run_id, stores=None):
+    """Every veto already filed on this run id, oldest first.
+
+    Read from the latest record, from each retained attempt and from the
+    run id's veto journal, in every store that can hold them, so a veto
+    outlives a second record that was not given the flag, a latest pointer
+    that was replaced, a record that was refused after the veto was read
+    and a record made under another root. A record's entry is preferred to
+    a journal's: it says what the veto was filed over. A file that cannot
+    be read adds nothing.
+    """
+    stores = stores or [root_store(root)]
+    paths = run_records(stores, run_id) + [veto_journal(runs, run_id) for runs in stores]
+    found = {}
+    for path in paths:
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            if b'"vetoes"' not in raw:
+                continue
+            row = json.loads(raw.decode("utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (not isinstance(row, dict) or row.get("runId") != run_id
+                or not isinstance(row.get("vetoes"), list)):
+            continue
+        for entry in row["vetoes"]:
+            if veto_shape(entry):
+                found.setdefault(veto_key(entry), entry)
+    return sorted(found.values(), key=lambda entry: str(entry.get("filedAt")))
+
+
+def read_veto(reason, evidence_path, when):
+    """One --veto, checked, with its evidence read once.
+
+    Raises ValueError naming the refusal. A veto nobody can account for is
+    not a record: it needs a reason and a file that holds something.
+    """
+    if reason is None or not reason.strip():
+        raise ValueError("VETO-REASON-REQUIRED: --veto-evidence needs --veto <reason>, "
+                         "and the reason cannot be blank")
+    if evidence_path is None:
+        raise ValueError("VETO-EVIDENCE-REQUIRED: --veto needs --veto-evidence <file> "
+                         "holding what the post-run check reported")
+    if not os.path.isfile(evidence_path):
+        raise ValueError(f"VETO-EVIDENCE-MISSING: {evidence_path} is not a file")
+    try:
+        with open(evidence_path, "rb") as fh:
+            data = fh.read()
+    except OSError as e:
+        raise ValueError(f"VETO-EVIDENCE-MISSING: {evidence_path} cannot be read ({e.strerror or e})")
+    if not data.strip():
+        raise ValueError(f"VETO-EVIDENCE-EMPTY: {evidence_path} holds no evidence")
+    return {"reason": reason.strip(), "filedAt": when,
+            "evidence": {"path": evidence_path, "sha256": hashlib.sha256(data).hexdigest(),
+                         "bytes": len(data)}}, data
+
+
+def file_veto_evidence(root, digest, data):
+    """Keep the bytes beside the run's attempts, named by their sha256.
+
+    The store and the discipline are repair_checks.retain_evidence's: one
+    immutable file per digest, never a link, never rewritten.
+    """
+    from pathlib import Path
+    base = Path(root).resolve() / ".claude/fluxpoint/runs/evidence"
+    base.mkdir(parents=True, exist_ok=True)
+    if base.resolve() != base:
+        raise ValueError("retained evidence directory must be canonical")
+    target = base / digest
+    if target.is_symlink():
+        raise ValueError("retained evidence cannot be a symlink")
+    if not target.exists():
+        fd, temporary = tempfile.mkstemp(prefix=".veto-", dir=str(base))
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+            try:
+                os.link(temporary, str(target))
+            except FileExistsError:
+                pass
+        finally:
+            os.unlink(temporary)
+    if target.read_bytes() != data:
+        raise ValueError("immutable retained evidence changed: " + digest)
+    return str(target)
+
+
+def resumed_past(root, run_id, summary, stores=None):
+    """Why this record is a second roll of a node that runs once per run, or None.
+
+    A node that declares "resume": "never" is held at launch by resume.py,
+    by the compiler's plan and by the compiled script. A native resume
+    launched by hand, with the first launch's own arguments, names no
+    source run and passes all three. It keeps its run id, though, so it
+    arrives here as a later attempt under an id whose earlier attempt had
+    started the node. A resume that names its source is held to that
+    source's record in the same way, and to every other run joined to the
+    source by a resume: they are one campaign. An attempt that did not
+    start the node itself is no roll of it and is filed, whenever it
+    arrives.
+    """
+    stores = stores or [root_store(root)]
+    source = summary.get("resumeSource")
+    source_id = source.get("runId") if isinstance(source, dict) else None
+    # Always read: the result may carry neither a declaration nor a source,
+    # when the field was deleted from the graph and the run resumed by hand.
+    members = _artifacts().lineage(stores, run_id, source_id)
+    paths = [path for member in members for path in run_records(stores, member)]
+
+    def same(a, b):
+        strip = lambda s: {k: v for k, v in s.items() if k != "evidenceUnpinned"}
+        return strip(a) == strip(b)
+
+    earlier, unread = [], []
+    for path in paths:
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+        except OSError as error:
+            if not _artifacts().absent(error):
+                unread.append(path)
+            continue
+        try:
+            row = json.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError):
+            unread.append(path)
+            continue
+        prior = row.get("summary") if isinstance(row, dict) else None
+        if not isinstance(prior, dict):
+            unread.append(path)
+            continue
+        if same(prior, summary) and row.get("runId") == run_id:
+            # This result itself, on file under this run id. It is no earlier
+            # attempt, so it is left out, and it excuses nothing either: a
+            # copy can sit in any store that is read, and every other attempt
+            # still has to be weighed.
+            continue
+        earlier.append((row.get("runId"), prior))
+    # Nothing to hold when no attempt that can be read declares such a node.
+    if not summary.get("noResume") and not any(prior.get("noResume") for _, prior in earlier):
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "compile_graph_recorder", os.path.join(os.path.dirname(os.path.abspath(__file__)), "compile-graph.py"))
+    compiler = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(compiler)
+    for prior_id, prior in earlier:
+        # Held to what either attempt was compiled with: the field may have
+        # been added to the graph, or deleted from it, between the two.
+        held = dict(compiler.held_no_resume({}, summary), **compiler.held_no_resume({}, prior))
+        started = compiler.run_started(prior, (), held)
+        rolled = compiler.run_started(summary, (), held)
+        for node, after in held.items():
+            hit = [nid for nid in after if nid in started]
+            # Only a result that started the node itself is a roll of it.
+            if hit and any(nid in rolled for nid in after):
+                which = ("an earlier attempt of this run" if prior_id == run_id
+                         else f"the run this one resumes ({prior_id})" if prior_id == source_id
+                         else f"{prior_id}, a run joined to this one by a resume,")
+                return (f"RESUME-PAST-NO-RESUME-NODE: {node} — {which} started "
+                        f"{', '.join(repr(nid) for nid in hit)}, and '{node}' declares "
+                        f"\"resume\": \"never\": this result is a second roll of it. The earlier "
+                        f"record stands. Launch fresh for a run that can be recorded.")
+    held = dict(compiler.held_no_resume({}, summary))
+    for _, prior in earlier:
+        held.update(compiler.held_no_resume({}, prior))
+    rolled = compiler.run_started(summary, (), held)
+    if unread and any(nid in rolled for after in held.values() for nid in after):
+        # A record that cannot be read may be the one that started the node.
+        node = sorted(node for node, after in held.items() if any(nid in rolled for nid in after))[0]
+        return (f"RESUME-REACH-UNKNOWN: {node} — an earlier record of this run cannot be read "
+                f"({unread[0]}), so whether it started '{node}' is not known, and '{node}' "
+                f"declares \"resume\": \"never\". Launch fresh for a run that can be recorded.")
+    return None
+
+
+def under_root(path, root):
+    """Whether a file really sits in the project root, once every link is followed.
+
+    The file a row is written to is the one a link resolves to, and a run's
+    earlier records are found by walking up from that file. So a root
+    reached through a linked directory holds its files, and a directory
+    that only holds a link to a WORK.md kept elsewhere does not hold it.
+    """
+    return _inside(os.path.realpath(path), os.path.realpath(root))
+
+
+def _inside(child, parent):
+    try:
+        child, parent = os.path.normcase(child), os.path.normcase(parent)
+        return os.path.commonpath([child, parent]) == parent
+    except ValueError:  # two drives on Windows
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-id", required=True)
@@ -401,7 +753,19 @@ def main():
                          "with a packet of its own files into WORK.md this way")
     ap.add_argument("--result", help="file holding the workflow's return value (default stdin)")
     ap.add_argument("--harness", default="n/a", help="independent harness exit code")
-    ap.add_argument("--red-team", default="n/a", help="SHIP | BLOCK | n/a")
+    ap.add_argument("--red-team", default="n/a",
+                    help="SHIP | BLOCK | n/a. A fallback for a summary with no red-team node; "
+                         "ignored, and reported as ignored, whenever the summary carries a "
+                         "red-team verdict. To lower a derived verdict after the run use --veto")
+    ap.add_argument("--veto", default=None, metavar="REASON",
+                    help="lower the recorded red-team verdict to BLOCK because a check that ran "
+                         "after the run refused it. Needs --veto-evidence. A veto only lowers: "
+                         "over a BLOCK it changes no verdict, and it never yields SHIP. It stays "
+                         "on the run id, so recording the run again keeps it")
+    ap.add_argument("--veto-evidence", default=None, metavar="FILE",
+                    help="the file holding what that check reported. It must exist and hold "
+                         "something. Its sha256 and size go into the run artifact and its bytes "
+                         "are kept under .claude/fluxpoint/runs/evidence")
     ap.add_argument("--proof-audit", default="n/a",
                     help="SOUND | WEAKENED | UNPROVEN | NOT-APPLICABLE | n/a")
     ap.add_argument("--executor", default="workflow", choices=("workflow", "degraded-subagents"))
@@ -422,6 +786,31 @@ def main():
                 | {"COM" + str(n) for n in range(1, 10)} | {"LPT" + str(n) for n in range(1, 10)})):
         ap.error("--run-id must be a safe filename component without drive prefixes or streams")
     evidence_file = args.evidence or args.graph
+    # A run's earlier attempts and its vetoes are read from the stores above
+    # the files it is recorded into. Started in another directory without
+    # --root, the recorder used to read an empty store, and filed the run
+    # into the same Evidence table as if nothing had been recorded before.
+    # So the files a record is about have to sit under its root, by their
+    # real paths, and every store above them is read as well as the root's.
+    # A root beside or below the graph is refused wherever it is, a clone
+    # included: the clone-wide store moves with FPL_MEMORY_HOME, and the
+    # ledger and the waits would be written where no resume looks for them.
+    for flag, named in (("--graph", args.graph), ("--evidence", args.evidence)):
+        if named is not None and not under_root(named, args.root):
+            real = os.path.realpath(named)
+            # Which way out is named is decided on the real paths as well.
+            # The directory the file is entered in is in the project and
+            # the file is somewhere else: the entry is a link.
+            holder = os.path.realpath(os.path.dirname(named) or os.curdir)
+            if _inside(os.path.join(holder, os.path.basename(named)), args.root):
+                ap.error(f"{flag} {named} is {real} once its links are followed, which is outside "
+                         f"the project root {args.root}. A row is written to the file a link "
+                         f"resolves to, and a run's earlier records are found from that file, so "
+                         f"keep the file itself inside the project")
+            ap.error(f"{flag} {named} is outside the project root {args.root}, whose "
+                     f".claude/fluxpoint/runs this record goes into: pass --root <project-root>, "
+                     f"the project directory that {os.path.basename(real)} sits under")
+    stores = run_stores(args.root, args.graph, evidence_file)
 
     raw = open(args.result, encoding="utf-8").read() if args.result else sys.stdin.read()
     try:
@@ -445,6 +834,87 @@ def main():
             print(f"record-run: ledger recorded {r['node']} — {r['evidence']}")
     except Exception as e:  # noqa: BLE001 - never lose the Evidence row over this
         print(f"record-run: ledger append failed: {e}", file=sys.stderr)
+
+    # A veto nobody can account for is refused here, before the record takes
+    # the work file, so the refusal leaves nothing behind it. The ledger above
+    # is the one thing already written, for the reason it gives.
+    new_veto = evidence_bytes = None
+    if args.veto is not None or args.veto_evidence is not None:
+        try:
+            new_veto, evidence_bytes = read_veto(
+                args.veto, args.veto_evidence,
+                datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+        except ValueError as e:
+            return veto_refused(e, ledger_written)
+
+    # One record at a time into a work file. The checks below read what is
+    # on file and the writes after them add to it, and nothing held the two
+    # together: of two records started at the same moment each passed the
+    # check the other was about to fail. A second roll of a once-only node
+    # was filed beside the first, and a plain record landed above a veto
+    # given in the same moment.
+    import contextlib
+    from workfile_lock import workfile_lock
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(workfile_lock(record_lock(evidence_file)))
+        except OSError as e:
+            print(f"record-run: {evidence_file} could not be taken for this record, so no run artifact "
+                  f"or Evidence row was written: {e}", file=sys.stderr)
+            if ledger_written:
+                print(f"record-run: the once-only ledger still recorded "
+                      f"{len(ledger_written)} irreversible effect(s) from this run",
+                      file=sys.stderr)
+            return 1
+        return record(args, summary, evidence_file, stores, ledger_written, new_veto, evidence_bytes)
+
+
+def veto_refused(why, ledger_written):
+    print(f"record-run: veto refused, no run artifact or Evidence row written: {why}",
+          file=sys.stderr)
+    if ledger_written:
+        print(f"record-run: the once-only ledger still recorded "
+              f"{len(ledger_written)} irreversible effect(s) from this run",
+              file=sys.stderr)
+    return 2
+
+
+def record_lock(evidence_file):
+    """What one record at a time is held on: the work file's real name, so
+    every root and every spelling of it meet on the same lock. It is kept
+    beside the file, where the lock for the row itself already is."""
+    return os.path.realpath(evidence_file) + ".record"
+
+
+def record(args, summary, evidence_file, stores, ledger_written, new_veto, evidence_bytes):
+    """Check the run against what is on file and file it, the work file held throughout."""
+    # 0a. A node that runs once per run is not filed twice. Checked before
+    # anything else is read or written, a veto's evidence included, so the
+    # earlier attempt's record is left exactly as it is.
+    if isinstance(summary, dict):
+        rerolled = resumed_past(args.root, args.run_id, summary, stores)
+        if rerolled:
+            print(f"record-run: {rerolled} No run artifact, Evidence row or veto written.", file=sys.stderr)
+            if ledger_written:
+                print(f"record-run: the once-only ledger still recorded "
+                      f"{len(ledger_written)} irreversible effect(s) from this run",
+                      file=sys.stderr)
+            return 2
+
+    # 0b. A post-run veto's evidence is filed here, before anything below
+    # writes. A veto that cannot be accounted for records nothing about the
+    # run: no artifact, no Evidence row, no inbox item. Refusing it must not
+    # drop the veto and file the run at its derived verdict either, so the
+    # whole record is refused.
+    # Read before this record's own veto is journaled, so it is told apart
+    # from one that was already on file.
+    earlier_vetoes = filed_vetoes(args.root, args.run_id, stores)
+    if new_veto is not None:
+        try:
+            file_veto_evidence(args.root, new_veto["evidence"]["sha256"], evidence_bytes)
+            journal_veto(args.root, args.run_id, new_veto, stores)
+        except (OSError, ValueError) as e:
+            return veto_refused(f"VETO-EVIDENCE-UNFILED: {e}", ledger_written)
 
     waits = summary.get("waits") or []
     wait_names = [wait_filename(summary.get("campaign", ""), w.get("node", "")) for w in waits]
@@ -544,6 +1014,43 @@ def main():
         blocked, red_team = True, "BLOCK"
         print("record-run: a SHIP flag without a coverage-bearing result cannot "
               "establish a shippable review", file=sys.stderr)
+    # A veto filed on this run id, by this record or an earlier one, lowers
+    # the recorded verdict to BLOCK and takes the path a derived BLOCK takes
+    # from here on. It is never lifted by recording the run again.
+    derived_block, unvetoed = blocked, red_team
+    vetoes = earlier_vetoes
+    carried = list(vetoes)
+    for position, earlier in enumerate(vetoes):
+        # Journaled by a record that was refused afterwards: this is the
+        # first record to carry it, so this is where it says what it lowered.
+        earlier.setdefault("over", "BLOCK" if position else unvetoed)
+    if new_veto and veto_key(new_veto) not in [veto_key(v) for v in vetoes]:
+        # What the record would have said without this veto.
+        new_veto["over"] = "BLOCK" if vetoes else unvetoed
+        vetoes.append(new_veto)
+    else:
+        new_veto = None
+    if vetoes:
+        blocked, red_team = True, "BLOCK"
+    # The flag used to be dropped here without a word, and a run its own
+    # post-run check refused was filed SHIP. The precedence is unchanged. The
+    # recorder now names the verdict it kept and the flag it ignored.
+    if d_verdict is not None and args.red_team != "n/a":
+        print(f"record-run: --red-team {args.red_team} ignored: the summary carries a "
+              f"red-team verdict, {d_verdict}, and the flag never overrides a derived one",
+              file=sys.stderr)
+        if (d_verdict, args.red_team) == ("SHIP", "BLOCK") and not vetoes:
+            print("record-run: a check that ran after the run reaches the record with "
+                  "--veto <reason> --veto-evidence <file>, or as a prove: node in the graph",
+                  file=sys.stderr)
+    for v in carried:
+        print(f"record-run: the veto filed on {args.run_id} at {cell(v.get('filedAt'), 20)} "
+              f"still applies ({cell(v['reason'], 200)}); the run stays BLOCK, and "
+              f"recording it again never lifts a veto", file=sys.stderr)
+    if new_veto:
+        print(f"record-run: veto filed over red-team {new_veto['over']}: the run is recorded "
+              f"as BLOCK; evidence sha256 {new_veto['evidence']['sha256']} "
+              f"({new_veto['evidence']['bytes']} bytes) kept under .claude/fluxpoint/runs/evidence")
     proof_audit = d_proof if d_proof is not None else args.proof_audit
     if blocked and outcome in ("COMPLETE", "INCOMPLETE", "UNKNOWN"):
         # A campaign does not get to report COMPLETE over a blocking
@@ -821,6 +1328,11 @@ def main():
                 "attestation": attestation,
                 "summary": summary,
             }
+    if vetoes:
+        # Beside redTeam, so a reader sees what the run derived and that a
+        # veto, with its reason and evidence, is why the record says BLOCK.
+        artifact_data["redTeamDerived"] = d_verdict
+        artifact_data["vetoes"] = vetoes
     try:
         import run_artifacts as _attempts
         art, _artifact_sha256 = _attempts.write(args.root, args.run_id, artifact_data)
@@ -878,8 +1390,17 @@ def main():
     if incoherent:
         claim += ("; red-team findings or coverage contradict its verdict (" + "; ".join(incoherent[:2])
                   + ") — filed as BLOCK")
-    elif blocked:
+    elif derived_block:
         claim += "; red-team returned BLOCK — not shippable"
+    if vetoes:
+        if unvetoed == "BLOCK":
+            claim += "; post-run veto filed, red-team already BLOCK"
+        elif d_verdict is None:
+            claim += "; post-run veto filed BLOCK, the run carries no red-team verdict"
+        else:
+            claim += f"; post-run veto lowered red-team {unvetoed} to BLOCK"
+        for v in vetoes:
+            claim += f"; veto {cell(v.get('filedAt'), 20)}: {cell(v['reason'], 200)}"
     if weakened:
         claim += ("; proof-audit returned WEAKENED — verification got weaker while "
                   "the checker stayed green")
@@ -968,6 +1489,9 @@ def main():
         proof_cell = proof_audit
     proof = (f"harness exit {harness}; red-team {red_team}; proof-audit {proof_cell}; "
              f"executor {args.executor}")
+    for v in vetoes:
+        proof += (f"; veto evidence sha256 {v['evidence']['sha256']} "
+                  f"({v['evidence']['bytes']} bytes)")
     if specification_coverage and specification_coverage['references'] == 'uncovered-legacy':
         proof += '; LEGACY reference files not covered: ' + ', '.join(cell(p, 500) for p in specification_coverage['paths'])
     if repair_followups:

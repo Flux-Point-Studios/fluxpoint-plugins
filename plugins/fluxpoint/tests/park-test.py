@@ -128,7 +128,8 @@ def run(ir, args, resolved=None):
             fh.write(
                 "import {writeFileSync} from 'node:fs';\n"
                 "const SPAWNED=[];\n"
-                "const agent=async(p)=>{SPAWNED.push(p);"
+                # let, not const: the scheduled runtime wraps the agent it is given.
+                "let agent=async(p)=>{SPAWNED.push(p);"
                 "return p.includes('cannot be run by an agent')"
                 "  ? {question:'can this be automated?',options:[],"
                 "     chosen:'use cardano-cli with a watch-only wallet',"
@@ -658,6 +659,34 @@ leaked = [t for t in ("${prev}", "${prev.", "${decisions.", "${seen}")
           if t in bj]
 report("no blessed token reaches the script unbound", not leaked,
        "clean" if not leaked else f"unbound: {leaked}")
+
+# A node that waits on two parents, one of them behind a park. The note that
+# files the inherited block was written with the parents' list pasted into a
+# quoted string, which is not JavaScript: the script did not parse.
+JOIN = {
+    "version": 1, "name": "join", "campaign": "a join that waits on a person", "treeGuard": False,
+    "budget": {"maxNodes": 12},
+    "nodes": [
+        {"id": "docs", "prompt": "write the docs", "contract": "HarnessCheckV1"},
+        copy.deepcopy(IR["nodes"][1]),
+        {"id": "publish", "after": ["docs", "sign"], "prompt": "publish {{prev.docs}} with {{prev.sign}}",
+         "contract": "HarnessCheckV1"},
+    ],
+}
+JOIN["nodes"][1].pop("wake")
+report("a join behind a park is accepted", not cg.validate(JOIN, CONTRACTS), str(cg.validate(JOIN, CONTRACTS))[:120])
+join_args = {"_releases": {}, "_launch": {"since": "2026-11-11T00:00:00Z", "nonce": "nonce", "root": "/campaign"},
+             "_replayLaunchNonce": "1" * 64}
+summary, calls, err = run(JOIN, join_args)
+report("and its compiled script parses and runs", summary is not None and not err,
+       "ran" if summary is not None and not err else (err or "no summary")[:160])
+blocked = [p for p in (summary or {}).get("provenance", []) if p["node"] == "publish" and p["status"] == "BLOCKED"]
+report("the join inherits the block and names what it waits on",
+       len(blocked) == 1 and "docs" in blocked[0]["detail"] and "sign" in blocked[0]["detail"],
+       blocked[0]["detail"] if blocked else "no BLOCKED row for the join")
+report("the parent that was not parked still ran",
+       any("write the docs" in c for c in calls) and not any("publish" in c for c in calls),
+       f"{len(calls)} call(s)")
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

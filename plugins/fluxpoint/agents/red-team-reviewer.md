@@ -123,7 +123,11 @@ final identity recheck. End with exactly `VERDICT: SHIP` or
 `VERDICT: BLOCK — <one sentence why>`.
 
 Inside a graph return the RedTeamV1 object: `verdict` and `findings`
-with `severity`, `finding`, `exploit_path`, `minimal_fix`, plus
+with `severity`, `finding`, `exploit_path`, `minimal_fix`, and where the prompt asks for
+them `target` (the file and line, or the component and entry point, the
+defect lives at) and `class` (a short stable name for the kind of defect).
+A graph merges the findings of several reviewers by those two, so name the
+place and the kind the way another reviewer of the same defect would. Add
 `worstSeverity` (the highest finding severity, `NONE` when there are none)
 and `worstSeverityRank` (0 NONE, 1 LOW, 2 MEDIUM, 3 HIGH, 4 CRITICAL). The
 contract binds the three together and refuses SHIP over a HIGH or CRITICAL

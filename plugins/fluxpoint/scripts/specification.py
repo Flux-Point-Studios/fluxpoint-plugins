@@ -398,21 +398,90 @@ def harness_inputs(root, doc, allow_missing=False, closure=True):
     return packet_inputs.Inputs(root, doc, closure, allow_missing).hashes()
 
 
-def freeze_harness(root, doc, lock_file, references=None):
-    """A re-lock may update hashes and add paths, never remove a frozen path."""
-    previous = {}
+UNTRACKED = 'untracked file in a locked directory: stage it or ignore it: '
+# Git lists a repository nested in the tree, or a link to a directory, as one
+# path. Staging it does not make it files a lock can freeze.
+NESTED = 'untracked nested repository or linked directory in a locked directory: ignore it or move it out: '
+
+
+def untracked_message(rel, root):
+    return (NESTED + rel.rstrip('/') if rel.endswith('/') or (Path(root) / rel).is_dir() else UNTRACKED + rel)
+
+
+def untracked_inputs(root, inputs, spec=None, held=()):
+    """Files under an input directory that Git neither tracks nor ignores. A directory
+    input means the tracked files under it, so a lock written now would leave these out.
+    The packet, its lock, the proof baseline and the gates are held outside the harness
+    map, as are the paths in held: referenced archives and what a lock already froze."""
+    fixed = [*packet_paths(root, spec), Path(root) / BASELINE, Path(root) / '.fluxpoint-gates.json']
+    return inputs.untracked({path.relative_to(root).as_posix() for path in fixed} | set(held))
+
+
+def freeze_harness(root, doc, spec=None, references=None, retire=(), because=None):
+    """A re-lock may update hashes and add paths. A frozen path leaves the map only by
+    --retire, which records its last hash and the reason, or because it lies in the
+    plugin's state store, which is named. Returns the map and the retirement records."""
+    lock_file = packet_paths(root, spec)[1]
+    previous, retired, archives = {}, {}, references
     if lock_file.exists():
         old = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
         if not isinstance(old, dict):
             raise ValueError('spec lock must be an object')
         validate_lock_maps(old)
-        previous = set(old.get('harness', {}))
+        previous, retired = dict(old.get('harness', {})), dict(old.get('retired', {}))
         if references is not None:
-            previous.update(set(old.get('references', {})) - set(references))
-    inputs = packet_inputs.Inputs(root, doc, frozen=previous)
+            previous.update({rel: sha for rel, sha in old.get('references', {}).items() if rel not in references})
+        else:
+            archives = old.get('references', {})
+    unfrozen = sorted(set(retire) - set(previous))
+    if unfrozen:
+        raise ValueError('--retire names a path the lock does not freeze: ' + ', '.join(unfrozen))
+    kept = set(previous) - set(retire)
+    missing = sorted(rel for rel in kept if not (Path(root) / rel).is_file()
+                     and not Path(rel).is_relative_to(Path(*packet_inputs.STORE)))
+    if missing:
+        raise ValueError('frozen path no longer exists: ' + ', '.join(missing) + '; restore it, or retire it with --lock '
+                         + ' '.join('--retire ' + rel for rel in missing) + ' --because <decision id or reason>')
+    inputs = packet_inputs.Inputs(root, doc, frozen=kept)
+    reached = sorted(rel for rel in retire if rel in inputs.reasons)
+    if reached:
+        # Retiring a live input would leave the checks running code no lock holds.
+        raise ValueError('cannot retire a path the packet still reaches: ' + '; '.join(
+            rel + ' (' + ', '.join(sorted({kind + (' via ' + via if via else '')
+                                           for kind, _, via in inputs.reasons[rel]})) + ')' for rel in reached))
     for warning in sorted(inputs.warnings):
         print('specification: warning: ' + warning, file=sys.stderr)
-    return inputs.hashes()
+    untracked = untracked_inputs(root, inputs, spec, archives or ())
+    if untracked:
+        # Locking would report success over a set that differs from what is on disk.
+        nested = [rel.rstrip('/') for rel in untracked if untracked_message(rel, root).startswith(NESTED)]
+        files = [rel for rel in untracked if rel.rstrip('/') not in nested]
+        raise ValueError('; '.join(part for part in (UNTRACKED + ', '.join(files) if files else '',
+                                                     NESTED + ', '.join(nested) if nested else '') if part))
+    frozen = inputs.hashes()
+    for rel in sorted(kept - set(frozen)):
+        # Only a state store path leaves this way; every other frozen path is retained.
+        print(f'specification: dropped {rel} from the harness map: '
+              'the plugin state store is never a packet input')
+    for rel in sorted(set(retired) & set(frozen)):
+        # Freezing a path that came back is the safe reading: it only adds protection.
+        print(f"specification: re-admitted {rel}; it was retired because {retired.pop(rel)['reason']}")
+    for rel in sorted(retire):
+        retired[rel] = {'sha256': previous[rel], 'reason': because}
+        print(f'specification: retired {rel} {previous[rel]}: {because}')
+    return frozen, dict(sorted(retired.items()))
+
+
+def write_lock(lock_file, lock, retired):
+    """A lock that records a retirement is format 3. Any other lock is written as
+    before, so it stays readable by a plugin that predates retirement."""
+    if retired or 'retired' in lock:
+        lock.pop('retired', None)
+        lock['lockFormat'] = 3 if retired else 2
+        if retired:
+            lock['retired'] = retired
+    with lock_file.open('w', encoding='utf-8', newline='\n') as out:
+        out.write(json.dumps(lock, indent=2) + '\n')
 
 
 def input_report(root, doc, identity, spec=None, closure=False):
@@ -430,6 +499,7 @@ def input_report(root, doc, identity, spec=None, closure=False):
     for rel in identity.get('references', {}):
         for cid in checks:
             inputs.add(inputs.path(rel), 'references', cid)
+    inputs.warnings.update(untracked_message(rel, root) for rel in inputs.untracked())
     rows = inputs.rows()
     for row in rows:
         row['frozen'] = (row['path'] in lock.get('harness', {})
@@ -437,6 +507,7 @@ def input_report(root, doc, identity, spec=None, closure=False):
                                 for r in row['reasons']))
     return inputs, {'version': 1, 'packet': packet.relative_to(root).as_posix(),
                     'closure': closure, 'inputs': rows,
+                    'retired': [dict(path=rel, **entry) for rel, entry in sorted(lock.get('retired', {}).items())],
                     'warnings': sorted(inputs.warnings)}
 
 
@@ -492,8 +563,11 @@ def strict_harness(root, spec=None):
                          + '; review and authorize a --lock-harness ruling before verification')
 
 
+LOCK_ONLY = ('harness', 'lockFormat', 'retired')  # Lock fields outside the compared identity.
+
+
 def validate_lock_maps(lock):
-    if 'lockFormat' in lock and (type(lock['lockFormat']) is not int or lock['lockFormat'] != 2):
+    if 'lockFormat' in lock and (type(lock['lockFormat']) is not int or lock['lockFormat'] not in (2, 3)):
         raise ValueError('unsupported specification lock format')
     for key in ('references', 'harness'):
         values = lock.get(key, {})
@@ -504,6 +578,20 @@ def validate_lock_maps(lock):
             raise ValueError(f'lock {key} must be a map of repository paths to SHA-256 digests')
         for rel in values:
             in_repo(rel, f'lock {key}')
+    if 'retired' in lock:
+        retired = lock['retired']
+        if (lock.get('lockFormat') != 3 or not isinstance(retired, dict) or not retired
+                or any(not isinstance(rel, str) or not isinstance(entry, dict) or set(entry) != {'sha256', 'reason'}
+                       or not isinstance(entry['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', entry['sha256'])
+                       or not isinstance(entry['reason'], str) or not entry['reason']
+                       or entry['reason'] != ' '.join(entry['reason'].split())
+                       for rel, entry in retired.items())):
+            raise ValueError('lock retired must map each retired path to its last sha256 and a one-line reason, '
+                             'under lockFormat 3')
+        for rel in retired:
+            in_repo(rel, 'lock retired')
+            if rel in lock.get('harness', {}):
+                raise ValueError(f'lock retired path {rel!r} is still frozen in the harness map')
 
 
 def relock_harness(root, doc, spec, gate):
@@ -528,13 +616,12 @@ def relock_harness(root, doc, spec, gate):
         raise ValueError(f"--lock-harness requires an attested exit 0 for gate {gate!r} at HEAD")
     _, lock_file = packet_paths(root, spec)
     lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
-    current = freeze_harness(root, doc, lock_file)
+    current, retired = freeze_harness(root, doc, spec)
     previous = lock.get('harness', {})
     changes = sorted(rel for rel in set(current) | set(previous)
                      if current.get(rel) != previous.get(rel))
     lock['harness'] = current
-    with lock_file.open('w', encoding='utf-8', newline='\n') as out:
-        out.write(json.dumps(lock, indent=2) + '\n')
+    write_lock(lock_file, lock, retired)
     for rel in changes:
         print(f'specification: harness changed {rel}: {previous.get(rel)} -> {current.get(rel)}')
     print(f'specification: locked harness after {gate} at {head}; {len(changes)} changed path(s)')
@@ -689,7 +776,7 @@ def load(root, locked=True, spec=None, snapshots=None, allow_missing_inputs=Fals
             for rel in sorted(set(lock.get('references', {})) | set(identity.get('references', {}))):
                 if lock.get('references', {}).get(rel) != identity.get('references', {}).get(rel):
                     errors.append(f'a file the packet points into changed since lock: {rel}')
-        if {k: v for k, v in lock.items() if k not in ('harness', 'lockFormat')} != identity:
+        if {k: v for k, v in lock.items() if k not in LOCK_ONLY} != identity:
             errors.append('spec, obligation or proof baseline changed since lock; review the change and re-lock')
     if errors:
         raise ValueError('; '.join(errors))
@@ -708,7 +795,7 @@ def recording_identity(root, claimed, spec=None):
     lock = json.loads(lock_file.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
     if not isinstance(lock, dict): raise ValueError('spec lock must be an object')
     validate_lock_maps(lock)
-    locked_identity = {k: v for k, v in lock.items() if k not in ('harness', 'lockFormat')}
+    locked_identity = {k: v for k, v in lock.items() if k not in LOCK_ONLY}
     old_current = {k: v for k, v in current.items() if k != 'references'}
     legacy_lock = 'references' not in lock and bool(current.get('references')) and locked_identity == old_current
     if locked_identity != current and not legacy_lock:
@@ -814,6 +901,9 @@ def main():
     parser.add_argument('--plugin-pin', help='expected compiler installation identity as JSON')
     parser.add_argument('--closure', action='store_true', help='include computed test-support closure in --inputs')
     parser.add_argument('--strict-harness', action='store_true', help='refuse locked harness drift at this root before and after checks')
+    parser.add_argument('--retire', action='append', default=[], metavar='PATH',
+                        help='with --lock, remove a frozen path the packet no longer reaches; repeatable, needs --because')
+    parser.add_argument('--because', metavar='REASON', help='decision id or reason recorded in the lock for every --retire')
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--lock', action='store_true')
     action.add_argument('--lock-harness', action='store_true')
@@ -833,6 +923,15 @@ def main():
                 raise ValueError('PLUGIN-PIN: specification helper differs from the compiled installation')
         if args.check_identity and (not args.check or not re.fullmatch(r'[0-9a-f]{64}', args.check_identity)):
             raise ValueError('--check-identity requires --check and a SHA-256 hex digest')
+        because = ' '.join((args.because or '').split())
+        if (args.retire or args.because is not None) and not args.lock:
+            raise ValueError('--retire and --because are only for --lock')
+        if args.retire and not because:
+            # A path that leaves the lock without a stated reason leaves no trace of why.
+            raise ValueError('--retire requires --because <decision id or reason>')
+        if args.because is not None and not args.retire:
+            raise ValueError('--because is only for --retire')
+        retire = sorted({'/'.join(in_repo(rel, '--retire').parts) or rel for rel in args.retire})
         spec = args.spec
         if not spec and not args.graph and args.run:
             # Without --spec or --graph the runner reads the state file's own
@@ -882,19 +981,25 @@ def main():
             relock_harness(root, doc, spec, args.gate)
             return 0
         if args.lock:
-            frozen = freeze_harness(root, doc, lock_path, identity.get('references', {}))
-            with lock_path.open('w', encoding='utf-8', newline='\n') as lock_file:
-                lock_file.write(json.dumps(dict(identity, harness=frozen, lockFormat=2), indent=2) + '\n')
+            frozen, retired = freeze_harness(root, doc, spec, identity.get('references', {}), retire, because)
+            write_lock(lock_path, dict(identity, harness=frozen, lockFormat=2), retired)
             print(f"specification: locked {name} {identity['sha256']}; checks have not run")
             return 0
         if args.strict_harness:
             strict_harness(root, spec)
         print(f"specification: validated {name} {identity['sha256']}", flush=True)
+        lock = json.loads(lock_path.read_text(encoding='utf-8'), object_pairs_hook=unique_keys)
+        for rel, entry in sorted(lock.get('retired', {}).items()):
+            print(f"specification: retired {rel} {entry['sha256']}: {entry['reason']}", flush=True)
         for check in doc['checks']:
             scope = check['scope']
             if 'scopeRef' not in check and re.fullmatch(r'[^\s#]+\.[a-zA-Z0-9]+', scope):
                 print(f"specification: warning: check {check['id']} scope is a bare path; "
                       'use path#/pointer to bind its text', file=sys.stderr)
+        # A warning here and a refusal at --lock: an unstaged scratch file must not turn a gate red.
+        live = packet_inputs.Inputs(root, doc, closure=False, allow_missing=True)
+        for rel in untracked_inputs(root, live, spec, {**identity.get('references', {}), **lock.get('harness', {})}):
+            print('specification: warning: ' + untracked_message(rel, root), file=sys.stderr)
         if args.run:
             stack = json.loads(os.environ.get('FPL_SPEC_STACK', '[]'))
             if not strings(stack, nonempty=False) or str(root) in stack:

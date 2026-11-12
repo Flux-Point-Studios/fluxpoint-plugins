@@ -177,6 +177,28 @@ the stable result before recording PASS.
 
 The hygiene scan reads added lines and untracked source. The hedge `for now`
 is checked in comments, so Python loop variables named `now` do not match.
+`TODO`, `FIXME`, `XXX`, Coq's `Admitted` and Dafny's `{:axiom}` and
+`{:verify false}` match in that exact spelling, so `a todo list` and
+`re-admitted` pass. A comment that opens with `todo` or `fixme` in any case
+and follows it with a colon, a parenthesis or nothing, as in
+`// todo: handle the error` and `# fixme`, is a marker too, and so are the
+`@todo` and `\todo` documentation tags inside a comment. The same words in
+the middle of a sentence, in code or in a string pass. For these markers a
+comment is read in the `//`, `/* */`, `--`, `(* *)` and `<!-- -->` forms, as
+`#` in scripts, build files and configuration (shell, Ruby, Perl, PowerShell,
+YAML, Terraform, a Makefile, a Dockerfile and the like), and as a line that
+starts with `;` in `.ini`-style files. In build files and configuration a
+`#` opens a comment where it starts a word, whatever stands before it on
+the line, so `apt-get install --yes curl # todo: pin` is flagged; a `#`
+inside a value or a URL, `TOKEN=12345#fixme` or `https://example.com/#todo`,
+opens none. A `//` inside a URL opens none, and
+`--todo` is a flag except in the languages whose comments open with `--`.
+`sorry` is a keyword in Lean and Isabelle and an English
+word elsewhere, so it is flagged in `.lean` and `.thy` files only. A Lean line
+that starts with `--` and holds no `"` or `-/` cannot contain code, so the
+word does not count there; a trailing comment or a string holding the word
+still matches. Calls, attributes and flags such as `.unwrap()`, `todo!()`,
+`.skip(` and `--no-verify` match in any case.
 `.fluxpoint-hygiene-allow` holds one Python regex per line for justified source
 lines (for example `skip\(f?"UNVERIFIED:`); blank lines and `#` comments are
 ignored. Both that policy and `.fluxpoint-hygiene-ignore` belong to the trust
@@ -237,7 +259,8 @@ base and cannot disable the gate's code-change detection.
   as a cache read when the previous call shares its `(model, effort)` and
   the declared `cacheTtl` keeps it warm, work scaled by effort, the call
   weighted by model — and `budget.maxEstimatedTokens` is the ceiling on
-  that estimate. The constants are stated assumptions in one place;
+  that estimate, at compile time for the plan and in the compiled script
+  for the run. The constants are stated assumptions in one place;
   `metrics.py` holds them to the runtime's own `spent`. Effort
   transitions between consecutive nodes into a key the run has not warmed
   are warned about as the cold prefills they are, and every expansion the

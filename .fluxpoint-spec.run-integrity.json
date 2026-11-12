@@ -1,0 +1,827 @@
+{
+  "version": 1,
+  "goal": "What a graph run may spend, resume, certify and record is held in code at the point it happens, and what a packet lock freezes is the set on disk, so that the fourteen defects reported as issues 232 to 246 cannot recur silently",
+  "asset": "The graph compiler, the run recorder, the attestation wrapper, the requirement packet lock and the hygiene scan, each of which already refused the adjacent failure and let these through",
+  "scope": [
+    "Red-team panels: which claims are judged, by which key, and what the recorder accepts as their receipt",
+    "prove: nodes: the contract a gate may return and two gates that must certify one commit",
+    "budget.maxEstimatedTokens enforced on the run as well as the plan",
+    "A node-level \"resume\": \"never\" held by the launcher, the plan, the compiled script and the recorder",
+    "record-run.py: an ignored --red-team flag is reported, and a logged veto can lower a verdict after the run",
+    "Packet inputs: the plugin state store, untracked files under an input directory, unresolved JS imports and retiring a frozen path",
+    "Hygiene markers matched in the spelling their language defines",
+    "The shell a wrapper gate starts under on Windows, and a shell that cannot start the gate"
+  ],
+  "outOfScope": [
+    "Failing --check when budget.maxNodes times the dearest call passes the cap: three shipped templates cannot satisfy that rule and their own plan",
+    "Detecting, inside a compiled script, a native resume launched by hand with the first launch's exact arguments; the recorder holds the record instead",
+    "A flag that raises a recorded verdict, and any veto of the harness exit or the proof-audit verdict",
+    "Treating every gitignored path as outside a packet's inputs",
+    "Running a gate under WSL, or guessing a shell fault from the text a gate printed",
+    "Re-locking the other packets in this repository, whose harness maps this change moves"
+  ],
+  "harnessInputs": [
+    "plugins/fluxpoint/scripts/compile-graph.py",
+    "plugins/fluxpoint/scripts/record-run.py",
+    "plugins/fluxpoint/scripts/resume.py",
+    "plugins/fluxpoint/scripts/run_artifacts.py",
+    "plugins/fluxpoint/scripts/attest.py",
+    "plugins/fluxpoint/scripts/specification.py",
+    "plugins/fluxpoint/scripts/packet_inputs.py",
+    "plugins/fluxpoint/scripts/hygiene-filter.py",
+    "plugins/fluxpoint/contracts/RedTeamV1.schema.json",
+    "plugins/fluxpoint/contracts/ExecutionV1.schema.json",
+    "plugins/fluxpoint/templates/WORK.feature.md",
+    "plugins/fluxpoint/templates/WORK.verified.md"
+  ],
+  "decisions": [
+    {
+      "id": "claim-key-source",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "By what key does a red-team panel decide that two lens findings are one claim?",
+        "options": [
+          {
+            "option": "graph-declared-key",
+            "argued_by": "model",
+            "strongest_objection": "A graph whose reduce keys on prose merges nothing two lenses word differently; --check has to warn about that key"
+          },
+          {
+            "option": "fixed-prose-fields",
+            "argued_by": "model",
+            "strongest_objection": "Severity, finding, exploit path and fix differ for every lens that sees one defect, so each wording costs its own panel"
+          },
+          {
+            "option": "exact-text",
+            "argued_by": "model",
+            "strongest_objection": "One reworded character makes a second claim"
+          }
+        ],
+        "chosen": "graph-declared-key",
+        "rationale": "The reduce between the lenses and the panel already declares when two findings are one defect, so the panel and the recorder read that key. RedTeamV1 findings gain optional target and class fields so the key can be structured, and a finding that lacks a key field is judged on its own wording rather than merged.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue 237: six lenses fed a panel:3 and one defect cost eighteen refuter calls out of the node ceiling",
+          "The shipped feature and verified templates keyed red-team-distinct on finding text"
+        ]
+      },
+      "costs": [
+        {
+          "option": "graph-declared-key",
+          "cost": "One panel per declared key; a prose key is warned about at --check",
+          "basis": "estimate",
+          "evidence": [
+            "Refuter calls fall from lenses times defects to defects when the key is structured"
+          ]
+        },
+        {
+          "option": "fixed-prose-fields",
+          "cost": "One panel per lens wording",
+          "basis": "measured",
+          "evidence": [
+            "Issue 237 reports the run ending BUDGET-EXHAUSTED before the verdict"
+          ]
+        },
+        {
+          "option": "exact-text",
+          "cost": "One panel per distinct string",
+          "basis": "estimate",
+          "evidence": [
+            "Strictly more panels than the prose key"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "collector-findings",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "What becomes of findings returned by the node that only starts the panel over the lenses' output?",
+        "options": [
+          {
+            "option": "drop-and-record",
+            "argued_by": "model",
+            "strongest_objection": "A real defect the collector noticed is not judged in this run; the receipt has to make it visible"
+          },
+          {
+            "option": "judge-them-too",
+            "argued_by": "model",
+            "strongest_objection": "A reworded copy of a lens claim becomes a second claim, and refuting the copy was recorded as refuting the original"
+          },
+          {
+            "option": "halt-on-novel-finding",
+            "argued_by": "model",
+            "strongest_objection": "A run halts on a node whose prompt asked it for nothing"
+          }
+        ],
+        "chosen": "drop-and-record",
+        "rationale": "That node read the lenses and reviewed nothing, so what it returns adds no claim. Findings of its own that match no lens claim are kept in the receipt, unjudged, where a reader and the recorder can see them. The recorder checks the same thing, so a receipt cannot pass by refuting a reworded copy in a lens claim's place.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issues 240 and 241: a collector's reworded finding was refuted and the lens claim it restated was filed as refuted"
+        ]
+      },
+      "costs": [
+        {
+          "option": "drop-and-record",
+          "cost": "No extra calls; one receipt field",
+          "basis": "estimate",
+          "evidence": [
+            "The receipt already existed and gains dropped and keyBy"
+          ]
+        },
+        {
+          "option": "judge-them-too",
+          "cost": "One panel per reworded copy, and a wrong record",
+          "basis": "measured",
+          "evidence": [
+            "Issue 241 names the run that recorded SHIP this way"
+          ]
+        },
+        {
+          "option": "halt-on-novel-finding",
+          "cost": "A halted campaign and a relaunch",
+          "basis": "estimate",
+          "evidence": [
+            "Every halt costs the calls already made"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "prove-contract-check",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "Which contracts may a prove: node return?",
+        "options": [
+          {
+            "option": "by-structure",
+            "argued_by": "model",
+            "strongest_objection": "A contract can satisfy the four fields and still be a poor description of the gate"
+          },
+          {
+            "option": "name-is-executionv1",
+            "argued_by": "model",
+            "strongest_objection": "A second gate with its own return shape has to be folded into one overloaded schema, and a local copy of the name can drop sha"
+          }
+        ],
+        "chosen": "by-structure",
+        "rationale": "The attest check reads gate, exit, attestId and sha. Any contract that requires those four, typed as the shipped ExecutionV1 types them, carries a prove: node, and a local contract named ExecutionV1 that drops one is refused. A second gate that must share the first gate's commit says so with sameShaAs and the run halts when the commits differ.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue 235: a second gate's result was added to ExecutionV1 as an arm of one schema",
+          "Issue 236: two gates certified two heads of a branch that moved between them and the run recorded COMPLETE"
+        ]
+      },
+      "costs": [
+        {
+          "option": "by-structure",
+          "cost": "One structural comparison at compile time",
+          "basis": "estimate",
+          "evidence": [
+            "No run-time cost; the comparison reads the shipped schema"
+          ]
+        },
+        {
+          "option": "name-is-executionv1",
+          "cost": "A contract variant and its tests per extra gate",
+          "basis": "measured",
+          "evidence": [
+            "Issue 232 lists the second gate, node, contract variant and tests one campaign had to build"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "token-cap-enforcement",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "Where is budget.maxEstimatedTokens enforced?",
+        "options": [
+          {
+            "option": "decline-at-run-time",
+            "argued_by": "model",
+            "strongest_objection": "The charge is the compiler's estimate and not the runtime's meter, so a cheap run can be stopped by a pessimistic price"
+          },
+          {
+            "option": "fail-check-on-priced-ceiling",
+            "argued_by": "model",
+            "strongest_objection": "Priced at the dearest call, four of the six shipped templates are over their own cap, and three have more planned calls than the cap divided by that call"
+          },
+          {
+            "option": "meter-real-tokens",
+            "argued_by": "model",
+            "strongest_objection": "The runtime's meter counts output tokens for the whole turn across workflows, which is neither per call nor in the estimate's unit"
+          }
+        ],
+        "chosen": "decline-at-run-time",
+        "rationale": "The compiled script prices each call it spawns at the figure the estimate used for that node and that kind of call, and declines one that would pass the cap the way it declines one past the node ceiling. A run that makes the calls its plan priced is charged its estimate, and one that makes fewer is charged less. --check prints what the node ceiling would allow at the dearest planned call instead of failing on it.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue 233: a sweep that found six times its expectItems ran six times the refuters inside the node ceiling",
+          "Measured on this tree: maxNodes times the dearest planned call exceeds maxEstimatedTokens in four of six shipped templates"
+        ]
+      },
+      "costs": [
+        {
+          "option": "decline-at-run-time",
+          "cost": "A price lookup per spawned call",
+          "basis": "estimate",
+          "evidence": [
+            "One map lookup and an addition in the spawn wrapper"
+          ]
+        },
+        {
+          "option": "fail-check-on-priced-ceiling",
+          "cost": "Three shipped templates cannot compile under any maxNodes",
+          "basis": "measured",
+          "evidence": [
+            "Counted from the templates' own plans on this tree"
+          ]
+        },
+        {
+          "option": "meter-real-tokens",
+          "cost": "A cap in a unit the plan was not written in",
+          "basis": "unknown",
+          "evidence": [
+            "No per-call meter exists in the runtime's budget object"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "no-resume-evidence",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "What shows that a recorded run reached a node that declares \"resume\": \"never\"?",
+        "options": [
+          {
+            "option": "started-by-record",
+            "argued_by": "model",
+            "strongest_objection": "Three kinds of evidence have to agree with what the compiled script files, and a new provenance status must be classified"
+          },
+          {
+            "option": "result-key-present",
+            "argued_by": "model",
+            "strongest_objection": "A node blocked behind a park holds a null result, so a parked campaign could never resume past its person"
+          },
+          {
+            "option": "declared-later-in-the-list",
+            "argued_by": "model",
+            "strongest_objection": "Behind a park a later node runs while this one waits, and in another lane it runs beside it"
+          }
+        ],
+        "chosen": "started-by-record",
+        "rationale": "The node, or a node that depends on it, started. For the declared node that is a result it produced, a call under its label, or a provenance row that is neither a wait nor a decline. For a dependent it is a result or a call, because a reduce files OK over a source that never ran. The runtime journal is read with the record, and the recorder refuses a second result that started the node under one run id. Runs joined by a resume are read as one campaign.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue 242: a red-team fan-out halted by a dead worker was resumed and the lenses after the dead one ran again",
+          "Parked nodes file BLOCKED with a null result and are resumed past by design"
+        ]
+      },
+      "costs": [
+        {
+          "option": "started-by-record",
+          "cost": "One read of the record and the journal per resume",
+          "basis": "estimate",
+          "evidence": [
+            "The launcher already reads both for replay"
+          ]
+        },
+        {
+          "option": "result-key-present",
+          "cost": "Parked campaigns that declare the field cannot resume",
+          "basis": "estimate",
+          "evidence": [
+            "Every node after a park records a null result"
+          ]
+        },
+        {
+          "option": "declared-later-in-the-list",
+          "cost": "False refusals behind parks and across lanes",
+          "basis": "estimate",
+          "evidence": [
+            "Declaration order is not execution order in either shape"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "post-run-downgrade",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How does a check that runs after the run reach the record?",
+        "options": [
+          {
+            "option": "logged-veto",
+            "argued_by": "model",
+            "strongest_objection": "A second way to change a record has to be impossible to use upward and impossible to drop by recording again"
+          },
+          {
+            "option": "flag-overrides-derived",
+            "argued_by": "model",
+            "strongest_objection": "A flag typed by an orchestrator would then overrule the verdict the run itself returned, in either direction"
+          },
+          {
+            "option": "document-only",
+            "argued_by": "model",
+            "strongest_objection": "The step still reads as if it works, and the recorder still drops the flag without a word"
+          }
+        ],
+        "chosen": "logged-veto",
+        "rationale": "The precedence stays: a verdict the summary carries beats the flag. The recorder now says when it ignores the flag, --check warns when a graph's prose relies on it, and --veto with evidence lowers the recorded red-team verdict to BLOCK. A veto never raises a verdict and stays on the run id: it is journaled when it is accepted, and a run's vetoes are read from every store that can hold them: the root's and those above the graph and the Evidence file. The clone-wide store is read as well, and nothing is decided on its being there.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue 232: --red-team BLOCK was dropped silently and a run its own certifier refused was filed SHIP"
+        ]
+      },
+      "costs": [
+        {
+          "option": "logged-veto",
+          "cost": "One evidence file kept per veto under the run store",
+          "basis": "estimate",
+          "evidence": [
+            "The store and its write discipline already exist for retained evidence"
+          ]
+        },
+        {
+          "option": "flag-overrides-derived",
+          "cost": "Every recorded verdict becomes editable from the command line",
+          "basis": "estimate",
+          "evidence": [
+            "The derive-beats-declare rule exists to prevent exactly this"
+          ]
+        },
+        {
+          "option": "document-only",
+          "cost": "The next campaign pays the same audit round",
+          "basis": "measured",
+          "evidence": [
+            "Issue 232 reports about 2.2M tokens and a redesign"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lock-follows-disk",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "Which paths under the repository are packet inputs, and when may one leave a lock?",
+        "options": [
+          {
+            "option": "store-never-untracked-refused-retire-recorded",
+            "argued_by": "model",
+            "strongest_objection": "Three narrow rules instead of one general one"
+          },
+          {
+            "option": "ignore-every-gitignored-path",
+            "argued_by": "model",
+            "strongest_objection": "A declared fixture that is ignored would leave the lock unannounced"
+          },
+          {
+            "option": "empty-directory-passes",
+            "argued_by": "model",
+            "strongest_objection": "A directory with no tracked files would freeze nothing where the author asked for a freeze"
+          }
+        ],
+        "chosen": "store-never-untracked-refused-retire-recorded",
+        "rationale": "The plugin's state store is never an input, decided by the path alone. An untracked file under an input directory refuses --lock and warns at --check. A frozen path leaves only through --retire with a recorded reason, and a JS specifier that resolves nowhere is named with its file and line.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue 243: recording a run made the run store a packet input and every later --check refused",
+          "Issue 234: a new test file in a locked directory was left out of the lock without a word",
+          "Issue 238: a removed check file could leave a lock only by deleting the lock"
+        ]
+      },
+      "costs": [
+        {
+          "option": "store-never-untracked-refused-retire-recorded",
+          "cost": "One git listing per lock or check",
+          "basis": "estimate",
+          "evidence": [
+            "git ls-files --others over the input directories"
+          ]
+        },
+        {
+          "option": "ignore-every-gitignored-path",
+          "cost": "A hole in the lock for every ignored fixture",
+          "basis": "estimate",
+          "evidence": [
+            "The lock exists to make a dropped input visible"
+          ]
+        },
+        {
+          "option": "empty-directory-passes",
+          "cost": "A lock that reports success over nothing",
+          "basis": "estimate",
+          "evidence": [
+            "Same failure as issue 234 in a different shape"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "marker-spelling",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "How does the hygiene scan tell a proof escape or marker from an ordinary word?",
+        "options": [
+          {
+            "option": "language-spelling-and-file-type",
+            "argued_by": "model",
+            "strongest_objection": "A Lean snippet in a Markdown file is no longer flagged"
+          },
+          {
+            "option": "case-sensitive-only",
+            "argued_by": "model",
+            "strongest_objection": "sorry, the file moved still matches a case-sensitive word-bounded sorry"
+          },
+          {
+            "option": "keep-case-insensitive",
+            "argued_by": "model",
+            "strongest_objection": "re-admitted, a todo list and a masked phone number all read as markers"
+          }
+        ],
+        "chosen": "language-spelling-and-file-type",
+        "rationale": "TODO, FIXME, XXX, Coq's Admitted and Dafny's attributes match in the one spelling their language or convention defines. A comment that opens with todo or fixme in any case is still a marker, and so are the @todo and \\todo documentation tags, both read in the comment alone. Calls, attributes and flags keep matching in any case, with Rust's todo! now named. sorry is lower case in Lean and in English, so the file type decides: it is flagged in .lean and .thy files only.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue 246: four ordinary lines tripped the scan under re.I"
+        ]
+      },
+      "costs": [
+        {
+          "option": "language-spelling-and-file-type",
+          "cost": "No extra work per line",
+          "basis": "estimate",
+          "evidence": [
+            "The suffix is read once per file"
+          ]
+        },
+        {
+          "option": "case-sensitive-only",
+          "cost": "One false marker per apology in prose",
+          "basis": "estimate",
+          "evidence": [
+            "The issue's own table lists the line"
+          ]
+        },
+        {
+          "option": "keep-case-insensitive",
+          "cost": "A red gate on ordinary prose",
+          "basis": "measured",
+          "evidence": [
+            "Issue 246 reproduces each line"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gate-shell",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "What starts a wrapper gate on Windows, and what is a gate whose shell could not start it?",
+        "options": [
+          {
+            "option": "git-bash-or-refuse-and-shell-fault",
+            "argued_by": "model",
+            "strongest_objection": "One extra one-word command before every wrapper gate"
+          },
+          {
+            "option": "fall-back-to-any-bash",
+            "argued_by": "model",
+            "strongest_objection": "CreateProcess finds WSL's bash.exe first, which runs the gate in another toolchain or not at all"
+          },
+          {
+            "option": "classify-from-output-text",
+            "argued_by": "model",
+            "strongest_objection": "A real red whose log happens to hold the same words becomes rerunnable"
+          }
+        ],
+        "chosen": "git-bash-or-refuse-and-shell-fault",
+        "rationale": "Git Bash is resolved from the environment, PATH outside System32 and WindowsApps, the prefix git reports and the usual install directories, only by a path that names its drive or share, and WSL's launcher is never used. Before the declared command is handed over the wrapper has the shell print one word. A shell that cannot is a shell fault: the row carries fault shell and a null exit, so it is rerunnable and no node can read it as the gate's verdict.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Issue 244: a gate started under WSL exited 1 after one second and was attested as a red, which halted the campaign"
+        ]
+      },
+      "costs": [
+        {
+          "option": "git-bash-or-refuse-and-shell-fault",
+          "cost": "One subprocess per gate run",
+          "basis": "estimate",
+          "evidence": [
+            "printf of one word"
+          ]
+        },
+        {
+          "option": "fall-back-to-any-bash",
+          "cost": "A campaign halted on a gate that never ran",
+          "basis": "measured",
+          "evidence": [
+            "Issue 244 reports the row and the halt"
+          ]
+        },
+        {
+          "option": "classify-from-output-text",
+          "cost": "A way to reroll a failing gate",
+          "basis": "estimate",
+          "evidence": [
+            "A fault row is rerunnable by design"
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "panel-judges-lens-claims",
+      "statement": "A red-team panel judges one claim per key that a reduce between the lenses and the panel declares, shows the refuters every lens's wording of it, takes the worst severity any lens gave, and judges a finding that lacks a key field on its own; a node that only starts the panel adds no claim, whatever it returns that no lens wrote word for word is kept in the receipt unjudged, and record-run.py accepts a receipt only when every lens claim's exact wording was in a class the panel judged, comparing a key field that holds a structure by its content",
+      "decisions": [
+        "claim-key-source",
+        "collector-findings"
+      ],
+      "checks": [
+        "redteam-panel-tests"
+      ],
+      "counterexample": "Six lenses word one defect six ways and eighteen refuters are spent on it, or a collector rewords a lens claim, the copy is refuted, and the lens claim is recorded as refuted"
+    },
+    {
+      "id": "gate-contract-and-commit",
+      "statement": "A prove: node may return any contract that requires gate, exit, attestId and a 40-hex sha typed as ExecutionV1 types them, a contract missing one is refused whatever it is called, attest.py checks the node by its prove: tier, and a node that declares sameShaAs halts the run when its commit differs from the named earlier node's or either is missing, and a sameShaAs that names a node running beside it in another lane is refused when the graph compiles",
+      "decisions": [
+        "prove-contract-check"
+      ],
+      "checks": [
+        "prove-gates-tests"
+      ],
+      "counterexample": "A branch moves between a final gate and a later gate, the two certify different heads, and the run records COMPLETE"
+    },
+    {
+      "id": "token-cap-holds-the-run",
+      "statement": "A compiled graph declines a call that would take its priced spend past budget.maxEstimatedTokens, files it SKIPPED and names the token ceiling, charges each call what the plan priced it at, so that a run of any shipped template that makes the calls its plan priced is charged its estimate, the repair diff review included, and one that makes fewer is charged less, names in the summary any call the plan did not price, and --check prints what budget.maxNodes would allow at the dearest planned call",
+      "decisions": [
+        "token-cap-enforcement"
+      ],
+      "checks": [
+        "token-ceiling-tests"
+      ],
+      "counterexample": "A sweep finds six times its expectItems and runs six times the refuters, all inside the node ceiling and none inside the cap"
+    },
+    {
+      "id": "no-resume-past-a-declared-node",
+      "statement": "A run whose record or journal shows that a node declaring \"resume\": \"never\", or a node that depends on it, started is refused with RESUME-PAST-NO-RESUME-NODE by resume.py --run, by compile-graph.py --plan --resume, by the compiled script before its first call and by record-run.py for a result that started the node when an earlier attempt under the same run id, or a run joined to it by a resume, had started it too; every attempt recorded under the run id and under each run joined to it by a resume is read, the latest and those kept in its history, from the root's store and those above the graph, by the launcher as by the recorder; a copy of the result already on file excuses nothing, an attempt on file that cannot be read is refused as RESUME-REACH-UNKNOWN, an attempt that did not start the node itself is filed, and records into one work file are taken one at a time, so of two rolls recorded at the same moment one is refused; a node blocked behind a park or declined by the budget did not start, in graphs with lanes as well as without, a repair loop that waits on a park is blocked with it, and a run that stopped before the node resumes; a node that declares the field has to wait on every park in the graph, and neither a parked node nor a node of a repair loop can declare it",
+      "decisions": [
+        "no-resume-evidence"
+      ],
+      "checks": [
+        "no-resume-tests"
+      ],
+      "counterexample": "A red-team fan-out halted by a dead lens is resumed, the lenses after it run again, one that had raised claims comes back clean, and the run is recorded SHIP; or the second roll is first recorded against a graph one directory up and then recorded in the project; or both rolls are recorded at the same moment and both are filed"
+    },
+    {
+      "id": "ignored-flag-is-said",
+      "statement": "record-run.py names the verdict it kept and the flag it ignored whenever --red-team is given over a summary that carries a verdict, and compile-graph.py --check warns, with the line, when a graph file's prose records a verdict by a flag the recorder will ignore, whether the value is written out or taken from the shell, leaves alone a line whose negation stands in the flag's own clause and governs the flag's own verb, a clause ending at punctuation and at then, so, but, otherwise and instead, and reads --harness as the recorder's only where record-run is named before it in the same command, sentence or list item",
+      "decisions": [
+        "post-run-downgrade"
+      ],
+      "checks": [
+        "record-location-tests",
+        "recorder-flag-prose-tests"
+      ],
+      "counterexample": "A graph's After the run step says to record --red-team BLOCK when a certifier refuses, and the run is filed SHIP without a word"
+    },
+    {
+      "id": "veto-only-lowers",
+      "statement": "record-run.py --veto with --veto-evidence records BLOCK, keeps the derived verdict and the evidence's sha256 and bytes beside it, refuses a veto without a reason or without readable non-empty evidence and then writes nothing, never yields SHIP, keeps a filed veto on the run id when the run is recorded again, when the record that carried it is refused afterwards, when two vetoes are given at once, when a plain record is made in the same moment and when the run is recorded under any other root above the graph, reading the stores above the graph and the Evidence file as well as the root's, and refuses before anything is written a --graph or --evidence file that really sits outside --root, in a clone as anywhere and a link to such a file included, naming the way out by where the files really are",
+      "decisions": [
+        "post-run-downgrade"
+      ],
+      "checks": [
+        "record-location-tests"
+      ],
+      "counterexample": "A second record without the flag erases a filed veto, a veto over a BLOCK is used to file SHIP, or the run is recorded with a root one directory up and filed SHIP beside its own BLOCK"
+    },
+    {
+      "id": "lock-freezes-what-is-on-disk",
+      "statement": "No path in a plugin state store is a packet input whether it is a file or a directory, the root's store and a package directory's alike, except what Git tracks under a package's store-shaped directory, which is a fixture and is frozen, and a working-directory flag that names a store sets no package directory; an untracked, unignored file under an input directory refuses --lock and is a warning at --check, one beside a committed fixture in such a directory included, only a compiled cache inside __pycache__ and a desktop's folder metadata are passed over, and a nested repository is named as one; a relative JS import that names no repository file is warned about with its file and line, and one that leaves the repository still refuses",
+      "decisions": [
+        "lock-follows-disk"
+      ],
+      "checks": [
+        "packet-inputs-tests"
+      ],
+      "counterexample": "Recording a run turns a passing specification.py --check red in the same checkout, a new test file under a locked directory is never frozen, a check that runs in the store freezes nothing at all, an untracked module under node_modules that a locked test loads is left out of the lock, or a recorded run nobody staged beside a committed fixture is read by a locked test and left out without a word"
+    },
+    {
+      "id": "retire-leaves-a-record",
+      "statement": "specification.py --lock --retire PATH --because REASON removes only the named frozen paths, refuses a path the packet still reaches, a path the lock does not freeze and a missing reason, records each retirement with its last hash, and --check and --inputs show the records",
+      "decisions": [
+        "lock-follows-disk"
+      ],
+      "checks": [
+        "packet-inputs-tests"
+      ],
+      "counterexample": "A check file removed by a recorded decision can leave the lock only by deleting the whole lock"
+    },
+    {
+      "id": "markers-in-their-own-spelling",
+      "statement": "The hygiene scan flags TODO, FIXME, XXX, Admitted and Dafny's attributes wherever they appear in that spelling, flags todo and fixme in another case only where a comment opens with the word as a marker, flags the @todo and \\todo documentation tags inside a comment, reads those comments in every form the hedge is read in and also as # in build files and configuration, where a # that opens a word is read whatever stands before it on the line and a # inside a value or a URL is none, as a line that starts with ; in .ini-style files and as <!-- -->, takes a // inside a URL for none, takes --todo for a flag except where -- opens a comment, flags sorry in .lean and .thy files only, and keeps flagging Rust's todo!, unimplemented!, #[ignore] and .unwrap() in any case",
+      "decisions": [
+        "marker-spelling"
+      ],
+      "checks": [
+        "hygiene-scope-tests"
+      ],
+      "counterexample": "The record was re-admitted, a todo list, a masked phone number or an apology in prose turns the gate red, a comment that opens with todo: passes because it is in lower case, or a # todo after a long option in a Dockerfile passes"
+    },
+    {
+      "id": "gate-shell-is-git-bash-or-a-fault",
+      "statement": "On Windows a wrapper gate starts under Git Bash resolved without System32 or WindowsApps and never by a relative path, and refuses with NO-GIT-BASH when none exists; on every platform a shell that cannot run the wrapper's one-word command attests a row with fault shell and a null exit and does not start the declared command, the test stops with whatever it started, at once on cancellation and when its runner is interrupted, terminated or loses its terminal, the fault line names a rerun that works for a run with a nonce and for one without, and a leg of a fault rerun pair whose shell cannot run did not pass, while a gate that started is judged by its exit; and the prove preamble tells the node to run the witness command exactly as written",
+      "decisions": [
+        "gate-shell"
+      ],
+      "checks": [
+        "shell-fault-tests",
+        "prove-gates-tests"
+      ],
+      "counterexample": "attest.py --run starts a gate under WSL, the shell exits 1 in a second, and the row is attested as the gate's red"
+    }
+  ],
+  "checks": [
+    {
+      "id": "redteam-panel-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/redteam-workflow-test.py"
+      ],
+      "scope": "The emitted red-team graph executed under stubs, the shipped templates, and record-run.py's receipt check",
+      "assumptions": [
+        "Stub agents stand in for the reviewers; what a real lens finds is not under test"
+      ],
+      "timeoutSeconds": 300
+    },
+    {
+      "id": "prove-gates-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/prove-gates-test.py"
+      ],
+      "scope": "The validator, the emitted two-gate graph executed under stubs, the warnings and the prove preamble",
+      "assumptions": [
+        "The attest log is not consulted here; attest-test.sh covers the record-time check"
+      ],
+      "timeoutSeconds": 120
+    },
+    {
+      "id": "token-ceiling-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/token-ceiling-test.py"
+      ],
+      "scope": "The emitted sweep executed under stubs with and without a cap, every shipped template run on its plan with the cap at its estimate, and the compiler's --check line",
+      "assumptions": [
+        "The charge is the compiler's estimate; real token spend is not measured"
+      ],
+      "timeoutSeconds": 300
+    },
+    {
+      "id": "no-resume-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/no-resume-test.py"
+      ],
+      "scope": "The validator, the rule over recorded summaries from both runtimes, resume.py, compile-graph.py --plan, the compiled script and record-run.py",
+      "assumptions": [
+        "Replay memo construction is mocked in the launcher cases; the journal is a file in the runtime's layout"
+      ],
+      "timeoutSeconds": 300
+    },
+    {
+      "id": "record-location-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/record-location-test.py"
+      ],
+      "scope": "record-run.py at the command line: the ignored flag, the veto, its evidence store and re-recording",
+      "assumptions": [
+        "Temporary repositories stand in for a campaign checkout"
+      ],
+      "timeoutSeconds": 300
+    },
+    {
+      "id": "recorder-flag-prose-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/recorder-flag-prose-test.py"
+      ],
+      "scope": "The prose reader over graph files and compile-graph.py --check",
+      "assumptions": [
+        "Only the three recorder flags that have a derived counterpart are read"
+      ],
+      "timeoutSeconds": 60
+    },
+    {
+      "id": "packet-inputs-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/packet-inputs-test.py"
+      ],
+      "scope": "specification.py and compile-graph.py at the command line over temporary git repositories, including a run recorded for real",
+      "assumptions": [
+        "The JS reader is a tokenizer; the shapes it does not handle are stated in the packet format guide"
+      ],
+      "timeoutSeconds": 900
+    },
+    {
+      "id": "hygiene-scope-tests",
+      "kind": "test",
+      "argv": [
+        "bash",
+        "plugins/fluxpoint/tests/hygiene-scope-test.sh"
+      ],
+      "scope": "hygiene-filter.py over a table of lines and file types, and the scan through lib.sh",
+      "assumptions": [
+        "Lean and Isabelle are recognised by file suffix"
+      ],
+      "timeoutSeconds": 300
+    },
+    {
+      "id": "shell-fault-tests",
+      "kind": "test",
+      "argv": [
+        "{python}",
+        "plugins/fluxpoint/tests/fault-attempts-test.py"
+      ],
+      "scope": "The Windows shell resolution as a pure function of its inputs, and wrapper gates run for real with a shell that cannot start",
+      "assumptions": [
+        "Windows itself is not available to this suite; its branch is driven with fakes"
+      ],
+      "timeoutSeconds": 600
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Enforcing the cap at run time stops runs that would have finished under the real token meter.",
+      "resolution": "It stops a run only when its priced spend passes the cap the author declared. A run that follows its plan is charged its estimate, and the declined work is filed SKIPPED with the ceiling named, which is what the node ceiling already does."
+    },
+    {
+      "claim": "Refusing every resume past the red team makes a dead lens cost a full relaunch.",
+      "resolution": "Only for a graph that declares the field. The alternative is a review rolled twice under one record, which is the defect. A run that stopped before the node, or behind a park, still resumes."
+    },
+    {
+      "claim": "A veto is a way to edit a record after the fact.",
+      "resolution": "It can only lower a verdict to BLOCK, needs evidence that is hashed and kept, is listed in the artifact beside the verdict the run derived, and cannot be dropped by recording again."
+    },
+    {
+      "claim": "Refusing --lock over an untracked file will red ordinary work in progress.",
+      "resolution": "--lock is the moment the set is frozen, so a difference from disk is refused there and named. --check and --run only warn."
+    },
+    {
+      "claim": "Matching the markers in one spelling stops flagging the comments people write in lower case.",
+      "resolution": "A comment that opens with todo or fixme in any case, and the @todo and \\todo tags, are still flagged. Only the word inside a sentence, in code or in a string passes, which is what the issue asked for."
+    },
+    {
+      "claim": "Refusing a graph file outside --root breaks recording from a subdirectory.",
+      "resolution": "Only when --root is left out or names another project. With --root <project-root> every directory works, as the run command already says, and the refusal comes before anything is read or written."
+    },
+    {
+      "claim": "Reading the stores above the Evidence file lets a store that belongs to another project block a run.",
+      "resolution": "Only a store that holds a record or a veto under the same run id, and a run id is minted for one launch. Reading them is what makes a root one directory up, a subdirectory or another worktree find the veto the project filed."
+    }
+  ]
+}

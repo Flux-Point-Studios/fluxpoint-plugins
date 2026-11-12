@@ -140,7 +140,38 @@ packet differs from the graph's embedded packet must not certify that graph.
 It includes repository files named in `argv`/`witness`, including `file::node`
 selectors and `--option=file`, plus every `harnessInputs` file. A directory
 expands to its Git-tracked files; an empty or untracked-only directory refuses
-to freeze. Explicit inputs must exist inside the repository. Package cwd
+to freeze. A directory input therefore means the tracked files under it.
+`--lock` and `--lock-harness` refuse while an untracked file that Git does not
+ignore sits under an input directory, and name each one: stage it or ignore it.
+`--check` and `--run` warn about the same files and do not fail. `--inputs`,
+`--touches` and `--reach` list them as warnings. An untracked file that the
+packet names outright, or that a locked test imports, is frozen like any other
+input. Explicit inputs must exist inside the repository.
+Two kinds of file are passed over, because nothing loads them: a compiled
+cache inside `__pycache__`, which Python reads only beside its source, and the
+folder metadata `.DS_Store`, `Thumbs.db` and `desktop.ini`. A lock taken after
+the checks ran is therefore not refused over what Python wrote. Everything
+else counts. A compiled module beside the sources, and a file under
+`node_modules` or a virtual environment, can be loaded by a locked test, so
+ignore those directories. A repository nested under an input directory, or a
+link to a directory, is named as that and not as a file to stage: ignore it or
+move it out.
+The plugin's state store, `.claude/fluxpoint/`, is runtime state and never a
+packet input. A check may name a file or a directory in it, such as
+`--runs-dir`, and nothing there is frozen, whether the path exists yet or not.
+A working-directory flag that names the store is read the same way: it sets no
+package directory and the check's other arguments resolve as they would without
+it. A directory named `.claude/fluxpoint` is a store wherever it sits in the
+repository: the root's, and that of a package directory a session was rooted
+in, so a check that runs in the package and reads `pkg/.claude/fluxpoint/`
+freezes nothing a session left there. What Git tracks under such a directory
+below the root's own store is a fixture somebody committed, and it is frozen
+like any other file. A file nobody staged in a store that holds such a fixture
+may be a fixture too, so under an input directory it is named like any other
+untracked file: stage it or ignore it.
+A recorded run or decision therefore moves no lock. A `harnessInputs` entry in
+the store refuses. A store path that an older lock froze leaves the harness map
+at the next `--lock` or `--lock-harness`, which prints each one. Package cwd
 flags (`--prefix`, `--dir`, `--cwd`, and a directory-valued `-C` or `--project`)
 resolve package-relative paths. A `--project` file is pinned as configuration;
 its parent guides local module resolution. Non-directory `-C` values and Jest
@@ -161,12 +192,36 @@ Known Python dynamic loaders and computed or template-literal JS imports emit
 warnings in lock and preflight output; a known target explicitly covered by
 `harnessInputs` discharges its warning. Static closure still cannot enumerate
 arbitrary resource paths computed by repository programs.
+JavaScript and TypeScript sources are read as tokens. Import text inside a
+comment, a template literal, a regular expression or a string that is not an
+import specifier is not an import. A relative specifier that names no
+repository file emits a warning with the specifier, its file and its line.
+That import is not followed, so name the file it means in `harnessInputs`.
+A specifier that resolves outside the repository refuses, and the refusal
+names the same location. The token reader is not a parser. It reads JSX text
+as code, so JSX text holding `/*` or an unpaired backtick can hide the imports
+after it. It takes a `/` after a postfix `++` or `--` or a TypeScript non-null
+`!` for the start of a regular expression when another `/` follows on that line.
 Every path in a previous harness map is retained as a closure root, even after
-an argv or import is removed. A missing retained file refuses re-locking; no
-path can silently leave the locked set.
-The harness map stays outside the compared identity, so editing check code
-changes neither the graph's IR nor its compiled script and does not stale its
-specification. It remains reviewed code, with its own recorded identity.
+an argv or import is removed. A missing retained file refuses re-locking, and
+the refusal names each missing file and the command that retires it.
+`--lock --retire <path> --because <decision id or reason>` removes a frozen
+path that the packet no longer reaches. `--retire` may repeat, and the one
+`--because` applies to every path of that call. It refuses without `--because`,
+for a path the lock does not freeze, and for a path the argv or the closure
+still reaches. The lock records each retirement under `retired` as the path,
+the last SHA-256 the lock held for it and the reason. Later locks carry the
+record forward. `--check` and `--run` print every retired path, and `--inputs`
+lists them under `retired`. A retired path that the packet reaches again is
+frozen again as an ordinary input: the lock drops its record and says so.
+A lock that records a retirement is written with `lockFormat: 3`. Any other
+lock is still written with `lockFormat: 2`, so a lock without retirements is
+unchanged. No path leaves the locked set without a record, except a state
+store path that an older lock froze.
+The harness map and the retirement records stay outside the compared identity,
+so editing check code or retiring a path changes neither the graph's IR nor its
+compiled script and does not stale its specification. Check code remains
+reviewed code, with its own recorded identity.
 `--check --strict-harness` and `--run --strict-harness` refuse changed, missing
 or newly discovered harness inputs in the exact checkout being judged, naming
 them before running checks and checking again afterwards. Newly scaffolded

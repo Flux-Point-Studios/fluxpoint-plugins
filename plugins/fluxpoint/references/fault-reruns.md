@@ -119,3 +119,77 @@ This is a gate-execution exception, not a node retry setting. Commands run outsi
 attestation remain unwitnessed. Compiler warnings identify schema-only exit
 gates whose prompt repeats a declared gate command verbatim; use `prove:<gate>`
 to enforce this history.
+
+## Shell faults
+
+A gate that goes through a shell can fail before its declared command starts.
+On Windows, `attest.py --run` started from PowerShell without `py.sh` once ran
+its gate under System32's `bash.exe`, which is WSL's launcher. The launcher
+printed `execvpe(/bin/bash) failed` and exited 1, and that exit was attested
+as the gate's.
+
+The wrapper now resolves the shell and tests it before it hands the gate over.
+
+On Windows the shell is Git Bash. The sources, in order, are `FPL_BASH`, which
+`py.sh` exports, then `CLAUDE_CODE_GIT_BASH_PATH`, a `bash.exe` in a `PATH`
+directory, `bin\bash.exe` and `usr\bin\bash.exe` under the prefix
+`git --exec-path` reports, and the directories Git for Windows installs into.
+A path in `System32`, `Sysnative`, `SysWOW64` or `WindowsApps` is never used,
+whatever names it. Nothing is found by a relative path: the gate starts in its
+own tree, so only a path that names its drive or share is taken, a `PATH`
+entry that names neither is skipped, and a `bash.cmd` or `bash.bat` is not a
+shell. With no Git Bash, `--run` prints `NO-GIT-BASH` and exits 2. No record
+and no row are written. On other platforms the shell is resolved as before.
+
+The `PATH` search takes the first `bash.exe` it finds outside those
+directories. Where MSYS2 or Cygwin leads `PATH`, that is their bash and the
+gate runs in their toolchain. Run `attest.py` through `py.sh` from Git Bash,
+or set `CLAUDE_CODE_GIT_BASH_PATH`, to name the shell yourself.
+
+Before the declared command is handed over, the wrapper has the shell run
+`printf %s FPL-SHELL-OK` in the gate's directory. A shell that cannot be
+started, exits non-zero, prints something else, or gives no answer within 60
+seconds is a shell fault. The declared command is not started. The wrapper row
+carries `"fault": "shell"`, the shell's own status as `shellExit`, the shell's
+path as `shell`, and `"exit": null`. `--run` and `--await` answer 4 and print
+`SHELL-FAULT` with the attestation id. `--last` prints `fault shell` in place
+of an exit.
+
+The test runs as a process tree of its own. A shell that hangs is stopped
+together with whatever it started, and so is one whose runner is interrupted,
+terminated or loses its terminal. `--cancel` during the test stops it at
+once: the run ends `CANCELLED` with nothing attested.
+
+A shell fault row is no pass and no red. A `prove:` node that cites it is
+`STALE`. It does not attest or contradict an observed claim. It does not stand
+against a later run of the gate, so that run is judged on its own exit.
+
+Run the gate again with the command the `SHELL-FAULT` line prints, which is
+the command a crash uses:
+
+```bash
+bash "$ROOT/scripts/py.sh" attest.py --rerun-fault <attestId> --root "$PROJECT" --nonce "$NONCE" --detach
+bash "$ROOT/scripts/py.sh" attest.py --await <token> --root "$PROJECT"
+```
+
+For a shell fault this starts one ordinary run of the gate. There is no pair
+and no reference leg, because no execution of the gate failed. The named row
+must be a shell fault, and its retained completion record and log must be
+unchanged. It is run again under the nonce it was minted under: a row from a
+run with a nonce needs that nonce, as `--nonce` or in `FPL_ATTEST_NONCE`, and
+a row from a run started without one is run again without the flag. Cite the
+new run's attestation.
+
+One shell fault is settled where it happens. The native leg of a crash's
+rerun pair goes through the same test, and a leg whose shell cannot run a
+command did not pass. Its row carries `"fault": "shell"` and no exit, the pair
+is filed with exit 1, and the pair was the crash's one rerun. `--rerun-fault`
+on that leg is refused.
+
+Only the wrapper's own test makes a shell fault. Once the shell has answered,
+the gate runs and its exit is its verdict. Exit 127 from a declared command
+whose program is missing is such a verdict: a gate script exits 127 as well
+when a tool it calls is missing, and the status does not tell the two apart.
+A red from a gate that started stays red and is never run again as a fault.
+A deployed lane starts its interpreter without a shell and is not tested this
+way.

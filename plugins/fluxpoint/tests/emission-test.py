@@ -159,6 +159,10 @@ probe("node", "mutates", NODE_BASE, lambda ir: (
 probe("node", "independent", NODE_BASE, setnode(independent=True, verifies="seed"))
 probe("node", "verifies", NODE_BASE, setnode(independent=True, verifies="seed"))
 probe("node", "cites", NODE_BASE, setnode(independent=True, cites=["suite"]))
+# Refused here, because neither node's contract carries a commit to compare;
+# prove-gates-test.py executes the comparison on a graph that does.
+probe("node", "sameShaAs", NODE_BASE, setnode(sameShaAs="seed"))
+probe("node", "resume", NODE_BASE, setnode(resume="never"))
 probe("node", "verify", NODE_BASE, setnode(verify="panel:3", verifyOver="findings"))
 probe("node", "verifyOver", NODE_BASE, setnode(verify="skeptic:1", verifyOver="findings"))
 probe("node", "expectItems", NODE_BASE,
@@ -411,7 +415,7 @@ probed = {
         "verifyOver", "expectItems", "haltWhen", "haltReason", "onRed",
         "isolation", "repeat", "irreversible", "actor", "release", "wake",
         "decides", "honors", "memory", "reduce", "cites", "lane", "fresh", "repository", "branch", "pushes", "replay",
-        "probe",
+        "probe", "sameShaAs", "resume",
     },
     "repeat": {"untilDryRounds", "maxRounds", "dedupeBy", "until", "integrate", "classBy", "reframeAfter", "severityFloor"},
     "reduce": {"from", "over", "dedupeBy", "sortBy", "order", "topK"},

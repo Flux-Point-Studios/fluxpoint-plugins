@@ -266,14 +266,55 @@ Workflow tool requires.
    something you remember to write:
    ```
    echo '<the workflow return value as JSON>' | bash "$ROOT/scripts/py.sh" record-run.py \
-     --run-id <runId> --graph <graph> [--evidence WORK.md] [--harness <exit>] [--red-team SHIP|BLOCK]
+     --run-id <runId> --graph <graph> [--evidence WORK.md] [--harness <exit>] [--red-team SHIP|BLOCK] \
+     [--veto "<reason>" --veto-evidence <file>]
    ```
    `--graph` is the file the run was compiled from (its `SPEC:` is the
    packet the run is checked against); `--evidence` is the file whose
    Evidence and Decisions tables receive the rows, `--graph` by default. A
    campaign in `GRAPH.<name>.md` with a packet of its own passes both.
+   `--red-team` is a fallback for a summary that carries no red-team node.
+   When the summary carries a red-team verdict, that verdict is recorded,
+   the flag is ignored, and the recorder prints the verdict it kept and the
+   flag it dropped. A check that runs after the run therefore cannot change
+   the record with `--red-team BLOCK`. Give such a check one of two forms.
+   The first is a `prove:` node after the verdict node, so the graph halts
+   before COMPLETE. The second is a veto: when the check refuses, record
+   with `--veto "<why it refused>" --veto-evidence <file holding its output>`.
+   A veto only lowers. The recorded verdict becomes BLOCK and the run is
+   filed `BLOCKED-REDTEAM`; the artifact keeps the derived verdict as
+   `redTeamDerived` and lists the reason with the evidence file's sha256
+   and size under `vetoes`; the bytes are kept under
+   `.claude/fluxpoint/runs/evidence/`. A veto over a BLOCK changes no
+   verdict, and no veto produces SHIP. `--veto` without `--veto-evidence`,
+   or with a file that is missing or empty, is refused with a `VETO-` code
+   and exit 2, and no artifact or Evidence row is written. A filed veto
+   stays on the run id: recording that run again, with or without the
+   flag, keeps the BLOCK and says so. The veto is on file from the moment
+   it is accepted, under `.claude/fluxpoint/runs/vetoes/`, so a record
+   that is refused afterwards for another reason does not take the veto
+   with it, and the next record of that run carries it. A run that passes
+   its check later is a new launch with its own run id.
    Run artifacts always go to `<root>/.claude/fluxpoint/runs`, even when
    recording from a subdirectory; pass `--root <project-root>` explicitly.
+   `--graph` and `--evidence` must name files that really sit under that
+   root, with links followed: started in another directory without
+   `--root`, or given a root that does not hold those files, the recorder
+   exits 2 before anything is written, in a clone as anywhere else. A
+   `WORK.md` that is a link to a file kept outside the project is refused
+   the same way, since rows are written to the file a link resolves to:
+   keep the file itself in the project. A run's earlier attempts and its
+   vetoes are read from the root's store and from the store of every
+   directory above the graph and the Evidence file, so a root chosen
+   above the project still finds them, and one run id is one run across
+   those stores. The clone-wide store is read as well. It lets one linked
+   worktree see what another recorded while both use the same store, and
+   `FPL_MEMORY_HOME` moves it, so nothing is decided on its being there.
+   One record at a time is made into a work file: a recorder started while
+   another is still recording into the same file waits for it, so neither
+   passes a check the other is about to fail. A record is tied to earlier
+   ones by its run id and, for a resumed run, by the source it names. The
+   same result recorded under a new run id is a new run to the recorder.
    `--state-dir` may only name that canonical directory. Exit 3 retains the
    artifact but means the Evidence row was NOT appended: add the canonical
    five-column header and separator, or pass `--evidence WORK.md`, then
@@ -320,6 +361,11 @@ Workflow tool requires.
    tracked config such as `.claude/settings.json` does. The compiler plan
    determines which calls replay under the graph's declared replay rules;
    irreversible nodes replay from the fresh ledger rather than firing twice.
+   A run that started a node declaring `"resume": "never"` (the shipped
+   templates declare it on `red-team-lenses`) is refused as
+   `RESUME-PAST-NO-RESUME-NODE: <node>`: the review ran once, and a resume
+   would run part of it again. Do not work around the refusal by passing
+   `resumeFromRunId` yourself. Fix what the review found and launch fresh.
    Apply step 5's launch-turn rule to every resume too. A node that stopped
    because its slice goes beyond the relayed user's request has an
    authorization-context stop, not a code defect. Resume from the operator's

@@ -229,7 +229,7 @@ for src, name, needle, want in [
     (drop_js, "onRed=drop+log fan-out does not halt", "halting per onRed=halt", False),
     # A ceiling-declined spawn is exhaustion, not death: it must file
     # SKIPPED and, under halt, end BUDGET-EXHAUSTED — never NODE-DEAD.
-    (halt_js, "ceiling declines file SKIPPED, not DEAD", "declined by the node ceiling", True),
+    (halt_js, "ceiling declines file SKIPPED, not DEAD", "declined by the ${DECLINED_BY}", True),
     (halt_js, "ceiling declines halt as exhaustion", "halting as exhausted, not as dead", True),
     (halt_js, "declined spawns are counted apart from deaths", "DECLINED_LABELS", True),
 ]:

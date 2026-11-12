@@ -166,6 +166,51 @@ future elapsed time; an unreached node contributes no executed cost.
 Graphs without these declarations or rejudge args keep their existing
 serial script and runtime keys.
 
+A node that must run once per run declares `"resume": "never"`. A red-team
+fan-out is the case it exists for. Replay is the longest unchanged prefix
+of calls, so after one dead lens every later lens runs again; a lens that
+raised claims the first time can come back clean, and the review is rolled
+twice under one record. A run that started such a node, or any node that
+depends on it, is not resumed: `resume.py --run` and `compile-graph.py
+--plan --resume` refuse with `RESUME-PAST-NO-RESUME-NODE: <node>` before
+anything is planned or compiled, and the compiled script refuses before
+its first call. Started means the record shows the node ran: a result it
+produced, a provenance row that is neither a wait nor a decline, or a call
+under its label in the summary or the runtime journal. Every attempt
+recorded under the run id is read, the latest and the ones kept in its
+history, so recording an earlier attempt again hides nothing. A node that
+depends on it counts by a result or a call only, because a reduce is code
+and files OK over lenses that never ran. A node that was blocked behind a
+park, or that the budget declined before any call, did not start, so a
+resume that stops before the node is still allowed. The
+declaration rides out in the summary as `noResume`, and a later resume is
+held to it even when the field has since been deleted from the graph. The
+launcher tells the script what the source run started in
+`args._resumeReach`; a launch that names a source run without it is
+refused as `RESUME-REACH-UNKNOWN`. A parked node cannot declare the field,
+because a park is resumed past by design. For the same reason a node that
+declares it has to wait on every park in the graph: a park after the
+review, or beside it, is continued by a resume the review has already
+made impossible, and the compiler refuses that graph. The nodes of a
+repair loop cannot declare it either. The loop files its rounds under its
+checker and is continued by a resume; put the field on the review that
+follows the loop. `--check` warns about a
+`RedTeamV1` fan-out that omits it. A native resume launched by hand with
+the first launch's exact arguments names no source, and the script cannot
+tell it from a first launch. It keeps its run id, so the record is held
+instead: `record-run.py` refuses to file a result that started the node
+when an earlier attempt under the same run id had started it too, and the
+earlier record stands. Runs joined by a resume are one campaign: a resumed
+run that has a run id of its own names its source, and neither the launcher
+nor the recorder lets the node start a second time anywhere in that line.
+These checks read the attempts recorded under the run ids of one campaign,
+so two limits remain: an attempt that died inside the node and was never
+recorded leaves nothing to compare, and a result filed under a new run id
+that names no source is a new run. A
+recorded attempt that cannot be read is refused as `RESUME-REACH-UNKNOWN`.
+Record every attempt, and assemble every resume with `resume.py`. The fix
+after a refusal is a fresh launch, which is a new run with its own record.
+
 ## The IR is the source of truth
 
 One ```json graph-ir fenced block in WORK.md. `graph-run` compiles it
@@ -302,7 +347,8 @@ Four consequences worth knowing:
 
 - **Blocked is inherited.** A node whose `after` is blocked is blocked too,
   not handed the `null` that reads like a failure. A dependent chain parks
-  as a unit; unrelated branches finish.
+  as a unit, a repair loop with its fixer and its integration review
+  included; unrelated branches finish.
 - **A parked run can never read COMPLETE.** It is `INCOMPLETE`, and the
   Evidence row names the blocked nodes.
 - **Releases are proof, not assent.** `/fluxpoint:release` validates what
@@ -487,6 +533,22 @@ review with `panel:3` on every finding is ~30 agent calls. Tier down and
 the same campaign costs a fraction with the same guarantees where they
 matter.
 
+A `RedTeamV1` panel node that sits after lens producers judges the lenses'
+claims, which the compiled graph reads from their results. The node's own
+output adds no claim and is not judged, so its prompt need not read
+`{{prev}}`. Whatever it returns that no lens wrote, word for word, is kept
+in the run's receipt as `dropped`, including a different wording of a
+place and kind a lens did name. Put a `reduce` with `dedupeBy` between the
+lenses and the panel to say when two findings are one defect; a reduce
+upstream of the lenses is not read for this. The panel then judges
+one claim per key, at the worst severity any lens gave it, and shows the
+refuters every wording; they refute it only by contradicting all of them.
+A finding missing a key field is judged on its own. Key on structure:
+`RedTeamV1` findings carry an optional `target` and `class` for this. A key
+on prose merges nothing that two lenses word differently, so one defect
+costs a panel per lens, and `--check` warns with the worst case against
+`budget.maxNodes`.
+
 ## Never trust a self-report
 
 A node that writes to the tree may not certify its own work. Mark it
@@ -523,6 +585,23 @@ files the whole run `TAMPERED-EXECUTION` — a campaign does not get to
 report clean when its own verification says its exit codes are not what
 happened. A `prove:` node citing nothing is `INCOMPLETE` instead: the
 declared verification did not run, which is not the same accusation.
+
+The contract need not be named `ExecutionV1`. Any contract that requires
+`gate`, `exit`, `attestId` and `sha`, typed as the shipped `ExecutionV1`
+types them, can carry a `prove:` node, so a second gate with its own
+return shape gets its own contract. The check at record time follows the
+node's `prove:` tier and ignores the contract's name.
+
+Two gates that must certify one commit say so. Each gate resolves its
+commit when it runs, so a branch that moves between them leaves a verdict
+about one head and a gate pass about another, and the run still records
+COMPLETE. `"sameShaAs": "<node id>"` on the later node halts the run when
+its `sha` differs from the earlier node's. Both contracts must require a
+40-hex `sha`, and the earlier node has to have returned: a gate in
+another lane of the same fork runs beside this one and is refused, so
+make the later gate wait on it. `--check` warns about a second `prove:`
+node in a chain that names none, unless a node that commits sits between
+the two, where the commit moves by design.
 
 A citation is also bound to the run that cites it. The compiled graph
 refuses to start without the launch stamp `/fluxpoint:graph-run` passes in
@@ -718,6 +797,26 @@ script's header, and in the run summary as `estimate` beside `spent`, with
 a per-node `profile` (effort, model, calls, tokens) so an effort setting
 has a number to answer for.
 
+The cap holds the run as well as the plan. The plan leans on `expectItems`,
+which is a guess, and `maxNodes` counts calls whatever they cost, so a
+sweep that finds more than it expected can spend several times its
+estimate inside the node ceiling. The compiled script prices each call it
+makes at the figure the estimate used for that node and that kind of call,
+and declines one that would pass `maxEstimatedTokens` the way it declines
+one past `maxNodes`: the work is filed SKIPPED, the run is INCOMPLETE, and
+a halting node ends it BUDGET-EXHAUSTED. Each call is charged what the
+plan priced it at, so a run that makes the calls its plan priced is
+charged its estimate, one that makes fewer is charged less, and a cap set
+from the estimate never stops either. The price is found from the call's
+label: the node's id, the shape of a refuter's or an advisor's label for
+that node, and for the repair diff review the slice it names. A call whose
+label the plan did not price is charged at the dearest planned call,
+logged, and listed in the summary as `unpriced`. The charge is the
+compiler's estimate, not the runtime's meter; the summary carries it as
+`estimatedSpend` beside `spent`. `--check` also
+prices the node ceiling, `maxNodes` times the dearest planned call, and
+says when that is more than the cap or when no cap bounds it.
+
 **The prompt cache is a budget decision, declared as one.** A forked call
 shares its parent's cache only on a byte-identical prefix at the same
 model and the same effort, and the default time-to-live is five minutes
@@ -893,6 +992,20 @@ empty result, read `journal.jsonl`. There is
 deliberately no per-node retry knob: recovery is memoized resume plus the
 once-only ledger, because an in-run retry loop is a second failure policy
 hiding inside the first.
+
+What a run records is read from its summary. `record-run.py` takes the
+harness exit, the red-team verdict and the proof-audit verdict from the
+nodes that returned them, and reads `--harness`, `--red-team` and
+`--proof-audit` only when no node did. A step written into a graph file
+that records a post-run check with one of those flags therefore changes
+nothing, and `--check` warns about it and names the line. A check that
+must be able to refuse the run belongs in the graph, as a `prove:` node
+after the verdict. A refusal that arrives after the run is filed with
+`record-run.py --veto <reason> --veto-evidence <file>`, which lowers the
+recorded red-team verdict to BLOCK and never raises one. The veto stays on
+the run id. It is read from the store under `--root` and from the stores
+above the graph and the Evidence file, and the recorder refuses a `--graph`
+or `--evidence` file that really sits outside the root, links followed.
 
 Two caches share a vocabulary and are different mechanisms. **Memoized
 resume** is the executor replaying completed `agent()` calls whose

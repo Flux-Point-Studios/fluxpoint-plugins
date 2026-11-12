@@ -319,15 +319,15 @@ check "the run artifact records the attestation tally" 1 "$t"
 # the hook's own record. Nodes that merely happen to match a declared gate
 # stay observed rather than enforced — the warn-mode lesson still holds for
 # everyone who did not opt in.
-prove_summary() { # $1 = claimed exit, $2 = cited attestId
-  "$FPL_PY" - "$1" "$2" <<'PYEOF'
+prove_summary() { # $1 = claimed exit, $2 = cited attestId, $3 = the node's contract
+  "$FPL_PY" - "$1" "$2" "${3:-ExecutionV1}" <<'PYEOF'
 import json, subprocess, sys
 print(json.dumps({
     "campaign": "c", "outcome": "COMPLETE",
     "results": {"gate": {"gate": "harness", "exit": int(sys.argv[1]),
                          "sha": subprocess.run(["git","rev-parse","HEAD"],capture_output=True,text=True).stdout.strip(),
                          "attestId": sys.argv[2]}},
-    "contracts": {"gate": "ExecutionV1"},
+    "contracts": {"gate": sys.argv[3]},
     "prove": {"gate": "harness"},
     # The compiled graph stamps its launch; a citation older than it is
     # an execution from another run (#91).
@@ -336,7 +336,7 @@ print(json.dumps({
 }))
 PYEOF
 }
-runprove() { prove_summary "$1" "$2" | "$FPL_PY" "$RECORD" --run-id "$3" \
+runprove() { prove_summary "$1" "$2" "${4:-ExecutionV1}" | "$FPL_PY" "$RECORD" --run-id "$3" \
   --graph WORK.md --root "$ROOT/r" --state-dir "$ROOT/r/.claude/fluxpoint/runs" 2>&1; }
 
 newrepo; gates
@@ -360,6 +360,23 @@ case "$out" in *TAMPERED-EXECUTION*)
 case "$out" in *"| COMPLETE |"*)
   bad "and the run may not be filed COMPLETE" "filed clean" ;;
   *) ok "and the run may not be filed COMPLETE" "rewritten" ;; esac
+
+# The same lie under a contract of the gate's own (#235). The compiler
+# accepts any contract that keeps the fields this check reads, so the
+# check cannot depend on what the contract is called.
+newrepo; gates
+rec "scripts/harness.sh --full" 1 >/dev/null
+ATT="$(field attestId)"
+out="$(runprove 0 "$ATT" wf-p2b RerunsV1)"
+case "$out" in *TAMPERED-EXECUTION*)
+  ok "a prove: node under its own contract is held to the log too" "caught" ;;
+  *) bad "a prove: node under its own contract is held to the log too" "${out:0:56}" ;; esac
+newrepo; gates
+rec "scripts/harness.sh --full" 0 >/dev/null
+ATT="$(field attestId)"
+out="$(runprove 0 "$ATT" wf-p2c RerunsV1)"
+case "$out" in *"[ATTESTED]"*) ok "  and an honest one is ATTESTED" "attested" ;;
+  *) bad "  and an honest one is ATTESTED" "${out:0:56}" ;; esac
 
 # An attestId nobody minted.
 newrepo; gates

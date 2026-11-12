@@ -17,6 +17,12 @@ PATH_FLAGS = {'--path', '--config', '-c'}
 PATTERN_FLAGS = {'--testPathPattern', '--testPathPatterns'}
 CWD_FLAGS = {'--prefix', '--dir', '--cwd'}
 IGNORED_DIRS = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', '.tox'}
+STORE = ('.claude', 'fluxpoint')  # A plugin state store: the root's, or a package's.
+# What running Python or opening a folder leaves behind, and nothing a locked
+# test can load: a compiled cache inside __pycache__, which Python reads only
+# beside its source, and a desktop's folder metadata.
+BYPRODUCT_NAMES = {'.DS_Store', 'Thumbs.db', 'desktop.ini'}
+BYPRODUCT_SUFFIXES = ('.pyc', '.pyo')
 
 
 def trust_paths(root, doc, frozen=None):
@@ -54,10 +60,11 @@ REGEX_AFTER = ({('punct', p) for p in '(,=:[!&|?{};+-*%<>~^'}
                                         'void', 'throw', 'case', 'do', 'else', 'yield', 'await')})
 
 
-def js_tokens(text):
+def js_tokens(text, offsets=None):
     """Words, punctuation and string literals of JS/TS source. Comments are dropped,
     so prose that quotes an import is never read as one; template and regex
-    literals become opaque tokens, so a '/*' or quote inside them hides no code."""
+    literals become opaque tokens, so a '/*' or quote inside them hides no code.
+    offsets, when given, maps each string token's index to its source offset."""
     tokens, templates, parens, i, n = [], [], [], 0, len(text)
     control_end = -1
     while i < n:
@@ -86,6 +93,8 @@ def js_tokens(text):
             j = i + 1
             while j < n and text[j] not in (c, '\n'):
                 j += 2 if text[j] == '\\' else 1
+            if offsets is not None:
+                offsets[len(tokens)] = i
             tokens.append(('string', text[i + 1:j]))
             i = j + 1
         elif c == '/' and (not tokens or tokens[-1] in REGEX_AFTER or len(tokens) - 1 == control_end):
@@ -125,15 +134,17 @@ def js_tokens(text):
 
 
 def js_specifiers(text):
-    """Relative specifiers of literal import, export-from, import() and require()."""
-    tokens = js_tokens(text)
+    """Relative specifiers of literal import, export-from, import() and require(),
+    each with the 1-based line it is written on."""
+    offsets = {}
+    tokens = js_tokens(text, offsets)
     for k, (kind, value) in enumerate(tokens):
         if kind != 'string' or len(value) < 2 or not value.startswith('.'):
             continue
         before = tokens[k - 1] if k else None
         if before in (('word', 'from'), ('word', 'import')) or (
                 before == ('punct', '(') and k > 1 and tokens[k - 2] in (('word', 'import'), ('word', 'require'))):
-            yield value
+            yield value, text.count('\n', 0, offsets[k]) + 1
 
 
 class Inputs:
@@ -142,8 +153,10 @@ class Inputs:
         self.doc, self.closure, self.allow_missing = doc, closure, allow_missing
         self.reasons, self.owners, self.seeds, self.edges, self.trees = {}, {}, {}, {}, {}
         self.search = {self.root, self.root / 'src'}
-        self.test_roots, self.warnings = set(), set()
+        self.test_roots, self.warnings, self.directories = set(), set(), set()
         self._tracked = None
+        self._fixtures = None
+        self._untracked = None
         self._packages = None
         self._queue = deque()
         self._expanded = set()
@@ -186,6 +199,42 @@ class Inputs:
             raise ValueError('ambiguous parent traversal through a symlink in import/config path: ' + str(path))
         return path
 
+    def store(self, path):
+        """A plugin state store holds what a run leaves behind. A recorded run or
+        decision must never move a lock, so no file or directory in one is an input.
+        The root has one, by its path alone. So has every directory below the root
+        that a session was rooted in, for everything Git does not track there. What
+        is committed under a `.claude/fluxpoint` deeper in the tree is a fixture
+        somebody put there, and source like any other."""
+        try:
+            parts = Path(os.path.abspath(path)).relative_to(self.root).parts
+        except ValueError:
+            return False
+        if parts[:2] == STORE:
+            return True
+        return any(parts[i:i + 2] == STORE for i in range(1, len(parts) - 1)) and not self.fixture(path)
+
+    def fixture(self, path):
+        """Whether Git tracks this path, or a file under it, inside a store-shaped
+        directory below the root's own store."""
+        if self._fixtures is None:
+            self._fixtures = {name for name in self.tracked()
+                              if '/.claude/fluxpoint/' in '/' + name and not name.startswith('.claude/fluxpoint/')}
+        if not self._fixtures:
+            return False
+        try:
+            rel = '/'.join(Path(os.path.abspath(path)).relative_to(self.root).parts)
+        except ValueError:
+            return False
+        return any(name == rel or name.startswith(rel + '/') for name in self._fixtures)
+
+    def beside_fixture(self, rel):
+        """Whether a path lies in a store-shaped directory below the root's own
+        store that holds something Git tracks."""
+        parts = rel.rstrip('/').split('/')
+        return any(tuple(parts[i:i + 2]) == STORE and self.fixture(self.root.joinpath(*parts[:i + 2]))
+                   for i in range(1, len(parts) - 1))
+
     def tracked(self):
         if self._tracked is None:
             result = subprocess.run(['git', 'ls-files', '-z', '--cached'], cwd=self.root,
@@ -222,17 +271,58 @@ class Inputs:
         self.rel(path)
         if path.is_dir():
             prefix = '' if path == self.root else self.rel(path).rstrip('/') + '/'
-            names = sorted(p for p in self.tracked() if p.startswith(prefix))
+            names = sorted(p for p in self.tracked() if p.startswith(prefix) and not self.store(self.root / p))
             if not names:
                 raise ValueError('packet input directory has no tracked files: ' + self.rel(path))
             return [self.path(p) for p in names]
         return [path]
+
+    @staticmethod
+    def byproduct(rel):
+        # Narrow on purpose. A compiled module beside the sources is imported
+        # when no source is, and a file under node_modules or a virtual
+        # environment is where a require or an import looks, so each of those
+        # is untracked source like any other.
+        parts = rel.rstrip('/').split('/')
+        return parts[-1] in BYPRODUCT_NAMES or (
+            len(parts) > 1 and parts[-2] == '__pycache__' and parts[-1].endswith(BYPRODUCT_SUFFIXES))
+
+    def untracked(self, skip=()):
+        """Paths under an input directory that Git neither tracks nor ignores. A directory
+        input means the tracked files under it, so these sit on disk outside every lock.
+        Git lists a nested repository as one path ending in a slash, and it stays that way
+        here: it is not a file a lock can freeze. Python's compiled caches and a desktop's
+        folder metadata are left out, since running the checks and opening a folder write them.
+        So is a state store, except one that holds committed fixtures: a file nobody staged
+        beside them may be a fixture too, and a locked test can read it, so it is named."""
+        if self._untracked is None:
+            self._untracked = set()
+            if self.directories:
+                result = subprocess.run(['git', 'ls-files', '-z', '--others', '--exclude-standard', '--',
+                                         *sorted(self.directories)], cwd=self.root, capture_output=True,
+                                        check=False, env=dict(os.environ, GIT_LITERAL_PATHSPECS='1'))
+                if not result.returncode:
+                    self._untracked = {v.decode('utf-8', 'replace') for v in result.stdout.split(b'\0') if v}
+        # A file the packet or its closure names is frozen whether or not it is tracked.
+        return sorted(rel for rel in self._untracked
+                      if rel not in self.reasons and rel not in skip and not self.byproduct(rel)
+                      and (not self.store(self.root / rel) or self.beside_fixture(rel)))
 
     def locate(self, text, cwd=None, explicit=False):
         text = text.split('::', 1)[0]
         if not text or text.startswith('-'):
             return None
         path = Path(text)
+        # A store path is never an input, decided by where the argument points
+        # and before asking whether it exists: below the package directory the
+        # check runs in, which has a store of its own, or below the root. A
+        # fixture committed in the package is the package's file, whatever
+        # the same spelling would name at the root.
+        placed = cwd / path if cwd is not None and not path.is_absolute() else None
+        if placed is not None and self.store(placed):
+            return None
+        if self.store(self.root / path) and not (placed is not None and self.fixture(placed)):
+            return None
         # Win32 strips a component's trailing dots and spaces, so on Windows Go's
         # './...' exists: it names the directory it is spelled under.
         if os.name == 'nt' and any(p != '..' and p != p.rstrip('. ') for p in path.parts):
@@ -270,6 +360,8 @@ class Inputs:
         return None
 
     def _seed_path(self, path, kind, check, selector=None):
+        if path.is_dir():
+            self.directories.add(self.rel(path))
         for file in self.files(path):
             rel = self.add(file, kind, check)
             self.seeds.setdefault(check, {}).setdefault(rel, set())
@@ -304,6 +396,10 @@ class Inputs:
                             self.warnings.add('unplaced command option ' + flag + ' ' + value + '; declare real inputs with harnessInputs')
                     if flag in CWD_FLAGS:
                         value = value if sep else (argv[i + 1] if i + 1 < len(argv) else '')
+                        if self.store(self.path(value)):
+                            # A check may run in the store. It is no package, so nothing
+                            # is looked up under it, and it need not exist before a run does.
+                            continue
                         cwd = self.path(value)
                         if not cwd.is_dir():
                             raise ValueError('check working directory does not exist: ' + value)
@@ -326,6 +422,9 @@ class Inputs:
                     if path is not None:
                         self._seed_path(path, kind, cid, text)
         for rel in self.doc.get('harnessInputs', []):
+            if self.store(self.path(rel)):
+                # Skipping a declared input in silence would be a hole in the lock.
+                raise ValueError('harnessInputs names the plugin state store, which is never a packet input: ' + rel)
             for check in self.doc['checks']:
                 self._seed_path(self.path(rel), 'harnessInputs', check['id'])
 
@@ -552,11 +651,19 @@ class Inputs:
                         pass
                 if not targets or not all(self.explicitly_covered(target) for target in targets):
                     self.warnings.add('dynamic JS import/require needs explicit harnessInputs: ' + rel)
-        for specifier in js_specifiers(text):
-            base = self.local(self.path(rel).parent / specifier)
-            candidates = [base] + [Path(str(base) + suffix) for suffix in JS_SUFFIXES]
-            candidates += [base / ('index' + suffix) for suffix in JS_SUFFIXES]
-            result.update(self.rel(p) for p in candidates if p.is_file())
+        for specifier, line in js_specifiers(text):
+            where = 'import ' + repr(specifier) + ' at ' + rel + ':' + str(line)
+            try:
+                base = self.local(self.path(rel).parent / specifier)
+                candidates = [base] + [Path(str(base) + suffix) for suffix in JS_SUFFIXES]
+                candidates += [base / ('index' + suffix) for suffix in JS_SUFFIXES]
+                found = {self.rel(p) for p in candidates if p.is_file()}
+            except ValueError as exc:
+                # Leaving the repository stays a refusal; say where it is written.
+                raise ValueError(str(exc) + ' (' + where + ')') from exc
+            if not found:
+                self.warnings.add(where + ' does not resolve to a repository file')
+            result.update(found)
         return result
 
     def _expand(self):
@@ -601,9 +708,10 @@ class Inputs:
                 self._queue.append((dep, cid, is_locked))
 
     def include_locked(self, paths, expand=True):
-        """Retained paths remain roots, even when the new argv no longer names them."""
+        """Retained paths remain roots, even when the new argv no longer names them.
+        A state store path an older lock froze is the exception: it was never an input."""
         for rel in paths:
-            if rel not in self.reasons:
+            if rel not in self.reasons and not self.store(self.path(rel)):
                 for check in self.doc['checks']:
                     self.add(self.path(rel), 'locked-harness', check['id'])
                     self._queue.append((rel, check['id'], True))

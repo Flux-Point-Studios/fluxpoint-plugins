@@ -50,7 +50,12 @@ command.
      stop the campaign.
    - `budget.maxEstimatedTokens` set from the estimate `--check` prints —
      calls are the wrong unit for the bill, and this is the ceiling on the
-     right one — and `budget.cacheTtl: "1h"` whenever a node fans out or
+     right one. It is checked against the plan when the graph compiles
+     and enforced on the run by the compiled script, which declines a
+     call once the estimated spend would pass it. Leave headroom over the
+     estimate for what the plan cannot see: more findings than
+     `expectItems`, another discovery round. Set `budget.cacheTtl: "1h"`
+     whenever a node fans out or
      parks, because the default five-minute prompt cache expires while
      the parent blocks. Read the compiler's transition warnings: an effort
      bump between consecutive nodes is a cold prefill, so bump only where
@@ -70,6 +75,18 @@ command.
      `order` / `topK`) so the judge reads a shortlist, not a landfill —
      and where a consumer needs one field of its predecessor, project it
      with `{{prev.<field>}}` instead of pasting the contract.
+   - between red-team lenses and their refuter panel, the `reduce` is
+     also the claim key: the panel judges one claim per `dedupeBy` key
+     and shows the refuters every lens's wording of it. Key on
+     `target` and `class`. A key on `finding` or `exploit_path` merges
+     nothing two lenses word differently, and every lens that sees a
+     defect then costs its own panel out of `budget.maxNodes`.
+   - a review that must run once per run declares `"resume": "never"` on
+     its fan-out. A resume replays the calls before the first dead one
+     and runs the rest again, so without the field a resumed run rolls
+     the review twice. With it, a run that started the node is refused
+     at resume (`RESUME-PAST-NO-RESUME-NODE`) and launches fresh. Prose
+     in a prompt that forbids the resume is not enforced by anything.
 5. Compile-check until clean:
    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" compile-graph.py WORK.md --check`
    Its findings are structural. Fix the IR — never weaken a contract,

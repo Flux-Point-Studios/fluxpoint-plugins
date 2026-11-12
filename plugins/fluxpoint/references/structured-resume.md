@@ -135,6 +135,61 @@ Embedded context has the same authority as inline context. It does not extend
 the relayed user request, bypass a human confirmation, discharge a red gate or
 authorize dispatch by itself.
 
+## Nodes a resume may not pass
+
+A node declares `"resume": "never"` when it must run once per run. The
+shipped feature and verified templates declare it on `red-team-lenses`.
+Before it plans or compiles, `resume.py --run` reads every attempt recorded
+under the run id, the latest and those kept in its history, and the run's
+journal. It refuses with `RESUME-PAST-NO-RESUME-NODE: <node>` when any of
+them shows that the node, or a node that depends on it, started. Runs joined
+by a resume are read as one campaign. A resumed run that gets a run id of its
+own names the run it was resumed from, and the launcher follows those links
+both ways, reading them from every attempt on file in the root's store and in
+the stores above the graph. A second resume of an older run is therefore
+refused once a run resumed from it has started the node. An attempt that is on
+file and cannot be read
+leaves the reach unknown, and the resume is refused with
+`RESUME-REACH-UNKNOWN`.
+`compile-graph.py --plan --resume` refuses with the same code. A node that
+was blocked behind a park, or declined by the budget before any call, did
+not start, so a run that stopped earlier resumes as usual. The compiler
+holds the declaration to that: a node that declares the field has to wait
+on every park in the graph, and neither a parked node nor a node of a
+repair loop can declare it.
+
+For a graph with such a node the launcher adds `_resumeReach` to the launch
+arguments: the node ids the source run started. The compiled script checks
+it before its first call, together with any prior results carried in and
+the replay state compiled into it. It refuses a launch that names a source
+run and carries no `_resumeReach` as `RESUME-REACH-UNKNOWN`. The summary
+records the declaration as `noResume`, and a resume is held to the recorded
+declaration as well as the current graph's.
+
+A native `resumeFromRunId` launched by hand with the first launch's exact
+arguments names no source run, so none of those checks can see it. It keeps
+its run id. `record-run.py` therefore refuses, with the same code, a result
+that started the node when an earlier recorded attempt under the same run id
+had started it too, or when the run it names as its source had, or any other
+run joined to that source by a resume. Nothing is written and the earlier
+record stands. Recording the same attempt again is not a later attempt, and
+an attempt that did not start the node itself is no roll of it: it is filed
+whenever it arrives. A copy of the result already on file is left out and
+excuses nothing, since every other attempt is still weighed. The earlier
+attempts are read from the store under `--root` and from the store of every
+directory above the graph and the Evidence file, so a root chosen above the
+project does not hide them. The clone-wide store is read too, which usually
+shows what another worktree of the clone recorded. An earlier record that
+cannot be read is refused as `RESUME-REACH-UNKNOWN`. Records into one work
+file are taken one at a time, so of two rolls recorded at the same moment
+the second is refused like any later one.
+
+Two things stay outside what the recorder can tie together. A result
+recorded under a run id of its own that names no source is a new run, so
+the same result filed under a second run id is not seen as a second roll.
+And the work file is known by where it really is: a second name for it
+made with a hard link in another directory has no earlier records above it.
+
 ## Witness version continuity
 
 A recorded summary names the compiling plugin root, version and witness code

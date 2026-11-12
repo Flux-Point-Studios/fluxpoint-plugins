@@ -35,7 +35,11 @@ Costs above describe concrete work and risk, not measured time or price estimate
    archives reached by complete text references. References resolve into binding
    text before nodes receive the packet, with the source retained as `scopeRef`.
    The lock separately records check files and optional `harnessInputs` as a
-   harness map outside the specification identity. This is a reviewable freeze,
+   harness map outside the specification identity. The plugin's state store,
+   `.claude/fluxpoint/`, is runtime state and never enters that map, so a
+   recorded run or decision moves no lock. A directory input means the tracked
+   files under it, and `--lock` refuses while an untracked file that Git does
+   not ignore sits there. This is a reviewable freeze,
    not an authorization grant or an adversarial security boundary. It runs no
    checks, allowing the tests to be RED before implementation.
 4. `--check` rejects absent, malformed, stale or blocked packets. `--run` also
@@ -63,6 +67,9 @@ Costs above describe concrete work and risk, not measured time or price estimate
    use `--lock-harness --gate <name>` after an attested pass for that declared
    command at HEAD. This changes no spec identity or compiled bytes. Run records
    and Evidence name the current harness digest and paths differing from its lock.
+   A re-lock keeps every frozen path. A check file removed by a recorded
+   decision leaves through `--lock --retire <path> --because <decision id or
+   reason>`, which records the path, its last hash and the reason in the lock.
 7. Newly scaffolded WORK.md files declare `SPEC: .fluxpoint-spec.json`.
    The scaffolded harness requires the spec runner when this marker or either
    spec artifact exists. Existing loops without any marker remain legacy;

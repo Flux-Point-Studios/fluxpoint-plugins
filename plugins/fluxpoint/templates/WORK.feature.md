@@ -166,10 +166,11 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
       "phase": "Gate",
       "role": "red-team",
       "after": "proof-audit",
-      "prompt": "Review only this adversarial lens: {{item.brief}}. Pin the campaign branch and default-branch base to exact commits before attacking, measure changed files/additions/deletions with git, and report top-level coverage for your actual lens id {{item.key}}, attackers 1 and sampled explicitly. Apply your full checklist within that lens and independent skeptical reproduction. The composition lens attacks sequences across components. Keep findings executable and include minimal-case artifact paths. Put missing work and unresolved claims in review.blockers. Prior proof verdict: {{prev}}. Return RedTeamV1. A lens may BLOCK with findings for independent refutation; never claim complete coverage for work you sampled.",
+      "prompt": "Review only this adversarial lens: {{item.brief}}. Pin the campaign branch and default-branch base to exact commits before attacking, measure changed files/additions/deletions with git, and report top-level coverage for your actual lens id {{item.key}}, attackers 1 and sampled explicitly. Apply your full checklist within that lens and independent skeptical reproduction. The composition lens attacks sequences across components. Keep findings executable and include minimal-case artifact paths. Give each finding a target (the file and line, or the component and entry point, where the defect lives) and a class (a short stable name for the kind of defect, such as authorization-bypass), so two lenses that see one defect name it alike. Put missing work and unresolved claims in review.blockers. Prior proof verdict: {{prev}}. Return RedTeamV1. A lens may BLOCK with findings for independent refutation; never claim complete coverage for work you sampled.",
       "contract": "RedTeamV1",
       "verify": "schema-only",
       "onRed": "halt",
+      "resume": "never",
       "foreach": "red-team-lenses",
       "independent": true,
       "verifies": "build",
@@ -182,8 +183,8 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
         "from": "red-team-lenses",
         "over": "findings",
         "dedupeBy": [
-          "finding",
-          "exploit_path"
+          "target",
+          "class"
         ]
       }
     },
@@ -191,7 +192,7 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
       "id": "red-team-refute",
       "phase": "Gate",
       "after": "red-team-distinct",
-      "prompt": "Read these distinct executable claims: {{prev}}. Return them without dropping unresolved claims in findings so three independent refuters can test reproduction, reachability and scope. Preserve exact snapshot, minimal-case paths and valid controls in each exploit_path. Return BLOCK while claims remain; this is an intermediate collection, not the final gate.",
+      "prompt": "Start the refuter panel. The compiled graph takes every claim from the lens results itself, merges the ones that share a target and a class, and sends each to three independent refuters for reproduction, reachability and scope. Return BLOCK with an empty findings array: nothing returned here is judged. This is an intermediate step, not the final gate.",
       "contract": "RedTeamV1",
       "verify": "panel:3",
       "verifyOver": "findings",
@@ -237,12 +238,18 @@ Uses the loop side of the plugin: the gate resolves `proof-auditor` and
   ratchets in a worktree of its own because the compiled graph brackets
   every verdict with a tree sentinel.
 - `red-team-lenses` runs the five boundary surfaces plus composition in
-  parallel. `red-team-distinct` deduplicates findings, `red-team-refute`
-  sends each claim to three independent refuters, and the separate
+  parallel. `red-team-distinct` declares when two findings are one defect:
+  the same `target` and `class`. `red-team-refute` sends each such defect
+  to three independent refuters with every lens's wording of it, and a
+  finding missing either field is judged on its own. The separate
   `red-team` gate consumes surviving/unverified claims and the compiler's
   raw lens coverage/blocker context. Missing work cannot become SHIP just
   because findings were empty or refuted. Every SHIP carries exact ranges,
   diff counts, completed attacker/lens counts and sampled status.
+  `red-team-lenses` declares `"resume": "never"`: the review runs once per
+  run, so a run that started it is never resumed. `resume.py`, `--plan`
+  and the compiled script each refuse with `RESUME-PAST-NO-RESUME-NODE`;
+  fix what the review found and launch fresh.
 - Terminal: merge happens outside the graph, per WORK.md Merge policy,
   with the harness as a required CI check.
 

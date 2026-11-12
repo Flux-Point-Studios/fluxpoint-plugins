@@ -125,5 +125,155 @@ printf '# the scratch dir, full of TODO markers\nscratch/*\n' > "$R/.fluxpoint-h
 n="$(scan "$R" | wc -l | tr -d ' ')"
 check "the ignore list is not scanned as its own violation" 0 "$n"
 
+# ====== a marker is spelled the way its language spells it ===============
+# The filter matched every alternative case-insensitively, so ordinary words
+# tripped the proof-escape and marker checks: "re-admitted" read as Coq's
+# Admitted and "a todo list" as a TODO. One row per decision, with both sides
+# of it. Case cannot separate Lean's `sorry` from the English word, so the
+# file type does: it is a keyword in .lean and .thy files and prose elsewhere.
+# In a Lean file only a line that cannot hold code is let through: one that
+# opens with `--` and closes neither a string nor a block comment. A trailing
+# comment still matches, because the `--` before it may sit inside a string.
+# The rows wanting 1 for a call, an attribute or a flag pin what must not
+# change: those keep matching in any case.
+# Dropping the case-insensitive match also dropped comments people do write:
+# `// todo: handle the error path`, `# fixme`, and the `@todo` and `\todo`
+# tags that JSDoc, PHPDoc and Doxygen define in lower case. A comment that
+# opens with the word as a marker is one, in any case, and so is the tag.
+# The word in the middle of a sentence, in code or in a string is not.
+PY="$( . "$PLUGIN/scripts/python-env.sh" >/dev/null 2>&1; printf '%s' "$FPL_PY" )"
+mkdir -p "$WORK/empty"
+flagged() {
+  printf '%s\n' "$2" | ( cd "$WORK/empty" && "$PY" "$PLUGIN/scripts/hygiene-filter.py" "$1" ) | wc -l | tr -d ' '
+}
+while IFS='|' read -r want path line; do
+  [ -n "$want" ] || continue
+  check "$path: $line" "$want" "$(flagged "$path" "$line")"
+done <<'ROWS'
+0|notes.txt|the record was re-admitted
+0|notes.txt|a todo list
+0|notes.txt|phone xx-xxx-1234
+0|notes.txt|sorry, the file moved
+1|notes.txt|TODO: fix
+1|Proof.v|Admitted.
+1|app.js|let a = 1 // FIXME new
+0|app.js|let fixme = 1
+1|app.js|// XXX: remove before merge
+1|spec.dfy|lemma {:axiom} L()
+1|spec.dfy|method {:verify false} M()
+0|spec.dfy|// {:AXIOM} in capitals is an attribute Dafny does not read
+1|Proofs.lean|theorem t : True := by sorry
+1|Proofs.lean|  sorry
+1|Scratch.thy|  sorry
+1|Proofs.lean|theorem c : parse "-- x" = none := by sorry
+1|Proofs.lean|  exact h -- sorry about this
+1|Proofs.lean|-- the header ends here -/ theorem t : True := by sorry
+1|Proofs.lean|-- " ++ (sorry : String)
+0|Proofs.lean|-- sorry, the file moved
+0|Proofs.lean|def Sorry := 1
+0|app.js|throw new Error("sorry, the file moved")
+1|src/lib.rs|    todo!()
+1|src/lib.rs|    unimplemented!("later")
+1|src/lib.rs|    #[ignore = "slow"]
+1|src/lib.rs|    let v = x.unwrap();
+1|src/lib.rs|#[verifier::external_body]
+1|app_test.go|	t.Skip("flaky")
+1|app.test.js|it.only("runs alone", () => {})
+1|ci.sh|git commit --no-verify -m wip
+1|ci.sh|git commit --NO-VERIFY -m wip
+1|deploy.ps1|Try { Publish } Catch { }
+1|app.js|// todo: handle the error path
+1|util.py|# todo: validate input
+1|app.js|// Fixme: off by one
+1|util.py|# fixme
+1|util.py|x = 1  # ToDo(alice): later
+1|app.js|/* fixme */
+1|app.js| * todo: move this into the parser
+1|query.sql|-- todo: add the index
+1|app.js|/** @todo handle the error path */
+1|app.js| * @todo: handle the error path
+1|lib.php|/// @todo
+1|vec.hpp|/* \todo bounds check */
+1|vec.hpp|//! \todo
+0|app.js|// a todo list
+0|app.js|// todo items are kept in order
+0|util.py|# the fixme tag is described in the README
+0|util.py|todo = load()  # the list a user keeps
+0|util.py|    @todo.setter
+0|util.py|    @todo
+0|app.js|const email = "me@todo.example" // contact
+0|app.js|open("C:\todo\list.txt")
+0|notes.txt|write a todo: buy milk
+0|service.conf|url=http://todo:8080/api
+0|service.conf|upstream = https://fixme:9000
+0|notes.txt|usage: task --todo
+0|notes.txt|usage: task --fixme
+1|app.js|go("http://tracker/1") // todo: retry
+1|main.c|case 1:// todo: fall through
+1|Makefile|# todo: split the target
+1|Dockerfile|# fixme
+1|build.pl|# Todo: handle the error
+1|deploy.ps1|# todo: sign the binary
+1|main.tf|# fixme: pin the provider
+1|settings.ini|; todo: rotate the key
+1|settings.ini|# fixme
+1|page.html|<!-- todo -->
+1|page.html|<!-- fixme: alt text -->
+1|view.vue|  <!-- todo: loading state -->
+0|page.html|<a href="#todo">the list</a>
+0|style.css|#todo:hover { color: red }
+0|main.c|#define todo(x) (x)
+0|Makefile|todo: build
+0|Makefile|	@echo "# todo: later"
+0|settings.ini|todo = buy milk ; and eggs
+1|main.tf|// todo: pin the provider
+1|main.tf|/* fixme */
+1|app.conf|// todo
+1|default.nix|/* todo */
+1|x.lua|--todo: tidy this
+1|q.sql|--fixme
+1|Main.hs|--todo: total function
+1|page.html|<!--todo: replace-->
+1|app.js|default:// todo: handle the rest
+1|app.c|out:// fixme
+1|app.js|default:// for now this falls through
+1|tool.rb|run();# fixme
+1|conf.toml|a = 1# todo
+1|run.sh|make;# todo
+0|build.pl|my $last = $#todo;
+0|app.js|fetch(base + "/x") // see http://todo:8080/api
+1|Dockerfile|RUN apt-get install --yes curl # todo: pin the version
+1|Dockerfile|COPY src/* /app/ # todo: narrow
+1|Makefile|SRC = $(wildcard src/*.c) # todo: headers
+1|Makefile|	rm -rf build/* # todo: narrow
+1|justfile|    cargo build --release # todo: cross targets
+1|deploy.zsh|curl --silent "$url" # todo: retry
+1|CMakeLists.txt|add_compile_options(--coverage) # todo: gate on config
+1|build.pl|print --$i; # todo: off by one
+1|settings.conf|opts=--verbose # todo: quiet
+1|.env|ARGS=--fast # fixme
+1|main.tf|count = 1 // 2 # todo: tune
+0|settings.conf|docs=https://example.com/guide/#todo
+0|Makefile|DOC_URL := https://example.com/#todo
+0|.env|TOKEN=12345#fixme
+0|build.pl|# see parser.c: /* todo */ is what the C side writes
+1|build.pl|my $x = 1;# todo: remove
+1|Makefile|CFLAGS=-O2# todo: -O3
+1|analysis.R|x <- 1# todo: tune
+0|build.pl|$s =~ s#todo#done#;
+0|deploy.zsh|n=${#todo}
+ROWS
+
+# The same rule through the scan the gate runs. The path reaches the filter on
+# both branches: the added lines of a tracked file and a whole untracked one.
+R="$(mkrepo spelled)"
+printf 'theorem t : True := trivial\n' > "$R/Proofs.lean"
+( cd "$R" && git add -A && git commit -qm lean ) >/dev/null
+printf 'theorem t : True := by sorry\n-- sorry, the file moved\n' > "$R/Proofs.lean"
+printf '# sorry, the file moved\n# the record was re-admitted to a todo list\n' > "$R/notes.py"
+out="$(scan "$R")"
+check "the scan flags a Lean sorry on an added line" 1 "$(printf '%s\n' "$out" | grep -c 'by sorry' || true)"
+check "and flags no prose around it, tracked or untracked" 1 "$(printf '%s\n' "$out" | grep -c . || true)"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

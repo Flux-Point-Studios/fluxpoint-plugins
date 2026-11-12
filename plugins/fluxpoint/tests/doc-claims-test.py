@@ -381,5 +381,88 @@ _untold = [lang for lang in _known if f"**{lang}**" not in INIT]
 report("every taxonomy language spec-guard gates is introduced by init", bool(_known) and not _untold,
        f"{len(_known)} languages" if _known and not _untold else f"MISSING {_untold}")
 
+# ============ 1.51.0: refusal codes and flags the documents name ============
+# A document that names a code or a flag is pinned to the script that prints
+# it, by running the script: a renamed code or a dropped flag fails here.
+import importlib.util  # noqa: E402
+
+_cg_spec = importlib.util.spec_from_file_location("cg_doc_claims", os.path.join(PLUGIN, "scripts", "compile-graph.py"))
+_cg = importlib.util.module_from_spec(_cg_spec)
+_cg_spec.loader.exec_module(_cg)
+_review = {"version": 1, "campaign": "c", "treeGuard": False, "budget": {"maxNodes": 4},
+           "lists": {"lens": [{"key": "a"}]},
+           "nodes": [{"id": "lenses", "foreach": "lens", "prompt": "review {{item.key}}", "contract": "FindingsV1",
+                      "resume": "never"}]}
+_refusal = _cg.resume_refusal(_review, {"results": {"lenses": [{"findings": []}]}}) or ""
+_code = _refusal.split(":")[0]
+_emitted = _cg.emit(_review, _cg.load_contracts(os.path.join(PLUGIN, "contracts")), {})
+_resume_docs = {"graph reference": SKILL, "graph-run": read("commands", "graph-run.md"),
+                "structured resume": read("references", "structured-resume.md"),
+                "feature template": read("templates", "WORK.feature.md")}
+_silent = [name for name, text in _resume_docs.items() if _code not in text]
+report("the resume refusal the documents name is the one the compiler raises",
+       _code == "RESUME-PAST-NO-RESUME-NODE" and not _silent and _code in _emitted,
+       _code if _code and not _silent else f"code {_code!r}; not named in {_silent}")
+_unknown = "RESUME-REACH-UNKNOWN"
+report("and the refusal for a resume that does not say what its source reached",
+       _unknown in _emitted and _unknown in SKILL and _unknown in _resume_docs["structured resume"],
+       _unknown if _unknown in _emitted else "NOT EMITTED")
+_unflagged = dict(_review, nodes=[{k: v for k, v in dict(_review["nodes"][0], contract="RedTeamV1").items()
+                                   if k != "resume"}])
+_skill_flat = re.sub(r"\s+", " ", SKILL)
+report("a red-team fan-out without the field is warned about, as the graph reference says",
+       any('"resume": "never"' in w for w in _cg.warnings(_unflagged))
+       and "`--check` warns about a `RedTeamV1` fan-out that omits it" in _skill_flat,
+       "warned")
+
+
+def _help(script):
+    return subprocess.run([sys.executable, os.path.join(PLUGIN, "scripts", script), "--help"],
+                          capture_output=True, text=True, encoding="utf-8").stdout
+
+
+_recorder_help = _help("record-run.py")
+_veto_docs = [name for name, text in (("graph-run", _resume_docs["graph-run"]), ("graph reference", SKILL))
+              if "--veto" not in text or "--veto-evidence" not in text]
+report("the veto flags the documents name are flags record-run.py takes",
+       "--veto " in _recorder_help and "--veto-evidence" in _recorder_help and not _veto_docs,
+       "--veto, --veto-evidence" if not _veto_docs else f"MISSING in {_veto_docs}")
+_spec_help = _help("specification.py")
+_format = read("references", "spec-format.md")
+report("the retire flags the packet format names are flags specification.py takes",
+       all(flag in _spec_help and flag in _format for flag in ("--retire", "--because")),
+       "--retire, --because")
+_cap = _cg.emit({"version": 1, "campaign": "c", "treeGuard": False,
+                 "budget": {"maxNodes": 2, "maxEstimatedTokens": 900000},
+                 "nodes": [{"id": "one", "prompt": "p", "contract": "DesignV1"}]},
+                _cg.load_contracts(os.path.join(PLUGIN, "contracts")), {})
+report("the token cap the graph reference says holds the run is in the compiled script",
+       "const MAX_TOKENS = 900000" in _cap and "estimatedSpend" in _cap and "`estimatedSpend`" in SKILL
+       and "The cap holds the run as well as the plan" in _skill_flat,
+       "MAX_TOKENS, estimatedSpend")
+
+
+def _hygiene(path, line):
+    return subprocess.run([sys.executable, os.path.join(PLUGIN, "scripts", "hygiene-filter.py"), path], input=line,
+                          capture_output=True, text=True, encoding="utf-8", cwd=tempfile.gettempdir()).stdout
+
+
+_sorry = "sorry, the file moved\n"
+report("sorry is flagged in Lean and Isabelle files only, as the plugin README says",
+       not _hygiene("notes.py", _sorry) and bool(_hygiene("Proof.lean", "  sorry\n"))
+       and bool(_hygiene("Proof.thy", "  sorry\n")) and "flagged in `.lean` and `.thy` files only" in PLUGIN_README,
+       ".lean and .thy")
+report("a comment that opens with todo or fixme, and the @todo tag, are markers as the plugin README says",
+       bool(_hygiene("app.js", "// todo: handle the error\n")) and bool(_hygiene("util.py", "# fixme\n"))
+       and bool(_hygiene("app.js", "/** @todo handle the error */\n")) and not _hygiene("app.js", "// a todo list\n")
+       and bool(_hygiene("Makefile", "# todo: split the target\n")) and bool(_hygiene("page.html", "<!-- fixme -->\n"))
+       and bool(_hygiene("settings.ini", "; todo: rotate the key\n"))
+       and not _hygiene("service.conf", "url=http://todo:8080/api\n") and not _hygiene("notes.txt", "usage: task --todo\n")
+       and "A comment that opens with `todo` or `fixme`" in PLUGIN_README and "`@todo`" in PLUGIN_README
+       and bool(_hygiene("main.tf", "// todo: pin the provider\n")) and bool(_hygiene("x.lua", "--todo: tidy\n"))
+       and "a line that\nstarts with `;`" in PLUGIN_README and "A `//` inside a URL opens none" in PLUGIN_README
+       and "`--todo` is a flag except" in PLUGIN_README,
+       "opening word and tag")
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

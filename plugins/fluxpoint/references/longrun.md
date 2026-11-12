@@ -62,6 +62,9 @@ bash "$ROOT/scripts/py.sh" attest.py --cancel <token>
 ```
 
 `attest.py --await` and `--cancel` also accept a gate name for its newest run.
+A gate whose shell cannot run a command is a
+[shell fault](fault-reruns.md#shell-faults). `--await` answers 4 and prints
+`SHELL-FAULT`, and the row records no gate exit.
 
 Classified interpreter crashes can use the recorded, one-shot
 [`--rerun-fault` native/reference pair](fault-reruns.md). Its pair token uses
