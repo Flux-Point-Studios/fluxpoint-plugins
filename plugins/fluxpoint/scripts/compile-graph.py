@@ -5695,10 +5695,24 @@ RECORDER_FLAGS = (
 # A line that tells the reader not to use the flag is not a step that uses it.
 # The negation has to govern the using: "never pass", "do not record with".
 # A negation about something else is still an instruction: "if the checks do
-# not pass, record ...", "do not forget to record ...".
+# not pass, record ...", "do not forget to record ...". So is a negated verb
+# that another verb follows before the flag: "if the checks do not pass then
+# record ...". A noun spelled like a verb follows a determiner and gives no
+# instruction: "never record the run with ...".
+INSTRUCTION_VERB = r"\b(?:pass|use|record|add|give|supply|set|run|call|write|file|put|rely\s+on)\b"
 NOT_AN_INSTRUCTION = re.compile(
-    r"\b(?:never|do not|don't|must not|should not|shouldn't|cannot|can't)\s+"
-    r"(?:pass|use|record|add|give|supply|set|run|call|write|file|put|rely\s+on)\b[^.;:,]*$", re.I)
+    r"\b(?:never|do not|don't|must not|should not|shouldn't|cannot|can't)\s+" + INSTRUCTION_VERB
+    + r"([^.;:,]*)$", re.I)
+DETERMINER = re.compile(r"\b(?:the|a|an|this|that|its|your|each|every|any|one|same)\s+$", re.I)
+
+
+def says_not_to_use(prefix):
+    """Whether the text before a flag tells the reader not to use it."""
+    match = NOT_AN_INSTRUCTION.search(prefix)
+    if not match:
+        return False
+    tail = match.group(1)
+    return all(DETERMINER.search(tail[:verb.start()]) for verb in re.finditer(INSTRUCTION_VERB, tail, re.I))
 
 
 def recorder_flag_warnings(text, ir):
@@ -5713,11 +5727,15 @@ def recorder_flag_warnings(text, ir):
     anything under an Evidence or Decisions heading or in a table whose
     first column is "When (UTC)": those are what was filed, whatever the
     section is called. --harness is a common flag name, so it counts only
-    on a line that names record-run.
+    where record-run is named before it: on its line, on an earlier line
+    of the same command in a block (one that ends in a backslash), or
+    earlier in the same paragraph of prose. A shell variable assigned a
+    value that names record-run stands for it.
     """
-    lines, fence, in_ir, filed, table = [], None, False, None, None
+    lines, fenced, fence, in_ir, filed, table = [], [], None, False, None, None
     for line in text.splitlines():
         marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+        fenced.append(fence is not None)
         if fence is not None:
             if marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence) and not marker.group(2).strip():
                 fence, in_ir = None, False
@@ -5742,6 +5760,23 @@ def recorder_flag_warnings(text, ir):
         else:
             table = None
         lines.append('' if filed is not None or table else line)
+    # What precedes each line inside its own command or paragraph. A row of a
+    # table stands alone: the row above it is another step.
+    before = []
+    for index, line in enumerate(lines):
+        earlier = lines[index - 1] if index else ''
+        if not earlier.strip() or line.lstrip().startswith('|'):
+            before.append('')
+        elif fenced[index]:
+            before.append(before[index - 1] + earlier + ' ' if earlier.rstrip().endswith('\\') else '')
+        else:
+            before.append(before[index - 1] + earlier + ' ')
+    holders = set(re.findall(r'(?m)^[ \t]*(?:export[ \t]+)?([A-Za-z_]\w*)=.*record-run', '\n'.join(lines)))
+
+    def names_recorder(fragment):
+        return 'record-run' in fragment or any(
+            re.search(r'\$\{?' + re.escape(name) + r'(?!\w)', fragment) for name in holders)
+
     found = []
     for flag, values, contracts, what in RECORDER_FLAGS:
         nodes = [n.get("id") for n in ir.get("nodes") or [] if isinstance(n, dict) and n.get("contract") in contracts]
@@ -5749,8 +5784,8 @@ def recorder_flag_warnings(text, ir):
             continue
         pattern = re.compile(r'(?<![\w-])' + re.escape(flag) + r'(?:[ \t]+|=)["\']?(?:' + values + r')["\']?(?![\w-])')
         hits = [(number, match.group(0)) for number, line in enumerate(lines, 1) for match in pattern.finditer(line)
-                if not NOT_AN_INSTRUCTION.search(line[:match.start()])
-                and (flag != "--harness" or "record-run" in line[:match.start()])]
+                if not says_not_to_use(line[:match.start()])
+                and (flag != "--harness" or names_recorder(before[number - 1] + line[:match.start()]))]
         if not hits:
             continue
         numbers = sorted({number for number, _ in hits})

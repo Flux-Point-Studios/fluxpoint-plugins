@@ -90,9 +90,18 @@ class Prose(unittest.TestCase):
                      'If the certifier cannot certify the commit, record `--red-team BLOCK`.',
                      'Do not forget to record the refusal with `--red-team BLOCK`.',
                      'The certifier cannot be skipped, so on exit 1 record `--red-team BLOCK`.',
-                     'The certifier cannot be skipped; on exit 1 record `--red-team BLOCK`.'):
+                     'The certifier cannot be skipped; on exit 1 record `--red-team BLOCK`.',
+                     # The negated verb is followed by the one that gives the instruction.
+                     'If the checks do not pass then record `--red-team BLOCK`.',
+                     'You cannot run the certifier twice so record `--red-team BLOCK`.',
+                     'Do not file the run as shippable - record `--red-team BLOCK`.'):
             with self.subTest(line=line):
                 self.assertEqual(len(self.found(graph('RedTeamV1'), line)), 1)
+        # A noun that is spelled like a verb gives no instruction.
+        for line in ('Never record the run with `--red-team BLOCK`.',
+                     'Do not record this run or its file with `--red-team BLOCK`.'):
+            with self.subTest(line=line):
+                self.assertEqual(self.found(graph('RedTeamV1'), line), [])
 
     def test_a_value_taken_from_the_shell_is_still_the_flag(self):
         for line in ('record-run.py --run-id "$RUN" --red-team "$VERDICT"', "record-run.py --red-team 'BLOCK'",
@@ -109,6 +118,32 @@ class Prose(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertEqual(self.found(graph('HarnessCheckV1'), '```', line, '```'), [])
         self.assertEqual(len(self.found(graph('HarnessCheckV1'), 'Then `record-run.py --run-id <id> --harness 1`.')), 1)
+
+    def test_the_recorders_harness_flag_is_found_across_the_lines_of_its_command(self):
+        ir = graph('HarnessCheckV1')
+        # The run command is documented over several lines.
+        spanning = ('```', "echo '<result>' | bash \"$ROOT/scripts/py.sh\" record-run.py \\",
+                    '  --run-id <runId> --graph WORK.md \\', '  --harness 1', '```')
+        found = self.found(ir, *spanning)
+        self.assertEqual(len(found), 1, found)
+        text = work(ir, *spanning)
+        line = next(i for i, row in enumerate(text.splitlines(), 1) if '--harness 1' in row)
+        self.assertIn(f'line {line}', found[0])
+        # A shell variable that holds the recorder is the recorder.
+        held = ('```', 'RECORD="bash $ROOT/scripts/py.sh record-run.py"', '$RECORD --run-id "$RUN" --harness "$rc"', '```')
+        self.assertEqual(len(self.found(ir, *held)), 1)
+        braced = ('```', 'export RECORD="$ROOT/scripts/record-run.py"', '"${RECORD}" --harness $?', '```')
+        self.assertEqual(len(self.found(ir, *braced)), 1)
+        # Prose that names the recorder on one line and the flag on the next.
+        self.assertEqual(len(self.found(ir, 'Record the run with `record-run.py`', 'and pass `--harness 1` when the probe is red.')), 1)
+        # Another tool's command is still another tool's: on the next line of
+        # a block, in the next paragraph, in the next row of a table.
+        self.assertEqual(self.found(ir, '```', 'bash "$ROOT/scripts/py.sh" record-run.py --run-id <id>',
+                                    './ci/run-suite.sh --harness "$HARNESS_BIN"', '```'), [])
+        self.assertEqual(self.found(ir, 'Record the run with `record-run.py`.', '', 'Run `make test -- --harness 1` first.'), [])
+        self.assertEqual(self.found(ir, '| Step | Command |', '|---|---|', '| 1 | `record-run.py --run-id <id>` |',
+                                    '| 2 | `./ci/run-suite.sh --harness 1` |'), [])
+        self.assertEqual(self.found(ir, '```', 'SUITE=./ci/run-suite.sh', '$SUITE --harness 1', '```'), [])
 
     def test_a_table_of_operator_steps_is_prose(self):
         steps = ('| Step | Command |', '|---|---|', '| 1 | run `check_reruns.py` |',
