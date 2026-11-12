@@ -94,7 +94,22 @@ class Prose(unittest.TestCase):
                      # The negated verb is followed by the one that gives the instruction.
                      'If the checks do not pass then record `--red-team BLOCK`.',
                      'You cannot run the certifier twice so record `--red-team BLOCK`.',
-                     'Do not file the run as shippable - record `--red-team BLOCK`.'):
+                     'Do not file the run as shippable - record `--red-team BLOCK`.',
+                     # "then", "so", "but", "otherwise" and "instead" open the next clause,
+                     # and the negation before them is about something else, whatever
+                     # the new clause holds: a verb after "or", a quoted one, or only
+                     # the command.
+                     'If the checks do not pass then stop or record `--red-team BLOCK`.',
+                     'If the checks do not pass then either veto or set `--red-team BLOCK`.',
+                     'When you cannot run the certifier then block the merge or pass `--red-team BLOCK`.',
+                     'If the checks do not pass then `record-run.py --run-id <id> --red-team BLOCK`.',
+                     'If the checks do not pass then "record" the run with `--red-team BLOCK`.',
+                     "If the gate cannot run then 'pass' `--red-team BLOCK` to the recorder.",
+                     'The certifier cannot run here so `record-run.py --red-team BLOCK` is the step.',
+                     'Do not file the run as shippable but `record-run.py --red-team BLOCK` it.',
+                     'You cannot run the certifier twice, otherwise `record-run.py --red-team BLOCK`.',
+                     # A verb that opens a code span is still the verb the flag belongs to.
+                     'If the checks do not pass `use --red-team BLOCK`.'):
             with self.subTest(line=line):
                 self.assertEqual(len(self.found(graph('RedTeamV1'), line)), 1)
         # A noun that is spelled like a verb gives no instruction. Neither does
@@ -112,7 +127,12 @@ class Prose(unittest.TestCase):
                      'Do not run `record-run.py --red-team BLOCK` to lower a verdict; file a veto.',
                      'You must not give record-run.py `--red-team SHIP`.',
                      # "or" carries the negation on to the next verb, wherever it stands.
-                     'Do not pass `--harness 1` or run record-run.py with `--red-team BLOCK`.'):
+                     'Do not pass `--harness 1` or run record-run.py with `--red-team BLOCK`.',
+                     # The negation that follows the new clause's opening word is the one that counts.
+                     'If the summary carries a verdict then never pass `--red-team BLOCK`.',
+                     'The recorder ignores it so do not record with `--red-team BLOCK`.',
+                     # "and then" carries on with the same clause.
+                     'Never pass `--harness 1` and then `--red-team BLOCK` by hand.'):
             with self.subTest(line=line):
                 self.assertEqual(self.found(graph('RedTeamV1'), line), [])
 
@@ -162,6 +182,10 @@ class Prose(unittest.TestCase):
                                     'start the bench with `bench.sh --harness 1`.'), [])
         self.assertEqual(len(self.found(ir, 'First run the probe. Then record with record-run.py',
                                         'and pass `--harness 1` if it was red.')), 1)
+        # The stop in an abbreviation ends no sentence.
+        self.assertEqual(len(self.found(ir, 'Use record-run.py, e.g. with `--harness 1`.')), 1)
+        self.assertEqual(len(self.found(ir, 'Record with record-run.py, i.e. pass `--harness 1` when red.')), 1)
+        self.assertEqual(self.found(ir, 'Record with record-run.py, e.g. after the probe. Then start `bench.sh --harness 1`.'), [])
         # Each item of a list is a step of its own, and its later lines belong to it.
         self.assertEqual(self.found(ir, '1. Record the run with `record-run.py --run-id <id>`.',
                                     '2. Start the bench with `bench.sh --harness 1`.'), [])

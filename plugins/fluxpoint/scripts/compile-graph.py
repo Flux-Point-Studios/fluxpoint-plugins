@@ -5676,26 +5676,32 @@ RECORDER_FLAGS = (
 # A line that tells the reader not to use the flag is not a step that uses it.
 # The negation has to govern the using: "never pass", "do not record with".
 # A negation about something else is still an instruction: "if the checks do
-# not pass, record ...", "do not forget to record ...". So is a negated verb
-# that another verb follows before the flag: "if the checks do not pass then
-# record ...". Four things that look like a second verb give no instruction:
-# a noun after a determiner ("never record the run with ..."), a verb joined
-# to the negated one ("do not add or pass ..."), part of a hyphenated name
-# ("don't use record-run's ...") and a word inside a quotation.
+# not pass, record ...", "do not forget to record ...". So the negation is
+# looked for in the flag's own clause, which begins after the last comma,
+# colon, semicolon or full stop, or after a word that opens a new clause:
+# "if the checks do not pass then record ...". Inside that clause a negated
+# verb that another verb follows before the flag gives the instruction to the
+# second one: "do not file the run as shippable - record ...". Four things
+# that look like a second verb give no instruction: a noun after a determiner
+# ("never record the run with ..."), a verb joined to the negated one ("do
+# not add or pass ..."), part of a hyphenated name ("don't use record-run's
+# ...") and a word inside a quotation.
 INSTRUCTION_VERB = r"(?<![\w-])(?:pass|use|record|add|give|supply|set|run|call|write|file|put|rely\s+on)(?![\w-])"
-NOT_AN_INSTRUCTION = re.compile(
-    r"\b(?:never|do not|don't|must not|should not|shouldn't|cannot|can't)\s+" + INSTRUCTION_VERB
-    + r"((?:[^.;:,]|\.(?=\w))*)$", re.I)  # a full stop inside a file name ends no sentence
-DETERMINER = re.compile(r"(?:\b(?:the|a|an|this|that|its|your|each|every|any|one|same|or|nor)\s+|[\"'`])$", re.I)
+# A full stop inside a file name ends no clause, and "and then" carries on with the same one.
+CLAUSE_END = re.compile(r"[;:,]|\.(?!\w)|(?<![\w-])(?:(?<!\band )(?<!\bor )then|so|but|otherwise|instead|else)(?![\w-])", re.I)
+NEGATED_VERB = re.compile(
+    r"\b(?:never|do not|don't|must not|should not|shouldn't|cannot|can't)\s+" + INSTRUCTION_VERB, re.I)
+DETERMINER = re.compile(r"(?:\b(?:the|a|an|this|that|its|your|each|every|any|one|same|or|nor)\s+|[\"'])$", re.I)
 JOINED_VERBS = re.compile(r"(?:\s+(?:or|nor|and)\s+" + INSTRUCTION_VERB + r")+", re.I)
 
 
 def says_not_to_use(prefix):
     """Whether the text before a flag tells the reader not to use it."""
-    match = NOT_AN_INSTRUCTION.search(prefix)
+    clause = CLAUSE_END.split(prefix)[-1]
+    match = NEGATED_VERB.search(clause)
     if not match:
         return False
-    tail = match.group(1)
+    tail = clause[match.end():]
     joined = JOINED_VERBS.match(tail)
     if joined:
         tail = tail[joined.end():]
@@ -5764,8 +5770,9 @@ def recorder_flag_warnings(text, ir):
     def names_recorder(fragment, prose):
         if prose:
             # The sentence the flag stands in: what follows the last full stop
-            # that ends one. The stop in record-run.py is followed by a letter.
-            fragment = re.split(r'[.!?](?:\s+|$)', fragment)[-1]
+            # that ends one. The stop in record-run.py is followed by a letter,
+            # and the one in "e.g." or "i.e." is followed by the rest of its sentence.
+            fragment = re.split(r'(?<!\be\.g)(?<!\bi\.e)[.!?](?:\s+|$)', fragment, flags=re.I)[-1]
         return 'record-run' in fragment or any(
             re.search(r'\$\{?' + re.escape(name) + r'(?!\w)', fragment) for name in holders)
 
