@@ -167,14 +167,23 @@ def red_team_review_receipts(summary):
     results = summary.get("results") or {}
     exempt, errors = set(), []
     prose = ("severity", "finding", "exploit_path", "minimal_fix")
-    text = lambda f: tuple(f.get(k) for k in prose)
+
+    def held(value):
+        # A repository's own contract may type a field as an object or a
+        # list. Those are compared by content, as the compiled panel
+        # compares them, and a dict cannot be a set member as it is.
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return value
+
+    text = lambda f: tuple(held(f.get(k)) for k in prose)
 
     def key(f, by):
         # The compiled panel's rule, re-derived: the graph's declared
         # dedupe key when the claim carries every field of it, and the
         # claim's exact text otherwise, so an absent field merges nothing.
         keyed = by is not None and all(f.get(k) is not None and str(f.get(k)).strip() != "" for k in by)
-        return ("key" if keyed else "text",) + tuple(f.get(k) for k in (by if keyed else prose))
+        return ("key" if keyed else "text",) + tuple(held(f.get(k)) for k in (by if keyed else prose))
     identity = lambda c: sorted(tuple(s[k] for k in ("repository", "base", "head", "files", "additions", "deletions")) for s in c["subject"])
     for terminal, info in meta["terminals"].items():
         final = results.get(terminal)

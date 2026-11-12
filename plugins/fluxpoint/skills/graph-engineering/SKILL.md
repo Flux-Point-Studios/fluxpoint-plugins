@@ -527,9 +527,11 @@ matter.
 A `RedTeamV1` panel node that sits after lens producers judges the lenses'
 claims, which the compiled graph reads from their results. The node's own
 output adds no claim and is not judged, so its prompt need not read
-`{{prev}}`. Whatever it returns that no lens claimed is kept in the run's
-receipt as `dropped`. Put a `reduce` with `dedupeBy` between the lenses and
-the panel to say when two findings are one defect. The panel then judges
+`{{prev}}`. Whatever it returns that no lens wrote, word for word, is kept
+in the run's receipt as `dropped`, including a different wording of a
+place and kind a lens did name. Put a `reduce` with `dedupeBy` between the
+lenses and the panel to say when two findings are one defect; a reduce
+upstream of the lenses is not read for this. The panel then judges
 one claim per key, at the worst severity any lens gave it, and shows the
 refuters every wording; they refute it only by contradicting all of them.
 A finding missing a key field is judged on its own. Key on structure:

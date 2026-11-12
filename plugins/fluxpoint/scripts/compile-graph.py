@@ -2220,7 +2220,9 @@ def red_team_key(n, ir):
     graph author's statement of when two findings are one defect. The
     panel used to ignore it and key every raw lens claim on its exact
     text, so the reduce changed what the collector read and nothing about
-    what was refuted.
+    what was refuted. The walk stops at the lenses: a reduce upstream of
+    them dedupes what the lenses were given, and says nothing about their
+    own findings.
     """
     by_id = {x.get("id"): x for x in ir.get("nodes", [])}
     seen, pending = set(), [n]
@@ -2231,6 +2233,8 @@ def red_team_key(n, ir):
             if not producer or dep in seen:
                 continue
             seen.add(dep)
+            if producer.get("contract") == "RedTeamV1" and producer.get("foreach"):
+                continue
             keys = (producer.get("reduce") or {}).get("dedupeBy") if is_reduce(producer) else None
             if isinstance(keys, list) and keys and all(isinstance(k, str) and k for k in keys):
                 return list(keys)
@@ -4179,14 +4183,17 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
             a("    // The panel judges what the source lenses claimed, one class per key. This node read the")
             a("    // lenses' output and reviewed nothing itself, so what it returns adds no claim: a reworded")
             a("    // copy used to become a second claim at n refuters out of the node ceiling. Whatever it")
-            a("    // returned that no lens claimed is kept in the receipt, unjudged, for a reader to see.")
-            a("    const classes = new Map()")
+            a("    // returned that no lens wrote is kept in the receipt, unjudged, for a reader to see. That")
+            a("    // is decided by the wording: a finding that names a lens claim's place and kind and says")
+            a("    // something else about it was read by no refuter either.")
+            a("    const classes = new Map(), wordings = new Set()")
             a("    for (const claim of redTeamClaims(sourceIds)) {")
             a("      const k = redTeamClaimKey(claim, keyBy)")
             a("      if (!classes.has(k)) classes.set(k, [])")
             a("      classes.get(k).push(claim)")
+            a("      wordings.add(redTeamClaimKey(claim))")
             a("    }")
-            a("    dropped = (Array.isArray(result[field]) ? result[field] : []).filter(f => !classes.has(redTeamClaimKey(f, keyBy)))")
+            a("    dropped = (Array.isArray(result[field]) ? result[field] : []).filter(f => !wordings.has(redTeamClaimKey(f)))")
             a("    if (dropped.length) log(`${label}: ${dropped.length} finding(s) of its own not judged — the panel judges the source lenses' claims, and a collector adds none`)")
             a("    // A class takes the worst severity any reviewer gave it and keeps every other wording, so")
             a("    // the refuters see them all and the record shows what was merged.")

@@ -308,12 +308,12 @@ class CompilerReviewTests(unittest.TestCase):
         ir['requiredArgs'] = []
         return ir
 
-    def compiled(self, mode='refuted', shape=None):
+    def compiled(self, mode='refuted', shape=None, contracts=None):
         ir = self.shipped(mode)
         if shape:
             shape(ir)
         # Keep the exact six-lens/reduce/panel:3/terminal shape and role binding.
-        js = self.cg.emit(ir, self.contracts).replace('export const meta', 'const meta')
+        js = self.cg.emit(ir, contracts or self.contracts).replace('export const meta', 'const meta')
         prefix = r"""
 import {writeFileSync} from 'node:fs';
 const mode=MODE,scope=SCOPE,lenses=LENSES,calls=[],prompts=[],logs=[];
@@ -322,11 +322,11 @@ const parallel=async(xs)=>Promise.all(xs.map(f=>f()));
 const claim={severity:mode==='unknown-source'?'URGENT':mode==='medium'?'MEDIUM':'HIGH',finding:'reachable review boundary bypass',exploit_path:'valid control and attack at pinned subject',minimal_fix:'Enforce the guard at that boundary'};
 const coverage=(lens)=>({subject:structuredClone(scope),attackers:lens?1:lenses.length,lenses:lens?[lens]:lenses,sampled:false});
 // Two lenses word one defect differently and agree on where it is and what kind it is.
-const worded=['two-wordings','missing-class','worse-restatement'].includes(mode);
-const placed={target:'src/gate.py:40',class:'authorization-bypass'};
+const worded=['two-wordings','missing-class','worse-restatement','object-key'].includes(mode);
+const placed={target:mode==='object-key'?{file:'src/gate.py',line:40}:'src/gate.py:40',class:'authorization-bypass'};
 const second={severity:mode==='worse-restatement'?'HIGH':'MEDIUM',finding:'the review boundary can be bypassed',exploit_path:'attack from the pinned subject with its valid control',minimal_fix:'Check the caller at the boundary',...placed};
 if(mode==='missing-class')delete second.class;
-const first=worded?{...claim,severity:mode==='worse-restatement'?'MEDIUM':'HIGH',...placed}:claim;
+const first=worded||mode==='collector-same-key'?{...claim,severity:mode==='worse-restatement'?'MEDIUM':'HIGH',...placed}:claim;
 const rank=f=>f.severity==='MEDIUM'?2:3;
 const agent=async(p,o)=>{const label=String(o.label);calls.push(label);prompts.push({label,p});
  if(label.startsWith('red-team-lenses:')){
@@ -340,7 +340,8 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push(label);prompts.p
  if(label==='red-team-refute'){
   const returned=mode==='collector-drop'||mode==='no-prev'||worded?[]:mode==='collector-unknown'?[{...claim,severity:'URGENT'}]
    :mode==='collector-reworded'?[{...claim,finding:claim.finding+', restated by the collector'}]
-   :mode==='collector-novel'?[claim,{severity:'HIGH',finding:'a claim only the collector makes',exploit_path:'no lens reported it',minimal_fix:'none'}]:[claim];
+   :mode==='collector-novel'?[claim,{severity:'HIGH',finding:'a claim only the collector makes',exploit_path:'no lens reported it',minimal_fix:'none'}]
+   :mode==='collector-same-key'?[first,{severity:'HIGH',finding:'any caller takes the admin role at this gate',exploit_path:'call it with no session',minimal_fix:'check the session',...placed}]:[claim];
   return {verdict:'BLOCK',findings:returned,worstSeverity:returned.length?claim.severity:'NONE',worstSeverityRank:returned.length?rank(claim):0,
    ...(mode==='collector-blocker'?{review:{blockers:['Missing control execution']}}:{})};
  }
@@ -348,7 +349,7 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push(label);prompts.p
   if(mode==='missing-vote'&&label.endsWith('3'))return null;
   return {refuted:mode==='invalid-vote'?'false':mode==='majority'? !label.endsWith('3'):
     ['refuted','sampled','dead-attacker','missing-vote','underverified','collector-blocker','collector-reworded','collector-novel',
-     'two-wordings','missing-class','worse-restatement','no-prev'].includes(mode),reason:'Contradictory executable case and passing valid control'};
+     'two-wordings','missing-class','worse-restatement','no-prev','collector-same-key','object-key'].includes(mode),reason:'Contradictory executable case and passing valid control'};
  }
  return {verdict:'SHIP',findings:[],worstSeverity:'NONE',worstSeverityRank:0,coverage:coverage(),
   ...(mode==='terminal-blocker'?{review:{blockers:['Missing deployment configuration']}}:{})};
@@ -408,6 +409,77 @@ const agent=async(p,o)=>{const label=String(o.label);calls.push(label);prompts.p
                 self.assertEqual([f['finding'] for f in kept], [receipt['dropped'][0]['finding']])
         # A collector that copies a lens claim exactly drops nothing.
         self.assertEqual(self.compiled()['r']['redTeamReviews']['checks']['red-team-refute']['dropped'], [])
+
+    def test_a_collector_wording_that_shares_a_lens_claims_key_is_kept_too(self):
+        # The collector names the place and kind a lens named and says something
+        # else about it. No lens wrote those words, so no refuter read them: they
+        # are not judged, and they used to be in no record at all.
+        coarse = lambda ir: ir['nodes'][1]['reduce'].update(dedupeBy=['target', 'class'])
+        doc = self.compiled('collector-same-key', coarse)
+        self.assertEqual((doc['r']['outcome'], len(self.refutes(doc))), ('COMPLETE', 3), doc)
+        receipt = doc['r']['redTeamReviews']['checks']['red-team-refute']
+        self.assertEqual([row['finding'] for row in receipt['rows']], ['reachable review boundary bypass'])
+        # The lens claim it repeated word for word is the lens claim, and is not listed.
+        self.assertEqual([f['finding'] for f in receipt['dropped']], ['any caller takes the admin role at this gate'])
+        self.assertTrue(any('not judged' in line for line in doc['logs']), doc['logs'])
+        art, _, err = record({}, summary=doc['r'])
+        self.assertEqual((art['outcome'], art['redTeam']), ('COMPLETE', 'SHIP'), err)
+
+    def test_a_key_field_that_holds_a_structure_is_keyed_and_recorded(self):
+        # A repository's own RedTeamV1 may type target as {file, line}.
+        local = copy.deepcopy(self.contracts)
+        local['RedTeamV1']['properties']['findings']['items']['properties']['target'] = {
+            'type': 'object', 'required': ['file', 'line'],
+            'properties': {'file': {'type': 'string'}, 'line': {'type': 'integer'}}}
+        coarse = lambda ir: ir['nodes'][1]['reduce'].update(dedupeBy=['target', 'class'])
+        doc = self.compiled('object-key', coarse, local)
+        self.assertEqual((doc['r']['outcome'], len(self.refutes(doc))), ('COMPLETE', 3), doc)
+        receipt = doc['r']['redTeamReviews']['checks']['red-team-refute']
+        self.assertEqual(len(receipt['rows'][0]['restatements']), 1)
+        art, _, err = record({}, summary=doc['r'])
+        self.assertEqual((art['outcome'], art['redTeam']), ('COMPLETE', 'SHIP'), err)
+        # The recheck still bites: move one lens's claim to another line.
+        moved = copy.deepcopy(doc['r'])
+        moved['results']['red-team-lenses'][1]['findings'][0]['target']['line'] = 41
+        art, _, _ = record({}, summary=moved)
+        self.assertEqual((art['outcome'], art['redTeam']), ('BLOCKED-REDTEAM', 'BLOCK'))
+
+    def test_the_claim_key_is_read_between_the_lenses_and_the_panel_only(self):
+        # A reduce over a sweep that runs before the lenses dedupes the sweep's
+        # findings. It says nothing about when two lens findings are one claim.
+        lens = [{'key': k} for k in LENSES]
+
+        def graph(upstream, between=None):
+            nodes = [{'id': 'sweep', 'prompt': 'find defects', 'contract': 'FindingsV1'}]
+            if upstream:
+                nodes.append({'id': 'distinct-defects', 'reduce': {'from': 'sweep', 'over': 'findings', 'dedupeBy': ['file', 'line']}})
+            nodes.append({'id': 'lenses', 'after': nodes[-1]['id'], 'foreach': 'lens', 'prompt': 'attack {{item.key}} given {{prev}}',
+                          'contract': 'RedTeamV1', 'resume': 'never'})
+            if between:
+                nodes.append({'id': 'distinct-claims', 'reduce': {'from': 'lenses', 'over': 'findings', 'dedupeBy': between}})
+            nodes += [{'id': 'refute', 'after': nodes[-1]['id'], 'prompt': 'start the panel', 'contract': 'RedTeamV1',
+                       'verify': 'panel:3', 'verifyOver': 'findings', 'expectItems': 4},
+                      {'id': 'verdict', 'after': 'refute', 'prompt': 'bind {{prev}}', 'contract': 'RedTeamV1',
+                       'haltWhen': "verdict == 'BLOCK'", 'independent': True, 'verifies': 'lenses'}]
+            return {'version': 1, 'campaign': 'sweep then review', 'treeGuard': False, 'budget': {'maxNodes': 40},
+                    'lists': {'lens': lens}, 'nodes': nodes}
+
+        def key(ir):
+            return self.cg.red_team_key(next(n for n in ir['nodes'] if n['id'] == 'refute'), ir)
+
+        def warned(ir):
+            return [w for w in self.cg.warnings(ir) if 'lenses feed a panel' in w]
+
+        for upstream in (False, True):
+            with self.subTest(upstream=upstream):
+                ir = graph(upstream)
+                self.assertEqual(self.cg.validate(ir, self.contracts), [])
+                self.assertIsNone(key(ir))
+                self.assertEqual(len(warned(ir)), 1, self.cg.warnings(ir))
+        between = graph(True, ['target', 'class'])
+        self.assertEqual(self.cg.validate(between, self.contracts), [])
+        self.assertEqual(key(between), ['target', 'class'])
+        self.assertEqual(warned(between), [])
 
     def test_the_record_refuses_a_malformed_receipt_of_unjudged_claims(self):
         valid = self.compiled('collector-novel')['r']
