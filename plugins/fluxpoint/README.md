@@ -184,11 +184,11 @@ and follows it with a colon, a parenthesis or nothing, as in
 `// todo: handle the error` and `# fixme`, is a marker too, and so are the
 `@todo` and `\todo` documentation tags inside a comment. The same words in
 the middle of a sentence, in code or in a string pass. For these markers a
-comment is `#` in scripts, build files and configuration (shell, Ruby, Perl,
-PowerShell, YAML, Terraform, a Makefile, a Dockerfile and the like), a line
-that starts with `;` in `.ini`-style files, and `//`, `/* */`, `--`, `(* *)`
-or `<!-- -->` elsewhere. A `//` inside a URL and a flag such as `--todo`
-open none.
+comment is read in the `//`, `/* */`, `--`, `(* *)` and `<!-- -->` forms, as
+`#` in scripts, build files and configuration (shell, Ruby, Perl, PowerShell,
+YAML, Terraform, a Makefile, a Dockerfile and the like), and as a line that
+starts with `;` in `.ini`-style files. A `//` inside a URL opens none, and
+`--todo` is a flag except in the languages whose comments open with `--`.
 `sorry` is a keyword in Lean and Isabelle and an English
 word elsewhere, so it is flagged in `.lean` and `.thy` files only. A Lean line
 that starts with `--` and holds no `"` or `-/` cannot contain code, so the

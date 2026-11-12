@@ -226,6 +226,22 @@ done <<'ROWS'
 0|Makefile|todo: build
 0|Makefile|	@echo "# todo: later"
 0|settings.ini|todo = buy milk ; and eggs
+1|main.tf|// todo: pin the provider
+1|main.tf|/* fixme */
+1|app.conf|// todo
+1|default.nix|/* todo */
+1|x.lua|--todo: tidy this
+1|q.sql|--fixme
+1|Main.hs|--todo: total function
+1|page.html|<!--todo: replace-->
+1|app.js|default:// todo: handle the rest
+1|app.c|out:// fixme
+1|app.js|default:// for now this falls through
+1|tool.rb|run();# fixme
+1|conf.toml|a = 1# todo
+1|run.sh|make;# todo
+0|build.pl|my $last = $#todo;
+0|app.js|fetch(base + "/x") // see http://todo:8080/api
 ROWS
 
 # The same rule through the scan the gate runs. The path reaches the filter on

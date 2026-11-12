@@ -30,17 +30,30 @@ HEDGE = re.compile(r'\bfor now\b', re.I)
 # `# fixme`, `/* fixme */`. So are the tags JSDoc, PHPDoc and Doxygen spell in
 # lower case, `@todo` and `\todo`. Both are read in the comment alone, which
 # leaves out "a todo list" in a sentence, a name in code and a decorator. A
-# word joined to dashes is a flag, `--todo`, and no comment.
-OPENS = re.compile(r'^(?:\s|[#/*!;(<-])*(?<!-)(?:todo|fixme)(?=\s*(?:[:(]|\*/|\*\)|-->|$))', re.I)
-# Where `#` opens a comment: scripts, build files and configuration. In C, CSS
-# and markup it does not (#define, an id selector, an anchor), so they stay out.
-HASH_SUFFIXES = {'.sh', '.bash', '.zsh', '.ksh', '.fish', '.rb', '.yaml', '.yml', '.toml', '.pl', '.pm', '.r',
-                 '.ps1', '.psm1', '.tf', '.tfvars', '.ex', '.exs', '.mk', '.cmake', '.nix', '.jl', '.tcl', '.awk',
-                 '.cfg', '.conf', '.ini', '.properties', '.env', '.dockerfile'}
+# word joined to dashes is a flag, `--todo`, except in the languages whose
+# comments open with `--`.
+_OPENS = (r'^(?:\s|[#/*!;(<-])*', r'(?:todo|fixme)(?=\s*(?:[:(]|\*/|\*\)|-->|$))')
+OPENS = re.compile(_OPENS[0] + r'(?<!-)' + _OPENS[1], re.I)
+OPENS_DASHED = re.compile(_OPENS[0] + _OPENS[1], re.I)
+DASH_SUFFIXES = {'.lua', '.sql', '.hs', '.lhs', '.elm', '.purs', '.idr', '.agda', '.ada', '.adb', '.ads',
+                 '.vhd', '.vhdl', '.lean', '.applescript'}
+# Where `#` is the one comment form, read anywhere outside a string, as the
+# hedge has always read it.
+HASH_ONLY = ('.sh', '.bash', '.rb', '.yaml', '.yml', '.toml')
+# Where `#` opens a comment beside the other forms: build files, configuration
+# and more scripts. In C, CSS and markup it does not (#define, an id selector,
+# an anchor), so they stay out. `$#`, `${#` and a fragment after a word are no
+# comment here.
+HASH_SUFFIXES = {'.zsh', '.ksh', '.fish', '.pl', '.pm', '.r', '.ps1', '.psm1', '.tf', '.tfvars', '.ex', '.exs',
+                 '.mk', '.cmake', '.nix', '.jl', '.tcl', '.awk', '.cfg', '.conf', '.ini', '.properties', '.env',
+                 '.dockerfile'}
 HASH_NAMES = {'makefile', 'gnumakefile', 'dockerfile', 'containerfile', 'rakefile', 'gemfile', 'justfile',
               'vagrantfile', 'cmakelists.txt', '.gitignore', '.dockerignore', '.env'}
 # Where a line that starts with `;` is a comment.
 SEMICOLON_SUFFIXES = {'.ini', '.cfg', '.conf', '.el', '.lisp', '.clj', '.scm', '.asm'}
+# `//` after a scheme is the rest of a URL, http://todo:8080, and opens no
+# comment. After a label it does when a space follows: `default:// todo`.
+PLAIN = r'(?<![A-Za-z]:)//|(?<=[A-Za-z]:)//(?=\s)|/\*|^\s*\*|--|\(\*'
 TAG = re.compile(r'(?:^|(?<=[\s*/!(]))[@\\]todo(?=[\s:*]|$)')
 STRINGS = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`')
 
@@ -70,33 +83,45 @@ def comments(line, suffix):
     # Mask strings before locating comment syntax; identifiers and literals
     # like `for now in nows` / "for now" are not prose hedges.
     masked = STRINGS.sub(lambda m: ' ' * len(m.group()), line)
-    # `//` after a scheme is the rest of a URL: http://todo:8080 opens no comment.
-    marker = (r'#' if suffix in ('.sh', '.bash', '.rb', '.yaml', '.yml', '.toml')
-              else r'(?<![A-Za-z]:)//|/\*|^\s*\*|--|\(\*')
-    m = re.search(marker, masked)
+    m = re.search(r'#' if suffix in HASH_ONLY else PLAIN, masked)
     return line[m.start():] if m else ''
 
 
 def marker_comment(line, path):
     """The comment on a line, as the marker rules read it.
 
-    Read in more comment forms than the hedge is, since a marker is written
-    wherever a comment can be: `#` in the files that use it, where it opens
-    a word; `;` at the start of a line in the files that use that; and `//`,
-    `/* */`, `--`, `(* *)` and `<!-- -->` everywhere else.
+    Every form the hedge is read in, and more, since a marker is written
+    wherever a comment can be: `#` in build files, configuration and more
+    scripts, beside their other forms; `;` at the start of a line in the
+    files that use that; and `<!-- -->`. Nothing the hedge reads is left
+    out, so no comment that was a marker before stops being one.
     """
     suffix, name = Path(path).suffix.lower(), Path(path).name.lower()
     if suffix in ('.py', '.pyi'):
         return comments(line, suffix)
     masked = STRINGS.sub(lambda m: ' ' * len(m.group()), line)
-    if suffix in HASH_SUFFIXES or name in HASH_NAMES:
-        marker = r'(?:^|(?<=\s))#'
+    if suffix in HASH_ONLY:
+        marker = r'#'
     else:
-        marker = r'(?<![A-Za-z]:)//|/\*|^\s*\*|--|\(\*|<!--'
+        marker = PLAIN + r'|<!--'
+        if suffix in HASH_SUFFIXES or name in HASH_NAMES:
+            marker = r'(?<![A-Za-z_$&{])#|' + marker
     if suffix in SEMICOLON_SUFFIXES:
         marker += r'|^\s*;'
     m = re.search(marker, masked)
-    return line[m.start():] if m else ''
+    if not m:
+        return ''
+    # The markup opener holds dashes of its own, so the text starts after it.
+    return line[m.end():] if m.group() == '<!--' else line[m.start():]
+
+
+def flagged(line, path):
+    """Whether one added line of this file holds a marker, an escape or a hedge."""
+    suffix = Path(path).suffix
+    comment = marker_comment(line, path)
+    opens = OPENS_DASHED if suffix.lower() in DASH_SUFFIXES else OPENS
+    return bool(marked(line, suffix.lower()) or HEDGE.search(comments(line, suffix))
+                or opens.search(comment) or TAG.search(comment))
 
 
 def main():
@@ -114,13 +139,9 @@ def main():
         except re.error as e:
             print(f'.fluxpoint-hygiene-allow:{n}: invalid regex: {e}')
             return 1
-    suffix = Path(path).suffix
     for n, line in enumerate(sys.stdin, 1):
-        comment = marker_comment(line, path)
-        if (marked(line, suffix.lower()) or HEDGE.search(comments(line, suffix))
-                or OPENS.search(comment) or TAG.search(comment)):
-            if not any(p.search(line) for p in allow):
-                print(f'{path}:{n}: {line.rstrip()}')
+        if flagged(line, path) and not any(p.search(line) for p in allow):
+            print(f'{path}:{n}: {line.rstrip()}')
     return 0
 
 

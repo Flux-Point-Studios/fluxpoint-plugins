@@ -459,7 +459,9 @@ report("a comment that opens with todo or fixme, and the @todo tag, are markers 
        and bool(_hygiene("settings.ini", "; todo: rotate the key\n"))
        and not _hygiene("service.conf", "url=http://todo:8080/api\n") and not _hygiene("notes.txt", "usage: task --todo\n")
        and "A comment that opens with `todo` or `fixme`" in PLUGIN_README and "`@todo`" in PLUGIN_README
-       and "a line\nthat starts with `;`" in PLUGIN_README and "A `//` inside a URL" in PLUGIN_README,
+       and bool(_hygiene("main.tf", "// todo: pin the provider\n")) and bool(_hygiene("x.lua", "--todo: tidy\n"))
+       and "a line that\nstarts with `;`" in PLUGIN_README and "A `//` inside a URL opens none" in PLUGIN_README
+       and "`--todo` is a flag except" in PLUGIN_README,
        "opening word and tag")
 
 print(f"\n{passed} passed, {failed} failed")
