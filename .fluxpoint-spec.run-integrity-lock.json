@@ -6,7 +6,7 @@
     "plugins/fluxpoint/contracts/ExecutionV1.schema.json": "bd673cb2460387192ab37028a0e0a0bfeedef1b34a0f29918b361308de9b719a",
     "plugins/fluxpoint/contracts/RedTeamV1.schema.json": "055e0ed220a95d5fca6b309d81f0b0b114a31b9a8d2ec22667975ed869107d76",
     "plugins/fluxpoint/scripts/attest.py": "e42f36f86d2537aa359ae535e838013bed1132863e757c05a03609e85931ada3",
-    "plugins/fluxpoint/scripts/compile-graph.py": "c6299517f2994b23f8c7d797914c9a0e7f287fd8f96dca07144a72d60f95bb71",
+    "plugins/fluxpoint/scripts/compile-graph.py": "4ad518b277c0cce0758cbf15c4b1b47e25a6c7120f5af819dfa2f4ce4f2e14e8",
     "plugins/fluxpoint/scripts/hygiene-filter.py": "6fee733cfcf992c1f7b70588aa24a556892f556515aa2b31db8599e8bf905b02",
     "plugins/fluxpoint/scripts/packet_inputs.py": "2a19ad16887d02c85a3f09973324692ec9b1954a97b859a4d65aad815b4c2dd5",
     "plugins/fluxpoint/scripts/record-run.py": "e8ece4508249591a7f3ef6f064c289d87cc1a6b1519113e90d382199ef539f31",
