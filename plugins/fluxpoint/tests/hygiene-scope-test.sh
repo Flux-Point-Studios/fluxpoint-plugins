@@ -204,6 +204,28 @@ done <<'ROWS'
 0|app.js|const email = "me@todo.example" // contact
 0|app.js|open("C:\todo\list.txt")
 0|notes.txt|write a todo: buy milk
+0|service.conf|url=http://todo:8080/api
+0|service.conf|upstream = https://fixme:9000
+0|notes.txt|usage: task --todo
+0|notes.txt|usage: task --fixme
+1|app.js|go("http://tracker/1") // todo: retry
+1|main.c|case 1:// todo: fall through
+1|Makefile|# todo: split the target
+1|Dockerfile|# fixme
+1|build.pl|# Todo: handle the error
+1|deploy.ps1|# todo: sign the binary
+1|main.tf|# fixme: pin the provider
+1|settings.ini|; todo: rotate the key
+1|settings.ini|# fixme
+1|page.html|<!-- todo -->
+1|page.html|<!-- fixme: alt text -->
+1|view.vue|  <!-- todo: loading state -->
+0|page.html|<a href="#todo">the list</a>
+0|style.css|#todo:hover { color: red }
+0|main.c|#define todo(x) (x)
+0|Makefile|todo: build
+0|Makefile|	@echo "# todo: later"
+0|settings.ini|todo = buy milk ; and eggs
 ROWS
 
 # The same rule through the scan the gate runs. The path reaches the filter on

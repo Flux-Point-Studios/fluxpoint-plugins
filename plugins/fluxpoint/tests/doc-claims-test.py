@@ -455,7 +455,11 @@ report("sorry is flagged in Lean and Isabelle files only, as the plugin README s
 report("a comment that opens with todo or fixme, and the @todo tag, are markers as the plugin README says",
        bool(_hygiene("app.js", "// todo: handle the error\n")) and bool(_hygiene("util.py", "# fixme\n"))
        and bool(_hygiene("app.js", "/** @todo handle the error */\n")) and not _hygiene("app.js", "// a todo list\n")
-       and "A comment that opens with `todo` or `fixme`" in PLUGIN_README and "`@todo`" in PLUGIN_README,
+       and bool(_hygiene("Makefile", "# todo: split the target\n")) and bool(_hygiene("page.html", "<!-- fixme -->\n"))
+       and bool(_hygiene("settings.ini", "; todo: rotate the key\n"))
+       and not _hygiene("service.conf", "url=http://todo:8080/api\n") and not _hygiene("notes.txt", "usage: task --todo\n")
+       and "A comment that opens with `todo` or `fixme`" in PLUGIN_README and "`@todo`" in PLUGIN_README
+       and "a line\nthat starts with `;`" in PLUGIN_README and "A `//` inside a URL" in PLUGIN_README,
        "opening word and tag")
 
 print(f"\n{passed} passed, {failed} failed")
