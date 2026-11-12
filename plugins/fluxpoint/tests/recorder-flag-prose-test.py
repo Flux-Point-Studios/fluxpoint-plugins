@@ -86,6 +86,10 @@ class Prose(unittest.TestCase):
                 self.assertEqual(self.found(graph('RedTeamV1'), line), [])
         # A negation about something else on the line does not excuse the instruction.
         for line in ('If the certifier does not pass, record `--red-team BLOCK`.',
+                     'If the checks do not pass, record `--red-team BLOCK`.',
+                     'If the certifier cannot certify the commit, record `--red-team BLOCK`.',
+                     'Do not forget to record the refusal with `--red-team BLOCK`.',
+                     'The certifier cannot be skipped, so on exit 1 record `--red-team BLOCK`.',
                      'The certifier cannot be skipped; on exit 1 record `--red-team BLOCK`.'):
             with self.subTest(line=line):
                 self.assertEqual(len(self.found(graph('RedTeamV1'), line)), 1)
@@ -98,6 +102,18 @@ class Prose(unittest.TestCase):
         for line in ('record-run.py --harness $?', 'record-run.py --harness "$rc"', 'record-run.py --harness=$rc'):
             with self.subTest(line=line):
                 self.assertEqual(len(self.found(graph('HarnessCheckV1'), '```', line, '```')), 1)
+
+    def test_another_tools_flag_of_the_same_name_is_not_the_recorders(self):
+        # --harness is a common name. Only the recorder's is the fallback this warns about.
+        for line in ('./ci/run-suite.sh --harness "$HARNESS_BIN"', 'pytest --harness=$PWD/harness', 'make test -- --harness 1'):
+            with self.subTest(line=line):
+                self.assertEqual(self.found(graph('HarnessCheckV1'), '```', line, '```'), [])
+        self.assertEqual(len(self.found(graph('HarnessCheckV1'), 'Then `record-run.py --run-id <id> --harness 1`.')), 1)
+
+    def test_a_table_of_operator_steps_is_prose(self):
+        steps = ('| Step | Command |', '|---|---|', '| 1 | run `check_reruns.py` |',
+                 '| 2 | on exit 1, `record-run.py --red-team BLOCK` |')
+        self.assertEqual(len(self.found(graph('RedTeamV1'), *steps)), 1)
 
     def test_filed_rows_are_not_prose_whatever_their_heading_is_called(self):
         ir = graph('RedTeamV1')
