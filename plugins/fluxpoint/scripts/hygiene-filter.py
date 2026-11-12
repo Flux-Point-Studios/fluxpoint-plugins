@@ -42,8 +42,10 @@ DASH_SUFFIXES = {'.lua', '.sql', '.hs', '.lhs', '.elm', '.purs', '.idr', '.agda'
 HASH_ONLY = ('.sh', '.bash', '.rb', '.yaml', '.yml', '.toml')
 # Where `#` opens a comment beside the other forms: build files, configuration
 # and more scripts. In C, CSS and markup it does not (#define, an id selector,
-# an anchor), so they stay out. `$#`, `${#` and a fragment after a word are no
-# comment here.
+# an anchor), so they stay out. Here it opens one where it opens a word, at
+# the start of the line or after a space, and where a space follows it and no
+# name precedes it, `x = 1;# todo`. `$#todo`, `${#todo}`, a value `12345#fixme`
+# and a URL's `/#todo` hold no comment.
 HASH_SUFFIXES = {'.zsh', '.ksh', '.fish', '.pl', '.pm', '.r', '.ps1', '.psm1', '.tf', '.tfvars', '.ex', '.exs',
                  '.mk', '.cmake', '.nix', '.jl', '.tcl', '.awk', '.cfg', '.conf', '.ini', '.properties', '.env',
                  '.dockerfile'}
@@ -54,6 +56,7 @@ SEMICOLON_SUFFIXES = {'.ini', '.cfg', '.conf', '.el', '.lisp', '.clj', '.scm', '
 # `//` after a scheme is the rest of a URL, http://todo:8080, and opens no
 # comment. After a label it does when a space follows: `default:// todo`.
 PLAIN = r'(?<![A-Za-z]:)//|(?<=[A-Za-z]:)//(?=\s)|/\*|^\s*\*|--|\(\*'
+HASH = r'(?:^|(?<=\s))#|(?<![A-Za-z_$&{])#(?=\s)'
 TAG = re.compile(r'(?:^|(?<=[\s*/!(]))[@\\]todo(?=[\s:*]|$)')
 STRINGS = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`')
 
@@ -87,41 +90,48 @@ def comments(line, suffix):
     return line[m.start():] if m else ''
 
 
-def marker_comment(line, path):
-    """The comment on a line, as the marker rules read it.
+def marker_comments(line, path):
+    """The comments on a line, as the marker rules read them.
 
     Every form the hedge is read in, and more, since a marker is written
     wherever a comment can be: `#` in build files, configuration and more
     scripts, beside their other forms; `;` at the start of a line in the
     files that use that; and `<!-- -->`. Nothing the hedge reads is left
     out, so no comment that was a marker before stops being one.
+
+    Where `#` is read beside the other forms, which of them the file's
+    language uses is not known here, so the line is read both ways: from
+    its first opener of any form, and from its first `#`. A long option, a
+    glob or a division before the `#` then hides nothing:
+    `apt-get install --yes curl # todo` is a flag and then a comment.
     """
     suffix, name = Path(path).suffix.lower(), Path(path).name.lower()
     if suffix in ('.py', '.pyi'):
-        return comments(line, suffix)
+        return [comments(line, suffix)]
     masked = STRINGS.sub(lambda m: ' ' * len(m.group()), line)
     if suffix in HASH_ONLY:
-        marker = r'#'
+        openers = [r'#']
     else:
-        marker = PLAIN + r'|<!--'
+        openers = [PLAIN + r'|<!--']
         if suffix in HASH_SUFFIXES or name in HASH_NAMES:
-            marker = r'(?<![A-Za-z_$&{])#|' + marker
+            openers = [HASH + r'|' + openers[0], HASH]
     if suffix in SEMICOLON_SUFFIXES:
-        marker += r'|^\s*;'
-    m = re.search(marker, masked)
-    if not m:
-        return ''
-    # The markup opener holds dashes of its own, so the text starts after it.
-    return line[m.end():] if m.group() == '<!--' else line[m.start():]
+        openers[0] += r'|^\s*;'
+    found = []
+    for opener in openers:
+        m = re.search(opener, masked)
+        if m:
+            # The markup opener holds dashes of its own, so the text starts after it.
+            found.append(line[m.end():] if m.group() == '<!--' else line[m.start():])
+    return found
 
 
 def flagged(line, path):
     """Whether one added line of this file holds a marker, an escape or a hedge."""
     suffix = Path(path).suffix
-    comment = marker_comment(line, path)
     opens = OPENS_DASHED if suffix.lower() in DASH_SUFFIXES else OPENS
     return bool(marked(line, suffix.lower()) or HEDGE.search(comments(line, suffix))
-                or opens.search(comment) or TAG.search(comment))
+                or any(opens.search(comment) or TAG.search(comment) for comment in marker_comments(line, path)))
 
 
 def main():

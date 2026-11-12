@@ -242,6 +242,26 @@ done <<'ROWS'
 1|run.sh|make;# todo
 0|build.pl|my $last = $#todo;
 0|app.js|fetch(base + "/x") // see http://todo:8080/api
+1|Dockerfile|RUN apt-get install --yes curl # todo: pin the version
+1|Dockerfile|COPY src/* /app/ # todo: narrow
+1|Makefile|SRC = $(wildcard src/*.c) # todo: headers
+1|Makefile|	rm -rf build/* # todo: narrow
+1|justfile|    cargo build --release # todo: cross targets
+1|deploy.zsh|curl --silent "$url" # todo: retry
+1|CMakeLists.txt|add_compile_options(--coverage) # todo: gate on config
+1|build.pl|print --$i; # todo: off by one
+1|settings.conf|opts=--verbose # todo: quiet
+1|.env|ARGS=--fast # fixme
+1|main.tf|count = 1 // 2 # todo: tune
+0|settings.conf|docs=https://example.com/guide/#todo
+0|Makefile|DOC_URL := https://example.com/#todo
+0|.env|TOKEN=12345#fixme
+0|build.pl|# see parser.c: /* todo */ is what the C side writes
+1|build.pl|my $x = 1;# todo: remove
+1|Makefile|CFLAGS=-O2# todo: -O3
+1|analysis.R|x <- 1# todo: tune
+0|build.pl|$s =~ s#todo#done#;
+0|deploy.zsh|n=${#todo}
 ROWS
 
 # The same rule through the scan the gate runs. The path reaches the filter on

@@ -187,7 +187,11 @@ the middle of a sentence, in code or in a string pass. For these markers a
 comment is read in the `//`, `/* */`, `--`, `(* *)` and `<!-- -->` forms, as
 `#` in scripts, build files and configuration (shell, Ruby, Perl, PowerShell,
 YAML, Terraform, a Makefile, a Dockerfile and the like), and as a line that
-starts with `;` in `.ini`-style files. A `//` inside a URL opens none, and
+starts with `;` in `.ini`-style files. In build files and configuration a
+`#` opens a comment where it starts a word, whatever stands before it on
+the line, so `apt-get install --yes curl # todo: pin` is flagged; a `#`
+inside a value or a URL, `TOKEN=12345#fixme` or `https://example.com/#todo`,
+opens none. A `//` inside a URL opens none, and
 `--todo` is a flag except in the languages whose comments open with `--`.
 `sorry` is a keyword in Lean and Isabelle and an English
 word elsewhere, so it is flagged in `.lean` and `.thy` files only. A Lean line
