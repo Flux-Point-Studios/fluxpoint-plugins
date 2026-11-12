@@ -786,6 +786,42 @@ class PacketInputsTests(unittest.TestCase):
         self.save()
         self.assertIn('pkg/.claude/fluxpoint/fixture.json', self.lock()['harness'])
 
+    def test_an_untracked_file_beside_a_committed_fixture_is_named_like_any_other(self):
+        # A store-shaped directory that holds committed files is a fixture, so a
+        # file nobody staged in it may be one too, and a locked test can read
+        # it. It is named, as the same file is one directory up. A store-shaped
+        # directory with nothing committed in it is a session's state.
+        tracked = 'tests/fixtures/app/.claude/fluxpoint/runs/r1.json'
+        beside = 'tests/fixtures/app/.claude/fluxpoint/runs/r2.json'
+        elsewhere = 'tests/fixtures/app/.claude/fluxpoint/waits/w1.json'
+        state = 'tests/fixtures/idle/.claude/fluxpoint/runs/s1.json'
+        self.write(tracked, '{"runId": "r1"}')
+        self.doc['harnessInputs'] = ['tests']
+        self.save()
+        self.commit()
+        self.write(state, '{}')
+        harness = self.lock()['harness']
+        self.assertIn(tracked, harness)
+        self.assertNotIn(state, harness)
+        for rel in (beside, elsewhere):
+            with self.subTest(rel=rel):
+                self.write(rel, '{}')
+                refused = self.cli('--lock')
+                self.assertEqual(refused.returncode, 1, refused.stdout)
+                self.assertIn('stage it or ignore it', refused.stderr)
+                self.assertIn(rel, refused.stderr)
+                self.assertNotIn(state, refused.stderr)
+                warned = self.cli('--check')
+                self.assertIn(rel, warned.stderr)
+                # Staged, it is a fixture like the one beside it.
+                self.git('add', rel)
+                self.assertIn(rel, self.lock()['harness'])
+        # Ignored, it is nobody's input, and the lock says nothing.
+        self.write('tests/fixtures/app/.claude/fluxpoint/runs/r3.json', '{}')
+        self.write('.gitignore', 'r3.json\n')
+        self.git('add', '.gitignore')
+        self.assertNotIn('tests/fixtures/app/.claude/fluxpoint/runs/r3.json', self.lock()['harness'])
+
     def test_directory_inputs_and_the_state_store_follow_one_coherent_rule(self):
         # No ignore rule covers the store here: the rule is the path, never the ignore file.
         self.root = self.root.resolve()

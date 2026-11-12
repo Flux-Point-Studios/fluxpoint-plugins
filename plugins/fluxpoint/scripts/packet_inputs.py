@@ -228,6 +228,13 @@ class Inputs:
             return False
         return any(name == rel or name.startswith(rel + '/') for name in self._fixtures)
 
+    def beside_fixture(self, rel):
+        """Whether a path lies in a store-shaped directory below the root's own
+        store that holds something Git tracks."""
+        parts = rel.rstrip('/').split('/')
+        return any(tuple(parts[i:i + 2]) == STORE and self.fixture(self.root.joinpath(*parts[:i + 2]))
+                   for i in range(1, len(parts) - 1))
+
     def tracked(self):
         if self._tracked is None:
             result = subprocess.run(['git', 'ls-files', '-z', '--cached'], cwd=self.root,
@@ -285,7 +292,9 @@ class Inputs:
         input means the tracked files under it, so these sit on disk outside every lock.
         Git lists a nested repository as one path ending in a slash, and it stays that way
         here: it is not a file a lock can freeze. Python's compiled caches and a desktop's
-        folder metadata are left out, since running the checks and opening a folder write them."""
+        folder metadata are left out, since running the checks and opening a folder write them.
+        So is a state store, except one that holds committed fixtures: a file nobody staged
+        beside them may be a fixture too, and a locked test can read it, so it is named."""
         if self._untracked is None:
             self._untracked = set()
             if self.directories:
@@ -296,8 +305,8 @@ class Inputs:
                     self._untracked = {v.decode('utf-8', 'replace') for v in result.stdout.split(b'\0') if v}
         # A file the packet or its closure names is frozen whether or not it is tracked.
         return sorted(rel for rel in self._untracked
-                      if rel not in self.reasons and rel not in skip and not self.store(self.root / rel)
-                      and not self.byproduct(rel))
+                      if rel not in self.reasons and rel not in skip and not self.byproduct(rel)
+                      and (not self.store(self.root / rel) or self.beside_fixture(rel)))
 
     def locate(self, text, cwd=None, explicit=False):
         text = text.split('::', 1)[0]

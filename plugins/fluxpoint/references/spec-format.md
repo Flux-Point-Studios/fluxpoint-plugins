@@ -166,7 +166,9 @@ repository: the root's, and that of a package directory a session was rooted
 in, so a check that runs in the package and reads `pkg/.claude/fluxpoint/`
 freezes nothing a session left there. What Git tracks under such a directory
 below the root's own store is a fixture somebody committed, and it is frozen
-like any other file.
+like any other file. A file nobody staged in a store that holds such a fixture
+may be a fixture too, so under an input directory it is named like any other
+untracked file: stage it or ignore it.
 A recorded run or decision therefore moves no lock. A `harnessInputs` entry in
 the store refuses. A store path that an older lock froze leaves the harness map
 at the next `--lock` or `--lock-harness`, which prints each one. Package cwd
