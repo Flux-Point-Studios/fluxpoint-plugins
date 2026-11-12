@@ -2800,19 +2800,62 @@ def call_prices(est):
     rounded figure in the profile: a cap set to the estimate must never
     decline a planned call over a fraction of a token. Sentinel calls do
     not pass through the spawn wrapper, so their planned cost is charged
-    before the first call.
+    before the first call. A node may carry a sentinel's name, so an id
+    is split by kind: only its sentinel calls are charged up front.
     """
     prices, upfront = {}, 0.0
     for nid, kinds in est["byKind"].items():
         planned = est["perNode"][nid]["estimatedTokens"]
         raw = sum(row["estimatedTokens"] for row in kinds.values())
         scale = planned / raw if raw else 1.0
-        if "sentinel" in kinds:
-            upfront += planned
-            continue
-        prices[nid] = {kind: row["estimatedTokens"] * scale / row["calls"]
-                       for kind, row in kinds.items() if row["calls"]}
+        row = {}
+        for kind, cost in kinds.items():
+            if kind == "sentinel":
+                upfront += cost["estimatedTokens"] * scale
+            elif cost["calls"]:
+                row[kind] = cost["estimatedTokens"] * scale / cost["calls"]
+        if row:
+            prices[nid] = row
     return prices, upfront
+
+
+DIFF_TIER = (("attack", ":diff-attack", "work"), ("refute", ":diff-refute", "refute"))
+
+
+def diff_tier_prices(ir, est):
+    """({'attack'|'refute': {item key: tokens per call}}, the plan ids they came from).
+
+    The repair diff review spawns as repair-diff:<item>:r<round>:attack:<lens>
+    and ...:refute:<claim>:<lens>. That label names the slice it reviews.
+    The plan prices the same calls under the checker that owns them, as
+    <checker>:diff-attack and <checker>:diff-refute, so a lookup by label
+    prefix finds nothing and the call was charged at the dearest one. The
+    table is keyed the way the label is: by the item, with `_integration`
+    for the merged tree. Two loops that share an item key are charged the
+    mean over their planned calls, which still adds up to the plan.
+    """
+    prices, _ = call_prices(est)
+    lists = ir.get("lists") or {}
+    by_id = {n.get("id"): n for n in ir.get("nodes") or [] if isinstance(n, dict)}
+    owners = {}
+    for loop in repair_loops(ir):
+        for work in (by_id.get(loop.get("verifies")) or {}, loop):
+            if work.get("contract") == "FixCheckV1":
+                for item in lists.get(loop.get("foreach"), []):
+                    owners.setdefault(str(item.get("key")) if isinstance(item, dict) else str(item), []).append(work["id"])
+        for nid in repair_integrations(loop):
+            if (by_id.get(nid) or {}).get("contract") == "FixCheckV1":
+                owners.setdefault("_integration", []).append(nid)
+    table, used = {seat: {} for seat, _, _ in DIFF_TIER}, set()
+    for item, ids in owners.items():
+        for seat, suffix, kind in DIFF_TIER:
+            rows = [(prices[nid + suffix][kind], est["byKind"][nid + suffix][kind]["calls"])
+                    for nid in ids if kind in prices.get(nid + suffix, {})]
+            calls = sum(count for _, count in rows)
+            if calls:
+                table[seat][item] = sum(price * count for price, count in rows) / calls
+                used.update(nid + suffix for nid in ids)
+    return table, used
 
 
 def dearest_call(est):
@@ -3877,7 +3920,7 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
     # spent is the runtime's own token meter. Without these in the artifact,
     # fan-out efficiency and budget accuracy are vibes, not numbers.
     if (ir.get("budget") or {}).get("maxNodes") is not None:
-        extra += ", spawned: SPAWNED, declined: DECLINED, declinedByTokens: DECLINED_BY_TOKENS, estimatedSpend: Math.round(SPENT_ESTIMATE)"
+        extra += ", spawned: SPAWNED, declined: DECLINED, declinedByTokens: DECLINED_BY_TOKENS, estimatedSpend: Math.round(SPENT_ESTIMATE), unpriced: UNPRICED"
     # spent is guarded: it is a newer runtime API than the rest of the
     # budget surface, and a summary that throws on an older runtime loses
     # the entire run record over a nice-to-have number.
@@ -3930,16 +3973,32 @@ def emit(ir, contracts, imports_resolved=None, specification=None, graph_file=No
         a("// A run that follows its plan is charged exactly its estimate.")
         cap_tokens = budget_cfg.get("maxEstimatedTokens")
         prices, upfront = call_prices(est)
+        diff_prices, diff_ids = diff_tier_prices(ir, est)
         a("const MAX_TOKENS = " + (str(int(cap_tokens)) if isinstance(cap_tokens, int) and not isinstance(cap_tokens, bool) else "null"))
-        a("const PRICES = " + json.dumps(prices, sort_keys=True))
+        a("const PRICES = " + json.dumps({nid: row for nid, row in prices.items() if nid not in diff_ids}, sort_keys=True))
+        a("// The repair diff review is labelled by the slice it reviews, so it has its")
+        a("// own table, keyed the way its labels are.")
+        a("const DIFF_PRICES = " + json.dumps(diff_prices, sort_keys=True))
         a("const DEAREST = " + json.dumps(dearest_call(est)))
         a("let SPENT_ESTIMATE = " + json.dumps(upfront))
         a("let DECLINED_BY_TOKENS = 0")
+        a("// A call the plan did not price is charged at the dearest planned call, and")
+        a("// named: charging it there in silence is how a mispriced label hid.")
+        a("const UNPRICED = []")
+        a("function unpriced(label) {")
+        a("  if (!UNPRICED.includes(label)) { UNPRICED.push(label); log(`${label} is not priced by the plan — charged at the dearest planned call (~${Math.round(DEAREST)})`) }")
+        a("  return DEAREST")
+        a("}")
         a("function priceOf(label) {")
+        a("  const diff = /^repair-diff:(.*):r\\d+:(attack|refute):/.exec(label)")
+        a("  if (diff) { const price = DIFF_PRICES[diff[2]][diff[1]]; return price === undefined ? unpriced(label) : price }")
         a("  let id = null")
         a("  for (const key of Object.keys(PRICES)) if ((label === key || label.startsWith(key + ':')) && (id === null || key.length > id.length)) id = key")
-        a("  if (id === null) return DEAREST          // a call the plan did not price")
-        a("  const row = PRICES[id], kind = /:refute\\d+$/.test(label) ? 'refute' : label.endsWith(':advice') ? 'advise' : 'work'")
+        a("  if (id === null) return unpriced(label)")
+        a("  // The kind of call is read from the label's shape for this node, never from")
+        a("  // its last word alone: a list item may be keyed 'advice' or 'refute1'.")
+        a("  const row = PRICES[id]")
+        a("  const kind = row.advise !== undefined && label === id + ':advice' ? 'advise' : row.refute !== undefined && /:\\d+:refute\\d+$/.test(label) ? 'refute' : 'work'")
         a("  return row[kind] !== undefined ? row[kind] : Math.max(...Object.values(row))")
         a("}")
         a("// Every agent in this graph is spawned through here, so the ceilings")

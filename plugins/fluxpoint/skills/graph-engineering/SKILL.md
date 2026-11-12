@@ -786,7 +786,11 @@ and declines one that would pass `maxEstimatedTokens` the way it declines
 one past `maxNodes`: the work is filed SKIPPED, the run is INCOMPLETE, and
 a halting node ends it BUDGET-EXHAUSTED. A run that follows its plan is
 charged exactly its estimate, so a cap set from the estimate never stops
-it. The charge is the compiler's estimate, not the runtime's meter; the
+it. The price is found from the call's label: the node's id, the shape of
+a refuter's or an advisor's label for that node, and for the repair diff
+review the slice it names. A call whose label the plan did not price is
+charged at the dearest planned call, logged, and listed in the summary as
+`unpriced`. The charge is the compiler's estimate, not the runtime's meter; the
 summary carries it as `estimatedSpend` beside `spent`. `--check` also
 prices the node ceiling, `maxNodes` times the dearest planned call, and
 says when that is more than the cap or when no cap bounds it.
