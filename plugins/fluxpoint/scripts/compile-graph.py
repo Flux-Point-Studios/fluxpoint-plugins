@@ -859,8 +859,13 @@ def runs_beside(ir, earlier, later):
         return False
     try:
         stages = execution_stages(ir)
+        # The schedule lists a repair loop under its checker alone. Its fixer
+        # and its integration nodes run inside the loop, in the loop's lane.
+        loop_of = {owned: loop["id"] for loop in repair_loops(ir)
+                   for owned in [loop.get("verifies"), *repair_integrations(loop)] if isinstance(owned, str)}
     except (KeyError, TypeError, AttributeError):
         return False        # a malformed graph is reported by its own findings
+    earlier, later = loop_of.get(earlier, earlier), loop_of.get(later, later)
     for kind, stage in stages:
         if kind != "lanes":
             continue
@@ -2289,11 +2294,13 @@ def warnings(ir, agents=None, specification=None, gates=None):
         if not isinstance(node, dict) or not prove_gate(node) or node.get("sameShaAs"):
             continue
         waits_on = ancestors(node, by_id)
-        # A node that commits between two gates moves the commit by design:
-        # the second gate judges what the first never saw.
-        moved = {nid for mid in waits_on if (by_id.get(mid) or {}).get("mutates")
-                 for nid in ancestors(by_id[mid], by_id)}
-        earlier = [nid for nid in waits_on if prove_gate(by_id.get(nid) or {}) and nid not in moved]
+        # A node that commits after the earlier gate read its commit moves the
+        # commit by design: the second gate judges what the first never saw.
+        # That is any committing node this gate waits on and the earlier one
+        # did not, whether it sits between the two or beside the first.
+        commits = {mid for mid in waits_on if (by_id.get(mid) or {}).get("mutates")}
+        earlier = [nid for nid in waits_on if prove_gate(by_id.get(nid) or {})
+                   and not commits - ancestors(by_id[nid], by_id)]
         if earlier:
             first = next(x.get("id") for x in ir["nodes"] if x.get("id") in earlier)
             w.append(

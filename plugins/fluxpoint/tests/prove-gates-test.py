@@ -227,6 +227,36 @@ class OneCommit(unittest.TestCase):
         joined['nodes'][2].update(after='e2e', prompt='report {{prev}}')
         self.assertEqual(refused(joined), [])
 
+    def test_a_gate_beside_a_repair_loop_cannot_share_the_commit_of_its_review(self):
+        # The loop's integration review runs inside the loop's lane, and the
+        # schedule lists the loop under its checker alone.
+        def lanes(**second):
+            return {'version': 1, 'campaign': 'a loop and a gate, two lanes', 'budget': {'maxNodes': 40, 'cacheTtl': '1h'},
+                    'lists': {'slices': [{'key': 'parser'}]},
+                    'nodes': [
+                        {'id': 'fix', 'lane': 'a', 'foreach': 'slices', 'mutates': True, 'pushes': '/code/app#repair',
+                         'prompt': 'fix {{item.key}}: {{lastCheck}} in {{roundDir}}', 'contract': 'SliceV1'},
+                        {'id': 'check', 'lane': 'a', 'foreach': 'slices', 'after': 'fix', 'independent': True, 'verifies': 'fix',
+                         'isolation': 'measure', 'prompt': 'check {{prev}}', 'contract': 'HarnessCheckV1',
+                         'repeat': {'until': 'exit == 0', 'maxRounds': 1, 'integrate': ['merge', 'review']}},
+                        {'id': 'merge', 'lane': 'a', 'after': 'check', 'mutates': True, 'pushes': '/code/app#repair',
+                         'prompt': 'merge {{prev}}', 'contract': 'SliceV1'},
+                        {'id': 'review', 'lane': 'a', 'after': 'merge', 'independent': True, 'verifies': 'merge',
+                         'isolation': 'measure', 'prompt': 'review {{prev}}', 'contract': 'ExecutionV1',
+                         'verify': 'prove:harness', 'haltWhen': 'exit != 0'},
+                        dict({'id': 'e2e', 'lane': 'b', 'prompt': 'run the end-to-end gate', 'contract': 'ExecutionV1',
+                              'verify': 'prove:reruns', 'haltWhen': 'exit != 0', 'sameShaAs': 'review'}, **second)]}
+
+        def refused(ir):
+            return [f for f in cg.validate(ir, SHIPPED, gates=GATES) if 'sameShaAs' in f]
+
+        base = lanes()
+        base['nodes'][4].pop('sameShaAs')
+        self.assertEqual(cg.validate(base, SHIPPED, gates=GATES), [])
+        found = refused(lanes())
+        self.assertEqual(len(found), 1, cg.validate(lanes(), SHIPPED, gates=GATES))
+        self.assertIn('lane', found[0])
+
     def test_check_does_not_ask_for_one_commit_across_a_node_that_commits(self):
         # Build, gate, then a prover that commits proofs, then a second gate.
         # The commit moves between the gates by design.
@@ -240,6 +270,12 @@ class OneCommit(unittest.TestCase):
              'contract': 'ExecutionV1', 'verify': 'prove:harness', 'haltWhen': 'exit != 0'}]}
         self.assertEqual(cg.validate(ir, SHIPPED, gates=GATES), [])
         self.assertEqual([w for w in cg.warnings(ir, gates=GATES) if 'sameShaAs' in w], [])
+        # The same when the second gate joins the first gate and a prover that did not wait on it.
+        joined = json.loads(json.dumps(ir))
+        joined['nodes'][2]['after'] = 'build'
+        joined['nodes'][3].update(after=['gate', 'prover'], prompt='gate {{prev.prover}} after {{prev.gate}}')
+        self.assertEqual(cg.validate(joined, SHIPPED, gates=GATES), [])
+        self.assertEqual([w for w in cg.warnings(joined, gates=GATES) if 'sameShaAs' in w], [])
         # Without the node that commits, the same two gates are warned about.
         ir['nodes'][2].pop('mutates')
         ir['nodes'][2]['contract'] = 'DesignV1'
