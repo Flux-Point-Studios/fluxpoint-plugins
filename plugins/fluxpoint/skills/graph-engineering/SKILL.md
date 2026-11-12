@@ -991,7 +991,9 @@ nothing, and `--check` warns about it and names the line. A check that
 must be able to refuse the run belongs in the graph, as a `prove:` node
 after the verdict. A refusal that arrives after the run is filed with
 `record-run.py --veto <reason> --veto-evidence <file>`, which lowers the
-recorded red-team verdict to BLOCK and never raises one.
+recorded red-team verdict to BLOCK and never raises one. The veto stays on
+the run id, read from the store under `--root`, so the recorder refuses a
+`--graph` or `--evidence` file that sits outside that root.
 
 Two caches share a vocabulary and are different mechanisms. **Memoized
 resume** is the executor replaying completed `agent()` calls whose

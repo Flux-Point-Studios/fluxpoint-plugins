@@ -290,10 +290,17 @@ Workflow tool requires.
    or with a file that is missing or empty, is refused with a `VETO-` code
    and exit 2, and no artifact or Evidence row is written. A filed veto
    stays on the run id: recording that run again, with or without the
-   flag, keeps the BLOCK and says so. A run that passes its check later is
-   a new launch with its own run id.
+   flag, keeps the BLOCK and says so. The veto is on file from the moment
+   it is accepted, under `.claude/fluxpoint/runs/vetoes/`, so a record
+   that is refused afterwards for another reason does not take the veto
+   with it, and the next record of that run carries it. A run that passes
+   its check later is a new launch with its own run id.
    Run artifacts always go to `<root>/.claude/fluxpoint/runs`, even when
    recording from a subdirectory; pass `--root <project-root>` explicitly.
+   `--graph` and `--evidence` must name files under that root. A run's
+   earlier attempts and its vetoes are read from the root's store, so the
+   recorder started in another directory without `--root`, or given a
+   root that does not hold those files, exits 2 before anything is written.
    `--state-dir` may only name that canonical directory. Exit 3 retains the
    artifact but means the Evidence row was NOT appended: add the canonical
    five-column header and separator, or pass `--evidence WORK.md`, then

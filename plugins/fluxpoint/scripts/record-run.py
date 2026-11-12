@@ -461,12 +461,43 @@ def veto_key(entry):
     return entry["reason"], entry["evidence"]["sha256"]
 
 
+def veto_journal(root, run_id):
+    return os.path.join(root, ".claude", "fluxpoint", "runs", "vetoes", run_id + ".json")
+
+
+def journal_veto(root, run_id, entry):
+    """Put an accepted veto on file under its run id before anything else can refuse.
+
+    A record can still be refused after its veto was read: two waits on one
+    node, a stale packet, an input whose pin no longer holds. The veto is
+    about the run, so it is kept whether or not this record is. The file is
+    replaced whole and holds every veto the run id has been given.
+    """
+    path = veto_journal(root, run_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    kept = {veto_key(old): old for old in filed_vetoes(root, run_id)}
+    kept.setdefault(veto_key(entry), entry)
+    fd, temporary = tempfile.mkstemp(prefix=".veto-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as out:
+            json.dump({"runId": run_id, "vetoes": sorted(kept.values(), key=lambda e: str(e.get("filedAt")))},
+                      out, indent=2, sort_keys=True)
+            out.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def filed_vetoes(root, run_id):
     """Every veto already filed on this run id, oldest first.
 
-    Read from the latest record and from each retained attempt, so a veto
-    outlives a second record that was not given the flag and a latest
-    pointer that was replaced. A record that cannot be read adds nothing.
+    Read from the latest record, from each retained attempt and from the
+    run id's veto journal, so a veto outlives a second record that was not
+    given the flag, a latest pointer that was replaced and a record that
+    was refused after the veto was read. A record's entry is preferred to
+    the journal's: it says what the veto was filed over. A file that cannot
+    be read adds nothing.
     """
     runs = os.path.join(root, ".claude", "fluxpoint", "runs")
     history = os.path.join(runs, "history", run_id)
@@ -474,6 +505,7 @@ def filed_vetoes(root, run_id):
     if os.path.isdir(history):
         paths += [os.path.join(history, name) for name in sorted(os.listdir(history))
                   if name.endswith(".json")]
+    paths.append(veto_journal(root, run_id))
     found = {}
     for path in paths:
         try:
@@ -618,6 +650,23 @@ def resumed_past(root, run_id, summary):
     return None
 
 
+def under_root(path, root, root_as_given=None):
+    """Whether a file sits in the project root, by its own spelling or once links are followed.
+
+    Either reading is accepted: a WORK.md that is a link to a file kept
+    elsewhere is in the root by its spelling, and a root reached through a
+    linked directory holds its files only once the link is followed.
+    """
+    def inside(child, parent):
+        try:
+            child, parent = os.path.normcase(child), os.path.normcase(parent)
+            return os.path.commonpath([child, parent]) == parent
+        except ValueError:  # two drives on Windows, or a relative path beside an absolute one
+            return False
+    return (inside(os.path.realpath(path), os.path.realpath(root))
+            or inside(os.path.abspath(path), root_as_given or os.path.abspath(root)))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-id", required=True)
@@ -652,6 +701,7 @@ def main():
     ap.add_argument('--unpinned-ok', action='append', default=[], metavar='ABSOLUTE_PATH',
                     help='explicitly record an input path without a byte pin (repeatable; retained in artifact)')
     args = ap.parse_args()
+    root_as_given = os.path.abspath(args.root)
     args.root = os.path.realpath(args.root)
     canonical_runs = os.path.realpath(os.path.join(args.root, ".claude", "fluxpoint", "runs"))
     if args.state_dir is not None and os.path.realpath(args.state_dir) != canonical_runs:
@@ -663,6 +713,16 @@ def main():
                 | {"COM" + str(n) for n in range(1, 10)} | {"LPT" + str(n) for n in range(1, 10)})):
         ap.error("--run-id must be a safe filename component without drive prefixes or streams")
     evidence_file = args.evidence or args.graph
+    # A run's earlier attempts and its vetoes are read from the store under
+    # --root. Started in another directory without --root, the recorder used
+    # to find neither, and filed the run into the same Evidence table as if
+    # nothing had been recorded before. The files a record is about have to
+    # sit under the root whose store holds it.
+    for flag, named in (("--graph", args.graph), ("--evidence", args.evidence)):
+        if named is not None and not under_root(named, args.root, root_as_given):
+            ap.error(f"{flag} {named} is outside the project root {args.root}, whose "
+                     f".claude/fluxpoint/runs holds this run's earlier records and vetoes: "
+                     f"pass --root <project-root>, the directory that holds {os.path.basename(named)}")
 
     raw = open(args.result, encoding="utf-8").read() if args.result else sys.stdin.read()
     try:
@@ -707,6 +767,9 @@ def main():
     # verdict either, so the whole record is refused. The ledger above is
     # the one thing already written, for the reason it gives.
     new_veto = None
+    # Read before this record's own veto is journaled, so it is told apart
+    # from one that was already on file.
+    earlier_vetoes = filed_vetoes(args.root, args.run_id)
     if args.veto is not None or args.veto_evidence is not None:
         try:
             new_veto, evidence_bytes = read_veto(
@@ -714,6 +777,7 @@ def main():
                 datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
             try:
                 file_veto_evidence(args.root, new_veto["evidence"]["sha256"], evidence_bytes)
+                journal_veto(args.root, args.run_id, new_veto)
             except (OSError, ValueError) as e:
                 raise ValueError(f"VETO-EVIDENCE-UNFILED: {e}")
         except ValueError as e:
@@ -827,8 +891,12 @@ def main():
     # the recorded verdict to BLOCK and takes the path a derived BLOCK takes
     # from here on. It is never lifted by recording the run again.
     derived_block, unvetoed = blocked, red_team
-    vetoes = filed_vetoes(args.root, args.run_id)
+    vetoes = earlier_vetoes
     carried = list(vetoes)
+    for position, earlier in enumerate(vetoes):
+        # Journaled by a record that was refused afterwards: this is the
+        # first record to carry it, so this is where it says what it lowered.
+        earlier.setdefault("over", "BLOCK" if position else unvetoed)
     if new_veto and veto_key(new_veto) not in [veto_key(v) for v in vetoes]:
         # What the record would have said without this veto.
         new_veto["over"] = "BLOCK" if vetoes else unvetoed

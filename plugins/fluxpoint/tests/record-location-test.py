@@ -235,6 +235,81 @@ class PostRunVetoTests(unittest.TestCase):
         self.assertFalse(self.store.exists())
         self.assertEqual(self.rows(), [])
 
+    def test_a_veto_is_not_dropped_by_recording_from_another_directory(self):
+        # The run store sits under --root, which defaults to the directory the
+        # recorder is started in. Started somewhere else, it found no veto and
+        # filed SHIP into the same Evidence table.
+        self.assertEqual(self.veto(verdict('SHIP')).returncode, 0)
+        nested = self.root / 'nested'
+        nested.mkdir(exist_ok=True)
+        elsewhere = subprocess.run([sys.executable, str(SCRIPT), '--graph', str(self.graph), '--run-id', 'vetoed'],
+                                   input=json.dumps(verdict('SHIP')), cwd=nested, capture_output=True, text=True,
+                                   env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
+        self.assertEqual(elsewhere.returncode, 2, elsewhere.stdout + elsewhere.stderr)
+        self.assertIn('--root', elsewhere.stderr)
+        self.assertFalse((nested / '.claude').exists())
+        rows = self.rows()
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn('| vetoed | BLOCKED-REDTEAM |', rows[0])
+        other = self.root.parent / (self.root.name + '-other')
+        other.mkdir()
+        self.addCleanup(lambda: __import__('shutil').rmtree(other, ignore_errors=True))
+        moved = subprocess.run([sys.executable, str(SCRIPT), '--root', str(other), '--graph', str(self.graph), '--run-id', 'vetoed'],
+                               input=json.dumps(verdict('SHIP')), cwd=self.root, capture_output=True, text=True,
+                               env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
+        self.assertEqual(moved.returncode, 2, moved.stdout + moved.stderr)
+        self.assertFalse((other / '.claude').exists())
+        self.assertEqual(self.rows(), rows)
+        # The Evidence file is held to the same rule as the graph.
+        graph = other / 'GRAPH.x.md'
+        graph.write_text(HEADER, encoding='utf-8')
+        split = subprocess.run([sys.executable, str(SCRIPT), '--root', str(other), '--graph', str(graph),
+                                '--evidence', str(self.graph), '--run-id', 'vetoed'],
+                               input=json.dumps(verdict('SHIP')), cwd=other, capture_output=True, text=True,
+                               env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
+        self.assertEqual(split.returncode, 2, split.stdout + split.stderr)
+        self.assertIn('--evidence', split.stderr)
+        self.assertEqual(self.rows(), rows)
+
+    def test_a_root_reached_through_a_link_still_holds_its_files(self):
+        # The refusal is about where the files are, whichever way they are spelled.
+        link = self.root.parent / (self.root.name + '-link')
+        try:
+            link.symlink_to(self.root, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest('this platform cannot create a directory link')
+        self.addCleanup(link.unlink)
+        through = subprocess.run([sys.executable, str(SCRIPT), '--root', str(self.root),
+                                  '--graph', str(link / 'WORK.md'), '--run-id', 'linked'],
+                                 input=json.dumps(verdict('SHIP')), cwd=self.root, capture_output=True, text=True,
+                                 env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
+        self.assertEqual(through.returncode, 0, through.stderr)
+        kept = self.root / 'kept-elsewhere.md'
+        target = self.root.parent / (self.root.name + '-kept.md')
+        target.write_text(HEADER, encoding='utf-8')
+        self.addCleanup(lambda: target.unlink() if target.exists() else None)
+        kept.symlink_to(target)
+        linked = subprocess.run([sys.executable, str(SCRIPT), '--root', str(self.root),
+                                 '--graph', str(kept), '--run-id', 'kept'],
+                                input=json.dumps(verdict('SHIP')), cwd=self.root, capture_output=True, text=True,
+                                env=dict(os.environ, FPL_MEMORY_INDEX='0'), timeout=30)
+        self.assertEqual(linked.returncode, 0, linked.stderr)
+
+    def test_a_veto_outlives_a_record_that_is_refused_for_another_reason(self):
+        # Two waits on one node refuse the record after the veto was read. The
+        # veto used to go with it, and the next plain record was filed SHIP.
+        twice = verdict('SHIP', waits=[{'node': 'sign', 'check': 'true', 'everyMinutes': 5},
+                                       {'node': 'sign', 'check': 'true', 'everyMinutes': 5}])
+        refused = self.veto(twice)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertFalse((self.store / 'vetoed.json').exists())
+        plain = self.record(verdict('SHIP'))
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        art = json.loads((self.store / 'vetoed.json').read_text())
+        self.assertEqual((art['outcome'], art['redTeam']), ('BLOCKED-REDTEAM', 'BLOCK'))
+        self.assertEqual(len(art['vetoes']), 1)
+        self.assertIn('still applies', plain.stderr)
+
     def test_evidence_is_never_filed_over_other_bytes_or_through_a_link(self):
         digest = hashlib.sha256(self.log.read_bytes()).hexdigest()
         kept = self.store / 'evidence' / digest
